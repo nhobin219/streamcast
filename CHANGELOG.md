@@ -31,6 +31,19 @@ a subscriber that stops can reconnect and ask for the rest.
 
 ### Fixed
 
+- **A log evicted dry is refused as `evicted`, not an error.** litelink 0.4.0
+  fixes which tiers a handle reads at assembly, and a server opens its log
+  local-only on purpose — serving a replay out of object storage means a long
+  network read on a worker thread while the subscriber's socket sits attached,
+  which is what `catch_up` exists to avoid. litelink now refuses a local-only
+  read of a log whose local table has been evicted dry rather than serving the
+  buffer alone, and that refusal arrives as the `evicted` it is.
+- **`EARLIEST` reports what the server can actually serve.** It asked
+  `coverage()`, which spans the archive, while the scan reads local files —
+  so on a partially evicted log it could resolve below what the very next scan
+  would return and be refused `evicted` for an offset just called the
+  earliest. It asks the tiers the handle reads.
+
 - **A catch-up whose archive does not go back far enough is refused, not
   half-served.** `Catcher.prepare` ruled out an archive that *ended* below the
   request; nothing ruled out one that *started* above it. A consumer asking

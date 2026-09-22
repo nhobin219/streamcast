@@ -7,6 +7,7 @@ Needs an endpoint — `just rustfs` — and skips without one, which
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import litelink
 import pytest
@@ -286,6 +287,66 @@ class TestItClosesTheGap:
             await sub.close()
 
             assert closed, "`prepare` opened a reader that `close` left open"
+
+
+class TestAnEvictedLog:
+    async def test_a_log_evicted_dry_refuses_rather_than_erroring(
+        self, tmp_path, s3, bucket, serve
+    ):
+        """litelink's refusal has to arrive as `evicted`, not a 500.
+
+        A server opens its log local-only (see `_log.rows`), and litelink
+        refuses a local-only read of a log whose local table has been evicted
+        dry rather than serving the buffer alone. That refusal is a
+        `ValueError` from the read, and the subscriber must see it as the
+        refusal it is — `evicted`, whose message already names the move — not
+        as an unhandled error on a stream that is working perfectly.
+        """
+        handle = litelink.new(
+            tmp_path / "data",
+            "trades",
+            schema=streamcast.to_arrow(SCHEMA),
+            archive=bucket,
+            s3=s3,
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE,
+                # Evict on upload: the local tier is emptied as soon as the
+                # archive has the rows, which is the state under test.
+                local_retention=timedelta(0),
+            ),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle)
+            await fill(stream, handle, total=8_000)
+            await asyncio.to_thread(handle.evict)
+
+            assert handle.table_extent() is None, "the fixture must evict dry"
+            # The handle reads local files only, so it reports what it can
+            # actually serve rather than what the archive still holds.
+            assert handle.include_archive is False
+
+            async with serve(stream, maintain=False) as uri:
+                with pytest.raises(streamcast.NotReplayable) as raised:
+                    await streamcast.connect(uri, offset=1)
+
+                assert raised.value.why == "evicted"
+
+                # And the consumer's move from here works, which is the whole
+                # reason this is a refusal with a named remedy rather than an
+                # error: nothing ages out of the archive, so an offset the
+                # local tier has dropped is still there.
+                #
+                # The refusal's own `archive` field is trimmed away here — a
+                # bucket URI does not fit in a 123-byte close reason beside
+                # the numbers — so this exercises the greeting as the
+                # fallback source for it too.
+                assert raised.value.fields.get("archive") is None
+                async with streamcast.connect(
+                    uri, offset=1, catch_up=True, s3=s3
+                ) as sub:
+                    first, _row = await sub.recv()
+
+                assert first == 1
 
 
 class TestTheGapItCannotClose:

@@ -509,20 +509,33 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.4.0"
+source = { editable = "../litelink" }
 dependencies = [
     { name = "duckdb" },
     { name = "pyarrow" },
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3c/6c/4266dfd5546547596a0e3bcc46da8f69f3c96a7dc94910ae0f356fddd613/litelink-0.3.1.tar.gz", hash = "sha256:befccbeffde61f9fe063678d88762ebaefa3764adf4debb8f4307e68afe5487a", size = 319729, upload-time = "2026-09-18T05:26:24.655Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/99/487ad9b921a9f58ff5ed8abb7649b33acc9bdae658c85cb93135447c82a3/litelink-0.3.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:71899b4b3c318ef8b1b99f074afc5fb8a600fce7f6571233ec5a8f0907768a99", size = 32036889, upload-time = "2026-09-18T05:26:11.881Z" },
-    { url = "https://files.pythonhosted.org/packages/5a/23/6c66c10cbdec5c1809c4f58c5727a361ba80314f14cff85281c1201508f8/litelink-0.3.1-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:6bded42e88af251dea782e8e7a7052a13cb7f4b149d1f241708bab0d241b6f25", size = 34402873, upload-time = "2026-09-18T05:26:15.201Z" },
-    { url = "https://files.pythonhosted.org/packages/0b/0d/0bf8bbc59dd1f1339da93668e805893fd8249d5a3dbd4f065df7becd29b5/litelink-0.3.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3fff484737174567a5b5b5fd353296b8f4ff45850b8f9dcd97dafbb4fd2a9c24", size = 39556854, upload-time = "2026-09-18T05:26:18.308Z" },
-    { url = "https://files.pythonhosted.org/packages/4f/c2/036591a10a9870b1340d67a1d8c716469690654bf4c160e8dfd2ab5d2b36/litelink-0.3.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f2a3196ea16eaa7fdf185c6d5df17f9f5a7e3c3cc7f2dad6e1517a6474fe9ff6", size = 42876243, upload-time = "2026-09-18T05:26:22.233Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "duckdb", specifier = ">=1.5.5,<1.5.6" },
+    { name = "pyarrow", specifier = ">=17.0.0" },
+    { name = "pyiceberg", extras = ["pyarrow", "sql-sqlite"], specifier = ">=0.11.1" },
+    { name = "xxhash", specifier = ">=3.6.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hatchling", specifier = ">=1.27" },
+    { name = "pre-commit", specifier = ">=4.5.1" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.15.0" },
+    { name = "s3fs", specifier = ">=2024.6.0" },
+    { name = "ty", specifier = ">=0.0.15" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [[package]]
@@ -1367,7 +1380,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litelink", specifier = ">=0.3.1" },
+    { name = "litelink", editable = "../litelink" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "websockets", specifier = ">=14" },
 ]

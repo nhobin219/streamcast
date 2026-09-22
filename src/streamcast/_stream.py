@@ -538,7 +538,27 @@ class Stream:
         reconnect that lost the connection rather than the race.
         """
         stream = _log.replay(log, start, frontier)
-        first = await anext(stream, None)
+        try:
+            first = await anext(stream, None)
+
+        except ValueError as exc:
+            # **litelink refuses a local-only read of a log it has evicted
+            # dry**, rather than serving the buffer alone. A server opens its
+            # log local-only on purpose (see `_log.rows`), so this is what a
+            # fully evicted log looks like from here: nothing local left to
+            # replay, and every row in the archive.
+            #
+            # That is exactly `evicted`, and the consumer's move is the one
+            # `evicted` already names. Letting the `ValueError` out would make
+            # it a 500 on a stream that is working perfectly.
+            if "holds no local files" not in str(exc):
+                raise
+
+            await stream.aclose()
+            raise NotReplayable(
+                "evicted", offset=start, earliest=frontier, archive=log.archive
+            ) from exc
+
         if first is None:
             return _empty()
 

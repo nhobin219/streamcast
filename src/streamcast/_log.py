@@ -107,20 +107,19 @@ async def rows(
     """
     declared = columns(log)
     names = (COLUMN, *declared)
-    # **`include_archive` is not passed, and that is a choice rather than an
-    # omission.** litelink's default is "whether the archive is load-bearing":
-    # False while the local table holds files, True once it holds nothing and
-    # the archive is the only source. Passing True would let a server serve a
-    # replay the local tier has dropped but the archive still has.
+    # **Which tiers this reads was decided when the handle was built.** A
+    # server opens its log without `include_archive`, so this is local files
+    # and the buffer; `_catchup` passes a `snapshot`, which is the archive by
+    # construction. One function serves both because neither decides anything
+    # here.
     #
-    # It is deliberately not passed, because that replay is a long network
-    # read held open on a worker thread while the subscriber's socket sits
-    # attached — the server queues for a consumer that is not reading, and
-    # `max_backlog` drops it. That is the exact failure `_catchup` exists to
-    # avoid, and it avoids it by reading the archive CLIENT-side with nothing
-    # connected. So a request below the local floor is refused `evicted` and
-    # the consumer is pointed at `catch_up=True`, which does the same read
-    # without holding a socket through it.
+    # A server's log is opened local-only on purpose. Serving a replay out of
+    # object storage means a long network read held on a worker thread while
+    # the subscriber's socket sits attached — the server queues for a consumer
+    # that is not reading, and `max_backlog` drops it. That is the exact
+    # failure `_catchup` avoids by doing the same read CLIENT-side with
+    # nothing connected, so a request below the local floor is refused and the
+    # consumer is pointed there.
     reader = await asyncio.to_thread(
         log.scan, columns=names, start_offset=start, end_offset=stop
     )
@@ -162,7 +161,11 @@ async def rows(
 
 
 def earliest(log: LogHandle) -> int | None:
-    """The lowest offset the log can still serve, or None if it holds nothing.
+    """The lowest offset this handle can serve, or None if it holds nothing.
+
+    "This handle", not "this log": which tiers it reads is fixed when it is
+    built, so the archive may hold far older rows than this reports. Those are
+    what `catch_up` is for — see `_catchup`.
 
     **Three tiers, and `coverage()` reports two of them.** That is not a bug
     in litelink — `coverage()` answers "what can this reader serve" for a
@@ -181,7 +184,15 @@ def earliest(log: LogHandle) -> int | None:
     and neither is a thing to do per message.
     """
     coverage = log.coverage()
-    tiers = (coverage.archive, log.table_extent(), coverage.buffered)
+    tiers = [log.table_extent(), coverage.buffered]
+    # **Only the tiers this handle actually reads.** litelink fixes that at
+    # assembly — `include_archive` — and a server opens its log without it, so
+    # the archive is not among them. Counting it would make `EARLIEST` resolve
+    # below what the very next scan can return, and the subscribe would be
+    # refused `evicted` for an offset the server had just called its earliest.
+    if log.include_archive:
+        tiers.append(coverage.archive)
+
     lows = [extent[0] for extent in tiers if extent is not None]
     if not lows:
         return None
