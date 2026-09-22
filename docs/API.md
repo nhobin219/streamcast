@@ -381,16 +381,19 @@ which is neither. So four things are arranged around that:
   syscalls to record something allowed to be stale;
 - a block that exits with an **exception** saves nothing, so the message whose handler
   raised is re-delivered;
-- the automatic save only ever moves **forward**, and `recv` refuses a frame whose offset
-  did not increase. Ordering within a subscription is TCP's guarantee about a network this
-  library cannot test — a loopback test says what the pump and the replay/live join do,
-  not what a middlebox between two hosts does — so it is checked rather than assumed, and
-  an out-of-order delivery stops the stream instead of moving the cursor.
+- the automatic save only ever moves **forward**. Not for ordering reasons: within a
+  subscription that is TCP's guarantee — one connection, one byte stream, in order — so
+  keeping a consumer's offset and resuming from it is safe on its own. The rewind this
+  guards is an operator's, not a network's: an explicit `offset=` sharing a cursor file.
+  A one-off `connect(uri, offset=1, cursor=path)` beside a production run wrote 1, 2, 3
+  over a file that said 400. `offset=` now overrides the *read* and cannot corrupt the
+  *write*.
 
-  The rewind the guard exists for comes from elsewhere anyway: an explicit `offset=`
-  sharing a cursor file. A one-off `connect(uri, offset=1, cursor=path)` beside a
-  production run wrote 1, 2, 3 over a file that said 400. `offset=` now overrides the
-  *read* and cannot corrupt the *write*.
+  `recv` separately refuses a frame whose offset did not increase. That one is for the
+  **catch-up join**, where the rows below the socket came from object storage and the
+  splice depends on `Catcher.start` and the server's replay window agreeing on an
+  inclusive/exclusive boundary — a place TCP says nothing about. It doubles as an
+  assertion on the replay/live partition. It does not span a reconnect.
 
 `commit(offset)` **is** allowed to move it backwards, because that is you stating what is
 durable and correcting an optimistic value downward is the point. It also cancels the

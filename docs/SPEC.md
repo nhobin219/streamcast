@@ -625,20 +625,28 @@ it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 | **I5** | Offsets are assigned once and never reused for the life of a log. Inherited from litelink, which owns the column. |
 | **I6** | Every subscriber receives the identical frame bytes for a given offset — one `encode` call, shared — and a **replayed** frame is byte-identical to the live one it repeats, because both project through the log's declared column order. |
 
-**I4's ordering is TCP's guarantee, and this library cannot test it.** A
-subscription is one connection and TCP delivers a byte stream in order, so
-frames on it cannot overtake each other — but that is a claim about the
-network between two hosts, and a loopback test establishes only what the pump,
-the queue and the replay/live join do. Those are the parts this library
-controls, and the parts that could have been wrong.
+**I4's ordering on ONE connection is TCP's, and is not what `recv` checks.**
+A subscription is one connection and TCP delivers a byte stream in order, so
+frames on it cannot overtake each other. That part needs no guard, and storing
+a consumer's offset and resuming from it is safe on that guarantee alone.
 
-So `Subscription.recv` compares each offset against the last and raises rather
-than trusting the reasoning. One comparison per message, and what it prevents
-is the expensive failure: processing a stream whose offsets went backwards
-means silently skipping data once a cursor is involved. `<=` rather than
-`!= previous + 1`, because litelink's offset space has legitimate gaps — a
-`restore` fences 2**20 of them — so a jump forward is ordinary and only a step
-backwards is wrong.
+`Subscription.recv` compares each offset against the last anyway, for the two
+places an offset arrives from somewhere TCP does not cover:
+
+| what it catches | why TCP does not |
+|---|---|
+| **the catch-up join** | `_offset` is set by rows read from OBJECT STORAGE, and the first frame off the socket is compared against it. Two sources spliced into one stream, and the splice depends on `Catcher.start` and the server's replay window agreeing about an inclusive/exclusive boundary |
+| **our own replay/live partition (I2)** | the server writes the replay and then the live queue onto one connection; TCP preserves the order they were *written*, not whether `_attach` picked the frontier correctly. An overlap repeats an offset |
+
+The first is the only one reachable today. What both would otherwise be is
+silent: processing a stream whose offsets went backwards means skipping data
+once a cursor is involved. `<=` rather than `!= previous + 1`, because
+litelink's offset space has legitimate gaps — a `restore` fences 2**20 of them
+— so a jump forward is ordinary and only a step backwards is wrong.
+
+It does **not** span a reconnect: a new `Subscription` starts with no previous
+offset, so nothing is compared across the gap. The log is what makes resuming
+safe there, not this check.
 
 I1, I2 and the mechanisms behind I4 are checked by `tests/test_invariants.py`
 against the source. I3 and I4 are checked end to end. I5 is litelink's.

@@ -53,8 +53,9 @@ possible is wrong even if every test passes.
 1. **Deliver a message a subscriber cannot account for.** What a subscriber receives is a
    contiguous prefix from where it subscribed, in increasing offset order. A drop ends it;
    nothing punches a hole in the middle of it, because a hole is invisible — the offsets
-   on either side still increase. Ordering is TCP's guarantee about a network this library
-   cannot test, so `recv` CHECKS it rather than assuming it.
+   on either side still increase. Ordering on one connection is TCP's guarantee and needs
+   no help; `recv`'s offset check is there for the catch-up join, where the rows come from
+   object storage rather than the socket, and as an assertion on I2's partition.
 2. **Let one consumer's speed affect another's.** `Stream.send` must never await a
    consumer. The broadcast is a synchronous `put_nowait` per subscriber and nothing else.
 3. **Broadcast before the log has the message.** `append` then fan out, never the

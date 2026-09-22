@@ -306,16 +306,37 @@ class Subscription:
             raise refusal from None
 
         offset, row = decode(frame)
-        # **Checked, not reasoned about.** A subscription is one TCP
-        # connection and TCP delivers a byte stream in order, so frames
-        # cannot overtake each other — but that is a claim about the network
-        # between two hosts, and this library has no way to test it. What it
-        # can do is refuse to process a stream whose offsets went backwards,
-        # whatever the cause: a middlebox that is not a conforming WebSocket
-        # proxy, a future transport, a bug here. One comparison per message
-        # turns silent out-of-order processing — which with a cursor means
-        # silently skipping data — into a loud stop the retry loop recovers
-        # from.
+        # **This is not a guard against the network.** TCP delivers a byte
+        # stream in order, so frames on ONE connection cannot overtake each
+        # other, and this comparison will never fire because of reordering
+        # between two hosts. An earlier version of this comment led with that
+        # hazard, which oversold a check that cannot see it.
+        #
+        # What it actually guards is the two places the offsets come from
+        # somewhere TCP says nothing about:
+        #
+        # * **The catch-up join.** `self._offset` above is set by rows read
+        #   out of OBJECT STORAGE, and the first frame off the socket is
+        #   compared against it. Those are two different sources spliced into
+        #   one stream, and the splice is computed by `Catcher.start` and the
+        #   server's replay window agreeing about an inclusive/exclusive
+        #   boundary. This is the line where an off-by-one there stops being
+        #   silent. It is the only case reachable today.
+        # * **Our own replay/live partition (I2).** The server writes the
+        #   replay and then the live queue onto one connection; TCP preserves
+        #   the order they were WRITTEN, not whether `_attach` picked the
+        #   frontier correctly. An overlap would repeat an offset, and a
+        #   repeat is what this sees.
+        #
+        # One integer compare per message, and what it buys is that both of
+        # those fail loudly. Silent out-of-order processing means, with a
+        # cursor, silently skipping data — the one thing a resume must never
+        # do — so the cost is worth paying even though the hazard the check
+        # is usually assumed to cover cannot happen.
+        #
+        # It does NOT span a reconnect: a new `Subscription` starts with
+        # `_offset = None`, so nothing is compared across the gap. The log is
+        # what makes that safe, not this.
         #
         # `<=` rather than `!= previous + 1`: litelink's offset space has
         # legitimate GAPS (a `restore` fences 2**20 of them), so a jump

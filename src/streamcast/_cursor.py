@@ -29,14 +29,14 @@ which is neither. So
   whose handler raised is re-delivered;
 * and the automatic save only ever moves FORWARD.
 
-**That last one is not mainly about message ordering.** `Subscription.recv`
-refuses a frame whose offset did not increase, so an out-of-order delivery
-stops the stream rather than moving the cursor — and it refuses rather than
-trusts, because ordering on the wire is TCP's guarantee about a network this
-library cannot test. A loopback test says what the pump and the replay/live
-join do; it says nothing about a middlebox between two hosts.
+**That last one is not about message ordering at all.** Ordering on a
+subscription is TCP's guarantee — one connection, one byte stream, in order —
+so storing the offset a consumer finished with and resuming from it is safe
+without any help from here. (`Subscription.recv` does compare offsets, but for
+the catch-up join, where the rows come from object storage rather than the
+socket; see the comment there.)
 
-The rewind this guard exists for comes from somewhere else entirely:
+The rewind this guard exists for comes from an operator, not a network:
 
     connect(uri, offset=0, cursor=path)   # a normal run; the file reaches 400
     connect(uri, offset=1, cursor=path)   # a one-off replay, same file
