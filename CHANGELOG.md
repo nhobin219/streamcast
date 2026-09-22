@@ -4,14 +4,12 @@ All notable changes are recorded here. Versions follow
 [Semantic Versioning](https://semver.org); the format is loosely
 [Keep a Changelog](https://keepachangelog.com).
 
-**Nothing has been released yet.** There is no tag, no PyPI package and no
-release workflow, so `0.1.0` is a number in `pyproject.toml` rather than
-something anyone can install. The entry below describes what the library is,
-not what changed for users — there are none — and the design decisions it
-records are kept because they were arrived at expensively, not because anybody
-has to migrate across them.
+**This is the first release.** The entry below describes what the library is
+rather than what changed for users, since there is nothing to have changed
+from — and the design decisions it records are kept because they were arrived
+at expensively, not because anybody has to migrate across them.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-09-22
 
 A replayable WebSocket multicaster. One upstream stream in, appended to a
 litelink log — an Iceberg table on disk — and broadcast to any number of

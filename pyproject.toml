@@ -64,14 +64,6 @@ build-backend = "uv_build"
 module-root = "src"
 module-name = "streamcast"
 
-# **A path source while litelink and streamcast are changed together.** The
-# `include_archive` move is a breaking change in litelink that this depends
-# on, and neither is released, so resolving `litelink>=0.4.0` from an index
-# would fail. `sources` is dev-only metadata — uv ignores it when building a
-# wheel — so the published requirement stays the version floor above, and
-# this line comes out when litelink 0.4.0 is on PyPI.
-[tool.uv.sources]
-litelink = { path = "../litelink", editable = true }
 
 [dependency-groups]
 dev = [

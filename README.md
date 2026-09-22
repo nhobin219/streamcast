@@ -26,13 +26,13 @@ A streamcast server is a Python WebSocket
 [tickerplant](https://code.kx.com/q/architecture/): a process that captures a feed,
 optionally writes it to a log, and publishes it to registered subscribers.
 
-**Status: early.** Nothing is released. Read [what it is not](#what-it-is-not) and
-[not implemented yet](#not-implemented-yet) first.
+**Status: early.** 0.1.0 is the first release. Read [what it is not](#what-it-is-not)
+and [not implemented yet](#not-implemented-yet) first.
 
 ## Install
 
 ```bash
-uv add git+https://github.com/nhobin219/streamcast     # not on PyPI yet
+uv add streamcast
 ```
 
 ## API
