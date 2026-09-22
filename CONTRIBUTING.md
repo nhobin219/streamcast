@@ -13,9 +13,19 @@ just check              # lint + format-check + typecheck + tests, exactly what 
 ```
 
 You need [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just).
-Nothing else — the test suite needs no network, no container and no credentials. Every
-test binds port 0 on loopback and every log is a temp directory, and a change that breaks
-that is a change to reject.
+
+Most of the suite needs nothing else: every test binds port 0 on loopback, every log is a
+temp directory, and a change that makes the ordinary tests need the network is a change to
+reject. The **replication and catch-up tiers** are the exception and are marked
+`@pytest.mark.replication` — they run litestream against a real object store and read a
+real archive back, which cannot be faked without testing the fake. They SKIP without an
+endpoint, and a skip is not a pass:
+
+```bash
+just rustfs             # a local S3 endpoint in a container
+just check-all          # every gate, with those tiers REQUIRED — what CI runs
+just rustfs-stop
+```
 
 ## Commits
 
@@ -27,8 +37,8 @@ same commit if you genuinely need it:
 <type>(<scope>): <lowercase description, no trailing period, subject <= 72 chars>
 
 types   feat fix refactor perf test docs build chore
-scopes  ci client deps errors examples log protocol replay server spec stream
-        subscriber
+scopes  catchup ci client cursor deps errors examples log maintain protocol
+        replay replicate schema server spec stream subscriber
 ```
 
 Write the body for someone reading `git log` in a year: what was wrong, why this fix and

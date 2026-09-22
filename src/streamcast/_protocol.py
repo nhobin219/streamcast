@@ -1,18 +1,27 @@
 """Everything that crosses the wire, and nothing that does not.
 
 **Every frame is JSON text.** The greeting is one, and every message after it
-is one row of the stream's table with `litelink_offset` in it:
+is a two-element pair — the offset, then one row of the stream's table:
 
     {"streamcast":1,"stream":"trades","end_offset":1861,...}
     [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]
+
+**The offset is POSITIONAL, and the row is untouched.** It is element 0 of
+the pair rather than a key in the object, so `msg` is exactly what the
+publisher sent: no offset column, no injected metadata, nothing to strip
+before forwarding it or appending it to another stream. litelink's own column
+is called `litelink_offset` and that name never reaches a subscriber — it is
+projected off in `_log` and re-attached here by position. A subscriber reads
+`offset, msg = frame`; it does not read a name it would then have to know
+belongs to a library it is not importing.
 
 There is no binary framing, no length header and no payload kind, and an
 earlier version of this file had all three. They existed to carry an opaque
 blob — a whole upstream frame stored verbatim — which is the design litelink's
 own example warns against in as many words: *"the reason to declare a schema
 rather than store the frame whole"*. Once the log is a typed table per stream,
-a message IS a row, and a row is a JSON object. The header held an offset that
-the object now carries itself, and nothing read it (see `_subscriber`).
+a message IS a row, and a row is a JSON object. The header held the offset the
+pair now carries positionally, and nothing read it (see `_subscriber`).
 
 What that buys is not just simplicity. `wscat ws://localhost:8765/trades?offset=0`
 now prints the stream, readably, with no client library at all — and a
@@ -191,6 +200,16 @@ class Greeting:
     replay: tuple[int, int] | None
     """The `[start, end)` about to be replayed, or None for a live-only subscribe."""
 
+    archive: str | None
+    """Where the stream's log is archived, or None if it has none.
+
+    Published so a subscriber that later falls behind the server's replay
+    window knows where to read the gap — see `_catchup`. It is here rather
+    than only in the refusal because a close frame has 123 bytes and a bucket
+    URI plus the numbers that diagnose the refusal do not both fit; the
+    refusal carries it too, last, so the numbers win when something has to go.
+    """
+
     schema: dict[str, object] | None
     """The stream's columns as JSON Schema, or None without a log.
 
@@ -219,6 +238,7 @@ def greeting(
     replay: tuple[int, int] | None,
     durable: bool,
     schema: dict[str, object] | None = None,
+    archive: str | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire."""
     return _ENCODER.encode(
@@ -229,6 +249,7 @@ def greeting(
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
             "schema": schema,
+            "archive": archive,
         }
     ).decode()
 
@@ -263,6 +284,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
 
     replay = fields.get("replay")
     schema = fields.get("schema")
+    archive = fields.get("archive")
 
     return Greeting(
         version=version,
@@ -270,6 +292,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         end_offset=None if fields["end_offset"] is None else int(fields["end_offset"]),
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
         schema=schema if isinstance(schema, dict) else None,
+        archive=archive if isinstance(archive, str) else None,
         durable=bool(fields.get("durable", False)),
     )
 

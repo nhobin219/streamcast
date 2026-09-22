@@ -17,40 +17,56 @@ message is durable *before* any subscriber sees it, so a consumer that falls
 behind, crashes, or is restarted reconnects with the last offset it processed
 and the server replays the gap before switching it to live — with no window in
 which a message is in neither place. Without one the fan-out is identical,
-offsets are `null`, and `?offset=` is refused. `docs/SPEC.md` §3 is where that partition
-is argued; `Stream` is where it is enforced.
+offsets are `null`, and `?offset=` is refused. `docs/SPEC.md` §3 is where that
+partition is argued; `Stream` is where it is enforced.
 
 **The API is `websockets` with one modification.** `serve` and `connect` have
 the same shapes and pass their keywords through; the difference is that
 iterating a subscription yields `(offset, row)` rather than `message`, because
 the offset is what makes a reconnect a resume.
 
-**The schema is yours.** streamcast declares no columns — the log is an
-ordinary litelink table with whatever shape you gave it, so every column
-prunes, compresses, and is queryable from any Iceberg engine. `send` takes a
-row, subscribers receive that row, and the parse happens once at the publisher
-rather than once per consumer.
+**The schema is yours, declared in JSON Schema.** streamcast declares no
+columns — the log is an ordinary litelink table with whatever shape you gave
+it, so every column prunes, compresses, and is queryable from any Iceberg
+engine. The wire is JSON, so the columns are declared in JSON Schema and
+converted here (`to_arrow`, `from_arrow`); `send` takes a row, subscribers
+receive that row, and the parse happens once at the publisher rather than once
+per consumer.
 
 .. code-block:: python
 
-    # server
-    log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
-    stream = streamcast.Stream("trades", log=log)
+    # server — creates the log at data/trades, or opens what is there
+    stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
+                               sort_by=("event_ts",))
 
+    # Fan-out, sealing, compaction and WAL shipping: all of it, one call.
     async with streamcast.serve(stream, "localhost", 8765):
         async for frame in upstream:
             await stream.send(parse(frame))      # a row
 
-    # consumer
-    async with streamcast.connect("ws://localhost:8765/trades", offset=123) as sub:
+    # consumer — `cursor` keeps the resume point, so a restart is a resume
+    async with streamcast.connect(
+        "ws://localhost:8765/trades", cursor=".trades.offset", catch_up=True
+    ) as sub:
         async for offset, msg in sub:
             ...
+
+**`serve` starts everything the stream needs.** A log that nobody seals grows
+for ever, and a WAL nobody ships is not replicated, so `serve` runs the
+maintainer in a subprocess and litestream as an flock-guarded sidecar. Both
+are keyword-controlled (`maintain=`, `replicate=`) for when you run your own.
 
 **The object model is two classes and two functions.** `Stream` is the
 broadcast — offsets, subscribers, replay — and holds no socket. `serve` puts
 it behind a port; `connect` reads it. `Subscription` is what a consumer holds,
 and it is read-only: it has no `send`, rather than a `send` that raises, for
 the reason litelink's read handles have no `append`.
+
+**Recovery is three keywords on `connect`.** `cursor=` keeps the last handled
+offset on disk; `cursor_uri=` ships it to object storage so a consumer can
+resume on another box; `catch_up=True` reads the gap from the log's archive
+when a consumer has fallen past what the server will replay, then picks the
+socket up where the archive ended.
 
 ``EARLIEST`` is the offset that means "everything the log still holds".
 
@@ -65,6 +81,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from litelink import S3Options
 
+from streamcast._catchup import CatchUpUnavailable
 from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
 from streamcast._errors import (
@@ -90,6 +107,7 @@ __all__ = [
     "EARLIEST",
     "MAX_BACKLOG",
     "MAX_REPLAY",
+    "CatchUpUnavailable",
     "Close",
     "Cursor",
     "Greeting",

@@ -17,6 +17,22 @@ A WebSocket multicaster with replay. One process holds the upstream
 subscription and fans it out; with a litelink log attached, an offset is a
 resume cursor and a consumer that stops can catch up.
 
+### Recovery
+
+- **`connect(catch_up=True)`** reads the gap from the log's archive when a
+  consumer has fallen past the server's `max_replay`, then picks the socket up
+  where the archive ended. Nothing is connected while the archive is read: a
+  subscriber holding a socket through a long catch-up is dropped for falling
+  behind, which would fail exactly the consumers that need it. It loops —
+  read, connect, and if the server moved on, read the newly archived rows —
+  bounded by `catch_up_retries` (3).
+- **`connect(cursor=path)`** keeps the resume point on disk, loaded at connect
+  and saved as the loop runs; **`cursor_uri=`** ships it to object storage on a
+  daemon thread so a consumer can resume on a different box.
+- Failures land at `connect`, not at the first `recv`, and say what to fix: an
+  unreadable archive names what was tried, which credential source, and four
+  ways out.
+
 ### The broadcast
 
 - `Stream` — offsets, subscribers and the subscribe partition, with no socket

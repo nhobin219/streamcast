@@ -67,16 +67,22 @@ possible is wrong even if every test passes.
    `_maintain`. A server started with `maintain=False` and no external maintainer buffers
    every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
    target, with zero Parquet files.
-7. **Run two litestream instances against one database.** It is the one thing litestream
+7. **Hold a socket open while reading the archive.** `catch_up` reads the gap with
+   NOTHING connected. Opening the connection first closes the window by construction and
+   makes the server queue for a subscriber that is not reading — `max_backlog` then drops
+   it, so the recovery fails on exactly the consumers that needed it. The loop closes the
+   window instead.
+8. **Run two litestream instances against one database.** It is the one thing litestream
    forbids. The sidecar takes an `flock` beside the log — not beside `log.root`, which is
    the shared parent — holds it for the server's life, sets `PR_SET_PDEATHSIG` so a
    `SIGKILL` cannot orphan the child, and stands by rather than starting a second.
-8. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
+9. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
    which is safe; a cursor ahead of it skips messages for ever. `_cursor` advances only
    when the loop asks for the next message, and never when the handler raised.
-9. **Let a replayed frame differ from the live one it repeats.** Both project through the
-   log's declared column order, so the bytes match. `_log.replay` checks the batch's column
-   order against what it projected for exactly this reason.
+10. **Let a replayed frame differ from the live one it repeats.** Both project through
+    the log's declared column order, so the bytes match. `_log.rows` checks each batch's
+    column order against what it projected for exactly this reason — and a catch-up reads
+    through the same function, so an archived row is built the same way too.
 
 ## The two invariants that fail silently
 
@@ -120,6 +126,7 @@ src/streamcast/
     _stream.py      Stream — offsets, fan-out, the subscribe partition
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
+    _catchup.py     reading the gap from the archive when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight

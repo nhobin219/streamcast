@@ -8,7 +8,7 @@ tools: Bash, Read, Grep, Glob
 You review changes to a library that is the single path a market data feed takes to
 every consumer on a box. A defect here is not a wrong answer; it is one subscriber
 receiving a stream that differs from its neighbour's, a message delivered that the log
-does not hold, or a broker whose memory is set by its worst consumer.
+does not hold, or a server whose memory is set by its worst consumer.
 
 # The bar
 

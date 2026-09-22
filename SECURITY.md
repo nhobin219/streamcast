@@ -13,7 +13,7 @@ Expect an acknowledgement within a week.
 
 **streamcast has no authentication, no authorisation and no transport security
 of its own**, and adding any of them is not on this list because `websockets`
-already has them and passing its keywords through is the whole design. A broker
+already has them and passing its keywords through is the whole design. A server
 bound to a public interface with no `ssl=` and no `process_request=` is serving
 its stream to anyone who can reach the port — and that is a deployment choice,
 not a defect.
@@ -22,18 +22,28 @@ not a defect.
 - **Authentication** is `serve(..., process_request=...)`, which sees the
   request before the WebSocket opens and can answer `401`.
 - **Binding** defaults to nothing: `serve(stream)` with no host binds to all
-  interfaces, exactly as `websockets` does. Pass `"127.0.0.1"` for a broker that
+  interfaces, exactly as `websockets` does. Pass `"127.0.0.1"` for a server that
   should only serve its own box, which is the case this library is built for.
 
-**A subscriber can ask for a replay, and a replay costs the broker a scan.**
+**A subscriber can ask for a replay, and a replay costs the server a scan.**
 `max_replay` bounds how far back one may ask; it does not bound how *often*.
-A broker reachable by untrusted clients wants a connection limit in front of it.
+A server reachable by untrusted clients wants a connection limit in front of it.
 
-**Close reasons carry stream names.** A 4404 lists what the broker serves, so a
+**Close reasons carry stream names.** A 4404 lists what the server serves, so a
 client that cannot reach a stream still learns that it exists. If a stream's
 existence is itself sensitive, run it on a separate port.
 
+**The greeting publishes the archive's location**, and the `too_old` refusal
+carries it when it fits in 123 bytes. That is deliberate — it is what lets
+`catch_up=True` find the gap without being told where to look — but it means a
+subscriber learns the bucket and prefix the log is archived to. Reading it
+still needs credentials the server never sends and never has to: the client
+resolves its own from the ordinary AWS chain, so a bucket policy is what
+decides who may read the archive, not this library. If the URI itself is
+sensitive, leave `archive=` off the log and give catching-up consumers the
+location out of band.
+
 What IS in scope: anything that lets a subscriber see messages from a stream it
 did not subscribe to, receive a stream that silently differs from another
-subscriber's, or make the broker exhaust memory through a path `max_backlog` is
+subscriber's, or make the server exhaust memory through a path `max_backlog` is
 supposed to bound.

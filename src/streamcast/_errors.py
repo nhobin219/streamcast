@@ -114,15 +114,21 @@ _WHY: Final = {
         "will assign — nothing has been issued there. A resume cursor this "
         "high usually means the server was restored or rebuilt."
     ),
+    # These two are the pair `catch_up=True` exists for: the rows are not
+    # gone, they are in the archive. Naming the flag in the sentence is the
+    # point — this text is what an operator reads at 3am, and "read the log
+    # directly" was an instruction to write the orchestration `_catchup`
+    # now contains.
     "too_old": (
         "offset {offset} is {behind} messages behind and this server replays "
-        "at most {max_replay}. Read the log directly for the gap, then "
-        "subscribe from where you stopped."
+        "at most {max_replay}. Reconnect with catch_up=True to read the gap "
+        "from the log's archive, or read the log directly."
     ),
     "evicted": (
         "offset {offset} is below {earliest}, the earliest offset this "
-        "stream's log still holds. The rows between are gone from it — read "
-        "the archive for them, or subscribe with offset=0 and accept the gap."
+        "stream's log still holds. The rows between are gone from it — "
+        "reconnect with catch_up=True to read them from the archive, or with "
+        "offset=0 to accept the gap."
     ),
 }
 """One home for every refusal sentence, keyed by what travels on the wire.

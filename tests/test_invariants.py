@@ -126,10 +126,14 @@ def test_a_replay_is_read_in_a_thread():
     for the first scan in a process. On the event loop that is the whole
     server stopped — no live message fanned out, no other subscriber served,
     no keepalive answered."""
-    source = inspect.getsource(_log.replay)
+    # `rows`, not `replay`: the batch reader was split out so the CLIENT can
+    # reuse it for a catch-up without an encode-then-decode round trip, and
+    # the thread hops went with the reader.
+    source = inspect.getsource(_log.rows)
     assert source.count("asyncio.to_thread") == 2, (
         "both the scan and each batch read must cross into a thread"
     )
+    assert "rows(" in inspect.getsource(_log.replay), "replay delegates to rows"
 
 
 def test_the_wire_key_order_comes_from_one_place():
@@ -149,7 +153,7 @@ def test_the_wire_key_order_comes_from_one_place():
     stream_src = inspect.getsource(_stream.Stream.__init__)
     assert "_log.columns(log)" in stream_src
 
-    replay_src = inspect.getsource(_log.replay)
+    replay_src = inspect.getsource(_log.rows)
     assert "names = (COLUMN, *declared)" in replay_src
     # The order check is what makes popping the front sound.
     assert "tuple(batch.schema.names) != names" in replay_src
@@ -172,5 +176,5 @@ def test_the_offset_is_never_a_key_in_the_message():
     ):
         assert "OFFSET" not in source, source
 
-    # And the replay pops litelink's column rather than passing it through.
-    assert "message.pop(COLUMN)" in inspect.getsource(log_module.replay)
+    # And the reader pops litelink's column rather than passing it through.
+    assert "message.pop(COLUMN)" in inspect.getsource(log_module.rows)

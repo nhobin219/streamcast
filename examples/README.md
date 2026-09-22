@@ -51,6 +51,12 @@ persist.
 
 `--from-start` ignores the cursor and replays everything the log still holds.
 
+`--catch-up` is the case one step past that — a consumer so far behind that the
+server refuses, and the rows it wants are only in the log's archive. This demo
+cannot show it: the log has no `archive=`, because that would mean credentials,
+and the point here is that there are none. `consumer.py` takes the flag anyway,
+so a real deployment is the same script.
+
 ## Live-only, for contrast
 
 ```

@@ -160,7 +160,8 @@ streamcast.Stream(name="", *, log=None, root=None, schema=None, sort_by=None,
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
-streamcast.connect(uri, *, offset=<unset>, cursor=None, ...) -> Subscription
+streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
+                   catch_up=False, ...) -> Subscription
 streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
 ```
 
@@ -194,6 +195,13 @@ ships the cursor to object storage, and a consumer starting on a different machi
 local file resumes from there — the same idea as the server's WAL replication, one layer
 out.
 
+**And `catch_up=True` handles having been down too long.** A consumer that falls past the
+server's `max_replay` is refused — the rows are in the log's archive, not gone. With this
+it reads the gap from object storage, then picks the socket up where the archive ended,
+looping if the server moved on meanwhile. Nothing is connected while the archive is read,
+because a subscriber that holds a socket through a long catch-up gets dropped for falling
+behind. If it cannot read the archive, the error says exactly what to fix.
+
 The server records its frontier at the instant the subscriber attaches, replays
 `[requested, frontier)` out of the log, and only then switches it to the live queue.
 Everything below the frontier is already durable; everything from it up is already in the
@@ -205,8 +213,8 @@ An offset the server cannot serve is **refused, never silently rounded**:
 
 ```
 NotReplayable: offset 100 is below 5000, the earliest offset this stream's log
-still holds. The rows between are gone from it — read the archive for them, or
-subscribe with offset=0 and accept the gap.
+still holds. The rows between are gone from it — reconnect with catch_up=True
+to read them from the archive, or with offset=0 to accept the gap.
 ```
 
 Five distinct reasons arrive as five distinct messages, because the caller's next move
@@ -249,8 +257,8 @@ is the whole of the recovery path, and it is the same two calls at every hop.
 
 ## What it is not
 
-**Not a message broker.** No fan-in — nothing
-publishes into a stream over the wire, and `Stream.send` runs in the server's own process
+**Not a message broker.** No fan-in — nothing publishes into a stream over the wire, and
+`Stream.send` runs in the server's own process
 ([`SPEC.md`](docs/SPEC.md) §6 and §9). No topics beyond a name, no consumer groups, no
 acknowledgements, and no delivery guarantee beyond "what you received is a contiguous
 prefix, and the log holds the rest". A subscriber that needs at-least-once with acks wants
@@ -261,8 +269,11 @@ keeps a 32 KB compressor per connection, which turns a frame encoded once into a
 compressed once per subscriber — the wrong trade on the LAN this is built for, and the
 right one across a WAN, where you pass `compression="deflate"` and get it back.
 
-**Not a replacement for reading the log.** `max_replay` bounds how far back a subscribe may
-ask; past that the answer is litelink directly, which needs nothing from streamcast.
+**Not a replacement for reading the log.** `max_replay` bounds how far back a subscribe
+may ask. `catch_up=True` covers the case where a consumer wants to resume from further
+back than that, by reading the gap from the archive — but a consumer that wants to *query*
+the history wants litelink directly, or any Iceberg engine, neither of which needs
+streamcast at all.
 
 **Not a place for frames that are not rows.** A typed log has nowhere to put a subscription
 ack or a heartbeat, so the feed handler drops them — the same division of labour a kdb
@@ -317,8 +328,12 @@ just --list             # the rest
 ```
 
 Tooling is uv + ruff + [ty](https://github.com/astral-sh/ty) + pytest; commits follow
-[Conventional Commits](https://www.conventionalcommits.org), enforced by a hook. The test
-suite needs no network, no container and no credentials.
+[Conventional Commits](https://www.conventionalcommits.org), enforced by a hook.
+
+Most of the suite needs no network, no container and no credentials. The replication and
+catch-up tiers do — they are where litestream is actually run and where a client actually
+reads an archive — so `just rustfs` starts a local S3 endpoint and `just check-all` runs
+every gate against it. Without one those tests SKIP, and a skip is not a pass.
 
 ## License
 

@@ -23,7 +23,9 @@ or merely received.
 `cursor=` is the whole of the recovery machinery: pass a path and the offset
 is loaded at connect, resumed one above, and saved as the loop runs. Add
 `--cursor-uri s3://bucket/consumer1/` and it is shipped to object storage too,
-so this consumer can come back on a different machine. It
+so this consumer can come back on a different machine — and `--catch-up` for
+when it has been down long enough that the server will not replay that far
+back, which reads the gap from the log's archive before going live. It
 advances only when the loop comes back for another message and never when the
 handler raised — a cursor ahead of the work is a message skipped for ever,
 where a cursor behind it is one handled twice.
@@ -40,7 +42,9 @@ import websockets
 import streamcast
 
 
-async def run(uri: str, cursor: Path, label: str, cursor_uri: str | None) -> None:
+async def run(
+    uri: str, cursor: Path, label: str, cursor_uri: str | None, catch_up: bool
+) -> None:
     """The whole recovery story, and `cursor=` is most of it.
 
     The offset is loaded from the file at connect, resumed one above, and
@@ -53,7 +57,7 @@ async def run(uri: str, cursor: Path, label: str, cursor_uri: str | None) -> Non
     while True:
         try:
             async with streamcast.connect(
-                uri, cursor=cursor, cursor_uri=cursor_uri
+                uri, cursor=cursor, cursor_uri=cursor_uri, catch_up=catch_up
             ) as stream:
                 replay = stream.info.replay
                 behind = 0 if replay is None else replay[1] - replay[0]
@@ -81,9 +85,17 @@ async def run(uri: str, cursor: Path, label: str, cursor_uri: str | None) -> Non
             print(f"[{label}] {exc}")
 
         except streamcast.NotReplayable as exc:
-            # The one failure a retry cannot fix. Printing `why` as well as
-            # the sentence, because it is what an operator greps for.
+            # A retry cannot fix this one. `--catch-up` can, for the two that
+            # are a gap rather than a misunderstanding — see the message.
             print(f"[{label}] cannot resume ({exc.why}): {exc}")
+            if exc.why in {"too_old", "evicted"} and not catch_up:
+                print(f"[{label}] try --catch-up to read the gap from the archive")
+
+            return
+
+        except streamcast.CatchUpUnavailable as exc:
+            # Long on purpose: it names what was tried and every way out.
+            print(f"[{label}] {exc}")
             return
 
         except (OSError, websockets.ConnectionClosed) as exc:
@@ -117,6 +129,15 @@ async def main() -> None:
         help="where the resume offset is kept (default: .<label>.offset)",
     )
     parser.add_argument(
+        "--catch-up",
+        action="store_true",
+        help=(
+            "if this consumer has been down long enough that the server will "
+            "not replay that far back, read the gap from the log's archive "
+            "first (needs credentials for it)"
+        ),
+    )
+    parser.add_argument(
         "--cursor-uri",
         default=None,
         help=(
@@ -138,7 +159,7 @@ async def main() -> None:
         # still holds.
         cursor.write_text(str(streamcast.EARLIEST - 1))
 
-    await run(args.uri, cursor, args.label, args.cursor_uri)
+    await run(args.uri, cursor, args.label, args.cursor_uri, args.catch_up)
 
 
 if __name__ == "__main__":

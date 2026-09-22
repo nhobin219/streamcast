@@ -11,9 +11,19 @@ resume rather than a restart, and a subscriber that has to ask for it
 separately will forget to.
 
 `row` is a `dict` over the stream's declared columns — the same row the
-publisher sent and the same row the log holds, with `litelink_offset` among
-its keys. It is not a blob to parse: the server's table is typed, so the
-parsing happened once at the publisher rather than once per subscriber.
+publisher sent and the same row the log holds, and **nothing else**: the
+offset is the other half of the pair, not a key in it, so the row can be
+logged, forwarded or appended to another stream whole. It is not a blob to
+parse either: the server's table is typed, so the parsing happened once at the
+publisher rather than once per subscriber.
+
+**Resuming is three keywords, because otherwise every consumer writes the same
+loop.** `cursor=` keeps the last handled offset on disk and resumes one above
+it; `cursor_uri=` ships that integer to object storage, so a consumer whose
+machine is gone can resume on another; `catch_up=True` reads the gap from the
+log's archive when the consumer has fallen past what the server will replay,
+then picks the socket up where the archive ended. `_cursor`, `_remote` and
+`_catchup` are where each is argued.
 
 **The second deviation is that there is no `send`.** A subscription is
 read-only, and rather than carrying a `send` that raises, it does not have
@@ -32,6 +42,13 @@ from litelink import S3Options
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from streamcast._catchup import (
+    CATCH_UP_RETRIES,
+    RECOVERABLE,
+    Catcher,
+    from_refusal,
+    nowhere_to_read,
+)
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
@@ -149,20 +166,36 @@ def _with_offset(uri: str, offset: int | None) -> str:
 class Subscription:
     """A live subscription. Async-iterable, read-only, and offset-aware."""
 
-    __slots__ = ("_connection", "_cursor", "_info", "_offset", "_stream", "_unsaved")
+    __slots__ = (
+        "_catcher",
+        "_connection",
+        "_cursor",
+        "_info",
+        "_offset",
+        "_prelude",
+        "_stream",
+        "_unsaved",
+    )
 
     def __init__(
         self,
-        connection: ClientConnection,
+        connection: ClientConnection | None,
         info: Greeting,
         stream: str,
         cursor: Cursor | None = None,
+        catcher: Catcher | None = None,
     ) -> None:
         self._connection = connection
         self._info = info
         self._stream = stream
         self._offset: int | None = None
         self._cursor = cursor
+        # Rows from the archive, drained BEFORE anything is connected — see
+        # `_catchup`, where holding a socket through a long catch-up is what
+        # gets the subscriber dropped for falling behind. `_catcher` opens the
+        # connection itself once the gap is closed.
+        self._catcher = catcher
+        self._prelude = None if catcher is None else catcher.stream()
         # The offset received but not yet known to be handled. It becomes the
         # saved value when the caller comes back for another message, which is
         # the only evidence this library has that the last one was finished.
@@ -213,11 +246,23 @@ class Subscription:
         """
         return self._offset
 
+    def _live(self) -> ClientConnection:
+        """The socket, once there is one.
+
+        None only while a catch-up is draining the archive — `Catcher` opens
+        it when the gap closes, and `recv` swaps it in before reaching here.
+        """
+        if self._connection is None:  # pragma: no cover — recv swaps it in
+            msg = "still reading the archive; there is no connection yet"
+            raise RuntimeError(msg)
+
+        return self._connection
+
     @property
     def connection(self) -> ClientConnection:
         """The underlying `websockets` connection, for `ping`, addresses, TLS
         details, and anything else this class deliberately does not wrap."""
-        return self._connection
+        return self._live()
 
     async def recv(self) -> tuple[int | None, dict[str, object]]:
         """The next `(offset, row)`.
@@ -231,8 +276,27 @@ class Subscription:
         if self._cursor is not None:
             self._cursor.save(self._unsaved)
 
+        if self._prelude is not None:
+            caught = await anext(self._prelude, None)
+            if caught is not None:
+                offset, row = caught
+                self._offset = offset
+                self._unsaved = offset
+
+                return offset, row
+
+            # Exhausted, which means `Catcher.stream` returned — and it does
+            # not return until it has a live connection. Everything below the
+            # socket came from object storage; everything from here comes from
+            # the server, starting where the archive stopped.
+            self._prelude = None
+            catcher, self._catcher = self._catcher, None
+            if catcher is not None and catcher.connection is not None:
+                self._connection = catcher.connection
+                self._info = catcher.info
+
         try:
-            frame = await self._connection.recv()
+            frame = await self._live().recv()
         except ConnectionClosed as exc:
             refusal = _refusal(exc, stream=self._stream, offset=self._offset)
             if refusal is None:
@@ -319,7 +383,26 @@ class Subscription:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """End the subscription. Idempotent, and awaits the close handshake."""
-        await self._connection.close(code, reason)
+        prelude, self._prelude = self._prelude, None
+        catcher, self._catcher = self._catcher, None
+        if prelude is not None:
+            # A consumer that walks away mid-catch-up leaves this generator
+            # suspended inside `Catcher.stream`, holding a DuckDB connection
+            # and the snapshot's scratch DIRECTORY — so abandoning it leaks
+            # disk as well as memory. `aclose` runs the `finally` that
+            # releases both. The server has the same guard for the same
+            # reason; this one was missing until it was looked for.
+            await prelude.aclose()
+
+        if catcher is not None:
+            # `aclose` above is not enough on its own. A subscription closed
+            # before its first `recv` never STARTED that generator, so its
+            # `finally` never ran — and `prepare` has an open reader waiting
+            # for a round that will not happen.
+            await catcher.close()
+
+        if self._connection is not None:
+            await self._connection.close(code, reason)
 
 
 class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirrors it
@@ -365,11 +448,39 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     the only one where a copy that lags should decide. See `_remote` for what
     this deliberately does not solve.
 
+    **`catch_up=True` handles having been down too long.** A consumer that
+    falls past the server's `max_replay` is refused — the rows are in the
+    log's archive, not gone — and this reads the gap from there, then picks
+    the socket up where the archive ended:
+
+        streamcast.connect(uri, cursor=".trades.offset", catch_up=True)
+
+    Nothing is connected while the archive is read, because a subscriber that
+    holds a socket through a long catch-up is dropped for falling behind. It
+    loops, bounded by `catch_up_retries` (3), for a server that moves on while
+    the gap is being read. `archive=` overrides where to read — otherwise it
+    comes from the refusal, or from the greeting — and `s3=` the credentials.
+    An archive that cannot be read raises `CatchUpUnavailable` HERE, at
+    `connect`, with a message naming what was tried and what to change. See
+    `_catchup`.
+
     Every other keyword goes to `websockets.connect` unchanged. `compression`
     defaults to None for the same reason it does in `serve`.
     """
 
-    __slots__ = ("_connect", "_cursor", "_remote", "_stream", "_subscription")
+    __slots__ = (
+        "_archive",
+        "_catch_up",
+        "_catch_up_retries",
+        "_cursor",
+        "_kwargs",
+        "_remote",
+        "_resolved",
+        "_s3",
+        "_stream",
+        "_subscription",
+        "_uri",
+    )
 
     def __init__(
         self,
@@ -380,9 +491,21 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         cursor_uri: str | None = None,
         s3: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
+        catch_up: bool = False,
+        catch_up_retries: int = CATCH_UP_RETRIES,
+        archive: str | None = None,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
+        self._uri = uri
+        # `Any`, so the checker resolves `**self._kwargs` against
+        # `websockets.connect`'s very precise signature rather than against a
+        # value type inferred from `compression`.
+        self._kwargs: dict[str, Any] = {"compression": compression, **kwargs}
+        self._catch_up = catch_up
+        self._catch_up_retries = catch_up_retries
+        self._archive = archive
+        self._s3 = s3
         self._stream = urlsplit(uri).path.lstrip("/")
         self._cursor = Cursor(cursor) if cursor is not None else None
 
@@ -429,10 +552,75 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             msg = f"offset is an int, None, or omitted — not {type(offset).__name__}"
             raise TypeError(msg)
 
-        self._connect = _ws_connect(
-            _with_offset(uri, resolved), compression=compression, **kwargs
-        )
+        self._resolved = resolved
+        # Called for its validation — it raises when an offset is given twice
+        # — and discarded, because `_handshake` builds each connection as it
+        # needs one. A catch-up opens a second at a different offset.
+        _with_offset(uri, resolved)
         self._subscription: Subscription | None = None
+
+    async def _handshake(self, offset: int | None) -> tuple[ClientConnection, Greeting]:
+        """One connection, opened and greeted. Raises the refusal it was given."""
+        connection = await _ws_connect(_with_offset(self._uri, offset), **self._kwargs)
+        try:
+            return connection, parse_greeting(await connection.recv())
+
+        except ConnectionClosed as closed:
+            refusal = _refusal(closed, stream=self._stream, offset=None)
+            if refusal is None:
+                raise
+
+            raise refusal from None
+
+        except BaseException:
+            await connection.close()
+            raise
+
+    async def _recover(self, refused: NotReplayable) -> Subscription:
+        """Hand back a subscription that reads the gap before it connects.
+
+        **Nothing is connected while the archive is read.** Holding a socket
+        through a catch-up that streams millions of rows makes the server
+        queue for a subscriber that is not reading, and `max_backlog` drops it
+        — a recovery that guaranteed its own failure. `Catcher` opens the
+        connection itself, after the gap is closed and at the offset the
+        archive actually reached, looping if the server has moved on since.
+        """
+        name = self._stream
+        where = from_refusal(refused, self._archive)
+        probe: Greeting | None = None
+        if where is None:
+            # The refusal did not carry it — a bucket URI and the numbers that
+            # diagnose the refusal do not both fit in 123 bytes, and the
+            # numbers are ordered first. The greeting has no such limit, so
+            # one throwaway live connection answers it. A rare path, costing a
+            # round trip rather than the ability to recover.
+            connection, probe = await self._handshake(None)
+            await connection.close()
+            where = probe.archive
+            if where is None:
+                raise nowhere_to_read(name)
+
+        if probe is None:
+            # Something has to describe the stream until the real connection
+            # exists, and `durable`, `schema` and `archive` are properties of
+            # the STREAM rather than of a connection. `end_offset` and
+            # `replay` are replaced when the socket opens.
+            connection, probe = await self._handshake(None)
+            await connection.close()
+
+        start = self._resolved if isinstance(self._resolved, int) else 1
+        catcher = Catcher(
+            where, name, self._s3, start, self._catch_up_retries, self._handshake
+        )
+        # BEFORE handing anything back, so an unreadable archive raises here
+        # rather than from whatever line first calls `recv`. Entering the
+        # block has to keep meaning that the subscription works.
+        await catcher.prepare()
+
+        self._subscription = Subscription(None, probe, name, self._cursor, catcher)
+
+        return self._subscription
 
     async def _open(self) -> Subscription:
         """Connect, then read the greeting before handing anything back.
@@ -443,29 +631,25 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         `recv` the application happened to reach first, which on a stream that
         is quiet out of hours is minutes later and somewhere else.
         """
-        connection = await self._connect
         try:
-            frame = await connection.recv()
-            info = parse_greeting(frame)
-        except ConnectionClosed as exc:
-            refusal = _refusal(exc, stream=self._stream, offset=None)
-            if refusal is None:
+            connection, info = await self._handshake(self._resolved)
+
+        except NotReplayable as refusal:
+            if not (self._catch_up and refusal.why in RECOVERABLE):
                 raise
 
-            raise refusal from None
-        except BaseException:
-            # A greeting that will not parse leaves an open connection nobody
-            # holds — `__aexit__` never runs, because `__aenter__` did not
-            # return. Closing here is what keeps a server-side handler from
-            # surviving every malformed handshake until its keepalive fires.
-            await connection.close()
-            raise
+            # Too far behind for the server to replay, which is exactly what
+            # the archive is for.
+            subscription = await self._recover(refusal)
 
-        self._subscription = Subscription(connection, info, self._stream, self._cursor)
+        else:
+            subscription = Subscription(connection, info, self._stream, self._cursor)
+            self._subscription = subscription
+
         if self._remote is not None:
             self._remote.start()
 
-        return self._subscription
+        return subscription
 
     def __await__(self):  # noqa: ANN204 — an awaitable's own protocol
         return self._open().__await__()

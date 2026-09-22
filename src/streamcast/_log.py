@@ -61,9 +61,10 @@ def columns(log: LogHandle) -> tuple[str, ...]:
 
     Read once at `Stream` construction and held, because it fixes the key
     order of every frame — and a replayed row must serialise to the same bytes
-    as the live one it repeats (I6). `litelink_offset` is prepended by
-    `encode` rather than listed here, so there is one statement of "the offset
-    comes first" instead of two.
+    as the live one it repeats (I6). litelink's own column is NOT among them:
+    the offset is element 0 of the pair `encode` writes, never a key in the
+    message, so there is one statement of "the offset comes first" instead of
+    two — and none of them is a column name a subscriber has to know.
     """
     return tuple(log.schema.names)
 
@@ -82,10 +83,10 @@ def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
         return None
 
 
-async def replay(
-    log: WriteHandle, start: int, stop: int
-) -> AsyncGenerator[tuple[int, bytes], None]:
-    """Frames for `[start, stop)`, already encoded, oldest first.
+async def rows(
+    log: LogHandle, start: int, stop: int
+) -> AsyncGenerator[tuple[int, dict[str, object]], None]:
+    """`(offset, row)` for `[start, stop)`, oldest first.
 
     **Every blocking call is in a thread**, which is not an optimisation. A
     replay is DuckDB reading Parquet — measured at 2.11 us per row warm and
@@ -141,7 +142,7 @@ async def replay(
 
             for message in batch.to_pylist():
                 offset = message.pop(COLUMN)
-                yield offset, _encode_projected(offset, message)
+                yield offset, message
 
     finally:
         # Releases the DuckDB result the scan is holding. A subscriber that
@@ -179,4 +180,18 @@ def earliest(log: LogHandle) -> int | None:
     return min(lows)
 
 
-__all__ = ["columns", "earliest", "replay"]
+async def replay(
+    log: WriteHandle, start: int, stop: int
+) -> AsyncGenerator[tuple[int, bytes], None]:
+    """`rows`, encoded — what a subscriber's pump sends.
+
+    Split from `rows` so the CLIENT can reuse the batch reader without an
+    encode-then-decode round trip it would only undo: `_catchup` reads the
+    archive the same way and hands the caller dicts directly, and 1.5 us a row
+    through msgspec twice adds up over a catch-up of millions.
+    """
+    async for offset, message in rows(log, start, stop):
+        yield offset, _encode_projected(offset, message)
+
+
+__all__ = ["columns", "earliest", "replay", "rows"]

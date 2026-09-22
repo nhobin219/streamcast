@@ -8,7 +8,7 @@ version: 0.1.0
 
 streamcast is the single path a feed takes to every consumer on a box. A defect is not a
 wrong answer; it is one subscriber receiving a stream that differs from its neighbour's,
-a message delivered that the log does not hold, or a broker whose memory is set by its
+a message delivered that the log does not hold, or a server whose memory is set by its
 worst consumer. Review is therefore adversarial and empirical, and it runs until a
 reviewer says it is clean — not until a round completes.
 

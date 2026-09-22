@@ -20,7 +20,8 @@ performance note — it is the correctness argument:
   duplicate — and that is what makes a resume exactly-once.
 
 If an `await` is ever added inside either, both properties are gone and
-nothing will fail loudly. `tests/test_ordering.py` is the guard.
+nothing will fail loudly. `tests/test_invariants.py` is the guard: it
+reads this module's AST and fails on an `await` in either place.
 """
 
 from __future__ import annotations
@@ -77,21 +78,30 @@ class Stream:
     """A broadcast, and the offsets that make it resumable.
 
     Constructed before there is a loop and serves any number of subscribers on
-    whichever loop `serve` runs on. It owns no thread, starts nothing, and
-    holds nothing open — including the log, which the caller opened and the
-    caller closes.
+    whichever loop `serve` runs on. It owns no thread and starts nothing —
+    `serve` is what starts the maintainer and the litestream sidecar, and it
+    stops them again.
 
-        log = litelink.new("data", "trades", schema=schema)   # YOUR columns
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.Stream("trades", root="data", schema=SCHEMA)
 
         async with streamcast.serve(stream, "localhost", 8765):
             async for frame in upstream:
                 await stream.send(parse(frame))      # a row, not a blob
 
-    **The schema is yours.** streamcast declares no columns; the log is an
-    ordinary litelink table with whatever shape you gave it, so every column
-    prunes, compresses and is queryable from any Iceberg engine. A row goes in
-    and the same row comes back out, live or replayed.
+    **The schema is yours, and declared in JSON Schema.** streamcast declares
+    no columns; the log is an ordinary litelink table with whatever shape you
+    gave it, so every column prunes, compresses and is queryable from any
+    Iceberg engine. A row goes in and the same row comes back out, live or
+    replayed. `_schema` converts the declaration to Arrow, so a durable stream
+    needs no import but this one.
+
+    **Who closes the log depends on who opened it.** `root=`+`schema=` creates
+    it here — `new` the first time, `open` every time after, which is the
+    try/except every caller otherwise writes — and `aclose` closes what it
+    created. Pass `log=` an open handle instead and it stays the caller's, for
+    a process that reads or writes it through litelink as well. The two are
+    mutually exclusive, because a `schema=` beside a `log=` is a declaration
+    that cannot be enforced: `open` reads the shape off disk.
 
     **`log` is what makes an offset a resume cursor**, and it is optional in
     both directions: a tickerplant's log is optional too — some kdb
@@ -405,6 +415,7 @@ class Stream:
                     replay=replaying,
                     durable=self._log is not None,
                     schema=self._shape,
+                    archive=None if self._log is None else self._log.archive,
                 )
             )
             await subscriber.run(replay)
@@ -454,9 +465,16 @@ class Stream:
         if behind > self._max_replay:
             raise NotReplayable(
                 "too_old",
+                # Numbers FIRST, archive LAST, because `refusal` trims from
+                # the end to fit 123 bytes and a bucket URI plus these does
+                # not fit. The numbers are what makes the message readable;
+                # the archive has a second home in the greeting, so losing it
+                # here costs a client one extra round trip rather than the
+                # ability to recover. See `_catchup.details`.
                 offset=requested,
                 behind=behind,
                 max_replay=self._max_replay,
+                archive=log.archive,
             )
 
         return log, requested
@@ -486,7 +504,9 @@ class Stream:
         offset, _frame = first
         if offset > start:
             await stream.aclose()
-            raise NotReplayable("evicted", offset=start, earliest=offset)
+            raise NotReplayable(
+                "evicted", offset=start, earliest=offset, archive=log.archive
+            )
 
         return _prepend(first, stream)
 

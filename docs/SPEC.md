@@ -33,6 +33,10 @@ upstream ws feed
 │             ├─► pump ──► subscriber A   │
 │             ├─► pump ──► subscriber B   │
 │             └─► pump ──► subscriber C   │
+│                                         │
+│   serve() also starts, per stream:      │
+│     maintainer  (subprocess)  §5        │   ← nothing seals without it
+│     litestream  (sidecar)               │   ← only if the log ships its WAL
 └─────────────────────────────────────────┘
 ```
 
@@ -52,8 +56,9 @@ missed. With one, it has an offset.
 
 ### Scope
 
-In: fan-out, ordering, offsets, replay, and per-subscriber backpressure
-isolation.
+In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
+and the recovery that rests on them — a consumer's cursor, and reading the
+archive when a consumer has fallen past what the server will replay.
 
 Out: acknowledgements, consumer groups, delivery guarantees beyond "a
 contiguous prefix", authentication, and transport security. The last two are
@@ -157,8 +162,9 @@ travels as compact JSON and the sentence is built at the subscriber:
 4416  {"error":"not_replayable","why":"evicted","offset":100,"earliest":5000}
       ↓
       offset 100 is below 5000, the earliest offset this stream's log still
-      holds. The rows between are gone from it — read the archive for them,
-      or subscribe with offset=0 and accept the gap.
+      holds. The rows between are gone from it — reconnect with
+      catch_up=True to read them from the archive, or with offset=0 to
+      accept the gap.
 ```
 
 The English has exactly one home (`_errors._WHY`) and can be reworded without a
@@ -511,8 +517,8 @@ one failure this convenience would otherwise introduce.
 | `not_durable` | no log attached | drop `offset=`, or give the server a log |
 | `empty` | the log holds nothing yet | subscribe live |
 | `ahead` | above the frontier | the server was restored or rebuilt; investigate |
-| `too_old` | further back than `max_replay` | read the log directly |
-| `evicted` | below what the log still holds | read the archive, or accept the gap |
+| `too_old` | further back than `max_replay` | `catch_up=True`, or read the log directly |
+| `evicted` | below what the log still holds | `catch_up=True`, or accept the gap |
 
 Five rather than one, because the move differs for each and collapsing them made
 every one of them a guess.
@@ -530,6 +536,54 @@ by construction. A server reads its *own* log, where that table holds almost
 everything. *Measured*: 60 rows sealed into 4 Parquet files, `coverage()`
 reporting `archive=None, buffered=None`, and every `offset=EARLIEST` subscribe
 refused as "holds no rows yet". `table_extent()` is the third tier.
+
+### Catching up from the archive
+
+`too_old` and `evicted` are the two refusals that mean *the rows exist, just not
+here*. `connect(catch_up=True)` is the client reading them out of the log's
+archive itself, so recovering a consumer that has been down a long time is a
+flag rather than an orchestration problem.
+
+The rule that shapes it: **nothing is connected while the archive is read.**
+The obvious design opens the socket at the archive's frontier first, which
+closes the gap by construction — and makes the server queue for a subscriber
+that will not read a message until it has pulled millions of rows out of object
+storage. `max_backlog` is 8,192, so it is dropped with `TooSlow` before the
+catch-up finishes: a recovery that guarantees its own failure on exactly the
+consumers that need it. *Measured* with `max_backlog=16`, where the first shape
+died immediately and this one caught up 20,000 rows.
+
+So it is a loop, and each round is: read the archive from the consumer's offset
+to whatever the archive now reaches, then try to connect there.
+
+| round ends | because |
+|---|---|
+| connected | the archive got inside the server's replay window |
+| refused again | the server moved on while the gap was read; the archive moved too, so go again |
+| `catch_up_retries` exhausted | the stream is published faster than it is archived — raise `max_replay`, sync more often, or allow more rounds |
+
+Rows already yielded are not re-read: a round that fails starts the next above
+where it stopped. Memory is one `RecordBatch`, and every blocking call crosses
+into a thread, exactly as the server's replay does.
+
+**The gap that nothing holds.** If the archive's frontier is itself below the
+server's window, a range exists that the server has forgotten and the archive
+never received. That is reported with both numbers rather than half-served: a
+consumer that silently resumed above it would have lost data and been told it
+recovered.
+
+**Where the archive location comes from**, in order: an explicit `archive=`, the
+refusal, then the greeting. The refusal carries it last, so the numbers survive
+the 123-byte trim and a long bucket URI is what drops; the greeting has no such
+limit, and a client that did not get it from the refusal spends one throwaway
+connection asking.
+
+**Credentials are the client's.** The server never sends any, and the client
+resolves them the way litelink does — the ordinary AWS chain, overridable with
+`S3Options`. An archive that cannot be read raises `CatchUpUnavailable` at
+`connect` rather than at the first `recv`, because a consumer told its
+subscription was open and handed a credentials error minutes later from
+whatever line read next is the failure the eager greeting exists to prevent.
 
 ---
 
@@ -603,10 +657,20 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 | a replay outruns `max_backlog` | the subscriber is dropped right after catching up. Size the two together (§4) |
 | two publishers on one log | litelink refuses: one writer per log. A second server on the same directory fails to open |
 | the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
+| a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the archive and then connects (§5) |
+| a catching-up consumer has no credentials | `CatchUpUnavailable` at `connect`, naming the endpoint, the credential source, and four ways out |
 
 ---
 
 ## 9. Open
+
+**A catch-up that does not re-read what it already has.** `catch_up` reads
+the archive from the consumer's offset each round, and a round that fails
+after yielding rows starts the next above them — so nothing is re-delivered
+WITHIN one `connect`. Across two, a consumer that died mid-catch-up starts
+from its cursor again, which may be well below where it got to, because the
+cursor only advances as rows are handled. That is the safe direction and it
+costs a re-read; a consumer that cannot afford it should commit more often.
 
 **Remote publishers.** `Stream.send` runs in the server's process, so a client
 cannot publish into a stream. It was designed and deliberately not built: the

@@ -29,8 +29,13 @@ SCOPES = {
     "subscriber",  # §4  the per-subscriber queue and its backpressure
     "server",  # §5  serve, routing
     "client",  # §5  connect, Subscription
-    "log",  # §6  the litelink tier: schema, rows, replay
+    "log",  # §6  the litelink tier: columns, rows, replay
     "replay",  # §6  the resume path specifically
+    "schema",  # JSON Schema <-> Arrow
+    "cursor",  # where a consumer keeps its offset, local and remote
+    "catchup",  # reading the gap from the archive
+    "maintain",  # the maintainer subprocess
+    "replicate",  # the litestream sidecar
     "errors",  # the refusal vocabulary and close codes
     "spec",  # docs/SPEC.md itself
     "ci",  # workflows, hooks, Justfile

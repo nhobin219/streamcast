@@ -56,11 +56,21 @@ the LAN this is built for. Pass `compression="deflate"` for subscribers across a
 ## `Stream`
 
 ```python
-streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
+streamcast.Stream(name="", *, log=None,
+                  root=None, schema=None, sort_by=None, config=None,
+                  archive=None, s3=None,
+                  max_backlog=8192, max_replay=100_000)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
+
+**Two ways to give it a log, and they are mutually exclusive.** `root=` + `schema=` (plus
+the optional `sort_by`, `config`, `archive`, `s3` — litelink's own `new()` keywords, with
+the name fed through) creates it here: `new` the first time, `open` every time after,
+which is the try/except every caller otherwise writes. `log=` takes a handle you already
+opened. Passing both raises, and so does `schema=` beside a `log=`: `open` reads the shape
+off disk, so a declaration there could not be enforced.
 
 **`log` is what makes an offset a resume cursor**, and it is optional — a
 [tickerplant](https://code.kx.com/q/architecture/)'s log is optional too, and some kdb
@@ -70,17 +80,25 @@ refused outright rather than appearing to work until the day a subscriber needs 
 it, every row is durable *before* any subscriber sees it.
 
 ```python
-log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
-stream = streamcast.Stream("trades", log=log)
+stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
+                           sort_by=("event_ts",))
 ```
 
 **Any shape of log works** — the schema is yours, and `Stream` reads its column order once
-at construction to fix the key order on the wire. The `Stream` does not close the log: you
-opened it, you close it.
+at construction to fix the key order on the wire.
+
+**Who closes it depends on who opened it.** `aclose` closes a log the `Stream` created
+from `root=`+`schema=`, and never one passed in as `log=` — that one stays yours, for a
+process that also reads or writes it through litelink. An existing log is checked against
+a declared `schema=` rather than adopted, because a declaration that disagreed with the
+disk would be silently ignored and every `send` validated against columns the caller never
+wrote down.
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
 how far back a subscribe may ask. **Size them against each other**: a replay streams
-while live messages queue behind it.
+while live messages queue behind it. The defaults are exported as
+`streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
+from them rather than restate them.
 
 ### Publishing
 
@@ -257,7 +275,9 @@ receive buffer, stops being able to send, and is closed by the keepalive.
 ## `connect`
 
 ```python
-streamcast.connect(uri, *, offset=<unset>, cursor=None,
+streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
+                   s3=None, upload_every=30.0, catch_up=False,
+                   catch_up_retries=3, archive=None,
                    **websockets_kwargs) -> Subscription
 ```
 
@@ -292,6 +312,8 @@ some `recv`.
 await sub.recv() -> tuple[int | None, dict[str, object]]
 async for offset, msg in sub: ...
 await sub.close(code=1000, reason="") -> None
+sub.commit(offset=None) -> None   # save the cursor now — see Resuming
+
 
 sub.offset -> int | None          # the last offset RECEIVED — the resume cursor
 sub.info -> Greeting              # what the server said at subscribe
@@ -312,7 +334,8 @@ for what a bare code cannot say.
 
 `info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
-a server restart), `stream`, `version`.
+a server restart), `schema` (the stream's columns as JSON Schema), `archive` (where its
+log is archived, which is what `catch_up` reads), `stream`, `version`.
 
 ## Resuming
 
@@ -373,6 +396,78 @@ sub.commit()          # force a save now — for a batching or non-idempotent co
 sub.commit(offset)    # ...at an offset you actually committed
 ```
 
+### `catch_up` — when the server will not replay that far back
+
+A consumer that has been down long enough falls past `max_replay`, and the server refuses
+with `NotReplayable(why="too_old")`. The rows are not gone — they are in the log's archive
+— but getting them means knowing where that is, opening litelink, scanning it without
+running out of memory, and working out where to resume the socket. `catch_up=True` does
+all of it:
+
+```python
+async with streamcast.connect(uri, cursor=".trades.offset", catch_up=True) as stream:
+    async for offset, msg in stream:
+        handle(msg)
+```
+
+The consumer sees one stream. Underneath, rows below the server's window come from object
+storage and the rest from the socket.
+
+**Nothing is connected while the archive is read.** This is the part that matters. Opening
+the socket first and then streaming the gap closes the window by construction — and makes
+the server queue for a subscriber that will not read a message until it has pulled
+millions of rows out of S3. `max_backlog` is 8,192, so the connection is dropped with
+`TooSlow` before the catch-up finishes: a recovery that guarantees its own failure on
+exactly the consumers that need it. Measured with `max_backlog=16`, where the old shape
+died immediately and this one caught up 20,000 rows.
+
+So it is a **loop**: read the archive, try to connect at the offset it reached, and if the
+server has moved on far enough to refuse again, read the newly archived rows and try once
+more. It converges when the archive gets inside the server's window.
+`catch_up_retries` (default 3) bounds it for when that never happens, and the failure says
+which of three things to change.
+
+| | |
+|---|---|
+| `catch_up=False` *(default)* | the plain `NotReplayable` refusal; handle the gap yourself |
+| `catch_up_retries=3` | rounds of read-then-connect before giving up |
+| `archive="s3://bucket/prefix"` | override where to read; otherwise taken from the refusal, or from the greeting |
+| `s3=streamcast.S3Options(...)` | credentials; otherwise the environment |
+
+**Where the archive location comes from.** The refusal carries it when it fits — a close
+frame is 123 bytes and the numbers that make the message readable are ordered first, so a
+long bucket URI is what drops. The greeting carries it too, with no such limit, so a client
+that did not get it from the refusal spends one throwaway connection asking. An explicit
+`archive=` beats both.
+
+**Failures land at `connect`, not at the first `recv`.** The archive is opened before the
+subscription is handed back, so unreadable credentials raise where you called `connect`
+rather than minutes later from whatever line read next. The message is long on purpose —
+it names what was tried, which credential source, and four ways out:
+
+```
+cannot read stream 'trades' from s3://market-data/prod to catch up.
+
+  tried:       endpoint http://..., region us-east-1
+  credentials: the ambient credential chain (profile, instance metadata, SSO)
+  underlying:  OSError: ...
+
+  * On AWS, the usual fix is an instance role or profile that can GET and LIST under ...
+  * Elsewhere, set AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, ...
+  * `catch_up=False` turns this back into the plain NotReplayable refusal ...
+  * To skip the gap and accept the loss, reconnect with offset=streamcast.EARLIEST ...
+```
+
+**What it cannot fix.** If the archive's frontier is itself below the server's window,
+a range exists that neither holds — the server has forgotten it and the archive never
+received it. That is reported with both numbers rather than half-served, because a
+consumer that silently resumed above the gap would have lost data and been told it
+recovered.
+
+Only `too_old` and `evicted` are recoverable this way. `not_durable`, `empty` and `ahead`
+are a stream with no log, a log with nothing in it, and a cursor from the future; reading
+object storage fixes none of them.
+
 ### `cursor_uri` — resuming on another box
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
@@ -432,6 +527,7 @@ StreamcastError
 ├── ProtocolError      the peer is not speaking streamcast, or sent a bad subscribe
 ├── StreamNotFound     nothing served at that path; `.serves` lists what is
 ├── NotReplayable      that offset cannot be served; `.why` says which of five
+├── CatchUpUnavailable `catch_up=True` could not read the gap; says what to change
 └── TooSlow            dropped for falling behind; `.offset` is where to resume
 ```
 
@@ -442,8 +538,8 @@ StreamcastError
 | `not_durable` | drop `offset=`, or give the server a log |
 | `empty` | subscribe live; there is nothing to replay yet |
 | `ahead` | your cursor is above the server's frontier — it was restored or rebuilt |
-| `too_old` | read the log directly for the gap, then subscribe from where you stopped |
-| `evicted` | the rows are gone from the log; read the archive, or accept the gap |
+| `too_old` | `catch_up=True`, or read the log directly and subscribe from where you stopped |
+| `evicted` | the rows are gone from the log; `catch_up=True`, or accept the gap |
 
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.
@@ -595,16 +691,23 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
 ## On the wire
 
-Every frame is JSON text. The greeting, then one object per row:
+Every frame is JSON text. The greeting, then a **two-element pair** per message — the
+offset, then the row:
 
 ```
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "archive":"s3://market-data/prod","schema":{...},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-No binary header, no length prefix, no payload kind. `wscat ws://localhost:8765/trades?offset=0`
-is a working subscriber, and a consumer in any language needs a JSON parser rather than
-this document.
+(The greeting is one line on the wire; it is wrapped here to fit.)
+
+The offset is **positional**, not a key in the object — `const [offset, msg] =
+JSON.parse(frame)` — so `msg` is the publisher's row and nothing else, with no column to
+strip before forwarding it. No binary header, no length prefix, no payload kind.
+
+`wscat ws://localhost:8765/trades?offset=0` is a working subscriber, and a consumer in any
+language needs a JSON parser rather than this document.
 
 Encoding is [msgspec](https://github.com/jcrist/msgspec), which sits on the hot path in
 both directions — every publish encodes a row, every replayed row re-encodes one. Measured
