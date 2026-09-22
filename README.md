@@ -108,7 +108,7 @@ log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on s
 streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      archive=None, s3=None, include_archive=False,
+                      archive=None, s3=None, replay_archive=False,
                       max_backlog=8192, max_replay=100_000)   # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
@@ -174,14 +174,14 @@ caller's next move differs for each.
 
 ## Serving the whole history
 
-`include_archive=True` with `max_replay=None` makes the server a complete gateway to the
+`replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
 log: no subscribe is refused for reaching too far back, and the server reads the archive on
 the subscriber's behalf.
 
 ```python
 stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                archive="s3://bucket/prefix",
-                               include_archive=True, max_replay=None)
+                               replay_archive=True, max_replay=None)
 ```
 
 Every frame is still JSON over a plain WebSocket, so **a client in any language replays the

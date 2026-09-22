@@ -293,7 +293,7 @@ class TestTheWholeHistoryGateway:
     async def test_no_replay_bound_and_an_archive_serves_everything(
         self, tmp_path, s3, bucket, serve
     ):
-        """`max_replay=None` + `include_archive=True`: nothing is refused.
+        """`max_replay=None` + an archive-reading log: nothing is refused.
 
         The point is what it buys a client that is not Python. Every frame is
         JSON over a plain WebSocket, so a server configured this way lets any
@@ -334,6 +334,45 @@ class TestTheWholeHistoryGateway:
             assert [offset for offset, _row in got] == list(range(1, 2_001))
             # And it came from object storage, not from a local file.
             assert got[0][1]["i"] == 0
+
+    async def test_the_factory_takes_it_too(self, tmp_path, s3, bucket, serve):
+        """`Stream.new(replay_archive=True)`, rather than opening the handle.
+
+        The parameter is named for the replay, not for the tier: `archive=`
+        sits beside it and already means "where", so two near-identical names
+        would be the kind a caller sets one of while meaning the other. It is
+        litelink's `include_archive` on the way in.
+        """
+        stream = streamcast.Stream.new(
+            "trades",
+            root=tmp_path / "data",
+            schema=SCHEMA,
+            archive=bucket,
+            s3=s3,
+            replay_archive=True,
+            max_replay=None,
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, local_retention=timedelta(0)
+            ),
+        )
+        try:
+            assert stream.log is not None
+            assert stream.log.include_archive is True, (
+                "replay_archive must reach litelink as include_archive"
+            )
+
+            await fill(stream, stream.log, total=4_000)
+            await asyncio.to_thread(stream.log.evict)
+            assert stream.log.table_extent() is None, "the fixture must evict dry"
+
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                    first, _row = await sub.recv()
+
+            assert first == 1
+
+        finally:
+            await stream.aclose()
 
     async def test_the_bound_still_applies_when_it_is_set(self, serve, log):
         """The default is unchanged: a number still refuses."""

@@ -21,7 +21,7 @@ a subscriber that stops can reconnect and ask for the rest.
 ### Serving the whole history
 
 - **`max_replay=None` removes the bound**, so no subscribe is refused as
-  `too_old`. With **`Stream.new(include_archive=True)`** the server reads the
+  `too_old`. With **`Stream.new(replay_archive=True)`** the server reads the
   archive on the subscriber's behalf, which together make it a complete
   gateway to the log: a client in any language replays the entire stream over
   a plain WebSocket, with no litelink, no Iceberg reader and no object-storage
@@ -32,10 +32,12 @@ a subscriber that stops can reconnect and ask for the rest.
   `max_backlog` is what drops a subscriber that fell behind while reading it.
   Size the two together.
 
-  `include_archive` is a handle property rather than a `LogConfig` field:
+  `replay_archive` is a handle property rather than a `LogConfig` field —
   litelink persists a config in the log's `meta` table, so a field there would
   be durable policy shared by every process, and one caller's `set_config`
-  would change another's read tier.
+  would change another's read tier. It is litelink's `include_archive` on the
+  way in; named for the replay here because `archive=` beside it already means
+  "where".
 
 ### Construction
 

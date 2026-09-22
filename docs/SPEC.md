@@ -427,11 +427,14 @@ rebuilding them in Python, for identical bytes. `_log.rows` checks the batch's
 column order against what it projected before relying on it, once per batch:
 the saving holds only while that does, and a silent reordering would break I6.
 
-**`include_archive` is not passed.** litelink's default decides from the tiers:
-local disk while the local table holds files — every ordinary server, and it
-keeps a replay off the network — and the archive when the log has been fully
-evicted and it is the only place the rows are, where refusing to look would be a
-silent short serve.
+**Which tiers a replay reads was decided when the log was opened.** litelink
+fixes that at assembly, and a server opens local-only unless
+`Stream.new(replay_archive=True)` says otherwise — serving a replay out of
+object storage is a long network read held on a worker thread while the
+subscriber's socket sits attached, which is the failure `catch_up` avoids by
+doing the same read client-side with nothing connected. A log with no local
+files left refuses rather than serving the buffer alone, and that refusal
+reaches the subscriber as `evicted`.
 
 ### The schema, in JSON
 

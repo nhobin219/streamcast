@@ -203,7 +203,7 @@ class Stream:
         s3: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
-        include_archive: bool = False,
+        replay_archive: bool = False,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -224,14 +224,14 @@ class Stream:
         The returned `Stream` OWNS its log and closes it in `aclose`. Pass
         `log=` to the initialiser instead when the handle is yours to keep.
 
-        `include_archive` is NOT part of `config`: litelink persists a
+        `replay_archive` is NOT part of `config`: litelink persists a
         `LogConfig` in the log's `meta` table, so a field there would be
         durable policy shared by every process that opens the log, and one
         caller's `set_config` would change another's read tier. Which tiers a
         handle reads is a property of that handle, so it is passed and not
         stored — reopen with it to get it again.
 
-        **`include_archive=True` with `max_replay=None` makes the server a
+        **`replay_archive=True` with `max_replay=None` makes the server a
         complete gateway to the log.** Together they mean no subscribe is ever
         refused for reaching too far back: the server reads whatever the
         archive holds and streams it as ordinary JSON frames. A client in any
@@ -261,7 +261,7 @@ class Stream:
                 config=config,
                 archive=archive,
                 s3=s3,
-                include_archive=include_archive,
+                replay_archive=replay_archive,
             ),
             owns_log=True,
             max_backlog=max_backlog,
@@ -534,7 +534,7 @@ class Stream:
         behind = frontier - requested
         # **None means no bound, and `too_old` then never fires.** The
         # request is served from wherever the log can serve it, which on a
-        # log opened with `include_archive=True` is the whole history out of
+        # log opened with `replay_archive=True` is the whole history out of
         # object storage. That is the setting that makes a plain WebSocket
         # client in any language able to replay a stream from the beginning
         # with no litelink, no credentials and no dependency on this repo —
@@ -617,7 +617,7 @@ def _open_or_create(
     config: object | None,
     archive: str | None,
     s3: object | None,
-    include_archive: bool = False,
+    replay_archive: bool = False,
 ) -> WriteHandle:
     """The log for this stream, created if it is not there yet.
 
@@ -634,7 +634,11 @@ def _open_or_create(
     """
     declared = _schema.to_arrow(schema)
     try:
-        log = litelink.open(root, name, include_archive=include_archive)
+        # litelink's spelling on the way in. It is `include_archive` there
+        # because it governs which tiers any READ includes; here it governs
+        # what a replay may reach, which is the only read this opens a log
+        # for — and `archive=` next to it already means "where".
+        log = litelink.open(root, name, include_archive=replay_archive)
     except FileNotFoundError:
         return litelink.new(
             root,
@@ -644,7 +648,7 @@ def _open_or_create(
             config=config,  # ty: ignore[invalid-argument-type]
             archive=archive,
             s3=s3,  # ty: ignore[invalid-argument-type]
-            include_archive=include_archive,
+            include_archive=replay_archive,
         )
 
     if list(log.schema) != list(declared):
