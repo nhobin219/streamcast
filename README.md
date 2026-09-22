@@ -1,12 +1,17 @@
-# streamcast
+<p align="center">
+  <img src="docs/assets/streamcast-logo.svg" alt="streamcast" width="330">
+</p>
 
-A replayable WebSocket multicaster. One upstream stream in, appended to a
+[![PyPI](https://img.shields.io/pypi/v/streamcast)](https://pypi.org/project/streamcast/)
+[![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
+
+# A replayable WebSocket multicaster
+
+One upstream stream in, appended to a
 [litelink](https://github.com/nhobin219/litelink) log — an Iceberg table on disk — and
 broadcast to any number of downstream subscribers. Each message carries the offset it was
 written at, so a subscriber that stops can reconnect and ask for the rest.
-
-[![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 
 ```
 upstream ws feed

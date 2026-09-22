@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 180" width="700" height="180" role="img" aria-label="streamcast">
+  <title>streamcast</title>
+
+  <!-- live: from the frontier to the head of the stream -->
+  <g stroke="#2F6FED" stroke-width="18" stroke-linecap="round" fill="none">
+    <path d="M34 52 H230"/>
+    <path d="M92 90 H230"/>
+    <path d="M150 128 H230"/>
+  </g>
+
+  <!-- replayed from the log: each subscriber's own subscribe offset up to the frontier -->
+  <g stroke="#6B7684" stroke-width="18" fill="none">
+    <path d="M34 52 H118" stroke-linecap="round"/>
+    <path d="M92 90 H118" stroke-linecap="round"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="296" y="113"
+        font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
+        font-size="64" letter-spacing="-1.5">
+    <tspan fill="#6B7684">stream</tspan><tspan fill="#2F6FED">cast</tspan>
+  </text>
+</svg>

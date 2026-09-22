@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="streamcast mark">
+  <title>streamcast</title>
+
+  <!-- live -->
+  <g stroke="#2F6FED" stroke-width="22" stroke-linecap="round" fill="none">
+    <path d="M38 74 H218"/>
+    <path d="M92 128 H218"/>
+    <path d="M146 182 H218"/>
+  </g>
+
+  <!-- replayed from the log -->
+  <g stroke="#6B7684" stroke-width="22" fill="none">
+    <path d="M38 74 H116" stroke-linecap="round"/>
+    <path d="M92 128 H116" stroke-linecap="round"/>
+  </g>
+</svg>
