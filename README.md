@@ -94,13 +94,20 @@ Full reference in [`docs/API.md`](docs/API.md).
 Every frame is JSON text: a greeting, then an `[offset, msg]` pair per message.
 
 ```
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "log":{"name":"trades","archive":"s3://market-data/prod"},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
 The offset is positional, so `const [offset, msg] = JSON.parse(frame)` is a client in
 another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
-with none at all. Key order comes from the log's schema, so a replayed message is
+with none at all.
+
+`log` is the stream's log — its name and where it is archived — so a subscriber holding
+the greeting can open it directly rather than through the socket:
+`litelink.snapshot(info.log.name, archive=info.log.archive)`, or any Iceberg engine
+pointed at the archive. `null` when the stream has no log. Credentials are never in it:
+they are the reader's own. Key order comes from the log's schema, so a replayed message is
 byte-identical to the live one it repeats.
 
 Encoding is [msgspec](https://github.com/jcrist/msgspec): 0.285 µs for a six-column row

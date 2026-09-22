@@ -631,31 +631,33 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         archive actually reached, looping if the server has moved on since.
         """
         name = self._stream
+        # One throwaway live connection, always. Something has to describe
+        # the stream until the real connection exists — `durable`, `schema`
+        # and `log` are properties of the STREAM rather than of a connection
+        # — and the greeting is the only place the log's NAME is published.
+        # `end_offset` and `replay` are replaced when the socket opens.
+        connection, probe = await self._handshake(None)
+        await connection.close()
+
+        # **The LOG's name, which is not always the stream's.** A stream
+        # serves at its own name and its log has its own; `Stream.new` feeds
+        # one through and `Stream(log=handle)` does not. Asking the archive
+        # for a table named after the stream found nothing and reported it as
+        # a credentials failure — the server knows the answer, so it says it.
+        log_name = name if probe.log is None else probe.log.name
+
         where = from_refusal(refused, self._archive)
-        probe: Greeting | None = None
         if where is None:
             # The refusal did not carry it — a bucket URI and the numbers that
             # diagnose the refusal do not both fit in 123 bytes, and the
-            # numbers are ordered first. The greeting has no such limit, so
-            # one throwaway live connection answers it. A rare path, costing a
-            # round trip rather than the ability to recover.
-            connection, probe = await self._handshake(None)
-            await connection.close()
-            where = probe.archive
+            # numbers are ordered first. The greeting has no such limit.
+            where = None if probe.log is None else probe.log.archive
             if where is None:
                 raise nowhere_to_read(name)
 
-        if probe is None:
-            # Something has to describe the stream until the real connection
-            # exists, and `durable`, `schema` and `archive` are properties of
-            # the STREAM rather than of a connection. `end_offset` and
-            # `replay` are replaced when the socket opens.
-            connection, probe = await self._handshake(None)
-            await connection.close()
-
         start = self._resolved if isinstance(self._resolved, int) else 1
         catcher = Catcher(
-            where, name, self._s3, start, self._catch_up_retries, self._handshake
+            where, log_name, self._s3, start, self._catch_up_retries, self._handshake
         )
         # BEFORE handing anything back, so an unreadable archive raises here
         # rather than from whatever line first calls `recv`. Entering the

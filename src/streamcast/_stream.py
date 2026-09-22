@@ -485,7 +485,16 @@ class Stream:
                     replay=replaying,
                     durable=self._log is not None,
                     schema=self._shape,
-                    archive=None if self._log is None else self._log.archive,
+                    # The log's OWN name, not the stream's. They are equal
+                    # when `Stream.new` fed one through and need not be when
+                    # a caller passed `log=` a handle they opened, and a
+                    # subscriber that guessed asks the archive for a table
+                    # that is not there.
+                    log=(
+                        None
+                        if self._log is None
+                        else (self._log.name, self._log.archive)
+                    ),
                 )
             )
             await subscriber.run(replay)

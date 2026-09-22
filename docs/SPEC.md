@@ -73,7 +73,8 @@ contiguous prefix", authentication, and transport security. The last two are
 message:
 
 ```
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "log":{"name":"trades","archive":"s3://market-data/prod"},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
