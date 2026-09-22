@@ -289,6 +289,63 @@ class TestItClosesTheGap:
             assert closed, "`prepare` opened a reader that `close` left open"
 
 
+class TestTheWholeHistoryGateway:
+    async def test_no_replay_bound_and_an_archive_serves_everything(
+        self, tmp_path, s3, bucket, serve
+    ):
+        """`max_replay=None` + `include_archive=True`: nothing is refused.
+
+        The point is what it buys a client that is not Python. Every frame is
+        JSON over a plain WebSocket, so a server configured this way lets any
+        language replay a stream from the beginning with no litelink, no
+        Iceberg reader and no object-storage credentials of its own — the
+        server reads the archive on its behalf. `catch_up` exists because the
+        default is the opposite.
+
+        Proved from the state that would otherwise refuse: the local tier is
+        evicted dry, so every row below the buffer is in object storage and
+        nowhere else.
+        """
+        handle = litelink.new(
+            tmp_path / "data",
+            "trades",
+            schema=streamcast.to_arrow(SCHEMA),
+            archive=bucket,
+            s3=s3,
+            include_archive=True,
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, local_retention=timedelta(0)
+            ),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle, max_replay=None)
+            await fill(stream, handle, total=8_000)
+            await asyncio.to_thread(handle.evict)
+
+            assert handle.table_extent() is None, "the fixture must evict dry"
+            assert handle.include_archive is True
+
+            async with serve(stream, maintain=False) as uri:
+                # Bounded by nothing: the default would refuse this as
+                # `too_old` long before it reached the archive.
+                async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                    got = [await sub.recv() for _ in range(2_000)]
+
+            assert [offset for offset, _row in got] == list(range(1, 2_001))
+            # And it came from object storage, not from a local file.
+            assert got[0][1]["i"] == 0
+
+    async def test_the_bound_still_applies_when_it_is_set(self, serve, log):
+        """The default is unchanged: a number still refuses."""
+        stream = streamcast.Stream("trades", log=log, max_replay=5)
+        async with serve(stream, maintain=False) as uri:
+            await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(20)])
+            with pytest.raises(streamcast.NotReplayable) as raised:
+                await streamcast.connect(uri, offset=1)
+
+        assert raised.value.why == "too_old"
+
+
 class TestAnEvictedLog:
     async def test_a_log_evicted_dry_refuses_rather_than_erroring(
         self, tmp_path, s3, bucket, serve

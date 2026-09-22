@@ -61,6 +61,7 @@ streamcast.Stream(name="", *, log=None, owns_log=False,
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, archive=None, s3=None,
+                      include_archive=False,
                       max_backlog=8192, max_replay=100_000)
 ```
 
@@ -104,7 +105,11 @@ disk would be silently ignored and every `send` validated against columns the ca
 wrote down.
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
-how far back a subscribe may ask. **Size them against each other**: a replay streams
+how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused
+as `too_old`. With `include_archive=True` that makes the server a complete gateway to the
+log — any language can replay the whole stream over a plain WebSocket, with no litelink and
+no credentials of its own. The cost is that a long replay accumulates live messages behind
+it and `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
 while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.

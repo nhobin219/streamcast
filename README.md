@@ -108,8 +108,8 @@ log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on s
 streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      archive=None, s3=None,
-                      max_backlog=8192, max_replay=100_000)
+                      archive=None, s3=None, include_archive=False,
+                      max_backlog=8192, max_replay=100_000)   # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
@@ -171,6 +171,30 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
+
+## Serving the whole history
+
+`include_archive=True` with `max_replay=None` makes the server a complete gateway to the
+log: no subscribe is refused for reaching too far back, and the server reads the archive on
+the subscriber's behalf.
+
+```python
+stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+                               archive="s3://bucket/prefix",
+                               include_archive=True, max_replay=None)
+```
+
+Every frame is still JSON over a plain WebSocket, so **a client in any language replays the
+entire stream from offset 1** — no litelink, no Iceberg reader, no object-storage
+credentials, nothing from this repo. `catch_up` exists because the default is the opposite;
+this is the setting that makes it unnecessary.
+
+It is not the default because of `max_backlog`. A replay is served before the live queue,
+which fills behind it, so a subscriber reading ten million rows out of S3 accumulates live
+messages for as long as that takes and is dropped the moment it catches up if it passed the
+backlog on the way. Size the two together, or run it on a stream quiet enough that the
+arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
+(`min(32, cpu + 4)`) for its whole scan.
 
 ## Backpressure
 
