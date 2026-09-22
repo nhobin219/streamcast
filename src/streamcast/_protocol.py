@@ -91,6 +91,19 @@ def encode(
     `.get` rather than `[...]`, so a nullable column the caller omitted
     becomes JSON `null`. That is exactly what the table stores for it, and
     therefore exactly what a replay of the same row will send.
+
+    **The offset key is litelink's column, not one streamcast invents.** The
+    caller never declares it — litelink owns it and refuses a schema that
+    names it (I11) — so the row that goes on the wire and the row the table
+    holds are the same shape, and a subscriber can write what it receives
+    straight into a litelink log of its own.
+
+    On a stream with NO log it is still spelled `litelink_offset`, which is
+    the one place the name overreaches: there is no litelink and no column,
+    only a counter in this process. It keeps the name so that both kinds of
+    stream have one wire shape and a subscriber needs no branch — and the
+    greeting's `durable: false` is the signal that these particular offsets
+    will not survive a restart and cannot be resumed from.
     """
     payload: dict[str, object] = {OFFSET: offset}
     if columns is None:
