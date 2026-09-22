@@ -109,7 +109,8 @@ it when the server closes. Without one nothing ever seals: litelink is explicit 
 maintainer is not optional"*, and measured on 100,000 rows past the 8 MiB seal target, a
 server without one held every row in its SQLite buffer and wrote zero Parquet files.
 `maintain=False` opts out; see [`docs/API.md`](docs/API.md#maintain) for the cadences and
-for why it is never a thread.
+for why it is never a thread. A log with `wal_replication=True` is refused there, because
+its WAL needs a litestream sidecar this maintainer does not run.
 
 And the log is a real table:
 

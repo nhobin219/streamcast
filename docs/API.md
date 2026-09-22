@@ -185,6 +185,17 @@ silently returns the server to never sealing.
 else that sweeps it. `python -m streamcast maintain --root PATH --name NAME` is the same
 loop, runnable by hand.
 
+**A log with `wal_replication=True` is refused under `maintain=True`.** That log needs a
+litestream sidecar shipping its WAL, and this maintainer does not run one — so it would
+seal while nothing shipped, leaving you believing you have continuous RPO protection when
+you have none. Pass `maintain=False` and run litelink's own maintainer, which supervises
+the sidecar.
+
+Starting one here is not a small omission to fix later: litelink does it through a
+flock-guarded `Sidecar` that lives in its *examples* rather than its library, because two
+litestream instances on one database is "the one thing litestream says never to do" and is
+reachable through an ordinary `SIGTERM`. See [`SPEC.md`](SPEC.md) §9.
+
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 

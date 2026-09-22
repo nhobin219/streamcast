@@ -555,6 +555,18 @@ live single row in a 1-row batch is mostly framing overhead. The cost is the
 client unpacking batches transparently. Two encoders and two client paths is
 the price; nobody has needed it yet.
 
+**Running the litestream sidecar.** `serve(maintain=True)` refuses a log with
+`wal_replication` on, because sealing it while nothing ships its WAL leaves
+an operator believing they have continuous RPO protection when they have
+none. Supervising the sidecar here is the fix, and it is not a small one:
+litelink does it with a flock-guarded `Sidecar` that lives in its examples
+rather than its library, since two litestream instances on one database is
+"the one thing litestream says never to do" and is reachable through an
+ordinary `SIGTERM` — two orphans were observed in its testing before the
+guard existed. The right shape is probably for that `Sidecar` to move into
+litelink, where the config, the binary and the destination already live, and
+for this maintainer to ask for one.
+
 **Binary columns.** litelink refuses them today, so a stream whose rows carry
 real bytes has no column for them. There is no base64 workaround here any more
 — that belonged to the blob schema §5 removed — and the answer is litelink's

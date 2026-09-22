@@ -132,11 +132,42 @@ def _supervisors(
 
     A live-only stream has nothing to sweep, so `maintain=True` on a server of
     them spawns nothing rather than a process with no work to do.
+
+    **A log with `wal_replication` on is refused rather than half-maintained.**
+    That log needs a litestream sidecar shipping its WAL, and this maintainer
+    does not run one — so sealing it while nothing replicates leaves an
+    operator believing they have continuous RPO protection when they have
+    none. Measured: `wal_replication=True`, a streamcast server maintaining
+    the log, zero litestream processes.
+
+    Starting one here is not a small omission to fix later. litelink's own
+    maintainer does it through a flock-guarded `Sidecar` that lives in its
+    EXAMPLES rather than its library, because two litestream instances on one
+    database is "the one thing litestream says never to do" and is reachable
+    through an ordinary SIGTERM — two orphans were observed in its testing
+    before the guard existed. Reimplementing that as a side effect of a
+    convenience flag is how it would be got wrong.
     """
     if maintain is False:
         return []
 
     plan = Maintain() if maintain is True else maintain
+
+    replicated = [
+        stream.name or "/"
+        for stream in routes.values()
+        if stream.log is not None and stream.log.config.wal_replication
+    ]
+    if replicated:
+        msg = (
+            f"{', '.join(repr(name) for name in replicated)} replicate their WAL "
+            f"(wal_replication=True), which needs a litestream sidecar that "
+            f"streamcast's maintainer does not run — so it would seal while "
+            f"nothing shipped. Pass maintain=False and run litelink's own "
+            f"maintainer, which supervises the sidecar, or turn wal_replication "
+            f"off."
+        )
+        raise ValueError(msg)
 
     return [
         Supervisor(Path(stream.log.root), stream.log.name, plan)
