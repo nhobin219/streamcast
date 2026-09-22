@@ -46,7 +46,7 @@ class TestOffsets:
         first = streamcast.Stream("trades", log=log)
         await first.send_many([trade(i) for i in range(10)])
 
-        # A broker restart against the same log. The offsets must continue,
+        # A server restart against the same log. The offsets must continue,
         # never restart — a restart that reset them would hand the same
         # integers to different data and every consumer cursor in the system
         # would silently point somewhere else.

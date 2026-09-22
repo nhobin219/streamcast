@@ -79,7 +79,7 @@ def log(tmp_path: Path) -> Iterator[WriteHandle]:
 
 @pytest.fixture
 def serve() -> Callable[..., contextlib.AbstractAsyncContextManager[str]]:
-    """`async with serve(stream) as uri:` — a broker on an ephemeral port.
+    """`async with serve(stream) as uri:` — a server on an ephemeral port.
 
     Returns the URI rather than the server, because every test that starts one
     immediately wants to connect to it and port 0 means nobody can spell the

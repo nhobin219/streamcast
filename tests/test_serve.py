@@ -1,4 +1,4 @@
-"""End to end: a broker on a port, subscribers on the other end of it.
+"""End to end: a server on a port, subscribers on the other end of it.
 
 Live fan-out, routing, the greeting, and the `websockets` compatibility the
 API claims. Replay and resume are `test_resume.py`; refusals are
@@ -72,7 +72,7 @@ class TestLiveFanOut:
             assert row == trade(4)
 
     async def test_send_many_arrives_as_separate_messages(self, serve, log):
-        # Batching is the broker's durability decision. Making it visible on
+        # Batching is the server's durability decision. Making it visible on
         # the wire would make every subscriber's parser depend on how the
         # publisher happened to poll.
         stream = streamcast.Stream("trades", log=log)
@@ -91,7 +91,7 @@ class TestLiveFanOut:
                 await sub.recv()
                 assert stream.subscribers == 1
 
-            # The detach happens in the broker's handler, which unwinds when
+            # The detach happens in the server's handler, which unwinds when
             # the peer closes — a beat after `close()` returns here.
             for _ in range(100):
                 if stream.subscribers == 0:
@@ -193,7 +193,7 @@ class TestWebsocketsCompatibility:
             pong = await sub.connection.ping()
             await asyncio.wait_for(pong, timeout=5)
 
-    async def test_iteration_stops_cleanly_when_the_broker_goes_away(self, serve, log):
+    async def test_iteration_stops_cleanly_when_the_server_goes_away(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as sub:
@@ -203,7 +203,7 @@ class TestWebsocketsCompatibility:
                 await stream.aclose()
 
                 # Everything already delivered still arrives; the loop then
-                # ends rather than raising, because 1001 is a broker finishing
+                # ends rather than raising, because 1001 is a server finishing
                 # with this connection on purpose.
                 assert [offset async for offset, _row in sub] == [1, 2]
 
@@ -213,7 +213,7 @@ class TestLeaks:
         """The regression this suite was written to catch.
 
         A subscriber that walks away is noticed by `send` raising — but only
-        if there is something to send. On a quiet stream the broker's pump
+        if there is something to send. On a quiet stream the server's pump
         parks in `queue.get()` and nothing wakes it, so before `Subscriber.run`
         raced it against the connection's closed future, every disconnect left
         a task alive for ever and a `Subscriber` in the fan-out set. Nothing

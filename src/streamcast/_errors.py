@@ -1,13 +1,13 @@
 """What a subscription can fail with, and the close codes that carry it.
 
 Every one of these is raised at the *client*, because every one of them is the
-broker's answer to a subscribe. The broker does not raise them at itself — it
+server's answer to a subscribe. The server does not raise them at itself — it
 closes the connection with a code and a reason, and `_client` turns that pair
 back into the exception below.
 
 **The reason on the wire is a code and some numbers; the sentence is built
 here.** RFC 6455 gives a close reason 123 bytes, which is not a sentence, and
-a broker that spent them on prose would hand the subscriber something only a
+a server that spent them on prose would hand the subscriber something only a
 regex could act on. So `NotReplayable` travels as `{"why":"too_old",
 "earliest":5000}` and this module turns it back into English — which means the
 English has exactly one home and can be reworded without a protocol change.
@@ -25,7 +25,7 @@ from typing import Final
 
 
 class Close(IntEnum):
-    """The close codes a broker uses to refuse or end a subscription.
+    """The close codes a server uses to refuse or end a subscription.
 
     1000 and 1001 are not here: those are WebSocket's own normal-closure and
     going-away, they mean what they mean everywhere else, and a subscription
@@ -33,7 +33,7 @@ class Close(IntEnum):
     """
 
     BAD_REQUEST = 4400
-    """The path or query string is not a subscribe this broker can parse."""
+    """The path or query string is not a subscribe this server can parse."""
 
     NO_SUCH_STREAM = 4404
     """Nothing is served at that path."""
@@ -60,7 +60,7 @@ class ProtocolError(StreamcastError):
 
     A greeting that will not parse, a version this build does not know, or a
     data frame too short to hold a header. Distinct from a refusal: a refusal
-    is a broker that understood the request and said no, and a different
+    is a server that understood the request and said no, and a different
     request would work. Nothing about this one will.
     """
 
@@ -68,9 +68,9 @@ class ProtocolError(StreamcastError):
 class StreamNotFound(StreamcastError):
     """No stream is served at that path.
 
-    Carries what the broker does serve, because the overwhelmingly common
+    Carries what the server does serve, because the overwhelmingly common
     cause is a typo in a name and the answer travels in the refusal. The list
-    can be empty — a broker serving many streams trims it to fit the close
+    can be empty — a server serving many streams trims it to fit the close
     frame — which is why it is not part of the message when it is.
     """
 
@@ -78,7 +78,7 @@ class StreamNotFound(StreamcastError):
         self.requested = requested
         self.serves = serves
         known = (
-            f"; this broker serves {', '.join(repr(n) for n in serves)}"
+            f"; this server serves {', '.join(repr(n) for n in serves)}"
             if serves
             else ""
         )
@@ -101,9 +101,9 @@ class _Missing(dict):
 
 _WHY: Final = {
     "not_durable": (
-        "this stream has no log attached, so its offsets are a counter in the "
-        "broker's memory and nothing can be replayed from them. Subscribe "
-        "without `offset=`, or give the broker a log."
+        "this stream has no log attached, so it assigns no offsets and there "
+        "is nothing to replay from. Subscribe without `offset=`, or give the "
+        "server a log."
     ),
     "empty": (
         "this stream's log holds no rows yet, so there is nothing to replay. "
@@ -112,10 +112,10 @@ _WHY: Final = {
     "ahead": (
         "offset {offset} is above {end_offset}, the next offset this stream "
         "will assign — nothing has been issued there. A resume cursor this "
-        "high usually means the broker was restored or rebuilt."
+        "high usually means the server was restored or rebuilt."
     ),
     "too_old": (
-        "offset {offset} is {behind} messages behind and this broker replays "
+        "offset {offset} is {behind} messages behind and this server replays "
         "at most {max_replay}. Read the log directly for the gap, then "
         "subscribe from where you stopped."
     ),
@@ -130,7 +130,7 @@ _WHY: Final = {
 Rewording one of these is a documentation change. Adding a key is a protocol
 change in the direction that degrades safely: an older subscriber renders the
 fallback below and still gets the code, the numbers and a correct diagnosis of
-"the broker refused this offset".
+"the server refused this offset".
 """
 
 
@@ -139,7 +139,7 @@ class NotReplayable(StreamcastError):
 
     Five distinct states arrive here and the caller's next move differs for
     each: drop the offset and take the live stream, ask again from a different
-    one, or stop asking the broker and read the log directly. Collapsing them
+    one, or stop asking the server and read the log directly. Collapsing them
     into one message was the first design and made every one of those a guess.
     """
 
@@ -148,7 +148,7 @@ class NotReplayable(StreamcastError):
         self.fields = fields
         template = _WHY.get(why)
         if template is None:
-            detail = f"the broker cannot replay from this offset ({why})"
+            detail = f"the server cannot replay from this offset ({why})"
         else:
             detail = template.format_map(_Missing(fields))
 
@@ -156,10 +156,10 @@ class NotReplayable(StreamcastError):
 
 
 class TooSlow(StreamcastError):
-    """The broker dropped this subscriber for falling too far behind.
+    """The server dropped this subscriber for falling too far behind.
 
     `offset` is the last one it received — tracked locally by the subscription
-    rather than reported by the broker, because the close frame has no room
+    rather than reported by the server, because the close frame has no room
     for it and the subscriber already knows. On a durable stream, reconnecting
     at `offset + 1` misses nothing. It is None only when the drop happened
     before a single message arrived.
@@ -173,7 +173,7 @@ class TooSlow(StreamcastError):
         behind = f" more than {backlog} messages" if backlog is not None else ""
         resume = f"; resume at offset {offset + 1}" if offset is not None else ""
         super().__init__(
-            f"the broker dropped this subscriber for falling{behind} behind{resume}"
+            f"the server dropped this subscriber for falling{behind} behind{resume}"
         )
 
 

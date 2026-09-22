@@ -91,7 +91,7 @@ def serve(
     is free and the CPU is not. Pass `compression="deflate"` to turn it back
     on for subscribers across a WAN, where the trade reverses.
 
-    A subscription is read-only and the broker never calls `recv` on one. A
+    A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to
     send, and is closed by the keepalive when its pongs stop arriving.
     """

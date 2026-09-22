@@ -56,7 +56,7 @@ it is running.
 MAX_REPLAY: Final = 100_000
 """How far back a subscribe may ask to resume from.
 
-It bounds the broker, not the log: a replay is a DuckDB scan in a worker
+It bounds the server, not the log: a replay is a DuckDB scan in a worker
 thread and a subscriber asking for ten million rows would hold one for
 minutes. Past this, the answer is to read the log directly — which needs
 nothing from streamcast and is what litelink is for.
@@ -94,10 +94,10 @@ class Stream:
     **`log` is what separates a multicaster from a tickerplant** — kx's term
     for a process that captures a feed, logs it, and publishes it to registered
     subscribers (https://code.kx.com/q/architecture/). Without it
-    the offsets are a counter in this process: they order the stream correctly
-    and mean nothing after a restart, so `?offset=` is refused outright rather
-    than appearing to work until the day a subscriber needs it. With it, every
-    message is durable *before* any subscriber sees it — so a broker that dies
+    nothing assigns offsets at all — `send` returns None and every frame
+    carries `null` — so `?offset=` is refused outright rather than appearing to
+    work until the day a subscriber needs it. With it, every row is durable
+    *before* any subscriber sees it — so a server that dies
     between the two has published nothing it cannot replay, which is the
     ordering that makes recovery a replay rather than a reconciliation.
     """
@@ -198,7 +198,7 @@ class Stream:
         **None without a log**, because nothing assigned one. A live-only
         stream fans out and forgets; handing back a per-process counter would
         give the caller a number that behaves like a resume cursor until the
-        day the broker restarts.
+        day the server restarts.
 
         `row` is a mapping over the log's declared columns — litelink's `Row`,
         the same thing `litelink.append` takes. litelink validates it against
@@ -208,7 +208,7 @@ class Stream:
         **Durable first.** With a log attached this returns only once the row
         is committed — one SQLite transaction at `synchronous=FULL`, which
         litelink measures at a ~400 us median — and a failure there raises
-        with nothing broadcast. That ordering is the reason a crashed broker
+        with nothing broadcast. That ordering is the reason a crashed server
         is recoverable: a message a subscriber has seen is always a message
         the log holds, never the other way round.
 
@@ -255,7 +255,7 @@ class Stream:
 
         Each row still gets its own offset and its own frame, so a subscriber
         cannot tell a group from the same rows sent one at a time. That is
-        deliberate — batching is the broker's durability decision, and making
+        deliberate — batching is the server's durability decision, and making
         it visible on the wire would make every subscriber's parser depend on
         how the publisher happened to poll.
         """
@@ -283,7 +283,7 @@ class Stream:
         for subscriber in self._subscribers:
             subscriber.offer(frame)
 
-    async def aclose(self, reason: str = "broker shutting down") -> None:
+    async def aclose(self, reason: str = "server shutting down") -> None:
         """Drop every subscriber with a 1001. Does not close the log.
 
         Concurrently, because `close` waits for each peer's close handshake

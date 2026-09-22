@@ -17,7 +17,7 @@ everything else on the box reads from it, and gets **the same bytes in the same 
 exchange ws feed
       │  one connection
       ▼
-streamcast broker ──► litelink log      durable BEFORE any subscriber sees it
+streamcast server ──► litelink log      durable BEFORE any subscriber sees it
       │  fan-out
       ├──► strategy          offset 1861
       ├──► dashboard         offset 1861
@@ -25,11 +25,12 @@ streamcast broker ──► litelink log      durable BEFORE any subscriber sees
 ```
 
 With a [litelink](https://github.com/nhobin219/litelink) log attached it stops being a
-fan-out and becomes a [tickerplant](https://code.kx.com/q/architecture/) — kx's term for a process that
-captures a feed, writes it to a log file, and publishes it to registered subscribers,
-which is this one almost exactly. Every message is durable before any subscriber sees it,
+fan-out and becomes a Python [tickerplant](https://code.kx.com/q/architecture/) — a term
+used in kdb+/q systems for a process that captures a feed, writes it to a log file, and
+publishes it to registered subscribers, which is this one almost exactly. Every message is
+durable before any subscriber sees it,
 so an offset is a **resume cursor**: a consumer that crashes, restarts, or falls behind
-reconnects with the last offset it processed and the broker replays the gap out of the log
+reconnects with the last offset it processed and the server replays the gap out of the log
 before switching it to live — with no window in which a message is in neither place.
 
 ```python
@@ -38,32 +39,27 @@ async with streamcast.connect(uri, offset=1862) as stream:
         ...
 ```
 
-### Multicaster or broker?
+### Multicaster or tickerplant?
 
-Both, on different planes, and the argument that decides it is `log=`.
+The argument that decides it is `log=`.
 
-**The data plane is multicast.** One `encode` per message, one frame object shared by
-every queue, identical bytes to every subscriber — a guarantee
+**Without a log it is a multicaster.** One `encode` per message, one frame object shared
+by every queue, identical bytes to every subscriber — a guarantee
 ([`SPEC.md`](docs/SPEC.md) I6), not an implementation detail. No per-consumer filtering,
-no partitioning, no per-message routing.
+no partitioning, no per-message routing. Offsets are `null`, because nothing assigned any.
 
-**The control plane is a broker's.** Named streams on one port, a subscribe negotiation,
-an offset namespace the server owns, replay out of durable storage, and a delivery
-contract written in close codes.
-
-The two together are a tickerplant, and `Stream` is either one depending on how it is
-built:
+**With one it is a tickerplant.** The feed is captured, logged, and published to
+subscribers that can resume — named streams on one port, a subscribe negotiation, an
+offset namespace it owns, and a delivery contract written in close codes.
 
 ```python
-streamcast.Stream("trades")            # a multicaster. offsets die with the process
+streamcast.Stream("trades")            # a multicaster. no offsets, nothing to resume from
 streamcast.Stream("trades", log=log)   # a tickerplant. offsets are resume cursors
 ```
 
-**Throughout these docs, "the broker" means the process** — the thing at the other end of
-a subscriber's socket — and never a claim about category. What would make that word an
-overclaim is all deliberately absent: no fan-in (nothing publishes over the wire), no
-acknowledgements, no consumer groups, no per-message routing. See
-[what it is not](#what-it-is-not).
+**It is not a message broker**, and the machinery that would make it one is deliberately
+absent: no fan-in — nothing publishes into a stream over the wire — no acknowledgements,
+no consumer groups, no per-message routing. See [what it is not](#what-it-is-not).
 
 **Status: early.** The fan-out, the replay and the backpressure isolation work and are
 tested. Read [what it is not](#what-it-is-not) and [not implemented yet](#not-implemented-yet)
@@ -143,7 +139,7 @@ ask for it separately will forget to. `msg` is a `dict` over your columns and no
 else — the offset is framing, not data, and never appears inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
-because publishing is `Stream.send` in the broker's own process. Nothing inherits a method
+because publishing is `Stream.send` in the server's own process. Nothing inherits a method
 it has to refuse.
 
 ```python
@@ -181,14 +177,14 @@ while True:
         offset = None if offset is None else offset + 1
 ```
 
-The broker records its frontier at the instant the subscriber attaches, replays
+The server records its frontier at the instant the subscriber attaches, replays
 `[requested, frontier)` out of the log, and only then switches it to the live queue.
 Everything below the frontier is already durable; everything from it up is already in the
 subscriber's queue. **The two partition the stream exactly** — no gap, no duplicate — and
 that is what makes this exactly-once rather than best-effort. `docs/SPEC.md` §3 is the
 argument; `tests/test_resume.py` is the argument as a test.
 
-An offset the broker cannot serve is **refused, never silently rounded**:
+An offset the server cannot serve is **refused, never silently rounded**:
 
 ```
 NotReplayable: offset 100 is below 5000, the earliest offset this stream's log
@@ -214,13 +210,13 @@ it. What it received is a contiguous prefix, so on a durable stream the drop cos
 reconnect and nothing else.
 
 ```
-streamcast.TooSlow: the broker dropped this subscriber for falling more than
+streamcast.TooSlow: the server dropped this subscriber for falling more than
 8192 messages behind; resume at offset 20481
 ```
 
 ## Chaining
 
-Each stage is a broker, so a pipeline is brokers end to end and every hop is independently
+Each stage is a server, so a pipeline is servers end to end and every hop is independently
 resumable:
 
 ```
@@ -231,13 +227,13 @@ market feed ─► streamcast ─► live runner ─► streamcast ─► dashbo
 
 The dashboard box runs a litelink capture with S3 publishing off, so it keeps a local
 window and drops what ages out. When it restarts it reads the maximum offset it persisted,
-hands that back on its subscription, and the runner's broker replays the difference. That
+hands that back on its subscription, and the runner's server replays the difference. That
 is the whole of the recovery path, and it is the same two calls at every hop.
 
 ## What it is not
 
-**Not a message broker**, whatever the prose calls the process. No fan-in — nothing
-publishes into a stream over the wire, and `Stream.send` runs in the broker's own process
+**Not a message broker.** No fan-in — nothing
+publishes into a stream over the wire, and `Stream.send` runs in the server's own process
 ([`SPEC.md`](docs/SPEC.md) §6 and §9). No topics beyond a name, no consumer groups, no
 acknowledgements, and no delivery guarantee beyond "what you received is a contiguous
 prefix, and the log holds the rest". A subscriber that needs at-least-once with acks wants
@@ -264,7 +260,7 @@ Every frame is JSON text — the greeting, then one object per row:
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-A frame is a **positional pair**: the offset is the broker's framing, `msg` is the
+A frame is a **positional pair**: the offset is the server's framing, `msg` is the
 publisher's row. `const [offset, msg] = JSON.parse(frame)` is the whole client in another
 language, and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber with none
 at all.
@@ -278,13 +274,13 @@ message is byte-identical to the live one it repeats** — two subscribers holdi
 offset hold the same bytes.
 
 **`offset` is `null` on a stream with no log.** Nothing assigned one, and a per-process
-counter would look exactly like a resume cursor until the broker restarted.
+counter would look exactly like a resume cursor until the server restarted.
 
 ## Not implemented yet
 
-**Remote publishers.** `Stream.send` is in the broker's process; a client cannot publish
+**Remote publishers.** `Stream.send` is in the server's process; a client cannot publish
 into a stream. **Registered intent** — one designated publisher and many read-only nodes,
-coordinated through the broker — is designed and unbuilt. **Arrow IPC as a negotiated wire
+coordinated through the server — is designed and unbuilt. **Arrow IPC as a negotiated wire
 format** would make a bulk replay 492x cheaper to encode and 2.4x smaller, at the cost of
 the `wscat` affordance; it is measured and unbuilt. See [`docs/SPEC.md`](docs/SPEC.md) §9.
 
@@ -292,7 +288,7 @@ the `wscat` affordance; it is measured and unbuilt. See [`docs/SPEC.md`](docs/SP
 
 - [`docs/API.md`](docs/API.md) — every public call, on one page
 - [`docs/SPEC.md`](docs/SPEC.md) — the design, the protocol, and the invariants
-- [`examples/`](examples/) — a live public feed through a broker, and a resuming consumer
+- [`examples/`](examples/) — a live public feed through a server, and a resuming consumer
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, the gates, and what a good PR here looks like
 
 ## Development

@@ -84,10 +84,10 @@ def row(trade: dict) -> dict:
 
 
 async def publish(stream: streamcast.Stream) -> None:
-    """One upstream connection, reconnecting for as long as the broker runs.
+    """One upstream connection, reconnecting for as long as the server runs.
 
     `websockets.connect` as an async iterator reconnects with backoff, which
-    is the behaviour a broker wants: subscribers stay attached across an
+    is the behaviour a server wants: subscribers stay attached across an
     upstream blip, and with a log attached they do not even see it — the
     offsets simply continue.
     """
@@ -112,7 +112,7 @@ async def publish(stream: streamcast.Stream) -> None:
 async def report(stream: streamcast.Stream) -> None:
     """A line every five seconds, and nothing when nothing is happening.
 
-    `end_offset` is None on a broker run with `--no-log`: nothing assigns
+    `end_offset` is None on a server run with `--no-log`: nothing assigns
     offsets there, so there is no count to report and the line says only how
     many subscribers are attached.
     """

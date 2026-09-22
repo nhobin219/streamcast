@@ -124,7 +124,7 @@ def test_the_overflow_slot_is_reserved_rather_than_taken_from_a_message():
 def test_a_replay_is_read_in_a_thread():
     """A replay is DuckDB reading Parquet: 2.11 us/row warm and ~0.5 s cold
     for the first scan in a process. On the event loop that is the whole
-    broker stopped — no live message fanned out, no other subscriber served,
+    server stopped — no live message fanned out, no other subscriber served,
     no keepalive answered."""
     source = inspect.getsource(_log.replay)
     assert source.count("asyncio.to_thread") == 2, (
@@ -156,7 +156,7 @@ def test_the_wire_key_order_comes_from_one_place():
 
 
 def test_the_offset_is_never_a_key_in_the_message():
-    """Non-negotiable: the broker sends `offset, msg`, and `msg` is the row.
+    """Non-negotiable: the server sends `offset, msg`, and `msg` is the row.
 
     Checked against the source as well as behaviour, because a future
     convenience — "let us put the offset back in so subscribers can store one

@@ -14,7 +14,7 @@ rather than store the frame whole"*. Once the log is a typed table per stream,
 a message IS a row, and a row is a JSON object. The header held an offset that
 the object now carries itself, and nothing read it (see `_subscriber`).
 
-What that buys is not just simplicity. `wscat ws://broker:8765/trades?offset=0`
+What that buys is not just simplicity. `wscat ws://localhost:8765/trades?offset=0`
 now prints the stream, readably, with no client library at all — and a
 subscriber in any language needs a JSON parser rather than this file.
 
@@ -48,7 +48,7 @@ _ENCODER: Final = msgspec.json.Encoder()
 _DECODER: Final = msgspec.json.Decoder()
 
 # A data frame is a PAIR, `[offset, msg]`, and the two halves are different
-# kinds of thing: the offset is the broker's framing, and `msg` is the
+# kinds of thing: the offset is the server's framing, and `msg` is the
 # publisher's row, untouched.
 #
 # Two earlier versions put the offset INSIDE the object — first as
@@ -64,7 +64,7 @@ VERSION: Final = 1
 """The protocol this build speaks. A greeting naming any other is refused.
 
 One number for the whole protocol rather than a feature list, because there is
-nothing yet to negotiate: a broker and a subscriber that disagree about the
+nothing yet to negotiate: a server and a subscriber that disagree about the
 frame layout disagree about all of it.
 """
 
@@ -85,7 +85,7 @@ def encode(
 ) -> bytes:
     """One message, as the `[offset, msg]` bytes every subscriber gets.
 
-    Encoded ONCE per message by the broker and handed to every subscriber's
+    Encoded ONCE per message by the server and handed to every subscriber's
     queue, which is why this takes a row rather than a connection: fan-out is
     a queue insert, not a serialisation. At 200 subscribers that is one encode
     instead of 200 (I6).
@@ -110,7 +110,7 @@ def encode(
     nothing: there is no log, so there is no offset, and a per-process counter
     would hand a subscriber an integer that looks exactly like a resume cursor
     and is not one. `null` cannot be mistaken for that — arithmetic on it
-    fails where `7 + 1` quietly succeeds against a broker that has restarted.
+    fails where `7 + 1` quietly succeeds against a server that has restarted.
     """
     if columns is None:
         message: dict[str, object] = dict(row)
@@ -141,7 +141,7 @@ def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
     """The inverse: `(offset, msg)`.
 
     `None` is a legitimate offset — a stream with no log. Everything else here
-    is a peer that is not a streamcast broker, which is why each shape gets
+    is a peer that is not a streamcast server, which is why each shape gets
     its own message rather than one "malformed frame".
     """
     try:
@@ -168,12 +168,12 @@ def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
 
 @dataclass(frozen=True, slots=True)
 class Greeting:
-    """What the broker says before the first message, and the only reply there is.
+    """What the server says before the first message, and the only reply there is.
 
     It exists so that "the connection opened" means something on a stream that
     is silent — which, for market data outside a session, is most of them. A
-    subscriber that gets this knows the broker understood its offset, knows
-    whether the offsets it is about to see survive a broker restart, and knows
+    subscriber that gets this knows the server understood its offset, knows
+    whether the offsets it is about to see survive a server restart, and knows
     what is about to be replayed before any of it arrives.
     """
 
@@ -194,11 +194,11 @@ class Greeting:
     durable: bool
     """Whether a log is attached.
 
-    False means these offsets are a counter in the broker's memory: they order
-    correctly for as long as it runs and mean nothing across a restart. A
-    subscriber that intends to resume should refuse to depend on them, and
-    `?offset=` is refused outright on such a stream rather than appearing to
-    work until the day it matters.
+    False means the stream assigns no offsets: every frame carries `null`
+    where an offset would be, and `?offset=` is refused outright rather than
+    appearing to work until the day it matters. A subscriber that intends to
+    resume can check this once, at subscribe, instead of discovering it from a
+    cursor that was never real.
     """
 
 
@@ -225,28 +225,28 @@ def parse_greeting(frame: str | bytes) -> Greeting:
     """Read a greeting, or say precisely how the peer is not one.
 
     Every failure here is `ProtocolError` rather than a refusal, because all
-    of them mean the thing on the other end is not a streamcast broker — an
+    of them mean the thing on the other end is not a streamcast server — an
     HTTP proxy's error page, a different service on a reused port, a build
     from before the frame layout changed. A subscriber cannot recover from any
     of that by asking differently.
     """
     if isinstance(frame, bytes):
-        msg = "the broker's first frame was binary; a greeting is text"
+        msg = "the server's first frame was binary; a greeting is text"
         raise ProtocolError(msg)
 
     try:
         fields = _DECODER.decode(frame)
     except msgspec.DecodeError as exc:
-        msg = f"the broker's first frame is not JSON: {frame[:120]!r}"
+        msg = f"the server's first frame is not JSON: {frame[:120]!r}"
         raise ProtocolError(msg) from exc
 
     if not isinstance(fields, dict) or "streamcast" not in fields:
-        msg = f"the broker's first frame is not a streamcast greeting: {frame[:120]!r}"
+        msg = f"the server's first frame is not a streamcast greeting: {frame[:120]!r}"
         raise ProtocolError(msg)
 
     version = fields["streamcast"]
     if version != VERSION:
-        msg = f"broker speaks streamcast {version}; this build speaks {VERSION}"
+        msg = f"server speaks streamcast {version}; this build speaks {VERSION}"
         raise ProtocolError(msg)
 
     replay = fields.get("replay")
@@ -264,7 +264,7 @@ CLOSE_REASON_LIMIT: Final = 123
 """What RFC 6455 allows a close reason to be, in bytes of UTF-8.
 
 The limit is the reason refusals are JSON and not prose. A sentence that says
-"offset 100 is below the earliest this broker can still serve, which is 5000"
+"offset 100 is below the earliest this server can still serve, which is 5000"
 is 74 bytes of text a subscriber would have to parse with a regex to act on;
 `{"error":"not_replayable","earliest":5000}` is 42 bytes it can act on with
 `msgspec.json.decode`. Both fit; only one is readable after the next reword.
@@ -278,7 +278,7 @@ def refusal(error: str, **fields: object) -> str:
     fields in decreasing order of usefulness and `{"error": ...}` is the
     irreducible core — the code is already on the close frame, so even a fully
     trimmed reason tells the subscriber nothing it did not have. The case that
-    forces this is a broker serving many streams: the name list in a 4404 is
+    forces this is a server serving many streams: the name list in a 4404 is
     unbounded and everything else here is not.
     """
     carried = dict(fields)
@@ -316,7 +316,7 @@ def parse_subscribe(path: str) -> tuple[str, int | None]:
     """A request path, as the stream name and the offset asked for.
 
     `/trades?offset=1200` is the whole of a subscribe. The name is the path
-    with its leading slash removed, so a broker serving one unnamed stream
+    with its leading slash removed, so a server serving one unnamed stream
     serves it at `/` and the name is `""` — which is the same empty name
     `Stream()` carries, rather than a second spelling of "no name".
 

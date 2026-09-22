@@ -1,17 +1,17 @@
 # examples
 
-A broker and a consumer, against a live public feed. Nothing to configure and no
+A server and a consumer, against a live public feed. Nothing to configure and no
 credentials to set: Bitstamp publishes BTC/USD trades over an unauthenticated
 websocket.
 
 ## Start here
 
 ```
-just demo              # terminal 1: the broker
+just demo              # terminal 1: the server
 just demo-consumer     # terminal 2, and 3, and 4
 ```
 
-`broker.py` holds **one** connection to Bitstamp and serves every consumer on the
+`server.py` holds **one** connection to Bitstamp and serves every consumer on the
 box from it. That is the whole idea, and the reason it is not one connection per
 consumer. The loop is a parse and a send:
 
@@ -25,7 +25,7 @@ await stream.send(row(frame["data"]))
 
 **The parse happens once, here.** Consumers receive the row, not the frame — six
 consumers used to mean six JSON parses of the same bytes, and now it means none.
-The schema in `broker.py` is the demo's, not streamcast's: every field worth a
+The schema in `server.py` is the demo's, not streamcast's: every field worth a
 column gets one, which is what makes the log a table rather than a pile of
 frames.
 
@@ -44,7 +44,7 @@ again:
 [one]  live      4192     85,571.50  0.02410000  sell
 ```
 
-It asked for the offset after the last one it processed, the broker replayed the
+It asked for the offset after the last one it processed, the server replayed the
 gap out of the log, and then it went live — with no gap and no duplicate at the
 join. The cursor is a file here; in a real consumer it is whatever you already
 persist.
@@ -57,7 +57,7 @@ persist.
 just demo-live
 ```
 
-The same broker with no litelink log. Fan-out works identically; `?offset=` is
+The same server with no litelink log. Fan-out works identically; `?offset=` is
 refused outright with a message saying why, and a consumer that restarts starts
 from now. Right when the stream is a cache nobody resumes — wrong the first time
 a consumer restarts and you wanted the last ten minutes.

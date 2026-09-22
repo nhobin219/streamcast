@@ -16,7 +16,7 @@ just test-fast          # skips the backpressure tier, for an inner loop
 just test tests/test_resume.py -k partition
 just bench              # fan-out and publish throughput
 just bench-replay       # replay cost, and which layer it is spent in
-just demo               # a live public feed through a broker
+just demo               # a live public feed through a server
 ```
 
 ## The schema is the caller's
@@ -43,7 +43,7 @@ possible is wrong even if every test passes.
 2. **Let one consumer's speed affect another's.** `Stream.send` must never await a
    consumer. The broadcast is a synchronous `put_nowait` per subscriber and nothing else.
 3. **Broadcast before the log has the message.** `append` then fan out, never the
-   reverse. A broker that died between the two has published nothing it cannot replay.
+   reverse. A server that died between the two has published nothing it cannot replay.
 4. **Serve a replay that silently starts above where it was asked.** A resume that begins
    at the wrong place is a hole at the join. Refuse with 4416 instead.
 5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8

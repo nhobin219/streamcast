@@ -3,7 +3,7 @@
 A refusal has to survive a 123-byte close frame and come out the other end as
 a sentence the caller can act on. Five of them are `NotReplayable`, and the
 whole reason they are distinguished is that the caller's next move differs:
-drop the offset, ask again from a different one, or stop asking the broker.
+drop the offset, ask again from a different one, or stop asking the server.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class TestNotReplayable:
         assert "3" in str(raised.value)
 
     async def test_an_offset_further_back_than_max_replay_is_refused(self, serve, log):
-        # The bound exists to protect the broker: a replay is a scan in a
+        # The bound exists to protect the server: a replay is a scan in a
         # worker thread, and one asking for ten million rows holds one for
         # minutes. Past it the answer is to read the log directly.
         stream = streamcast.Stream("trades", log=log, max_replay=5)
@@ -97,7 +97,7 @@ class TestNotReplayable:
         # rows and THEN got the error would have a hole it could not see.
         assert raised.value.fields.get("offset") == 100
 
-    async def test_a_refused_subscribe_leaves_the_broker_clean(self, serve, log):
+    async def test_a_refused_subscribe_leaves_the_server_clean(self, serve, log):
         # A refusal runs before the subscriber joins the fan-out set, and the
         # handler has to unwind without leaving a task behind. Twenty-five of
         # them in a row is what makes a leak visible.
@@ -119,7 +119,7 @@ class TestNotReplayable:
 
 
 class TestRoutingRefusals:
-    async def test_an_unknown_stream_names_what_the_broker_does_serve(self, serve):
+    async def test_an_unknown_stream_names_what_the_server_does_serve(self, serve):
         trades = streamcast.Stream("trades")
         quotes = streamcast.Stream("quotes")
         async with serve(trades, quotes) as uri:
@@ -139,7 +139,7 @@ class TestRoutingRefusals:
             ("?from=3", "unknown query parameter"),
         ],
     )
-    async def test_a_subscribe_the_broker_cannot_parse_is_a_protocol_error(
+    async def test_a_subscribe_the_server_cannot_parse_is_a_protocol_error(
         self, serve, query, match
     ):
         stream = streamcast.Stream("trades")
@@ -156,7 +156,7 @@ class TestTheClientSide:
             streamcast.connect("ws://127.0.0.1:1/trades?offset=5", offset=9)
 
     async def test_the_offset_may_be_written_into_the_uri_instead(self, serve, log):
-        # The affordance that makes `wscat ws://broker/trades?offset=0` work.
+        # The affordance that makes `wscat ws://server/trades?offset=0` work.
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(0), trade(1)])
@@ -164,7 +164,7 @@ class TestTheClientSide:
                 assert sub.info.replay == (2, 3)
                 assert (await sub.recv())[0] == 2
 
-    async def test_a_peer_that_is_not_a_broker_is_a_protocol_error(self):
+    async def test_a_peer_that_is_not_a_server_is_a_protocol_error(self):
         # An unrelated WebSocket service on a reused port. The failure has to
         # name that, not surface as an empty stream.
         import websockets

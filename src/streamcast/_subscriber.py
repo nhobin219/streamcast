@@ -17,7 +17,7 @@ this library came from — that every client receives the same data:
 
 * Drop the oldest and keep going, and the subscriber silently has a hole in
   the middle of its stream with nothing marking it.
-* Grow without bound, and the broker's memory is set by its worst consumer.
+* Grow without bound, and the server's memory is set by its worst consumer.
   This is the OOM the design exists to avoid.
 
 Dropping is the only one that leaves the stream a contiguous prefix. With a
@@ -114,7 +114,7 @@ class Subscriber:
         `queue.get()` and nothing ever wakes it: the task lives for ever, the
         `Subscriber` stays in the fan-out set, and every disconnect leaks one
         of each. Measured before this existed: a connect/disconnect loop left
-        the broker's subscriber count climbing and its handler tasks never
+        the server's subscriber count climbing and its handler tasks never
         returning, and neither is visible until the box runs out of something.
 
         So the pump races the connection's own closed future. Two tasks per

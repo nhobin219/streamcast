@@ -1,6 +1,6 @@
 """`connect` — the subscriber end, and where a close code becomes an exception.
 
-    async with streamcast.connect("ws://broker:8765/trades", offset=123) as stream:
+    async with streamcast.connect("ws://localhost:8765/trades", offset=123) as stream:
         async for offset, message in stream:
             ...
 
@@ -12,13 +12,13 @@ separately will forget to.
 
 `row` is a `dict` over the stream's declared columns — the same row the
 publisher sent and the same row the log holds, with `litelink_offset` among
-its keys. It is not a blob to parse: the broker's table is typed, so the
+its keys. It is not a blob to parse: the server's table is typed, so the
 parsing happened once at the publisher rather than once per subscriber.
 
 **The second deviation is that there is no `send`.** A subscription is
 read-only, and rather than carrying a `send` that raises, it does not have
 one — the same reason litelink's read handles are not writable handles with
-thirteen methods that refuse. Publishing is `Stream.send` in the broker's own
+thirteen methods that refuse. Publishing is `Stream.send` in the server's own
 process; a remote publisher is an open question, not an omission (`docs/SPEC.md`
 §9).
 """
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from streamcast._protocol import Greeting
 
 # The close codes that end a subscription rather than break it. Normal closure
-# and going-away both mean the broker finished with this connection on
+# and going-away both mean the server finished with this connection on
 # purpose, which is what `async for` should stop on and not raise for.
 _ENDED = frozenset({1000, 1001})
 
@@ -91,7 +91,7 @@ def _refusal(
         return TooSlow(backlog if isinstance(backlog, int) else None, offset=offset)
 
     if close.code == Close.BAD_REQUEST:
-        detail = fields.get("detail", "the broker could not parse this subscribe")
+        detail = fields.get("detail", "the server could not parse this subscribe")
 
         return ProtocolError(str(detail))
 
@@ -105,7 +105,7 @@ def _with_offset(uri: str, offset: int | None) -> str:
     """The URI a subscribe actually opens.
 
     An offset may be given as the argument or written into the URI — the
-    second is what makes `wscat ws://broker:8765/trades?offset=0` a working
+    second is what makes `wscat ws://localhost:8765/trades?offset=0` a working
     subscriber, so it cannot be forbidden — but never both. Given both, this
     raises rather than picking, because the two disagreeing is a resume from
     the wrong place and neither value is more likely to be the intended one.
@@ -153,7 +153,7 @@ class Subscription:
 
     @property
     def info(self) -> Greeting:
-        """What the broker said at subscribe: its frontier, the replay range,
+        """What the server said at subscribe: its frontier, the replay range,
         and whether its offsets survive a restart."""
         return self._info
 
@@ -162,7 +162,7 @@ class Subscription:
         """The last offset received, or None before the first message.
 
         **This is the resume cursor.** Reconnect with `offset=stream.offset + 1`
-        and the broker replays exactly what was missed:
+        and the server replays exactly what was missed:
 
             offset = None
             while True:
@@ -190,7 +190,7 @@ class Subscription:
     async def recv(self) -> tuple[int | None, dict[str, object]]:
         """The next `(offset, row)`.
 
-        Raises the refusal the broker closed with, or `ConnectionClosed` as
+        Raises the refusal the server closed with, or `ConnectionClosed` as
         `websockets` raised it when the close carries no refusal.
         """
         try:
@@ -238,7 +238,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
 
     `offset` is the resume point: absent for live-only, `streamcast.EARLIEST`
     for everything the stream still holds, or an offset to resume from
-    inclusive. It is refused rather than ignored when the broker cannot serve
+    inclusive. It is refused rather than ignored when the server cannot serve
     it — see `NotReplayable`, which says which of the five reasons it is.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`
@@ -265,7 +265,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         """Connect, then read the greeting before handing anything back.
 
         The greeting is awaited here rather than lazily on the first message,
-        so that entering the block MEANS the broker accepted this subscribe.
+        so that entering the block MEANS the server accepted this subscribe.
         The alternative surfaces a refused offset as a failure of whatever
         `recv` the application happened to reach first, which on a stream that
         is quiet out of hours is minutes later and somewhere else.
@@ -283,7 +283,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         except BaseException:
             # A greeting that will not parse leaves an open connection nobody
             # holds — `__aexit__` never runs, because `__aenter__` did not
-            # return. Closing here is what keeps a broker-side handler from
+            # return. Closing here is what keeps a server-side handler from
             # surviving every malformed handshake until its keepalive fires.
             await connection.close()
             raise

@@ -1,6 +1,6 @@
 """The litelink side: the stream's table, and how a replay comes back off it.
 
-A broker with a log attached is a tickerplant — kx's term for a process that
+A server with a log attached is a tickerplant — kx's term for a process that
 captures a feed, writes it to a log file, and publishes it to registered
 subscribers (https://code.kx.com/q/architecture/). The log is what turns an
 offset from a number that orders messages into a number a subscriber can
@@ -90,7 +90,7 @@ async def replay(
     **Every blocking call is in a thread**, which is not an optimisation. A
     replay is DuckDB reading Parquet — measured at 2.11 us per row warm and
     ~0.5 s cold for the first scan in a process, of which 91% is the read
-    itself — and on the event loop that is the whole broker stopped: no live
+    itself — and on the event loop that is the whole server stopped: no live
     message fanned out, no other subscriber served, no keepalive answered.
     litelink is built for this: its buffer and reader each hold their own lock
     and its SQLite connections are opened `check_same_thread=False`.
@@ -108,7 +108,7 @@ async def replay(
     names = (COLUMN, *declared)
     # `include_archive` is deliberately not passed. litelink's default decides
     # from the tiers: local disk while the local table holds files, which is
-    # every ordinary broker and keeps a replay off the network — and the
+    # every ordinary server and keeps a replay off the network — and the
     # archive when the log has been fully evicted and it is the only place the
     # rows are, where refusing to look would be a silent short serve.
     reader = await asyncio.to_thread(
@@ -157,7 +157,7 @@ def earliest(log: LogHandle) -> int | None:
     **Three tiers, and `coverage()` reports two of them.** That is not a bug
     in litelink — `coverage()` answers "what can this reader serve" for a
     reader assembled from an archive and a replica, where the local Iceberg
-    table is empty by construction. A broker reads its OWN log, where that
+    table is empty by construction. A server reads its OWN log, where that
     table is the tier holding almost everything, and `coverage()` alone
     returns nothing the moment a seal empties the buffer. Measured: 60 rows
     sealed into 4 Parquet files, `coverage()` reporting `archive=None,

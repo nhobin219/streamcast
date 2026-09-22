@@ -13,7 +13,7 @@ log file, and publishes it to registered subscribers, which is this one almost
 exactly (https://code.kx.com/q/architecture/). Every message is durable
 *before* any subscriber sees it, which means an offset is a resume cursor: a
 consumer that falls behind, crashes, or is restarted reconnects with the last
-offset it processed and the broker replays the gap out of the log before
+offset it processed and the server replays the gap out of the log before
 switching it to live — with no window in which a message is in neither place. `docs/SPEC.md` §3 is where that partition
 is argued; `Stream` is where it is enforced.
 
@@ -30,7 +30,7 @@ rather than once per consumer.
 
 .. code-block:: python
 
-    # broker
+    # server
     log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
     stream = streamcast.Stream("trades", log=log)
 
@@ -52,7 +52,7 @@ the reason litelink's read handles have no `append`.
 ``EARLIEST`` is the offset that means "everything the log still holds".
 
 Every frame on the wire is JSON text — the greeting, then an ``[offset, msg]``
-pair per message — so ``wscat ws://broker:8765/trades?offset=0`` is a working
+pair per message — so ``wscat ws://localhost:8765/trades?offset=0`` is a working
 subscriber with no client library at all. **``msg`` is the row the publisher
 sent and nothing else**: no offset key, no injected metadata, so a subscriber
 can log it, forward it or append it to another stream whole.

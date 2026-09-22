@@ -3,11 +3,11 @@
 The failure this library was built against: one consumer that stops reading
 becomes the rate of the whole stream, because the broadcast awaits it. These
 tests hold a subscriber still and check that (a) everyone else is unaffected,
-(b) the broker's memory does not grow to meet it, and (c) what it did receive
+(b) the server's memory does not grow to meet it, and (c) what it did receive
 is a contiguous prefix, so a durable stream loses nothing when it comes back.
 
 Forcing a real overflow needs real backpressure, which is why the payloads
-here are large and `max_queue=1` on the stalled client: the broker's pump only
+here are large and `max_queue=1` on the stalled client: the server's pump only
 blocks once `write_limit` of unacknowledged bytes have piled up in the socket,
 and a client whose own library is happily draining into a 16-deep queue is not
 yet a slow consumer.
@@ -23,7 +23,7 @@ import streamcast
 from tests.conftest import trade
 
 # Large enough that a handful fill the kernel buffer and `websockets`'
-# 32 KB `write_limit`, so the broker's pump actually parks. A row is small,
+# 32 KB `write_limit`, so the server's pump actually parks. A row is small,
 # so the bulk goes in the one string column the schema has.
 BULK = "x" * 65_536
 
@@ -179,7 +179,7 @@ class TestDropping:
         ]
 
 
-async def test_the_broker_forgets_a_dropped_subscriber(serve):
+async def test_the_server_forgets_a_dropped_subscriber(serve):
     stream = streamcast.Stream("trades", max_backlog=4)
     async with serve(stream) as uri:
         stalled = await streamcast.connect(uri, max_queue=1)

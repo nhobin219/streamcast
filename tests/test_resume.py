@@ -1,6 +1,6 @@
 """Replay and resume: the partition that makes a reconnect exactly-once.
 
-The claim, in one sentence: the broker records its frontier at the instant a
+The claim, in one sentence: the server records its frontier at the instant a
 subscriber attaches, replays `[requested, frontier)` out of the log, and only
 then switches it to the live queue — so everything below the frontier is
 already durable and everything from it up is already in that subscriber's
@@ -227,7 +227,7 @@ class TestDurabilityOrdering:
 async def test_the_greeting_states_the_range_it_is_about_to_replay(serve, log, offset):
     # So that a subscriber knows what is coming before any of it arrives —
     # which on a stream that is quiet out of hours is the difference between
-    # "connected" and "connected and the broker agreed with my cursor".
+    # "connected" and "connected and the server agreed with my cursor".
     stream = streamcast.Stream("trades", log=log)
     async with serve(stream) as uri:
         await stream.send_many([trade(i) for i in range(10)])

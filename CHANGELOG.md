@@ -47,7 +47,7 @@ defended itself in a docstring and could be made again.
 - Every frame is JSON text: the greeting, then an **`[offset, msg]` pair** per
   message. `msg` is the publisher's row and nothing else — no offset key, no
   injected metadata.
-- `wscat ws://broker:8765/trades?offset=0` is a working subscriber, and
+- `wscat ws://localhost:8765/trades?offset=0` is a working subscriber, and
   `const [offset, msg] = JSON.parse(frame)` is the whole client in another
   language.
 - msgspec, not stdlib `json`: serialisation sits on the hot path in both
@@ -56,13 +56,13 @@ defended itself in a docstring and could be made again.
 - A replayed frame is byte-identical to the live one it repeats, because both
   resolve to the log's declared column order.
 - `offset` is `null` on a stream with no log. Nothing assigned one, and a
-  per-process counter would look exactly like a resume cursor until the broker
+  per-process counter would look exactly like a resume cursor until the server
   restarted.
 
 ### Resuming
 
 - `?offset=` replays out of the log and switches to live with no gap and no
-  duplicate at the join. The broker records its frontier at the instant a
+  duplicate at the join. The server records its frontier at the instant a
   subscriber attaches; everything below it comes from the log, everything from
   it up is already in that subscriber's queue.
 - `streamcast.EARLIEST` asks for everything the log still holds.

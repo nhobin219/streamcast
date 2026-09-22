@@ -40,7 +40,7 @@ class TestFrames:
     def test_a_frame_is_a_positional_pair(self):
         """`[offset, msg]`, and the halves are different kinds of thing.
 
-        The offset is the broker's framing; `msg` is the publisher's row. Two
+        The offset is the server's framing; `msg` is the publisher's row. Two
         earlier versions put the offset INSIDE the object — first as
         `litelink_offset`, then as `offset` — and both were wrong the same
         way: a subscriber takes the offset positionally, so the key name was a
@@ -61,7 +61,7 @@ class TestFrames:
         assert message == ROW
 
     def test_a_frame_is_json_text_any_client_can_read(self):
-        # The affordance the format exists for: `wscat ws://broker/trades`
+        # The affordance the format exists for: `wscat ws://server/trades`
         # prints the stream readably, and `const [offset, msg] =
         # JSON.parse(frame)` is the whole client in another language.
         frame = encode(1861, ROW, COLUMNS)
@@ -182,7 +182,7 @@ class TestRefusals:
             "earliest": 5000,
         }
 
-    def test_a_reason_from_something_that_is_not_a_broker_never_raises(self):
+    def test_a_reason_from_something_that_is_not_a_server_never_raises(self):
         assert parse_refusal("connection reset by peer") == ("", {})
         assert parse_refusal("") == ("", {})
         assert parse_refusal("[1, 2, 3]") == ("", {})

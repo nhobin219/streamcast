@@ -17,7 +17,7 @@ single us/row figure taken at one size is meaningless on its own.
 
 **cold vs warm.** The first scan in a process loads DuckDB extensions and
 resolves metadata. That cost lands on the first subscriber to resume after a
-broker starts, which is exactly the subscriber a restart produces.
+server starts, which is exactly the subscriber a restart produces.
 
 **where it goes.** Split across the DuckDB read, the Arrow-to-Python
 conversion, and the encode. If the encode ever stops being noise, the wire

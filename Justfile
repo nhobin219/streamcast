@@ -53,28 +53,28 @@ check: lint format-check typecheck test
 build:
     uv build
 
-# START HERE. A live public feed through a broker, in one process: Bitstamp
+# START HERE. A live public feed through a server, in one process: Bitstamp
 # publishes BTC/USD trades over an unauthenticated websocket, so there is
 # nothing to configure and no credentials to set.
 #
-#   just demo              terminal 1: the broker, logging every trade
+#   just demo              terminal 1: the server, logging every trade
 #   just demo-consumer     terminal 2 (and 3, and 4): a resuming subscriber
 #
 # Stop a consumer, leave it stopped for a while, start it again, and watch it
 # replay what it missed before it goes live.
 
-# Run the broker against a live public websocket feed.
+# Run the server against a live public websocket feed.
 demo *args:
-    uv run python examples/broker.py {{args}}
+    uv run python examples/server.py {{args}}
 
-# Subscribe to the demo broker, resuming from where it stopped.
+# Subscribe to the demo server, resuming from where it stopped.
 demo-consumer *args:
     uv run python examples/consumer.py {{args}}
 
-# A live-only broker — no log, no litelink, no replay. The other end of the
+# A live-only server — no log, no litelink, no replay. The other end of the
 # range, and the shape to reach for when the stream is a cache nobody resumes.
 demo-live *args:
-    uv run python examples/broker.py --no-log {{args}}
+    uv run python examples/server.py --no-log {{args}}
 
 # Delete what the demo captured.
 demo-clean root="streamcast-data":

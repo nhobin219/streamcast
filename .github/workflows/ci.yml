@@ -121,7 +121,7 @@ jobs:
                   assert got[7][1]["price"] == 85_572.0, got[7]
                   # And the log is a TABLE, which is the whole reason litelink
                   # is underneath this rather than an append-only file. A wheel
-                  # that shipped a working broker over an unqueryable log would
+                  # that shipped a working server over an unqueryable log would
                   # pass every other check in this job.
                   n, high = log.sql(
                       "SELECT count(*) n, max(price) high FROM log"

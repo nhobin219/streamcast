@@ -4,7 +4,7 @@
 
 Run several. Stop one with Ctrl-C, leave it stopped while trades keep
 arriving, and start it again: it asks for the offset after the last one it
-processed and the broker replays the gap out of the log before switching it to
+processed and the server replays the gap out of the log before switching it to
 live. The line it prints says which messages were replayed and which arrived
 live, because that is the thing worth seeing.
 
@@ -63,7 +63,7 @@ async def run(uri: str, cursor: Path, label: str) -> None:
                 )
 
                 async for offset, row in stream:
-                    # `offset` is None on a broker with no log — nothing
+                    # `offset` is None on a server with no log — nothing
                     # assigned one, so there is nothing to persist and nothing
                     # to resume from. `?offset=` is refused on such a stream
                     # anyway, so this consumer simply stops tracking.
@@ -76,7 +76,7 @@ async def run(uri: str, cursor: Path, label: str) -> None:
                     if offset is not None:
                         cursor.write_text(str(offset))
 
-            print(f"[{label}] the broker closed the stream")
+            print(f"[{label}] the server closed the stream")
             return
 
         except streamcast.TooSlow as exc:
@@ -93,7 +93,7 @@ async def run(uri: str, cursor: Path, label: str) -> None:
             return
 
         except (OSError, websockets.ConnectionClosed) as exc:
-            # The ordinary case: the broker restarted, or the network blipped.
+            # The ordinary case: the server restarted, or the network blipped.
             # The cursor is on disk, so the reconnect resumes rather than
             # restarts — which is the difference a log makes.
             print(f"[{label}] {type(exc).__name__}: reconnecting in 1s")
@@ -103,7 +103,7 @@ async def run(uri: str, cursor: Path, label: str) -> None:
 def handle(label: str, offset: int | None, row: dict, *, replayed: bool) -> None:
     """Whatever your consumer actually does. Note there is no parsing here.
 
-    The broker's table is typed, so `row` arrives as columns — the feed
+    The server's table is typed, so `row` arrives as columns — the feed
     handler parsed once, at the publisher, rather than every subscriber
     parsing the same frame independently.
     """

@@ -35,7 +35,7 @@ has to ask for it separately will forget to. `msg` is a `dict` over your declare
 **and nothing else** — the offset is framing, not data, and never appears inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
-because publishing is `Stream.send` in the broker's own process. Nothing inherits a
+because publishing is `Stream.send` in the server's own process. Nothing inherits a
 method it has to refuse.
 
 One default differs: **`compression` is `None` here and `"deflate"` there.**
@@ -52,10 +52,10 @@ streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**`log` is what separates a multicaster from a [tickerplant](https://code.kx.com/q/architecture/).** Without it the offsets are
-a counter in this process: they order the stream correctly and mean nothing after a
-restart, so `?offset=` is refused outright rather than appearing to work until the day a
-subscriber needs it. With it, every message is durable *before* any subscriber sees it.
+**`log` is what separates a multicaster from a [tickerplant](https://code.kx.com/q/architecture/).** Without it nothing assigns
+offsets at all — `send` returns None and every frame carries `null` — so `?offset=` is
+refused outright rather than appearing to work until the day a subscriber needs it. With
+it, every row is durable *before* any subscriber sees it.
 
 ```python
 log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
@@ -89,7 +89,7 @@ one at a time against 10 us at a group of 100. That call size is the write-throu
 lever and it is a call-site choice; no setting tunes it.
 
 Each row in a group still gets its own offset and its own frame, so a subscriber cannot
-tell a group from the same rows sent singly. That is deliberate — batching is the broker's
+tell a group from the same rows sent singly. That is deliberate — batching is the server's
 durability decision, and making it visible on the wire would make every subscriber's
 parser depend on how the publisher happened to poll.
 
@@ -116,7 +116,7 @@ name — but an attribute here and a call there, because litelink reads it from 
 this is the counter `send` already maintains.
 
 ```python
-await stream.aclose(reason="broker shutting down") -> None
+await stream.aclose(reason="server shutting down") -> None
 ```
 
 Drops every subscriber with a 1001, concurrently. **Does not close the log.**
@@ -143,10 +143,10 @@ rather than resolving: whichever lost would be unreachable, and the subscriber t
 wanted it would get somebody else's messages — which looks like working software.
 
 `host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for a
-broker that should only serve its own box, which is the case this library is built for.
+server that should only serve its own box, which is the case this library is built for.
 TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECURITY.md).
 
-The broker never calls `recv` on a subscription. A client that sends anyway fills its own
+The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 
 ## `connect`
@@ -158,7 +158,7 @@ streamcast.connect(uri, *, offset=None, **websockets_kwargs) -> Subscription
 Awaitable and an async context manager, like `websockets.connect`.
 
 ```python
-async with streamcast.connect("ws://broker:8765/trades", offset=123) as stream:
+async with streamcast.connect("ws://localhost:8765/trades", offset=123) as stream:
     async for offset, msg in stream:
         ...
 ```
@@ -171,13 +171,13 @@ async with streamcast.connect("ws://broker:8765/trades", offset=123) as stream:
 | `streamcast.EARLIEST` | everything the log still holds |
 | an integer | resume from it, **inclusive** |
 
-It may be written into the URI instead — `ws://broker:8765/trades?offset=123`, which is
+It may be written into the URI instead — `ws://localhost:8765/trades?offset=123`, which is
 what makes `wscat` a working subscriber — but never both. Given both, `connect` raises
 rather than picking: two values that disagree is a resume from the wrong place, and
 neither is more likely to be the intended one.
 
 **The greeting is awaited before `connect` returns**, so entering the block means the
-broker accepted the subscribe. A refused offset raises here, not minutes later inside
+server accepted the subscribe. A refused offset raises here, not minutes later inside
 some `recv`.
 
 ### `Subscription`
@@ -188,13 +188,13 @@ async for offset, msg in sub: ...
 await sub.close(code=1000, reason="") -> None
 
 sub.offset -> int | None          # the last offset RECEIVED — the resume cursor
-sub.info -> Greeting              # what the broker said at subscribe
+sub.info -> Greeting              # what the server said at subscribe
 sub.connection -> ClientConnection  # the websockets object, unwrapped
 ```
 
 `msg` is a `dict` over the stream's declared columns — **exactly** the row the publisher
 sent, with no offset key and nothing else injected, so it can be logged, forwarded or
-appended to another stream whole. There is nothing to parse: the broker's table is typed,
+appended to another stream whole. There is nothing to parse: the server's table is typed,
 so the parse happened once at the publisher.
 
 `offset` is `None` on a stream with no log. Nothing assigned one, and `?offset=` is
@@ -204,9 +204,9 @@ Iteration **stops** on a normal close (1000/1001) and **raises** on anything els
 same contract as iterating a `websockets` connection, with the refusals below filling in
 for what a bare code cannot say.
 
-`info` is the greeting: `end_offset` (the broker's frontier at subscribe), `replay` (the
+`info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
-a broker restart), `stream`, `version`.
+a server restart), `stream`, `version`.
 
 ## Resuming
 
@@ -241,9 +241,9 @@ StreamcastError
 
 | `.why` | what to do |
 |---|---|
-| `not_durable` | drop `offset=`, or give the broker a log |
+| `not_durable` | drop `offset=`, or give the server a log |
 | `empty` | subscribe live; there is nothing to replay yet |
-| `ahead` | your cursor is above the broker's frontier — it was restored or rebuilt |
+| `ahead` | your cursor is above the server's frontier — it was restored or rebuilt |
 | `too_old` | read the log directly for the gap, then subscribe from where you stopped |
 | `evicted` | the rows are gone from the log; read the archive, or accept the gap |
 
@@ -308,7 +308,7 @@ Every frame is JSON text. The greeting, then one object per row:
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-No binary header, no length prefix, no payload kind. `wscat ws://broker:8765/trades?offset=0`
+No binary header, no length prefix, no payload kind. `wscat ws://localhost:8765/trades?offset=0`
 is a working subscriber, and a consumer in any language needs a JSON parser rather than
 this document.
 

@@ -18,7 +18,7 @@ exchange ws feed
       │  ONE connection
       ▼
 ┌─────────────────────────────────────────┐
-│ broker process                          │
+│ server process                          │
 │                                         │
 │   Stream.send(message)                  │
 │       │                                 │
@@ -35,7 +35,7 @@ exchange ws feed
 Three problems, one shape:
 
 **Subscription limits.** Exchanges cap connections per account and per IP. Six
-consumers on a VM is six connections; one broker is one.
+consumers on a VM is six connections; one server is one.
 
 **Divergence.** Six connections can be served six subtly different streams —
 different reconnect points, different dropped frames, a rebalance that reaches
@@ -68,7 +68,7 @@ message:
 ```
 
 **The frame is a pair, and the halves are different kinds of thing.** The
-offset is the broker's framing; `msg` is the publisher's row, untouched — no
+offset is the server's framing; `msg` is the publisher's row, untouched — no
 offset key, no injected metadata, so a subscriber can log it, forward it or
 append it to another stream whole.
 
@@ -88,7 +88,7 @@ except a field in `Subscriber` that nothing read either, so removing it cost
 nothing and bought this:
 
 ```
-wscat ws://broker:8765/trades?offset=0
+wscat ws://localhost:8765/trades?offset=0
 ```
 
 A working subscriber with no client library at all, printing rows a human can
@@ -114,14 +114,14 @@ what the table stores for it and therefore exactly what a replay will send.
 
 **`offset` is `null` on a stream with no log.** Such a stream assigns nothing,
 and a per-process counter would hand a subscriber an integer that looks exactly
-like a resume cursor and is not one — right until the broker restarts and the
+like a resume cursor and is not one — right until the server restarts and the
 same integers mean different messages. `null` cannot be mistaken for a cursor;
 arithmetic on it fails where `7 + 1` quietly succeeds.
 
 ### A subscribe is a URL
 
 ```
-ws://broker:8765/trades?offset=1200
+ws://localhost:8765/trades?offset=1200
       └── stream ──┘ └── resume ──┘
 ```
 
@@ -134,12 +134,12 @@ is the `wscat` line above.
 
 It exists so that "the connection opened" means something on a stream that is
 silent, which for market data outside a session is most of them. A subscriber
-that receives it knows the broker understood its offset, knows whether the
+that receives it knows the server understood its offset, knows whether the
 offsets it is about to see survive a restart, and knows what is about to be
 replayed before any of it arrives.
 
 `connect` awaits it before returning, so entering the `async with` block MEANS
-the broker accepted the subscribe. The alternative surfaces a refused offset as
+the server accepted the subscribe. The alternative surfaces a refused offset as
 a failure of whatever `recv` the application happened to reach first, which on a
 quiet stream is minutes later and somewhere else.
 
@@ -158,7 +158,7 @@ travels as compact JSON and the sentence is built at the subscriber:
 
 The English has exactly one home (`_errors._WHY`) and can be reworded without a
 protocol change. `refusal()` trims by dropping whole fields from the end, so a
-broker serving three hundred streams still sends a valid 4404 — the list goes,
+server serving three hundred streams still sends a valid 4404 — the list goes,
 the code stays.
 
 **The close CODE is what the client dispatches on; the reason only fills in the
@@ -172,7 +172,7 @@ would turn a rejected subscribe into an empty stream.
 | 4404 | nothing served there | `StreamNotFound` |
 | 4416 | that offset cannot be served | `NotReplayable` |
 | 4429 | you fell too far behind | `TooSlow` |
-| 1000/1001 | the broker finished on purpose | ends the iteration |
+| 1000/1001 | the server finished on purpose | ends the iteration |
 
 ---
 
@@ -239,7 +239,7 @@ reproduce on purpose.
 ### I3 — durable before delivered
 
 A message a subscriber has seen is always a message the log holds; never the
-other way round. A broker that dies between the two has published nothing it
+other way round. A server that dies between the two has published nothing it
 cannot replay, which is what makes recovery a replay rather than a
 reconciliation.
 
@@ -270,7 +270,7 @@ There is no free answer, and the one taken is to **drop the subscriber**.
 | | leaves | |
 |---|---|---|
 | drop oldest | a hole in the middle, unmarked | offsets still increase across it, so nothing can see it |
-| grow unbounded | the broker's memory set by its worst consumer | the OOM this design exists to avoid |
+| grow unbounded | the server's memory set by its worst consumer | the OOM this design exists to avoid |
 | **drop the subscriber** | **a contiguous prefix** | reconnect at `last + 1` and the log fills the gap |
 
 Only the third is compatible with "every client receives the same data", which
@@ -382,7 +382,7 @@ maintained by `send` thereafter — `append` returns the offset it assigned, so
 asking the log per message would be a round trip for a number the previous call
 already returned. It cannot drift, because litelink allows exactly one writer.
 
-A broker restarted against an existing log continues its offsets. It must: a
+A server restarted against an existing log continues its offsets. It must: a
 restart that reset them would hand the same integers to different data, and
 every consumer cursor in the system would silently point somewhere else.
 
@@ -395,7 +395,7 @@ while (batch := await asyncio.to_thread(_next_batch, reader)) is not None:
 ```
 
 **Every blocking call is in a thread, and that is not an optimisation.** On the
-event loop a replay is the whole broker stopped — no live message fanned out, no
+event loop a replay is the whole server stopped — no live message fanned out, no
 other subscriber served, no keepalive answered. litelink is built for this: its
 buffer and reader each hold their own lock and its SQLite connections are opened
 `check_same_thread=False`.
@@ -413,7 +413,7 @@ by DuckDB reading Parquet, not by anything this library does:
 | where it goes | ~48% DuckDB, ~11% Arrow→Python, ~41% encode |
 
 The cold figure is extension loading and Iceberg metadata resolution, and it is
-paid by the first subscriber to resume after a broker starts.
+paid by the first subscriber to resume after a server starts.
 
 **The split moved, and the reason is worth recording.** Under the old blob
 schema the same profile read 91% DuckDB and 1% encode — the scan was dragging a
@@ -430,7 +430,7 @@ once per batch, because the saving is only sound while that holds and a silent
 reordering would break I6.
 
 **`include_archive` is not passed.** litelink's default decides from the tiers:
-local disk while the local table holds files — every ordinary broker, and it
+local disk while the local table holds files — every ordinary server, and it
 keeps a replay off the network — and the archive when the log has been fully
 evicted and it is the only place the rows are, where refusing to look would be a
 silent short serve.
@@ -439,9 +439,9 @@ silent short serve.
 
 | `why` | when | the caller's next move |
 |---|---|---|
-| `not_durable` | no log attached | drop `offset=`, or give the broker a log |
+| `not_durable` | no log attached | drop `offset=`, or give the server a log |
 | `empty` | the log holds nothing yet | subscribe live |
-| `ahead` | above the frontier | the broker was restored or rebuilt; investigate |
+| `ahead` | above the frontier | the server was restored or rebuilt; investigate |
 | `too_old` | further back than `max_replay` | read the log directly |
 | `evicted` | below what the log still holds | read the archive, or accept the gap |
 
@@ -457,7 +457,7 @@ never give.
 **`earliest` asks three tiers, not two.** `coverage()` reports the archive and
 the buffer, because it answers "what can this reader serve" for a reader
 assembled from an archive and a replica, where the local Iceberg table is empty
-by construction. A broker reads its *own* log, where that table holds almost
+by construction. A server reads its *own* log, where that table holds almost
 everything. *Measured*: 60 rows sealed into 4 Parquet files, `coverage()`
 reporting `archive=None, buffered=None`, and every `offset=EARLIEST` subscribe
 refused as "holds no rows yet". `table_extent()` is the third tier.
@@ -466,7 +466,7 @@ refused as "holds no rows yet". `table_extent()` is the third tier.
 
 ## 6. Chaining
 
-Each stage is a broker, so a pipeline is brokers end to end and every hop is
+Each stage is a server, so a pipeline is servers end to end and every hop is
 independently resumable:
 
 ```
@@ -476,7 +476,7 @@ market feed ─► streamcast A ─► live runner ─► streamcast B ─► da
 ```
 
 The live runner is a *subscriber* of A and *embeds* B in its own process — a
-`Stream` plus a `serve`, exactly as §1 shows. Nothing publishes into a broker
+`Stream` plus a `serve`, exactly as §1 shows. Nothing publishes into a server
 over the wire, which is why there is no remote publisher (§9).
 
 The dashboard box runs a litelink capture with S3 publishing off, so it keeps a
@@ -484,9 +484,9 @@ local window and drops what ages out. On restart it reads the maximum offset it
 persisted and hands that back on its subscription; B replays the difference.
 That is the whole recovery path, and it is the same two calls at every hop.
 
-**Offsets are per broker.** A message that travels A → runner → B has one offset
+**Offsets are per server.** A message that travels A → runner → B has one offset
 in A's log and a different one in B's. They are not translated and must not be
-compared: a consumer's cursor is only meaningful against the broker that issued
+compared: a consumer's cursor is only meaningful against the server that issued
 it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 
 ---
@@ -513,26 +513,26 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 |---|---|
 | a subscriber stops reading | its queue fills, it is dropped with 4429, everyone else is unaffected |
 | a subscriber disconnects | the pump's race with `wait_closed` unwinds the handler; the set entry goes |
-| the upstream feed drops | the broker's business — `examples/broker.py` reconnects and the offsets simply continue |
-| the broker dies | subscribers see a reset; on restart they resume from their cursors and the log fills the gap |
+| the upstream feed drops | the server's business — `examples/server.py` reconnects and the offsets simply continue |
+| the server dies | subscribers see a reset; on restart they resume from their cursors and the log fills the gap |
 | the log is full / the disk is full | `append` raises, `send` raises, **nothing is broadcast** — the failure is at the publisher, where it can be handled |
 | a replay outruns `max_backlog` | the subscriber is dropped right after catching up. Size the two together (§4) |
-| two publishers on one log | litelink refuses: one writer per log. A second broker on the same directory fails to open |
-| the broker is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
+| two publishers on one log | litelink refuses: one writer per log. A second server on the same directory fails to open |
+| the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
 
 ---
 
 ## 9. Open
 
-**Remote publishers.** `Stream.send` runs in the broker's process, so a client
+**Remote publishers.** `Stream.send` runs in the server's process, so a client
 cannot publish into a stream. It was designed and deliberately not built: the
-chained topology (§6) is served by embedding a broker in the publishing process,
+chained topology (§6) is served by embedding a server in the publishing process,
 which is simpler and needs no new authority model. A `streamcast.publish(uri)`
 returning a write-only handle — a sibling of `Subscription`, not a method on it —
 is the shape if it is ever wanted.
 
 **Registered intent.** One designated publisher and many read-only nodes,
-coordinated through the broker, so that exactly one process pushes to S3 and the
+coordinated through the server, so that exactly one process pushes to S3 and the
 rest are local-only. The registration would have to propagate to the litelink
 tier to be worth anything, which is where the design stops.
 
