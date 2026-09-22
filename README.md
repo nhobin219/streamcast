@@ -1,4 +1,4 @@
-# A WebSocket multicaster with a durable log behind it
+# A WebSocket multicaster, and a tickerplant when you give it a log
 
 **One connection in, one stream out, resumable.**
 
@@ -36,7 +36,34 @@ async with streamcast.connect(uri, offset=1862) as stream:
         ...
 ```
 
-**Status: early.** The broker, the replay and the backpressure isolation work and are
+### Multicaster or broker?
+
+Both, on different planes, and the argument that decides it is `log=`.
+
+**The data plane is multicast.** One `encode` per message, one frame object shared by
+every queue, identical bytes to every subscriber — a guarantee
+([`SPEC.md`](docs/SPEC.md) I6), not an implementation detail. No per-consumer filtering,
+no partitioning, no per-message routing.
+
+**The control plane is a broker's.** Named streams on one port, a subscribe negotiation,
+an offset namespace the server owns, replay out of durable storage, and a delivery
+contract written in close codes.
+
+The two together are a tickerplant, and `Stream` is either one depending on how it is
+built:
+
+```python
+streamcast.Stream("trades")            # a multicaster. offsets die with the process
+streamcast.Stream("trades", log=log)   # a tickerplant. offsets are resume cursors
+```
+
+**Throughout these docs, "the broker" means the process** — the thing at the other end of
+a subscriber's socket — and never a claim about category. What would make that word an
+overclaim is all deliberately absent: no fan-in (nothing publishes over the wire), no
+acknowledgements, no consumer groups, no per-message routing. See
+[what it is not](#what-it-is-not).
+
+**Status: early.** The fan-out, the replay and the backpressure isolation work and are
 tested. Read [what it is not](#what-it-is-not) and [not implemented yet](#not-implemented-yet)
 before you rely on it.
 
@@ -182,9 +209,12 @@ is the whole of the recovery path, and it is the same two calls at every hop.
 
 ## What it is not
 
-**Not a message broker.** No topics beyond a name, no consumer groups, no acknowledgements,
-no delivery guarantee beyond "what you received is a contiguous prefix, and the log holds
-the rest". A subscriber that needs at-least-once with acks wants a queue, not a multicast.
+**Not a message broker**, whatever the prose calls the process. No fan-in — nothing
+publishes into a stream over the wire, and `Stream.send` runs in the broker's own process
+([`SPEC.md`](docs/SPEC.md) §6 and §9). No topics beyond a name, no consumer groups, no
+acknowledgements, and no delivery guarantee beyond "what you received is a contiguous
+prefix, and the log holds the rest". A subscriber that needs at-least-once with acks wants
+a queue, not a multicast.
 
 **Not a wide-area transport.** `compression` defaults to off because permessage-deflate
 keeps a 32 KB compressor per connection, which turns a frame encoded once into a frame

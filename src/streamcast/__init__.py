@@ -1,4 +1,4 @@
-"""A WebSocket multicaster with a durable log behind it.
+"""A WebSocket multicaster, and a tickerplant when you give it a log.
 
 One process holds the upstream subscription; every consumer on the box reads
 from it. That is the whole idea, and it exists because the alternative — every
