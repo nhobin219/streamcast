@@ -1,0 +1,198 @@
+name: Release
+
+# Cutting a tag is the whole trigger. CI already runs on `v*` pushes too, so the
+# suite and this workflow start together — but publishing is gated on the checks
+# below rather than on that run, because a job that publishes must not depend on
+# a green light it cannot see.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # The tag and the version in pyproject.toml are two statements of the same
+      # fact, and PyPI will not let the second one be corrected later: a release
+      # is immutable, so a `v0.2.0` tag that ships 0.1.0 burns the version
+      # number. Fail before anything is built.
+      - name: Tag matches the packaged version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          packaged=$(uv version --short)
+          if [ "$tagged" != "$packaged" ]; then
+            echo "tag $GITHUB_REF_NAME declares $tagged, pyproject.toml says $packaged" >&2
+            exit 1
+          fi
+          echo "both say $packaged"
+
+      # **A path source must never reach PyPI.** While litelink and streamcast
+      # change together, `[tool.uv.sources]` points at a checkout next door.
+      # `uv` leaves it out of the built metadata, so a wheel would install and
+      # resolve the version floor correctly — but a release cut from a tree
+      # still carrying it was built against a litelink that is not the one the
+      # floor names, and nothing downstream could tell. Fail loudly instead.
+      - name: No path dependencies in the released tree
+        run: |
+          if grep -q "^\[tool.uv.sources\]" pyproject.toml; then
+            echo "pyproject.toml still has [tool.uv.sources] — a release must" >&2
+            echo "resolve its dependencies from the index, not from a sibling" >&2
+            echo "checkout. Drop it and pin the floor." >&2
+            exit 1
+          fi
+          echo "dependencies resolve from the index"
+
+      # Pure Python, one wheel. There is no build hook and nothing vendored —
+      # litelink carries binaries and needs a wheel per platform; this does not.
+      - name: Build
+        run: |
+          uv build
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  smoke:
+    name: Install the wheel and run a stream through it
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Against the built WHEEL in a clean environment, not the source tree.
+      # Every packaging defect this could have looks identical from a checkout:
+      # a module left out of the wheel, a dependency declared in the dev group
+      # by accident, a `py.typed` that did not ship, or a litelink floor that
+      # resolves to a release without the API this needs.
+      - name: Serve and replay on a cold box
+        run: |
+          uv venv --python 3.11 cold
+          uv pip install --python cold/bin/python dist/*.whl
+          cd /tmp && "$GITHUB_WORKSPACE/cold/bin/python" - <<'PY'
+          import asyncio, tempfile
+          from pathlib import Path
+          import streamcast
+
+          assert (Path(streamcast.__file__).parent / "py.typed").exists()
+
+          SCHEMA = {
+              "type": "object",
+              "properties": {
+                  "event_ts": {"type": "integer"},
+                  "price": {"type": "number"},
+              },
+              "required": ["event_ts", "price"],
+          }
+
+          async def main():
+              root = Path(tempfile.mkdtemp())
+              stream = streamcast.Stream.new("trades", root=root, schema=SCHEMA,
+                                             sort_by=("event_ts",))
+              try:
+                  server = await streamcast.serve(stream, "127.0.0.1", 0,
+                                                  maintain=False)
+                  port = server.sockets[0].getsockname()[1]
+                  uri = f"ws://127.0.0.1:{port}/trades"
+                  await stream.send_many(
+                      [{"event_ts": i, "price": 1.0 * i} for i in range(50)]
+                  )
+
+                  async with streamcast.connect(
+                      uri, offset=streamcast.EARLIEST
+                  ) as sub:
+                      got = [await sub.recv() for _ in range(50)]
+
+                  assert [o for o, _ in got] == list(range(1, 51)), got[:3]
+                  assert got[7][1]["price"] == 7.0, got[7]
+
+                  # The log is a queryable table, which is the reason litelink
+                  # is underneath this. A wheel that served rows over a log
+                  # nothing could query would pass every other check here.
+                  rows = stream.log.sql(
+                      "SELECT count(*) n, max(price) high FROM log"
+                  ).read_all().to_pylist()[0]
+                  assert (rows["n"], rows["high"]) == (50, 49.0), rows
+
+                  server.close()
+                  await server.wait_closed()
+
+              finally:
+                  await stream.aclose()
+
+          asyncio.run(main())
+          print("cold box: 50 rows replayed out of a queryable log via an installed wheel")
+          PY
+
+  publish:
+    name: Publish to PyPI
+    needs: smoke
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there
+    # is no API token in the repository to leak or rotate. It requires a
+    # publisher configured on the PyPI project side — owner, repo, workflow
+    # filename, and this environment name must all match what is registered
+    # there, or the upload is rejected.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/streamcast
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Full history and tags: the notes are generated from the commits since
+      # the previous tag, and the default shallow checkout has neither.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Notes from the commit BODIES, not from pull request titles.
+      # `--generate-notes` lists PR titles and throws the bodies away, which in
+      # this history is the part worth reading: every commit carries the reason
+      # for the change. `scripts/release_notes.py` takes each body's lead
+      # paragraph and groups by Conventional Commit type.
+      #
+      # `--notes-file`, so a failure to generate them fails the step rather
+      # than publishing a release with an empty body.
+      - name: Generate the notes
+        run: |
+          previous=$(git tag --sort=-creatordate | grep -v "^$GITHUB_REF_NAME$" | head -1)
+          python scripts/release_notes.py \
+            ${previous:+--since "$previous"} \
+            --version "${GITHUB_REF_NAME#v}" > notes.md
+          cat notes.md
+
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file notes.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
