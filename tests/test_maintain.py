@@ -77,8 +77,21 @@ class TestTheDefect:
         stream = streamcast.Stream("trades", log=wide_log)
         async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False):
             await fill(stream)
-            await asyncio.sleep(2)
 
+            # **No sleep, deliberately.** This used to wait two seconds and
+            # then check that nothing had sealed, which proves a negative by
+            # hoping: on a slower box two seconds is not evidence, and on any
+            # box it is two seconds of nothing. Nothing here is SCHEDULED to
+            # seal — `maintain=False` starts no subprocess and the library
+            # calls `seal_due` nowhere else — so there is no race for a wait
+            # to lose, and a longer one could not catch anything.
+            #
+            # What proves the policy was satisfied is the POSITIVE CONTROL
+            # below: `test_with_one_the_buffer_drains_into_parquet` runs the
+            # same fixture through the same `fill` and does seal. An empty
+            # table here means the maintainer, not an unmet threshold.
+            # (`seal_due()` would answer it directly and must not be called —
+            # it SEALS, which is the whole point of this test.)
             assert wide_log.buffered_rows() == 100_000
             assert wide_log.table_files() == 0
 

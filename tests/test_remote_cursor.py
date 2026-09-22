@@ -7,7 +7,6 @@ without one, which `STREAMCAST_REQUIRE_S3` turns into a failure.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import pytest
@@ -48,12 +47,19 @@ class TestCrossBoxRecovery:
                 cursor=first,
                 cursor_uri=prefix,
                 s3=s3,
-                upload_every=0.2,
+                # **Long on purpose, and no sleep.** This used to set 0.2s
+                # and then sleep 0.6s hoping the interval had fired — a race
+                # against a daemon thread, which on a loaded box it can lose.
+                # Nothing here needs the interval: `__aexit__` calls
+                # `RemoteCursor.stop`, which joins the thread, and the thread
+                # pushes one last time on its way out. Leaving the block IS
+                # the upload. 30s makes that the only thing that can have
+                # written the key, so a pass means the guarantee held rather
+                # than that the timer got lucky.
+                upload_every=30.0,
             ) as sub:
                 for _ in range(30):
                     await sub.recv()
-
-                await asyncio.sleep(0.6)
 
             assert first.read_text() == "30"
 
@@ -88,12 +94,11 @@ class TestCrossBoxRecovery:
                 cursor=cursor,
                 cursor_uri=prefix,
                 s3=s3,
-                upload_every=0.2,
+                # As above: the push on close is the guarantee, not the timer.
+                upload_every=30.0,
             ) as sub:
                 for _ in range(10):
                     await sub.recv()
-
-                await asyncio.sleep(0.5)
 
             # The local file moves on while nothing uploads.
             cursor.write_text("40")
@@ -154,10 +159,12 @@ class TestItIsBestEffort:
                         secret_key="y",
                         region="us-east-1",
                     ),
-                    upload_every=0.2,
+                    # The push on close is what fails and logs, so there is
+                    # no interval to wait for. `caplog` is still capturing:
+                    # the inner block exits — and uploads — inside it.
+                    upload_every=30.0,
                 ) as sub:
                     assert (await sub.recv())[0] == 1
-                    await asyncio.sleep(0.5)
 
             # It said so, at debug, rather than raising.
             assert any("cursor" in record.message for record in caplog.records)

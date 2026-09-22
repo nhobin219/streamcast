@@ -16,10 +16,16 @@ yet a slow consumer.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 import streamcast
+from streamcast._subscriber import _OVERFLOW, Subscriber
+
+if TYPE_CHECKING:
+    from websockets.asyncio.server import ServerConnection
+
 from tests.conftest import trade
 
 # Large enough that a handful fill the kernel buffer and `websockets`'
@@ -155,28 +161,62 @@ class TestDropping:
             f"{i:06}" for i in range(total)
         ]
 
-    async def test_dropping_one_subscriber_leaves_the_others_alone(self, serve):
-        stream = streamcast.Stream("trades", max_backlog=64)
-        async with serve(stream) as uri:
-            stalled = await streamcast.connect(uri, max_queue=1)
-            async with streamcast.connect(uri) as healthy:
-                try:
-                    for i in range(80):
-                        await stream.send(fat(i))
-                        await asyncio.sleep(0)  # as above: a publisher yields
+    async def test_dropping_one_subscriber_leaves_the_others_alone(self):
+        """One queue overflows; the other is untouched. No socket involved.
 
-                    received = [
-                        await asyncio.wait_for(healthy.recv(), timeout=15)
-                        for _ in range(80)
-                    ]
-                finally:
-                    with pytest.raises(Exception):  # noqa: B017, PT011 — any end is fine
-                        while True:
-                            await asyncio.wait_for(stalled.recv(), timeout=15)
+        **The socket version of this could not be made honest.** It sent a
+        fixed 80 messages, then caught `Exception` around a
+        `wait_for(..., timeout=15)` — so its OWN timeout satisfied the
+        assertion, and it recorded a 15.03s pass. Worse, the drop it claimed
+        to test never happened: measured, the stalled subscriber received all
+        80, and still all 5,000 when the count was raised. On loopback, with
+        a publisher that yields, the pump keeps up and `max_backlog` is never
+        reached — whether it ever would came down to the kernel's socket
+        buffer, which is the definition of machine-dependent.
 
-        assert [str(row["tag"])[:6] for _offset, row in received] == [
-            f"{i:06}" for i in range(80)
-        ]
+        A publisher that does NOT yield cannot rescue it either: then no pump
+        runs at all and BOTH subscribers overflow together, leaving no
+        asymmetry to observe. The end-to-end drop is covered by the tests on
+        either side of this one, which do force it. What was missing was the
+        isolation claim itself — and `offer` is where that lives: synchronous,
+        non-blocking, and the only thing `Stream.send` calls per subscriber.
+
+        So it is checked there. Microseconds, no timeout, no kernel.
+        """
+        # `offer` touches the queue and nothing else — never the connection —
+        # which is what makes a stub enough here. Cast rather than ignored,
+        # so the claim is written down: if `offer` ever grows a use for the
+        # connection, this is the line that has to change.
+        connection = cast("ServerConnection", object())
+        stalled = Subscriber(connection, max_backlog=4)
+        healthy = Subscriber(connection, max_backlog=4)
+
+        for i in range(4):
+            frame = f"{i}".encode()
+            stalled.offer(frame)
+            healthy.offer(frame)
+            # The healthy one is read as it goes; the stalled one is not.
+            assert healthy._queue.get_nowait() == frame  # noqa: SLF001
+
+        # One more is what overflows the stalled queue and drops it.
+        stalled.offer(b"4")
+        healthy.offer(b"4")
+
+        assert stalled._dropped is True  # noqa: SLF001
+        assert healthy._dropped is False, (  # noqa: SLF001
+            "a full queue on one subscriber dropped another"
+        )
+
+        # What the dropped one holds is a contiguous prefix followed by the
+        # overflow sentinel — never a hole in the middle, which is the whole
+        # argument for dropping rather than evicting the oldest.
+        drained = [stalled._queue.get_nowait() for _ in range(5)]  # noqa: SLF001
+        assert drained[:4] == [b"0", b"1", b"2", b"3"]
+        assert drained[4] is _OVERFLOW
+
+        # And the healthy one still holds the message it was offered after
+        # the other was dropped.
+        assert healthy._queue.get_nowait() == b"4"  # noqa: SLF001
 
 
 async def test_the_server_forgets_a_dropped_subscriber(serve):
