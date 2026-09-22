@@ -42,6 +42,7 @@ import contextlib
 import ctypes
 import fcntl
 import itertools
+import shutil
 import signal
 import subprocess
 import sys
@@ -113,9 +114,7 @@ class Sidecar:
         if not Path(self._binary).is_absolute() or not Path(self._binary).exists():
             # `litestream_binary` falls through to the bare name for a
             # PATH install, so resolve it the way `Popen` would.
-            from shutil import which
-
-            if which(self._binary) is None:
+            if shutil.which(self._binary) is None:
                 msg = (
                     f"{log.name!r} has wal_replication on, but litestream was not "
                     f"found (tried {self._binary!r}). Install it, or pass "

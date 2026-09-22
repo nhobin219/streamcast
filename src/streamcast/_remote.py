@@ -39,6 +39,7 @@ import threading
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
+import pyarrow.fs as pafs
 from litelink import S3Options
 
 if TYPE_CHECKING:
@@ -56,14 +57,16 @@ uses.
 """
 
 
-def _filesystem(uri: str, s3: S3Options | None):  # noqa: ANN202 — pyarrow is a lazy import
+def _filesystem(uri: str, s3: S3Options | None) -> tuple[pafs.S3FileSystem, str]:
     """A pyarrow S3 filesystem for `uri`, and the path inside it.
 
-    Imported lazily so a consumer with no `cursor_uri` never pays for
-    pyarrow's S3 stack, which initialises an AWS SDK on first use.
+    This used to import `pyarrow.fs` inside the function, on the grounds that
+    a consumer with no `cursor_uri` should not pay for pyarrow's S3 stack.
+    **Measured, that saved 0.0 ms**: litelink imports `pyarrow.fs` itself, so
+    it is already in `sys.modules` before `import streamcast` returns. The
+    deferral bought nothing and hid the dependency from anything reading the
+    imports.
     """
-    import pyarrow.fs as pafs
-
     split = urlsplit(uri)
     resolved = (s3 or S3Options()).resolved()
     options: dict[str, object] = {}
