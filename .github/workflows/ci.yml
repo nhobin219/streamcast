@@ -113,9 +113,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # **No cache on this job, deliberately.** It is the only one that
+      # resolves this package's dependencies from the INDEX rather than from
+      # the lockfile, and uv's cache includes index metadata. A restored cache
+      # predating a dependency's release makes the resolve fail against a
+      # version that exists — measured: the run that first required
+      # `litelink>=0.4.0` failed with "No solution found" while 0.4.0 was on
+      # PyPI and the uncached release workflow resolved it fine.
+      #
+      # The job installs one wheel into one throwaway venv, so the cache was
+      # saving little and hiding the answer to "does a cold box resolve this",
+      # which is the question this job exists to ask.
       - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
       - run: uv build --wheel --out-dir dist
 
       # Installed into a clean environment and driven end to end, because
