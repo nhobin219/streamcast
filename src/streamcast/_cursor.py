@@ -29,11 +29,14 @@ which is neither. So
   whose handler raised is re-delivered;
 * and the automatic save only ever moves FORWARD.
 
-**That last one is not about message ordering.** Within a subscription offsets
-are strictly increasing by construction — `SPEC.md` I1 and I2 — and that was
-measured rather than assumed: 600 offsets across a replay/live join under
-concurrent publishing, every one exactly its predecessor plus one. The rewind
-comes from somewhere else entirely:
+**That last one is not mainly about message ordering.** `Subscription.recv`
+refuses a frame whose offset did not increase, so an out-of-order delivery
+stops the stream rather than moving the cursor — and it refuses rather than
+trusts, because ordering on the wire is TCP's guarantee about a network this
+library cannot test. A loopback test says what the pump and the replay/live
+join do; it says nothing about a middlebox between two hosts.
+
+The rewind this guard exists for comes from somewhere else entirely:
 
     connect(uri, offset=0, cursor=path)   # a normal run; the file reaches 400
     connect(uri, offset=1, cursor=path)   # a one-off replay, same file

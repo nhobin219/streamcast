@@ -349,13 +349,16 @@ which is neither. So four things are arranged around that:
   syscalls to record something allowed to be stale;
 - a block that exits with an **exception** saves nothing, so the message whose handler
   raised is re-delivered;
-- the automatic save only ever moves **forward**. Not because messages can arrive out of
-  order — within a subscription offsets are strictly increasing by construction
-  ([`SPEC.md`](SPEC.md) I1, I2, measured across a replay/live join under concurrent
-  publishing) — but because an explicit `offset=` sharing a cursor file would otherwise
-  clobber it: a one-off `connect(uri, offset=1, cursor=path)` beside a production run
-  wrote 1, 2, 3 over a file that said 400. `offset=` now overrides the *read* and cannot
-  corrupt the *write*.
+- the automatic save only ever moves **forward**, and `recv` refuses a frame whose offset
+  did not increase. Ordering within a subscription is TCP's guarantee about a network this
+  library cannot test — a loopback test says what the pump and the replay/live join do,
+  not what a middlebox between two hosts does — so it is checked rather than assumed, and
+  an out-of-order delivery stops the stream instead of moving the cursor.
+
+  The rewind the guard exists for comes from elsewhere anyway: an explicit `offset=`
+  sharing a cursor file. A one-off `connect(uri, offset=1, cursor=path)` beside a
+  production run wrote 1, 2, 3 over a file that said 400. `offset=` now overrides the
+  *read* and cannot corrupt the *write*.
 
 `commit(offset)` **is** allowed to move it backwards, because that is you stating what is
 durable and correcting an optimistic value downward is the point. It also cancels the

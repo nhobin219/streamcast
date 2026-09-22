@@ -556,9 +556,24 @@ it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 | **I1** | `Stream.send` and `send_many` contain no `await`. Offset assignment, durability and fan-out are one step. |
 | **I2** | Joining the fan-out set and reading the frontier are adjacent statements. The replay range and the live queue partition the stream exactly. |
 | **I3** | A message is durable before it is delivered, never after. |
-| **I4** | What a subscriber receives is a contiguous prefix of the stream from where it subscribed. A drop ends it; nothing punches a hole in it. |
+| **I4** | What a subscriber receives is a contiguous prefix of the stream from where it subscribed, in increasing offset order. A drop ends it; nothing punches a hole in it. The order is CHECKED at the subscriber, not assumed — see below. |
 | **I5** | Offsets are assigned once and never reused for the life of a log. Inherited from litelink, which owns the column. |
 | **I6** | Every subscriber receives the identical frame bytes for a given offset — one `encode` call, shared — and a **replayed** frame is byte-identical to the live one it repeats, because both project through the log's declared column order. |
+
+**I4's ordering is TCP's guarantee, and this library cannot test it.** A
+subscription is one connection and TCP delivers a byte stream in order, so
+frames on it cannot overtake each other — but that is a claim about the
+network between two hosts, and a loopback test establishes only what the pump,
+the queue and the replay/live join do. Those are the parts this library
+controls, and the parts that could have been wrong.
+
+So `Subscription.recv` compares each offset against the last and raises rather
+than trusting the reasoning. One comparison per message, and what it prevents
+is the expensive failure: processing a stream whose offsets went backwards
+means silently skipping data once a cursor is involved. `<=` rather than
+`!= previous + 1`, because litelink's offset space has legitimate gaps — a
+`restore` fences 2**20 of them — so a jump forward is ordinary and only a step
+backwards is wrong.
 
 I1, I2 and the mechanisms behind I4 are checked by `tests/test_invariants.py`
 against the source. I3 and I4 are checked end to end. I5 is litelink's.

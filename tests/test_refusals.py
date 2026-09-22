@@ -350,14 +350,13 @@ class TestTheCursor:
 class TestTheCursorNeverRewinds:
     """Forward only, and the rewind does not come from message ordering."""
 
-    async def test_offsets_within_a_subscription_are_strictly_increasing(
-        self, serve, log
-    ):
-        """The premise, measured rather than assumed.
+    async def test_this_library_does_not_reorder(self, serve, log):
+        """What a loopback test can actually establish.
 
-        I1 and I2 make it so, across the replay/live join and under concurrent
-        publishing — which is why the guard below is not about out-of-order
-        delivery. There is none.
+        That the pump, the queue and the replay/live join deliver in order —
+        the parts this library controls. It says NOTHING about a network
+        between two hosts, which is why `recv` checks rather than trusts: see
+        the next test.
         """
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
@@ -375,6 +374,57 @@ class TestTheCursorNeverRewinds:
             await task
 
         assert seen == list(range(1, 301))
+
+    async def test_an_out_of_order_frame_stops_the_stream(self, serve, log):
+        """Checked, not reasoned about.
+
+        TCP delivers a byte stream in order, so frames on one connection
+        cannot overtake each other — but that is a claim about a network this
+        library cannot test, and a middlebox that is not a conforming
+        WebSocket proxy is not hypothetical. Processing a stream whose
+        offsets went backwards means silently skipping data once a cursor is
+        involved, so it stops instead. The retry loop recovers.
+        """
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(5)])
+
+            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                assert (await sub.recv())[0] == 1
+                assert (await sub.recv())[0] == 2
+
+                # Rewind what the subscription believes it has seen, which is
+                # indistinguishable from the next frame arriving stale.
+                sub._offset = 99  # noqa: SLF001
+                with pytest.raises(streamcast.ProtocolError, match="must increase"):
+                    await sub.recv()
+
+    async def test_a_gap_in_the_offsets_is_not_out_of_order(self, serve, log):
+        # litelink's offset space has legitimate gaps — `restore` fences 2**20
+        # of them — so the check is `<=`, not `!= previous + 1`. A jump
+        # forward is ordinary.
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(3)])
+
+            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                assert (await sub.recv())[0] == 1
+                sub._offset = -1000  # noqa: SLF001 — a large jump forward
+                assert (await sub.recv())[0] == 2
+
+    async def test_a_live_only_stream_has_no_offsets_to_check(self, serve):
+        # Every frame carries `null`, so there is nothing to compare and the
+        # check must not trip on it.
+        stream = streamcast.Stream("live")
+        async with serve(stream) as uri, streamcast.connect(uri) as sub:
+            for i in range(3):
+                await stream.send(trade(i))
+
+            assert [offset for offset, _ in [await sub.recv() for _ in range(3)]] == [
+                None,
+                None,
+                None,
+            ]
 
     async def test_an_explicit_offset_cannot_clobber_the_file_backwards(
         self, serve, log, tmp_path

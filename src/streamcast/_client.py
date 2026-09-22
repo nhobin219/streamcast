@@ -239,6 +239,27 @@ class Subscription:
             raise refusal from None
 
         offset, row = decode(frame)
+        # **Checked, not reasoned about.** A subscription is one TCP
+        # connection and TCP delivers a byte stream in order, so frames
+        # cannot overtake each other — but that is a claim about the network
+        # between two hosts, and this library has no way to test it. What it
+        # can do is refuse to process a stream whose offsets went backwards,
+        # whatever the cause: a middlebox that is not a conforming WebSocket
+        # proxy, a future transport, a bug here. One comparison per message
+        # turns silent out-of-order processing — which with a cursor means
+        # silently skipping data — into a loud stop the retry loop recovers
+        # from.
+        #
+        # `<=` rather than `!= previous + 1`: litelink's offset space has
+        # legitimate GAPS (a `restore` fences 2**20 of them), so a jump
+        # forward is ordinary and only a step backwards is wrong.
+        if offset is not None and self._offset is not None and offset <= self._offset:
+            msg = (
+                f"offsets must increase within a subscription; received "
+                f"{offset} after {self._offset}"
+            )
+            raise ProtocolError(msg)
+
         self._offset = offset
         self._unsaved = offset
 
