@@ -64,6 +64,7 @@ can log it, forward it or append it to another stream whole.
 from importlib.metadata import PackageNotFoundError, version
 
 from streamcast._client import Subscription, connect
+from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
     NotReplayable,
@@ -74,6 +75,7 @@ from streamcast._errors import (
 )
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
+from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
 
@@ -87,6 +89,7 @@ __all__ = [
     "MAX_BACKLOG",
     "MAX_REPLAY",
     "Close",
+    "Cursor",
     "Greeting",
     "Maintain",
     "NotReplayable",
@@ -98,5 +101,7 @@ __all__ = [
     "TooSlow",
     "__version__",
     "connect",
+    "from_arrow",
     "serve",
+    "to_arrow",
 ]

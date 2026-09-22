@@ -96,11 +96,14 @@ class _Served:
     to fix.
     """
 
-    __slots__ = ("_children", "_server", "_serving")
+    __slots__ = ("_children", "_server", "_serving", "_streams")
 
-    def __init__(self, serving: Server, children: list[_Child]) -> None:
+    def __init__(
+        self, serving: Server, children: list[_Child], streams: list[Stream]
+    ) -> None:
         self._serving = serving
         self._children = children
+        self._streams = streams
         self._server: Server | None = None
 
     async def _start(self) -> _Served:
@@ -136,6 +139,13 @@ class _Served:
 
         for child in self._children:
             await child.wait_closed()
+
+        # LAST, and the order is the point: a replay in flight is reading the
+        # log in a worker thread, so closing it before the connections are
+        # done would pull the file out from under a scan. `aclose` is a no-op
+        # for a stream whose log was handed in — that one is the caller's.
+        for stream in self._streams:
+            await stream.aclose()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
@@ -283,6 +293,7 @@ def serve(
     return _Served(
         _ws_serve(handler, host, port, compression=compression, **kwargs),
         children,
+        list(routes.values()),
     )
 
 

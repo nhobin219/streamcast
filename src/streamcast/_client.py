@@ -179,6 +179,15 @@ class Subscription:
         return self._info
 
     @property
+    def pending(self) -> bool:
+        """Whether a received offset is still unaccounted for.
+
+        False once `commit` has been called, which is what keeps the clean
+        exit from overwriting an explicit commit.
+        """
+        return self._unsaved is not None
+
+    @property
     def offset(self) -> int | None:
         """The last offset received, or None before the first message.
 
@@ -259,9 +268,31 @@ class Subscription:
         For a consumer whose work is not idempotent, or that batches: call it
         once the batch is durable, and pass the offset you actually committed
         if it is not simply the last one received. A no-op without `cursor=`.
+
+        **Passing an offset is allowed to move the cursor backwards**, because
+        it is you stating what is durable, and correcting an optimistic value
+        downward is the point. The automatic saves never do — see `_cursor`.
+
+        A consumer that batches should not rely on the automatic save at all:
+        it advances as you read, which for a batch is ahead of what you have
+        flushed. Drive `streamcast.Cursor` yourself there.
         """
-        if self._cursor is not None:
-            self._cursor.save(self._offset if offset is None else offset, force=True)
+        if self._cursor is None:
+            return
+
+        if offset is None:
+            # The automatic value, so the forward-only guard applies.
+            self._cursor.save(self._offset, force=True)
+        else:
+            # The caller's word about what they actually committed, which they
+            # are entitled to state lower than what was received.
+            self._cursor.save(offset, force=True, rewind=True)
+
+        # Nothing outstanding now, which is what stops the clean-exit commit
+        # from overwriting an explicit one. Without this, `commit(8)` followed
+        # by leaving the block wrote back the last offset RECEIVED — undoing
+        # the caller's statement about what was durable.
+        self._unsaved = None
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """End the subscription. Idempotent, and awaits the close handshake."""
@@ -317,10 +348,15 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         self._cursor = Cursor(cursor) if cursor is not None else None
 
         resolved: int | None
+        # ALWAYS read, even when an explicit offset makes the value unused:
+        # `load` is what seeds the cursor's high-water mark, and without it
+        # the forward-only guard is inert. A one-off `offset=1` beside a
+        # production cursor then wrote 1, 2, 3 over a file that said 400.
+        saved = self._cursor.load() if self._cursor is not None else None
+
         if offset is _UNSET:
             # Not given: the file decides. `+ 1` because the file holds the
             # last offset FINISHED with, and a resume asks for the next one.
-            saved = self._cursor.load() if self._cursor is not None else None
             resolved = None if saved is None else saved + 1
         elif offset is None or isinstance(offset, int):
             # Given: it wins, including when it is None. Overriding a stale
@@ -382,11 +418,11 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         if self._subscription is None:
             return
 
-        # Only on a clean exit. Leaving the block because a handler raised
-        # means the last message was NOT finished with, and saving it there
-        # would skip it on the next run — the one thing a cursor must never
-        # do. It is re-delivered instead.
-        if exc_type is None:
+        # Only on a clean exit, and only if something is outstanding. Leaving
+        # the block because a handler raised means the last message was NOT
+        # finished with, and saving it there would skip it on the next run —
+        # the one thing a cursor must never do. It is re-delivered instead.
+        if exc_type is None and self._subscription.pending:
             self._subscription.commit()
 
         await self._subscription.close()

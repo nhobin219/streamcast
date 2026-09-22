@@ -13,13 +13,17 @@ consumer that stops and starts again resumes from where it left off rather
 than from now. Stop `demo-consumer`, leave it stopped, start it again, and
 watch it replay the gap.
 
-**The schema below is this demo's, not streamcast's.** Every field the feed
-sends that is worth a column gets one, because that is what makes the log a
-table rather than a pile of frames: `SELECT max(price) FROM log` works,
-Iceberg statistics prune a query for one minute of trades, and a subscriber
-receives the row rather than a blob to parse. Frames that are not trades —
-the subscription ack, the reconnect notices — have no row and are dropped
-here, which is the feed handler's job in every tickerplant.
+**The schema below is this demo's, not streamcast's**, and it is JSON Schema
+because the wire is JSON. Every field the feed sends that is worth a column
+gets one, because that is what makes the log a table rather than a pile of
+frames: `SELECT max(price) FROM log` works, Iceberg statistics prune a query
+for one minute of trades, and a subscriber receives the row rather than a blob
+to parse. Frames that are not trades — the subscription ack, the reconnect
+notices — have no row and are dropped here, which is the feed handler's job in
+every tickerplant.
+
+Note what is NOT imported: no litelink, no pyarrow. `Stream` creates the log
+from the schema, and `serve` maintains and replicates it.
 
 `--no-log` is the other end of the range: a pure multicaster, no litelink, no
 replay, and `?offset=` refused outright. Right when the stream is a cache
@@ -38,13 +42,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import signal
 from pathlib import Path
 
-import litelink
-import pyarrow as pa
 import websockets
 
 import streamcast
@@ -53,18 +54,22 @@ FEED = "wss://ws.bitstamp.net"
 CHANNEL = "live_trades_btcusd"
 SUBSCRIBE = json.dumps({"event": "bts:subscribe", "data": {"channel": CHANNEL}})
 
-SCHEMA = pa.schema(
-    [
+SCHEMA = {
+    "type": "object",
+    "properties": {
         # Microseconds, as the feed sends them. Leading column of `sort_by`,
         # so a bounded query on it prunes whole files.
-        pa.field("event_ts", pa.int64(), nullable=False),
-        pa.field("trade_id", pa.int64(), nullable=False),
-        pa.field("price", pa.float64()),
-        pa.field("amount", pa.float64()),
-        # 0 buy, 1 sell, as the feed spells it.
-        pa.field("side", pa.int64()),
-    ]
-)
+        "event_ts": {"type": "integer"},
+        "trade_id": {"type": "integer"},
+        "price": {"type": "number"},
+        "amount": {"type": "number"},
+        # 0 buy, 1 sell, as the feed spells it. int32 because it is a flag,
+        # and `format` is where the width lives — JSON Schema's `integer`
+        # does not carry one.
+        "side": {"type": "integer", "format": "int32"},
+    },
+    "required": ["event_ts", "trade_id", "price", "amount", "side"],
+}
 
 
 def row(trade: dict) -> dict:
@@ -145,57 +150,49 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    # `new` takes the shape and `open` takes none of it, so a restart against
-    # an existing log continues its offsets rather than restarting them.
-    log = None
-    if not args.no_log:
+    # `root=` + `schema=` and the `Stream` owns the log: created the first
+    # time, opened every time after, and closed when the server closes. The
+    # try/except every server used to write is what that replaced — and note
+    # this file imports neither litelink nor pyarrow.
+    if args.no_log:
+        stream = streamcast.Stream("trades")
+    else:
+        stream = streamcast.Stream(
+            "trades", root=args.root, schema=SCHEMA, sort_by=("event_ts",)
+        )
+
+    # `serve` starts the maintainer too, and litestream if the log replicates
+    # its WAL. There is nothing else to run.
+    async with streamcast.serve(stream, args.host, args.port):
+        where = "durable" if stream.durable else "live-only"
+        print(f"serving {CHANNEL} ({where}) at ws://{args.host}:{args.port}/trades")
+        print(f"  resuming from offset {stream.end_offset}")
+        print("  subscribe:  just demo-consumer")
+
+        stopping = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stopping.set)
+
+        work = [
+            asyncio.create_task(publish(stream)),
+            asyncio.create_task(report(stream)),
+        ]
         try:
-            log = litelink.open(args.root, "trades")
-        except FileNotFoundError:
-            log = litelink.new(
-                args.root, "trades", schema=SCHEMA, sort_by=("event_ts",)
-            )
+            await stopping.wait()
+        finally:
+            for task in work:
+                task.cancel()
 
-    with contextlib.ExitStack() as closing:
-        if log is not None:
-            closing.enter_context(log)
+            await asyncio.gather(*work, return_exceptions=True)
+            # Subscribers get a 1001 rather than a reset, so their `async
+            # for` ends cleanly instead of raising. `serve` closing would do
+            # it too; this makes the shutdown order explicit.
+            await stream.aclose()
 
-        stream = streamcast.Stream("trades", log=log)
-        async with streamcast.serve(stream, args.host, args.port):
-            where = "durable" if log else "live-only"
-            print(f"serving {CHANNEL} ({where}) at ws://{args.host}:{args.port}/trades")
-            print(f"  resuming from offset {stream.end_offset}")
-            print("  subscribe:  just demo-consumer")
-
-            stopping = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, stopping.set)
-
-            work = [
-                asyncio.create_task(publish(stream)),
-                asyncio.create_task(report(stream)),
-            ]
-            try:
-                await stopping.wait()
-            finally:
-                for task in work:
-                    task.cancel()
-
-                await asyncio.gather(*work, return_exceptions=True)
-                # Subscribers get a 1001 rather than a reset, so their
-                # `async for` ends cleanly instead of raising.
-                await stream.aclose()
-
-        stopped = stream.end_offset
-        where = f"offset {stopped - 1:,}" if stopped is not None else "live-only"
-        print(f"\nstopped at {where}")
-        if log is not None:
-            # Sealing is litelink's, not streamcast's — and it is the one
-            # thing worth doing on the way out, because an orderly shutdown
-            # is the right moment to close the open group.
-            while log.seal() is not None:
-                pass
+    stopped = stream.end_offset
+    where = f"offset {stopped - 1:,}" if stopped is not None else "live-only"
+    print(f"\nstopped at {where}")
 
 
 if __name__ == "__main__":

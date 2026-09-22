@@ -25,10 +25,18 @@ The replication tier SKIPS without an endpoint, and a skip is not a pass — it 
 where litestream is actually run and where "never two instances on one database"
 is checked. `just rustfs` then `just check-all` is the honest local gate.
 
-## The schema is the caller's
+## The schema is the caller's, in JSON Schema
 
 streamcast declares no columns. The log is an ordinary litelink table with
 whatever shape the application gave it, and `send` takes a **row**.
+
+The schema is declared in **JSON Schema** and converted here (`_schema.py`),
+not in litelink: litelink speaks Arrow and is deliberately general about what
+it stores, while streamcast is specifically about JSON websockets, so the
+mapping sits on the side that knows about JSON. `format` carries the width
+JSON Schema will not (`int32` vs `int64`, `float` vs `double`), and anything
+litelink would refuse is refused here where the message can name JSON
+Schema's vocabulary.
 
 An earlier design owned a fixed `(recv_ts, kind, payload)` schema and stored
 each upstream frame whole. That threw away pruning, compression, a queryable
@@ -112,6 +120,7 @@ src/streamcast/
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
     _cursor.py      where a consumer keeps the offset it finished with
+    _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
     _server.py      serve — routing, close codes, maintainer lifetime

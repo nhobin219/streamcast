@@ -191,6 +191,16 @@ class Greeting:
     replay: tuple[int, int] | None
     """The `[start, end)` about to be replayed, or None for a live-only subscribe."""
 
+    schema: dict[str, object] | None
+    """The stream's columns as JSON Schema, or None without a log.
+
+    Published so a subscriber in another language can read the shape without
+    this repo — which is most of the reason the schema is declared in JSON
+    terms rather than as a `pa.schema`. It is the greeting's only unbounded
+    field, and a schema large enough to matter is a stream with hundreds of
+    columns, which litelink would be the wrong store for anyway.
+    """
+
     durable: bool
     """Whether a log is attached.
 
@@ -208,6 +218,7 @@ def greeting(
     end_offset: int | None,
     replay: tuple[int, int] | None,
     durable: bool,
+    schema: dict[str, object] | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire."""
     return _ENCODER.encode(
@@ -217,6 +228,7 @@ def greeting(
             "end_offset": end_offset,
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
+            "schema": schema,
         }
     ).decode()
 
@@ -250,12 +262,14 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         raise ProtocolError(msg)
 
     replay = fields.get("replay")
+    schema = fields.get("schema")
 
     return Greeting(
         version=version,
         stream=fields.get("stream", ""),
         end_offset=None if fields["end_offset"] is None else int(fields["end_offset"]),
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
+        schema=schema if isinstance(schema, dict) else None,
         durable=bool(fields.get("durable", False)),
     )
 

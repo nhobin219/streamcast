@@ -5,7 +5,17 @@ this says what you can call.
 
 ```python
 import streamcast
-from streamcast import EARLIEST, SCHEMA, Stream, Subscription, __version__
+from streamcast import Cursor, EARLIEST, Maintain, Stream, Subscription, to_arrow
+```
+
+**A durable stream needs no other import.** Declare the columns in JSON Schema and
+`Stream` creates the log, while `serve` maintains and replicates it:
+
+```python
+stream = streamcast.Stream("trades", root="data", schema=SCHEMA)
+
+async with streamcast.serve(stream, "localhost", 8765):
+    await stream.send({"event_ts": ..., "price": ...})
 ```
 
 The object model is **two classes and two functions**. `Stream` is the broadcast —
@@ -329,16 +339,31 @@ Stop the consumer, start it again, and it picks up where it stopped.
 rows have to be different things: *not given* means "use the file", `None` means "ignore
 it and take the live stream".
 
-**The cursor lags deliberately, and must never lead.** A cursor behind the work
+**The cursor lags deliberately, and must never lead or rewind.** A cursor behind the work
 re-delivers, which is safe and visible; a cursor ahead of it skips messages for ever,
-which is neither. So three things are arranged around that:
+which is neither. So four things are arranged around that:
 
 - it advances when you ask for the **next** message, not when you receive this one —
   coming back for another is the only evidence the library has that the last was handled;
 - saves are throttled to once a second, because an atomic rename per message is three
   syscalls to record something allowed to be stale;
 - a block that exits with an **exception** saves nothing, so the message whose handler
-  raised is re-delivered.
+  raised is re-delivered;
+- the automatic save only ever moves **forward**. Not because messages can arrive out of
+  order — within a subscription offsets are strictly increasing by construction
+  ([`SPEC.md`](SPEC.md) I1, I2, measured across a replay/live join under concurrent
+  publishing) — but because an explicit `offset=` sharing a cursor file would otherwise
+  clobber it: a one-off `connect(uri, offset=1, cursor=path)` beside a production run
+  wrote 1, 2, 3 over a file that said 400. `offset=` now overrides the *read* and cannot
+  corrupt the *write*.
+
+`commit(offset)` **is** allowed to move it backwards, because that is you stating what is
+durable and correcting an optimistic value downward is the point. It also cancels the
+clean-exit save, so leaving the block does not undo it.
+
+**A batching consumer should not use the automatic save at all.** It advances as you read,
+which for a batch is ahead of what you have flushed. Drive `streamcast.Cursor` yourself —
+it is exported for exactly that — and save only what you have committed.
 
 ```python
 sub.commit()          # force a save now — for a batching or non-idempotent consumer
@@ -382,19 +407,81 @@ StreamcastError
 
 ## The schema is yours
 
-streamcast declares no columns. Create the log the way litelink's own example does — every
-field the feed sends that is worth a column gets one:
+streamcast declares no columns — you do, in **JSON Schema**, because the wire is JSON and
+this is a library about JSON websockets:
 
 ```python
-SCHEMA = pa.schema([
-    pa.field("event_ts", pa.int64(), nullable=False),   # microseconds, as the feed sends
-    pa.field("price", pa.float64()),
-    pa.field("amount", pa.float64()),
-    pa.field("side", pa.int64()),
-])
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "event_ts": {"type": "integer"},                   # int64
+        "price": {"type": "number"},                       # float64
+        "amount": {"type": "number"},
+        "side": {"type": "integer", "format": "int32"},    # narrower, on purpose
+        "tag": {"type": "string"},                         # not required -> nullable
+    },
+    "required": ["event_ts", "price", "amount", "side"],
+}
 
-log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
+stream = streamcast.Stream("trades", root="data", schema=SCHEMA, sort_by=("event_ts",))
 ```
+
+`Stream` creates the log at `root/name` if it is not there and opens it if it is — the
+`new`/`open` dance every server writes — and **closes it on `aclose`, because it opened
+it.** A log you open yourself and pass as `log=` stays yours, closed by you. Passing both
+is refused.
+
+An existing log whose columns disagree with the declaration is **refused, not adopted**:
+litelink fixes a log's shape at creation and `open` takes none of it, so a disagreement
+would otherwise be ignored and every send validated against columns you never wrote down.
+
+| JSON | `format` | Arrow |
+|---|---|---|
+| `boolean` | — | `bool` |
+| `integer` | — or `int64` | `int64` |
+| `integer` | `int32` | `int32` |
+| `number` | — or `double` | `float64` |
+| `number` | `float` | `float32` |
+| `string` | — | `string` |
+
+**`format` carries the width, because JSON Schema does not.** `integer` does not choose
+between int32 and int64; left out, the wider of each pair wins — a feed that overflows an
+int32 is a silent wrong answer, while one that would have fitted costs four bytes a row.
+`required` decides nullability, and `{"type": ["integer", "null"]}` is the other spelling.
+
+Anything litelink cannot store is refused **here**, where the message names JSON Schema's
+vocabulary rather than Arrow's: nested objects, arrays, `date-time` (store epoch
+integers), `byte`/`binary`, and the narrow integer widths Iceberg would widen silently.
+
+```python
+streamcast.to_arrow(SCHEMA)     -> pa.Schema      # if you want the litelink schema
+streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
+```
+
+**The greeting carries the schema**, so a subscriber in another language reads the columns
+without this repo:
+
+```json
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+ "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
+```
+
+Widths are stated explicitly on the way out, so what a subscriber reads back is what the
+column actually is.
+
+**A caveat JSON cannot fix:** integers beyond 2^53 do not survive every parser. Python and
+msgspec carry int64 exactly; a JavaScript subscriber silently rounds. A nanosecond
+`event_ts` is past it — microseconds, which the examples use, are not.
+
+### Or bring your own litelink log
+
+```python
+log = litelink.new("data", "trades", schema=streamcast.to_arrow(SCHEMA),
+                   sort_by=("event_ts",))
+stream = streamcast.Stream("trades", log=log)
+```
+
+Which is what you want for `litelink.restore`, or a log shared with something else.
 
 **`sort_by` is a read-shape decision, not a knob** — only a leading column prunes, and
 changing it later rewrites every file. litelink's default is offset order, which is right

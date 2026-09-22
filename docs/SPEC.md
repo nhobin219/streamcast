@@ -440,6 +440,59 @@ keeps a replay off the network — and the archive when the log has been fully
 evicted and it is the only place the rows are, where refusing to look would be a
 silent short serve.
 
+### The schema, in JSON
+
+**A stream's columns are declared in JSON Schema and converted here**, not in
+litelink. That is a division of labour rather than a convenience: litelink
+speaks Arrow and is deliberately general about what it stores, while
+streamcast is specifically about JSON websockets — so the layer mapping one
+onto the other sits on the side that knows about JSON. Putting it in litelink
+was considered and rejected; it would make a JSON codec part of the public
+surface of a library whose value is being general.
+
+What it buys is an import list of one. `Stream(name, root=…, schema=…)` creates
+the log, `serve` maintains and replicates it, and a caller reaches for neither
+litelink nor pyarrow.
+
+**`format` carries the width, because JSON Schema does not.** `integer` does
+not choose between int32 and int64 and `number` does not choose between
+float32 and float64, so the format names JSON Schema already reserves —
+`int32`, `int64`, `float`, `double` — do it. Omitted, the WIDER of each pair
+wins: a feed that overflows an int32 is a silent wrong answer, while one that
+would have fitted costs four bytes a row.
+
+| JSON | format | Arrow |
+|---|---|---|
+| `boolean` | — | `bool` |
+| `integer` | — / `int64` / `int32` | `int64` / `int64` / `int32` |
+| `number` | — / `double` / `float` | `float64` / `float64` / `float32` |
+| `string` | — | `string` |
+
+`required` decides nullability, and `{"type": ["integer", "null"]}` is the
+other spelling of the same thing.
+
+**It refuses up front what litelink would refuse at the first append** —
+nested objects, arrays, `date-time`, `byte`, and the narrow integer widths
+Iceberg widens silently — where the message can name JSON Schema's vocabulary
+rather than Arrow's.
+
+**The greeting publishes it**, with the widths stated explicitly, so a
+subscriber in another language reads the columns without this repo and gets
+back exactly the types the columns are.
+
+One caveat the mapping cannot fix, only document: **JSON integers beyond 2^53
+do not survive every parser.** Python and msgspec carry int64 exactly; a
+JavaScript subscriber silently rounds. A nanosecond `event_ts` is past it,
+and a microsecond one — which the examples use — is not.
+
+### An existing log is checked, not adopted
+
+`Stream(root=…, schema=…)` opens a log that is already there, and litelink's
+`open` takes none of the shape: it reads it from disk. So a declaration that
+disagreed would be silently ignored and every send validated against columns
+the caller never wrote down. It is compared and refused instead, which is the
+one failure this convenience would otherwise introduce.
+
 ### The five refusals
 
 | `why` | when | the caller's next move |
@@ -531,15 +584,15 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 
 **Remote publishers.** `Stream.send` runs in the server's process, so a client
 cannot publish into a stream. It was designed and deliberately not built: the
-chained topology (§6) is served by embedding a server in the publishing process,
-which is simpler and needs no new authority model. A `streamcast.publish(uri)`
-returning a write-only handle — a sibling of `Subscription`, not a method on it —
-is the shape if it is ever wanted.
+chained topology (§6) is served by embedding a server in the publishing
+process, which is simpler and needs no new authority model. A
+`streamcast.publish(uri)` returning a write-only handle — a sibling of
+`Subscription`, not a method on it — is the shape if it is ever wanted.
 
 **Registered intent.** One designated publisher and many read-only nodes,
-coordinated through the server, so that exactly one process pushes to S3 and the
-rest are local-only. The registration would have to propagate to the litelink
-tier to be worth anything, which is where the design stops.
+coordinated through the server, so that exactly one process pushes to S3 and
+the rest are local-only. The registration would have to propagate to the
+litelink tier to be worth anything, which is where the design stops.
 
 **Bytes, not messages, for `max_backlog`.** The queue is bounded in messages
 because that is what it holds; an operator thinks in memory. A byte bound needs
@@ -555,44 +608,16 @@ live single row in a 1-row batch is mostly framing overhead. The cost is the
 client unpacking batches transparently. Two encoders and two client paths is
 the price; nobody has needed it yet.
 
-**Running the litestream sidecar.** `serve(maintain=True)` refuses a log with
-`wal_replication` on, because sealing it while nothing ships its WAL leaves
-an operator believing they have continuous RPO protection when they have
-none. Supervising the sidecar here is the fix, and it is not a small one:
-litelink does it with a flock-guarded `Sidecar` that lives in its examples
-rather than its library, since two litestream instances on one database is
-"the one thing litestream says never to do" and is reachable through an
-ordinary `SIGTERM` — two orphans were observed in its testing before the
-guard existed. The right shape is probably for that `Sidecar` to move into
-litelink, where the config, the binary and the destination already live, and
-for this maintainer to ask for one.
-
 **Binary columns.** litelink refuses them today, so a stream whose rows carry
 real bytes has no column for them. There is no base64 workaround here any more
 — that belonged to the blob schema §5 removed — and the answer is litelink's
 §15.
 
-**A JSON schema for a stream.** The conversion between JSON types and Arrow
-types belongs HERE, and that is a decision rather than an accident: litelink
-speaks Arrow and is deliberately format-agnostic, while streamcast is
-specifically about JSON websockets — so the layer that maps one onto the other
-sits on the side that knows about JSON. Putting it in litelink was considered
-and rejected: it would make a JSON codec part of the public surface of a
-library whose value is being general about what it stores.
-
-What follows from owning it is a schema declared in JSON terms rather than as a
-`pa.schema`, so a caller imports nothing but `streamcast` — and a stream could
-then publish its own schema in the greeting, which is what a polyglot
-subscriber actually wants. What makes it real work is that JSON Schema does not
-express what Arrow needs: "number" does not choose between float32 and float64,
-"integer" does not choose between int32 and int64, and litelink refuses the
-narrow types outright. The mapping needs a vocabulary of its own, and it needs
-to refuse up front what litelink would refuse at the first append.
-
-A caveat that applies either way, and is a documentation problem today:
-**JSON integers beyond 2^53 do not survive every parser.** msgspec and Python
-carry int64 exactly, but a JavaScript subscriber does not — and a nanosecond
-`event_ts` is past it. Microseconds, which is what the examples use, are not.
+**A batching consumer's cursor.** The automatic save advances as the consumer
+reads, which for a batch is ahead of what it has flushed — so such a consumer
+must drive `streamcast.Cursor` itself. A `connect(..., autosave=False)` that
+kept the load-at-connect and dropped the automatic write would close the gap;
+it is one keyword and has not been needed yet.
 
 **Compression per stream rather than per connection.** permessage-deflate keeps
 a compressor per connection, so a frame encoded once is compressed N times; the

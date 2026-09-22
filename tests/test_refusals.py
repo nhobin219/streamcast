@@ -345,3 +345,98 @@ class TestTheCursor:
 
         assert list(tmp_path.glob("*.offset")) == []
         assert list(tmp_path.glob("*.tmp")) == []
+
+
+class TestTheCursorNeverRewinds:
+    """Forward only, and the rewind does not come from message ordering."""
+
+    async def test_offsets_within_a_subscription_are_strictly_increasing(
+        self, serve, log
+    ):
+        """The premise, measured rather than assumed.
+
+        I1 and I2 make it so, across the replay/live join and under concurrent
+        publishing — which is why the guard below is not about out-of-order
+        delivery. There is none.
+        """
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(100)])
+
+            async def publish():
+                for i in range(100, 300):
+                    await stream.send(trade(i))
+                    await asyncio.sleep(0)
+
+            task = asyncio.create_task(publish())
+            async with streamcast.connect(uri, offset=1) as sub:
+                seen = [offset for offset, _ in [await sub.recv() for _ in range(300)]]
+
+            await task
+
+        assert seen == list(range(1, 301))
+
+    async def test_an_explicit_offset_cannot_clobber_the_file_backwards(
+        self, serve, log, tmp_path
+    ):
+        """Where a rewind actually comes from.
+
+        A one-off replay sharing a production cursor: `offset=` overrides what
+        is READ, and before the guard the automatic save then wrote 1, 2, 3
+        over a file that said 400. Observed exactly that.
+        """
+        cursor = tmp_path / "trades.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(50)])
+
+            async with streamcast.connect(uri, offset=0, cursor=cursor) as sub:
+                for _ in range(40):
+                    await sub.recv()
+
+            assert cursor.read_text() == "40"
+
+            # The one-off. It reads from 1 and must leave the file alone.
+            async with streamcast.connect(uri, offset=1, cursor=cursor) as sub:
+                for _ in range(5):
+                    await sub.recv()
+
+            assert cursor.read_text() == "40"
+
+            # And the next normal run still resumes from 41.
+            async with streamcast.connect(uri, cursor=cursor) as sub:
+                assert (await sub.recv())[0] == 41
+
+    async def test_a_fresh_cursor_over_an_existing_file_cannot_rewind_it_either(
+        self, tmp_path
+    ):
+        from streamcast import Cursor
+
+        path = tmp_path / "c.offset"
+        path.write_text("500")
+        cursor = Cursor(path, every=0.0)
+        assert cursor.load() == 500
+        cursor.save(10)
+        assert path.read_text() == "500"
+
+    async def test_an_explicit_commit_may_correct_it_downward(
+        self, serve, log, tmp_path
+    ):
+        """Because that is the caller stating what is durable.
+
+        A batching consumer's automatic cursor runs AHEAD of its flushed work,
+        so correcting it down is the point — and the automatic path, which
+        cannot know, never does it.
+        """
+        cursor = tmp_path / "trades.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(30)])
+
+            async with streamcast.connect(uri, offset=0, cursor=cursor) as sub:
+                for _ in range(20):
+                    await sub.recv()
+
+                sub.commit(8)
+
+            assert cursor.read_text() == "8"

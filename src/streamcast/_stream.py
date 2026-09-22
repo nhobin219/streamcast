@@ -28,15 +28,17 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Final
 
+import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _log
+from streamcast import _log, _schema
 from streamcast._errors import NotReplayable
 from streamcast._protocol import EARLIEST, encode, greeting
 from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterable
+    from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+    from os import PathLike
 
     from litelink import Row, WriteHandle
     from websockets.asyncio.server import ServerConnection
@@ -110,6 +112,8 @@ class Stream:
         "_max_backlog",
         "_max_replay",
         "_name",
+        "_owned",
+        "_shape",
         "_subscribers",
     )
 
@@ -118,9 +122,36 @@ class Stream:
         name: str = "",
         *,
         log: WriteHandle | None = None,
+        root: str | PathLike[str] | None = None,
+        schema: Mapping[str, object] | None = None,
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
+        archive: str | None = None,
+        s3: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int = MAX_REPLAY,
     ) -> None:
+        owned = None
+        if root is not None or schema is not None:
+            if log is not None:
+                msg = "pass either an open `log=` or `root=`+`schema=`, not both"
+                raise ValueError(msg)
+
+            if root is None or schema is None:
+                msg = "`root=` and `schema=` go together — one without the other"
+                raise ValueError(msg)
+
+            owned = _open_or_create(
+                root,
+                name,
+                schema=schema,
+                sort_by=sort_by,
+                config=config,
+                archive=archive,
+                s3=s3,
+            )
+            log = owned
+
         # The declared column order, read once. It fixes the key order of
         # every frame, and a replayed row must encode to the same bytes as the
         # live one it repeats (I6) — so this cannot be re-derived per message
@@ -130,6 +161,14 @@ class Stream:
         # frame takes the row's own order. Such a stream is a multicaster and
         # nothing replays from it, so there is no second encoding to match.
         self._columns = None if log is None else _log.columns(log)
+        # The shape a subscriber is told at subscribe, built once. None for a
+        # stream with no log: there are no declared columns to publish.
+        self._shape = None if log is None else _schema.from_arrow(log.schema)
+        # Closed by `aclose` only when this object created it. A log the
+        # caller opened stays the caller's — they may be sharing it, and a
+        # library that closes a handle it was lent is a library you cannot
+        # lend one to.
+        self._owned = owned
         self._name = name
         self._log = log
         self._max_backlog = max_backlog
@@ -165,8 +204,21 @@ class Stream:
 
     @property
     def log(self) -> WriteHandle | None:
-        """The litelink handle, or None. Opened and closed by the caller."""
+        """The litelink handle, or None.
+
+        Closed by `aclose` when this `Stream` created it from `root=`+`schema=`,
+        and never when it was passed in — that one is the caller's.
+        """
         return self._log
+
+    @property
+    def schema(self) -> dict[str, object] | None:
+        """The stream's shape as JSON Schema, or None without a log.
+
+        What the greeting publishes, so a subscriber in another language can
+        read the columns without this repo.
+        """
+        return None if self._shape is None else dict(self._shape)
 
     @property
     def durable(self) -> bool:
@@ -298,6 +350,13 @@ class Stream:
             return_exceptions=True,
         )
 
+        # A log this object opened is a log this object closes. One handed in
+        # is left alone: the caller may be sharing it, and closing a borrowed
+        # handle is how a library becomes one you cannot lend to.
+        if self._owned is not None:
+            self._owned.close()
+            self._owned = None
+
     # -- subscribe ---------------------------------------------------------
 
     async def serve_subscriber(
@@ -345,6 +404,7 @@ class Stream:
                     end_offset=frontier,
                     replay=replaying,
                     durable=self._log is not None,
+                    schema=self._shape,
                 )
             )
             await subscriber.run(replay)
@@ -429,6 +489,60 @@ class Stream:
             raise NotReplayable("evicted", offset=start, earliest=offset)
 
         return _prepend(first, stream)
+
+
+def _open_or_create(
+    root: str | PathLike[str],
+    name: str,
+    *,
+    schema: Mapping[str, object],
+    sort_by: Sequence[str] | None,
+    config: object | None,
+    archive: str | None,
+    s3: object | None,
+) -> WriteHandle:
+    """The log for this stream, created if it is not there yet.
+
+    The try/except every caller writes identically: a server has to `new` the
+    first time and `open` every time after, and `new` raises rather than
+    adopting an existing log. Doing it here is most of what makes `root=` +
+    `schema=` worth having.
+
+    **An existing log is checked against the declared schema**, because `open`
+    takes none of the shape — it reads it from disk — so a declaration that
+    disagreed would be silently ignored and every send would be validated
+    against columns the caller did not write down. That is the failure this
+    convenience would otherwise introduce.
+    """
+    declared = _schema.to_arrow(schema)
+    try:
+        log = litelink.open(root, name)
+    except FileNotFoundError:
+        return litelink.new(
+            root,
+            name,
+            schema=declared,
+            sort_by=sort_by,
+            config=config,  # ty: ignore[invalid-argument-type]
+            archive=archive,
+            s3=s3,  # ty: ignore[invalid-argument-type]
+        )
+
+    if list(log.schema) != list(declared):
+        # Read BEFORE closing. `log.schema` goes to the buffer's `meta` table,
+        # so building this message after `close()` raises "Cannot operate on a
+        # closed database" and buries the real complaint.
+        found = log.schema.names
+        log.close()
+        msg = (
+            f"the log at {root}/{name} has columns {found}, and this "
+            f"stream declares {declared.names}. litelink fixes a log's shape at "
+            f"creation, so an existing one cannot be re-declared — open it "
+            f"yourself and pass `log=`, or point `root=` somewhere else."
+        )
+        raise ValueError(msg)
+
+    return log
 
 
 async def _empty() -> AsyncGenerator[tuple[int, bytes], None]:

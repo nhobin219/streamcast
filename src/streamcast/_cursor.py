@@ -26,7 +26,29 @@ which is neither. So
 * saves are throttled, because an `os.replace` per message on a fast stream is
   three syscalls per message to record something that is allowed to be stale;
 * a subscription that exits with an exception saves nothing, so the message
-  whose handler raised is re-delivered.
+  whose handler raised is re-delivered;
+* and the automatic save only ever moves FORWARD.
+
+**That last one is not about message ordering.** Within a subscription offsets
+are strictly increasing by construction — `SPEC.md` I1 and I2 — and that was
+measured rather than assumed: 600 offsets across a replay/live join under
+concurrent publishing, every one exactly its predecessor plus one. The rewind
+comes from somewhere else entirely:
+
+    connect(uri, offset=0, cursor=path)   # a normal run; the file reaches 400
+    connect(uri, offset=1, cursor=path)   # a one-off replay, same file
+
+The explicit offset overrides what the file said, the automatic save then
+writes 1, 2, 3 — and a production resume point that read 400 reads 5. Observed
+exactly that before the guard existed. With it, an `offset=` overrides the
+READ and cannot corrupt the WRITE, so replaying an old range for a one-off
+leaves the consumer's place untouched.
+
+**The automatic save assumes you finish each message before asking for the
+next.** A consumer that BATCHES does not: it receives a hundred, flushes at the
+hundredth, and the automatic cursor has been running ahead of its durable work
+the whole time. Such a consumer should drive `Cursor` itself — it is exported
+for that — and save only what it has committed.
 """
 
 from __future__ import annotations
@@ -50,13 +72,17 @@ instead.
 class Cursor:
     """One integer on disk: the last offset the consumer finished with."""
 
-    __slots__ = ("_every", "_last", "_path", "_saved")
+    __slots__ = ("_every", "_highest", "_last", "_path", "_saved")
 
     def __init__(self, path: str | os.PathLike[str], every: float = SAVE_EVERY) -> None:
         self._path = Path(path)
         self._every = every
         self._last = 0.0
         self._saved: int | None = None
+        # The high-water mark the monotonic guard compares against, seeded
+        # from disk so a fresh `Cursor` over an existing file cannot rewind it
+        # either. None until `load` or the first save.
+        self._highest: int | None = None
 
     @property
     def path(self) -> Path:
@@ -76,17 +102,32 @@ class Cursor:
             return None
 
         try:
-            return int(text)
+            found = int(text)
         except ValueError:
             return None
 
-    def save(self, offset: int | None, *, force: bool = False) -> None:
+        self._highest = found if self._highest is None else max(self._highest, found)
+
+        return found
+
+    def save(
+        self, offset: int | None, *, force: bool = False, rewind: bool = False
+    ) -> None:
         """Record `offset`, at most every `every` seconds unless forced.
+
+        **Forward only unless `rewind`.** The automatic path never rewinds,
+        so an explicit `offset=` on a reconnect overrides what is read without
+        corrupting what is written. `rewind=True` is the escape hatch for
+        `Subscription.commit(offset)`, where the caller is stating what they
+        actually committed and is entitled to correct the file downward.
 
         Atomic: written beside the target and renamed over it, so a reader
         sees the old value or the new one and never half of either.
         """
         if offset is None or offset == self._saved:
+            return
+
+        if not rewind and self._highest is not None and offset <= self._highest:
             return
 
         now = time.monotonic()
@@ -102,6 +143,7 @@ class Cursor:
         # slowest thing in the consumer.
         os.replace(temporary, self._path)
         self._saved = offset
+        self._highest = offset if rewind else max(offset, self._highest or offset)
         self._last = now
 
 

@@ -56,25 +56,30 @@ before you rely on it.
 uv add git+https://github.com/nhobin219/streamcast     # not on PyPI yet
 ```
 
-**The schema is yours.** streamcast declares no columns — the log is an ordinary
-[litelink](https://github.com/nhobin219/litelink) table with whatever shape you gave it,
-which is what makes it queryable rather than a pile of frames.
+**The schema is yours**, declared in JSON Schema — the wire is JSON, so the columns are
+too. `streamcast` is the only import a durable stream needs:
 
 ```python
-import asyncio, json, litelink, pyarrow as pa, streamcast, websockets
+import asyncio, json, streamcast, websockets
 
-SCHEMA = pa.schema([                       # every field worth a column
-    pa.field("event_ts", pa.int64(), nullable=False),
-    pa.field("price", pa.float64()),
-    pa.field("amount", pa.float64()),
-    pa.field("side", pa.int64()),
-])
+SCHEMA = {                                 # every field worth a column
+    "type": "object",
+    "properties": {
+        "event_ts": {"type": "integer"},
+        "price": {"type": "number"},
+        "amount": {"type": "number"},
+        "side": {"type": "integer", "format": "int32"},
+    },
+    "required": ["event_ts", "price", "amount", "side"],
+}
 
 async def main():
-    log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
-    stream = streamcast.Stream("trades", log=log)
+    # Creates the log at data/trades, or opens it if it is already there.
+    stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
+                               sort_by=("event_ts",))
 
-    with log, await streamcast.serve(stream, "localhost", 8765):
+    # Fan-out, sealing, compaction and WAL shipping — all of it, one call.
+    async with streamcast.serve(stream, "localhost", 8765):
         async with websockets.connect("wss://ws.bitstamp.net") as feed:
             await feed.send(SUBSCRIBE)
             async for message in feed:
@@ -88,6 +93,11 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Underneath it is an ordinary [litelink](https://github.com/nhobin219/litelink) table —
+`streamcast.to_arrow(SCHEMA)` is the `pa.schema`, and `log=` takes one you opened
+yourself. The greeting publishes the schema, so a subscriber in another language reads
+the columns without this repo.
 
 Any number of consumers, on that box or another — and they receive the **row**, not a blob
 to parse:
@@ -142,14 +152,16 @@ it has to refuse.
 ```python
 import streamcast
 
-streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
-    await stream.send(row) -> int              # durable, then fan out
-    await stream.send_many(rows) -> list[int]  # ONE fsync for the group
-    stream.end_offset · stream.subscribers · stream.durable
+streamcast.Stream(name="", *, log=None, root=None, schema=None, sort_by=None,
+                  config=None, archive=None, s3=None,
+                  max_backlog=8192, max_replay=100_000)
+    await stream.send(row) -> int | None       # durable, then fan out
+    await stream.send_many(rows) -> list       # ONE fsync for the group
+    stream.end_offset · stream.subscribers · stream.durable · stream.schema
 
-streamcast.serve(streams, host, port, **websockets_kwargs) -> Server
-streamcast.connect(uri, *, offset=None, **websockets_kwargs) -> Subscription
-streamcast.EARLIEST
+streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
+streamcast.connect(uri, *, offset=<unset>, cursor=None, ...) -> Subscription
+streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
 ```
 
 Routing is by `Stream.name`: a stream named `trades` is served at `/trades`, an unnamed one
