@@ -83,7 +83,14 @@ and litestream if the log has `wal_replication` on. Both are opt-out (`maintain=
 `Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened yourself
 and does no I/O. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you want it.
 
-## Surviving a feed that changes
+What it captures is a table, queryable without streamcast:
+
+```python
+log.sql("SELECT count(*), max(price), sum(amount) FROM log").read_all()
+log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on statistics
+```
+
+### Surviving a feed that changes
 
 `send` validates the row against the schema, so a feed that changes shape breaks capture —
 a missing field, an unexpected type or a new key all raise, and that message is lost:
@@ -149,7 +156,46 @@ example above reaches through `["data"]` — so a general extractor needs per-fi
 which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
 where it already knows the feed.
 
-## Consumer
+### Serving the whole history
+
+`replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
+log: no subscribe is refused for reaching too far back, and the server reads the archive on
+the subscriber's behalf.
+
+```python
+stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+                               archive="s3://bucket/prefix",
+                               replay_archive=True, max_replay=None)
+```
+
+Every frame is still JSON over a plain WebSocket, so **a client in any language replays the
+entire stream from offset 1** — no litelink, no Iceberg reader, no object-storage
+credentials, nothing from this repo. `catch_up` exists because the default is the opposite;
+this is the setting that makes it unnecessary.
+
+It is not the default because of `max_backlog`. A replay is served before the live queue,
+which fills behind it, so a subscriber reading ten million rows out of S3 accumulates live
+messages for as long as that takes and is dropped the moment it catches up if it passed the
+backlog on the way. Size the two together, or run it on a stream quiet enough that the
+arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
+(`min(32, cpu + 4)`) for its whole scan.
+
+### Backpressure
+
+`Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
+queue insert per subscriber. A consumer that stops reading fills its own queue, hits
+`max_backlog`, and is **dropped**:
+
+```
+streamcast.TooSlow: the server dropped this subscriber for falling more than
+8192 messages behind; resume at offset 20481
+```
+
+Dropping rather than buffering bounds the server's memory. Dropping rather than evicting
+the oldest keeps what the subscriber received a contiguous prefix, so on a durable stream
+the drop costs a reconnect and nothing else.
+
+## Client
 
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
@@ -161,44 +207,7 @@ async with streamcast.connect("ws://localhost:8765/trades") as stream:
 be logged, forwarded, or appended to another stream whole. The parse happens once, at the
 publisher.
 
-The log is a table, queryable without streamcast:
-
-```python
-log.sql("SELECT count(*), max(price), sum(amount) FROM log").read_all()
-log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on statistics
-```
-
-## API
-
-```python
-streamcast.Stream(name="", *, log=None, owns_log=False,
-                  max_backlog=8192, max_replay=100_000)
-streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      archive=None, s3=None, replay_archive=False,
-                      max_backlog=8192, max_replay=100_000)   # None = no bound
-    await stream.send(row) -> int | None       # durable, then fan out
-    await stream.send_many(rows) -> list       # ONE fsync for the group
-    stream.end_offset · stream.subscribers · stream.durable · stream.schema
-
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
-streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
-                   catch_up=False, ...) -> Subscription
-streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
-```
-
-Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
-`serve([trades, quotes])` serves both on one port.
-
-Two differences from `websockets`, which otherwise passes every keyword through:
-
-- **Iterating yields `(offset, msg)`**, not `message`. The offset is what makes a
-  reconnect a resume rather than a restart.
-- **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
-  Publishing is `Stream.send`, in the server's own process.
-
-Full reference in [`docs/API.md`](docs/API.md).
-
-## Resuming
+### Resuming
 
 The server records its frontier when a subscriber attaches, replays `[requested, frontier)`
 from the log, then switches it to the live queue. Everything below the frontier is already
@@ -238,44 +247,35 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
 
-## Serving the whole history
-
-`replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
-log: no subscribe is refused for reaching too far back, and the server reads the archive on
-the subscriber's behalf.
+## API
 
 ```python
-stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
-                               archive="s3://bucket/prefix",
-                               replay_archive=True, max_replay=None)
+streamcast.Stream(name="", *, log=None, owns_log=False,
+                  max_backlog=8192, max_replay=100_000)
+streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
+                      archive=None, s3=None, replay_archive=False,
+                      max_backlog=8192, max_replay=100_000)   # None = no bound
+    await stream.send(row) -> int | None       # durable, then fan out
+    await stream.send_many(rows) -> list       # ONE fsync for the group
+    stream.end_offset · stream.subscribers · stream.durable · stream.schema
+
+streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
+streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
+                   catch_up=False, ...) -> Subscription
+streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
 ```
 
-Every frame is still JSON over a plain WebSocket, so **a client in any language replays the
-entire stream from offset 1** — no litelink, no Iceberg reader, no object-storage
-credentials, nothing from this repo. `catch_up` exists because the default is the opposite;
-this is the setting that makes it unnecessary.
+Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
+`serve([trades, quotes])` serves both on one port.
 
-It is not the default because of `max_backlog`. A replay is served before the live queue,
-which fills behind it, so a subscriber reading ten million rows out of S3 accumulates live
-messages for as long as that takes and is dropped the moment it catches up if it passed the
-backlog on the way. Size the two together, or run it on a stream quiet enough that the
-arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
-(`min(32, cpu + 4)`) for its whole scan.
+Two differences from `websockets`, which otherwise passes every keyword through:
 
-## Backpressure
+- **Iterating yields `(offset, msg)`**, not `message`. The offset is what makes a
+  reconnect a resume rather than a restart.
+- **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
+  Publishing is `Stream.send`, in the server's own process.
 
-`Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
-queue insert per subscriber. A consumer that stops reading fills its own queue, hits
-`max_backlog`, and is **dropped**:
-
-```
-streamcast.TooSlow: the server dropped this subscriber for falling more than
-8192 messages behind; resume at offset 20481
-```
-
-Dropping rather than buffering bounds the server's memory. Dropping rather than evicting
-the oldest keeps what the subscriber received a contiguous prefix, so on a durable stream
-the drop costs a reconnect and nothing else.
+Full reference in [`docs/API.md`](docs/API.md).
 
 ## The wire
 
