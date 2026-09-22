@@ -32,7 +32,9 @@ TRADES = {
         "price": {"type": "number"},
         "side": {"type": "integer", "format": "int32"},
         "live": {"type": "boolean"},
-        "tag": {"type": "string"},
+        # Nullable through its TYPE, not merely by being left out of
+        # `required` — see `TestNullability`, which is why.
+        "tag": {"type": ["string", "null"]},
     },
     "required": ["event_ts", "price", "side", "live"],
 }
@@ -63,7 +65,10 @@ class TestTypes:
         where a feed that would have fitted one costs four bytes a row.
         """
         schema = to_arrow(
-            {"properties": {"i": {"type": "integer"}, "n": {"type": "number"}}}
+            {
+                "properties": {"i": {"type": "integer"}, "n": {"type": "number"}},
+                "required": ["i", "n"],
+            }
         )
         assert schema.field("i").type == pa.int64()
         assert schema.field("n").type == pa.float64()
@@ -111,11 +116,13 @@ class TestRefusals:
     )
     def test_what_litelink_cannot_store_is_refused_here(self, spec, match):
         with pytest.raises(TypeError, match=match):
-            to_arrow({"properties": {"c": spec}})
+            to_arrow({"properties": {"c": spec}, "required": ["c"]})
 
     def test_the_message_names_the_column(self):
         with pytest.raises(TypeError, match="column 'price'"):
-            to_arrow({"properties": {"price": {"type": "array"}}})
+            to_arrow(
+                {"properties": {"price": {"type": "array"}}, "required": ["price"]}
+            )
 
     @pytest.mark.parametrize(
         ("schema", "match"),
@@ -164,7 +171,7 @@ class TestRefusals:
             {"type": "number", "format": "float"},
             {"type": "string"},
         ):
-            field = to_arrow({"properties": {"c": spec}}).field("c")
+            field = to_arrow({"properties": {"c": spec}, "required": ["c"]}).field("c")
             column_type(field.type)  # raises if litelink would refuse it
 
 
@@ -385,3 +392,110 @@ class TestRequiredIsEnforced:
         assert msg["event_ts"] == 7
 
         await stream.aclose()
+
+
+class TestNullability:
+    """`required` is presence; `"null"` in the type is the value.
+
+    These assert the mapping against a REAL JSON Schema validator rather than
+    against a reading of the specification — the distinction is subtle, it is
+    someone else's spec, and getting it backwards would mean streamcast
+    accepting rows its own published schema rejects.
+    """
+
+    @staticmethod
+    def _json_allows_null(schema: dict) -> bool:
+        from jsonschema import Draft202012Validator
+
+        return not list(Draft202012Validator(schema).iter_errors({"c": None}))
+
+    @staticmethod
+    def _json_allows_absence(schema: dict) -> bool:
+        from jsonschema import Draft202012Validator
+
+        return not list(Draft202012Validator(schema).iter_errors({}))
+
+    def test_required_is_about_presence_not_nullability(self):
+        # The premise, straight from the validator: a null is rejected by the
+        # `type` keyword, an absence by `required`. They are different rules.
+        from jsonschema import Draft202012Validator
+
+        schema = {
+            "type": "object",
+            "properties": {"c": {"type": "string"}},
+            "required": ["c"],
+        }
+        assert [
+            e.validator for e in Draft202012Validator(schema).iter_errors({"c": None})
+        ] == ["type"]
+        assert [e.validator for e in Draft202012Validator(schema).iter_errors({})] == [
+            "required"
+        ]
+
+    @pytest.mark.parametrize(
+        ("spec", "required"),
+        [
+            ({"type": "string"}, True),
+            ({"type": ["string", "null"]}, True),
+            ({"type": ["string", "null"]}, False),
+        ],
+    )
+    def test_arrow_nullability_matches_what_json_schema_allows(self, spec, required):
+        schema = {"type": "object", "properties": {"c": spec}}
+        if required:
+            schema["required"] = ["c"]
+
+        assert to_arrow(schema).field("c").nullable == self._json_allows_null(schema)
+
+    def test_optional_with_a_non_null_type_is_refused(self):
+        """The one case Arrow cannot express, refused rather than widened.
+
+        JSON Schema means "may be absent, but never null when present". A
+        stream has no "absent": a row that omits a column stores NULL. So
+        accepting it would make streamcast take rows the declared schema
+        rejects — a schema meaning something other than what it says.
+        """
+        schema = {"type": "object", "properties": {"c": {"type": "string"}}}
+        assert self._json_allows_absence(schema)
+        assert not self._json_allows_null(schema)
+
+        with pytest.raises(TypeError, match="optional with a non-null type"):
+            to_arrow(schema)
+
+    def test_the_message_names_both_fixes(self):
+        with pytest.raises(TypeError) as raised:
+            to_arrow({"properties": {"tag": {"type": "string"}}})
+
+        assert "'required'" in str(raised.value)
+        assert '"null"' in str(raised.value)
+
+    def test_a_nullable_column_is_published_as_a_union(self):
+        """Not merely left out of `required`.
+
+        A subscriber validating against the published schema needs to know
+        the value may be null, and `required` does not say that.
+        """
+        published = properties(from_arrow(to_arrow(TRADES)))
+        assert published["tag"] == {"type": ["string", "null"]}
+        published_required = from_arrow(to_arrow(TRADES))["required"]
+        assert isinstance(published_required, list)
+        assert "tag" not in published_required
+
+    def test_everything_published_is_something_that_would_be_accepted(self):
+        # The closure property the refusal buys: no published schema can be
+        # one `to_arrow` would reject.
+        published = from_arrow(to_arrow(TRADES))
+        assert to_arrow(published) == to_arrow(TRADES)
+
+    def test_the_published_schema_validates_a_real_row(self):
+        from jsonschema import Draft202012Validator
+
+        published = from_arrow(to_arrow(TRADES))
+        validator = Draft202012Validator(published)
+        assert not list(
+            validator.iter_errors(
+                {"event_ts": 1, "price": 1.0, "side": 0, "live": True, "tag": None}
+            )
+        )
+        # And rejects one missing a required column, as the stream does.
+        assert list(validator.iter_errors({"price": 1.0}))

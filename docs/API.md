@@ -464,7 +464,7 @@ SCHEMA = {
         "price": {"type": "number"},                       # float64
         "amount": {"type": "number"},
         "side": {"type": "integer", "format": "int32"},    # narrower, on purpose
-        "tag": {"type": "string"},                         # not required -> nullable
+        "tag": {"type": ["string", "null"]},               # nullable
     },
     "required": ["event_ts", "price", "amount", "side"],
 }
@@ -493,7 +493,41 @@ would otherwise be ignored and every send validated against columns you never wr
 **`format` carries the width, because JSON Schema does not.** `integer` does not choose
 between int32 and int64; left out, the wider of each pair wins — a feed that overflows an
 int32 is a silent wrong answer, while one that would have fitted costs four bytes a row.
-`required` decides nullability, and `{"type": ["integer", "null"]}` is the other spelling.
+
+### `required` is presence; `"null"` in a type is the value
+
+These are different rules, and conflating them is the easy mistake. Verified against a
+real validator (`tests/test_schema.py` asserts this table against `jsonschema`, and CI
+runs it):
+
+| schema | `{"c":"x"}` | `{"c":null}` | `{}` |
+|---|---|---|---|
+| required + `"string"` | valid | **invalid** — by `type` | **invalid** — by `required` |
+| required + `["string","null"]` | valid | valid | invalid — by `required` |
+| optional + `"string"` | valid | **invalid** — by `type` | valid |
+| optional + `["string","null"]` | valid | valid | valid |
+
+Arrow has two states, not four — a column is nullable or it is not, and there is no
+"absent", because **a row that omits a column stores NULL**. So:
+
+```
+nullable = (not in `required`) or ("null" in its type)
+```
+
+Three of those rows map exactly. The fourth — **optional with a non-null type — is
+refused**, not widened. It means "may be absent, but never null when present", which a
+stream cannot express, and accepting it would make streamcast take rows your own declared
+schema rejects. The message names both fixes: mark it `required`, or add `"null"` to its
+type.
+
+So the rule is: **every property is either required with a plain type, or nullable through
+its type.** And everything the greeting publishes is something `to_arrow` would accept,
+because a nullable column is published as `["string","null"]` rather than merely left out
+of `required` — a subscriber validating against it needs to know the value may be null.
+
+`required` *is* enforced, one library down: it becomes `nullable=False` and
+`litelink.append` refuses both a missing column and an explicit `None`, telling them
+apart.
 
 Anything litelink cannot store is refused **here**, where the message names JSON Schema's
 vocabulary rather than Arrow's: nested objects, arrays, `date-time` (store epoch

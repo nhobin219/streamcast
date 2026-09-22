@@ -468,8 +468,19 @@ would have fitted costs four bytes a row.
 | `number` | — / `double` / `float` | `float64` / `float64` / `float32` |
 | `string` | — | `string` |
 
-`required` decides nullability, and `{"type": ["integer", "null"]}` is the
-other spelling of the same thing.
+**`required` is about presence; `"null"` in a type is about the value.**
+Different rules, verified against a real validator rather than a reading of
+the spec — a null is rejected by `type`, an absence by `required`. Arrow has
+two states and no "absent", since a row omitting a column stores NULL, so:
+
+    nullable = (not in `required`) or ("null" in its type)
+
+Three of the four combinations map exactly. The fourth — optional with a
+non-null type — means "may be absent, but never null when present", which a
+stream cannot express, and is **refused rather than widened**: accepting it
+would make streamcast take rows its own declared schema rejects. The rule that
+leaves is that every property is either required with a plain type, or nullable
+through its type, and every schema published is one that would be accepted.
 
 **It refuses up front what litelink would refuse at the first append** —
 nested objects, arrays, `date-time`, `byte`, and the narrow integer widths

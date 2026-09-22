@@ -82,6 +82,12 @@ dev = [
     # Its absence would skip the whole tier silently, which is how a tier goes
     # unchecked; `STREAMCAST_REQUIRE_S3` turns that skip into a failure.
     "s3fs>=2024.6.0",
+    # A TEST dependency. `_schema` claims that `required` is about presence
+    # while `"null"` in a type is about the value — which is a claim about
+    # someone else's specification, and the kind this repo has been wrong
+    # about before. `test_schema.py` asserts the mapping against a real
+    # validator rather than against my reading of the spec.
+    "jsonschema>=4.20",
     "ruff>=0.15.0",
     "ty>=0.0.15",
 ]

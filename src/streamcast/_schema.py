@@ -23,6 +23,34 @@ Schema already reserves for it (`int32`, `int64`, `float`, `double`). Left out,
 the wider of each pair is chosen: a feed that overflows an int32 is a silent
 wrong answer, and a feed that would have fitted one costs four bytes a row.
 
+**`required` is about PRESENCE, not nullability**, and conflating the two is
+the easy mistake here. Checked against a real validator rather than believed —
+`tests/test_schema.py` asserts this table against `jsonschema`, which rejects
+a null by the `type` keyword and an absence by `required`:
+
+    schema                      {"c": "x"}   {"c": null}   {}
+    required + "string"         valid        INVALID type  INVALID required
+    required + ["string","null"] valid       valid         INVALID required
+    optional + "string"         valid        INVALID type  valid
+    optional + ["string","null"] valid       valid         valid
+
+Arrow has two states, not four: a column is nullable or it is not, and there
+is no "absent" — a row that omits a column stores NULL for it. So
+
+    nullable = (not in `required`) or ("null" in its type)
+
+and three of those four rows map exactly. The fourth, **optional with a
+non-null type, is refused** rather than widened. It means "may be absent, but
+never null when present", which this cannot express: an absent key IS a null
+here. Accepting it would make streamcast take rows the declared schema
+rejects, and a schema that means something other than what it says is the
+failure this library has already been bitten by. The message names both fixes
+— mark it required, or add `"null"` to its type.
+
+The consequence is a clean rule: **every property is either required with a
+plain type, or nullable through its type.** And every schema this publishes is
+one it would accept, because `from_arrow` emits the null union.
+
 **It refuses up front what litelink would refuse at the first append.** A
 schema with a `date-time` or a nested object is rejected here, where the
 message can name JSON Schema's own vocabulary, rather than inside `litelink.new`
@@ -61,6 +89,10 @@ _TO_ARROW: Final[dict[tuple[str, str | None], pa.DataType]] = {
 # explicitly on the way out, so a schema that round-trips is a schema whose
 # reader is told which one it got. An `integer` published without a format
 # would be read back as int64 and be wrong for an int32 column.
+#
+# A nullable column is published as a UNION with "null", not merely left out
+# of `required`: a subscriber validating against this needs to know the value
+# may be null, and `required` does not say that (see the module docstring).
 _FROM_ARROW: Final[list[tuple[object, dict[str, str]]]] = [
     (pa.types.is_boolean, {"type": "boolean"}),
     (pa.types.is_int32, {"type": "integer", "format": "int32"}),
@@ -96,10 +128,10 @@ def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field
         raise TypeError(msg)
 
     declared = spec.get("type")
+    # The two signals are separate: `required` is about the KEY being present,
+    # and `"null"` in the type is about the VALUE. Arrow has one bit for both.
+    accepts_null = isinstance(declared, list) and "null" in declared
     if isinstance(declared, list):
-        # `["integer", "null"]` is JSON Schema's other way of saying nullable,
-        # and it means the same thing as leaving the name out of `required`.
-        # Accepted, because a schema written by a tool will use it.
         rest = [entry for entry in declared if entry != "null"]
         if len(rest) != 1:
             msg = (
@@ -108,7 +140,7 @@ def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field
             )
             raise TypeError(msg)
 
-        declared, required = rest[0], False
+        declared = rest[0]
 
     if not isinstance(declared, str):
         msg = f"column {name!r}: missing a 'type'"
@@ -134,7 +166,24 @@ def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field
         )
         raise TypeError(msg) from None
 
-    return pa.field(name, arrow, nullable=not required)
+    if not required and not accepts_null:
+        # "May be absent, but never null when present" — which this cannot
+        # express, because an absent key IS a null here. Refused rather than
+        # widened, so streamcast never accepts a row its own declared schema
+        # would reject. See the module docstring's table.
+        #
+        # Checked LAST, after the type is known good: a `{"type": "array"}`
+        # that is also optional should be told arrays are not a column, which
+        # is the more specific complaint and the one worth fixing first.
+        msg = (
+            f"column {name!r} is optional with a non-null type, which a stream "
+            f"cannot express: a row that omits it stores NULL. Either add it to "
+            f"'required', or make it nullable with "
+            f'{{"type": [{declared!r}, "null"]}}.'
+        )
+        raise TypeError(msg)
+
+    return pa.field(name, arrow, nullable=accepts_null)
 
 
 def to_arrow(schema: Mapping[str, object]) -> pa.Schema:
@@ -182,13 +231,22 @@ def from_arrow(schema: pa.Schema) -> dict[str, object]:
     Widths are stated explicitly — see `_FROM_ARROW` — so what a subscriber
     reads back is what the column actually is, and so that `to_arrow` of this
     is the schema it started from.
+
+    A nullable column is published as `["string", "null"]` rather than merely
+    omitted from `required`, because `required` is about presence and a
+    subscriber validating against this needs to know the value may be null.
+    That also makes everything published here something `to_arrow` accepts.
     """
     properties: dict[str, object] = {}
     required: list[str] = []
     for field in schema:
         for matches, spec in _FROM_ARROW:
             if matches(field.type):  # ty: ignore[call-non-callable]
-                properties[field.name] = dict(spec)
+                published: dict[str, object] = dict(spec)
+                if field.nullable:
+                    published["type"] = [spec["type"], "null"]
+
+                properties[field.name] = published
                 break
 
         else:
