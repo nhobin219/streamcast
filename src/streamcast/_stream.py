@@ -32,13 +32,13 @@ from websockets.frames import CloseCode
 
 from streamcast import _log
 from streamcast._errors import NotReplayable
-from streamcast._protocol import EARLIEST, encode, greeting, kind_of
+from streamcast._protocol import EARLIEST, encode, greeting
 from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
 
-    from litelink import WriteHandle
+    from litelink import Row, WriteHandle
     from websockets.asyncio.server import ServerConnection
 
 MAX_BACKLOG: Final = 8_192
@@ -79,10 +79,17 @@ class Stream:
     holds nothing open — including the log, which the caller opened and the
     caller closes.
 
+        log = litelink.new("data", "trades", schema=schema)   # YOUR columns
         stream = streamcast.Stream("trades", log=log)
+
         async with streamcast.serve(stream, "localhost", 8765):
-            async for message in upstream:
-                await stream.send(message)
+            async for frame in upstream:
+                await stream.send(parse(frame))      # a row, not a blob
+
+    **The schema is yours.** streamcast declares no columns; the log is an
+    ordinary litelink table with whatever shape you gave it, so every column
+    prunes, compresses and is queryable from any Iceberg engine. A row goes in
+    and the same row comes back out, live or replayed.
 
     **`log` is what separates a multicaster from a tickerplant** — kx's term
     for a process that captures a feed, logs it, and publishes it to registered
@@ -96,6 +103,7 @@ class Stream:
     """
 
     __slots__ = (
+        "_columns",
         "_end_offset",
         "_log",
         "_max_backlog",
@@ -112,13 +120,15 @@ class Stream:
         max_backlog: int = MAX_BACKLOG,
         max_replay: int = MAX_REPLAY,
     ) -> None:
-        if log is not None:
-            # At construction, not at the first send. The failure this
-            # prevents is a broker that starts fine, brings up its upstream
-            # subscription, and raises inside `append` on the first message —
-            # with the feed live and nowhere to put it.
-            _log.validate(log)
-
+        # The declared column order, read once. It fixes the key order of
+        # every frame, and a replayed row must encode to the same bytes as the
+        # live one it repeats (I6) — so this cannot be re-derived per message
+        # from whatever keys a caller's dict happened to carry.
+        #
+        # None for a stream with no log: there is no declared schema, so a
+        # frame takes the row's own order. Such a stream is a multicaster and
+        # nothing replays from it, so there is no second encoding to match.
+        self._columns = None if log is None else _log.columns(log)
         self._name = name
         self._log = log
         self._max_backlog = max_backlog
@@ -173,8 +183,13 @@ class Stream:
 
     # -- publish -----------------------------------------------------------
 
-    async def send(self, message: str | bytes) -> int:
-        """Make one message durable, then fan it out. Returns its offset.
+    async def send(self, row: Row) -> int:
+        """Make one row durable, then fan it out. Returns its offset.
+
+        `row` is a mapping over the log's declared columns — litelink's `Row`,
+        the same thing `litelink.append` takes. litelink validates it against
+        the schema, so a wrong type or an unknown column raises here with a
+        message naming the column, and nothing is broadcast.
 
         **Durable first.** With a log attached this returns only once the row
         is committed — one SQLite transaction at `synchronous=FULL`, which
@@ -188,6 +203,11 @@ class Stream:
         subscriber. `async` is the signature `websockets` has, and it is what
         leaves room to move the append off the loop without breaking callers
         — see the module docstring for what that move would have to preserve.
+
+        The frame is the row as JSON text, encoded once and shared by every
+        subscriber (I6) — measured at 0.285 us for a six-column row. The key
+        order comes from the log's schema rather than from this dict, which is
+        what makes a replay of this row byte-identical to what goes out now.
 
         Throughput on the durable path is one fsync per call. `send_many` is
         the lever: it commits a whole group in one transaction.
@@ -203,53 +223,44 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
-        kind = kind_of(message)
         if self._log is not None:
-            offset = self._log.append(_log.row(kind, message))
+            offset = self._log.append(row)
             self._end_offset = offset + 1
         else:
             offset = self._end_offset
             self._end_offset = offset + 1
 
-        self._fan_out(encode(offset, kind, message))
+        self._fan_out(encode(offset, row, self._columns))
 
         return offset
 
-    async def send_many(self, messages: Iterable[str | bytes]) -> list[int]:
-        """Make a group durable in ONE transaction, then fan each out.
+    async def send_many(self, rows: Iterable[Row]) -> list[int]:
+        """Make a group of rows durable in ONE transaction, then fan each out.
 
         The write-throughput lever, and it is a call-site choice rather than a
         setting: one fsync for the group instead of one per message. litelink
         measures the same difference on `extend`.
 
-        Each message still gets its own offset and its own frame, so a
-        subscriber cannot tell a group from the same messages sent one at a
-        time. That is deliberate — batching is the broker's durability
-        decision, and making it visible on the wire would make every
-        subscriber's parser depend on how the publisher happened to poll. A
-        batch that should ARRIVE as one unit is one message: encode it
-        yourself and call `send`.
+        Each row still gets its own offset and its own frame, so a subscriber
+        cannot tell a group from the same rows sent one at a time. That is
+        deliberate — batching is the broker's durability decision, and making
+        it visible on the wire would make every subscriber's parser depend on
+        how the publisher happened to poll.
         """
-        batch = list(messages)
+        batch = list(rows)
         if not batch:
             return []
 
-        kinds = [kind_of(message) for message in batch]
         if self._log is not None:
-            offsets = self._log.extend(
-                [
-                    _log.row(kind, message)
-                    for kind, message in zip(kinds, batch, strict=True)
-                ]
-            )
+            offsets = self._log.extend(batch)
             self._end_offset = offsets[-1] + 1
         else:
             first = self._end_offset
             offsets = list(range(first, first + len(batch)))
             self._end_offset = first + len(batch)
 
-        for offset, kind, message in zip(offsets, kinds, batch, strict=True):
-            self._fan_out(encode(offset, kind, message))
+        for offset, row in zip(offsets, batch, strict=True):
+            self._fan_out(encode(offset, row, self._columns))
 
         return offsets
 

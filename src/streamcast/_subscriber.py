@@ -33,7 +33,7 @@ import asyncio
 from typing import TYPE_CHECKING, Final
 
 from streamcast._errors import Close
-from streamcast._protocol import frame_offset, refusal
+from streamcast._protocol import refusal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -60,7 +60,7 @@ send path to say what the queue already guarantees.
 class Subscriber:
     """A connection, its backlog, and the offset it has actually been sent."""
 
-    __slots__ = ("_backlog", "_connection", "_dropped", "_offset", "_queue")
+    __slots__ = ("_backlog", "_connection", "_dropped", "_queue")
 
     def __init__(self, connection: ServerConnection, *, max_backlog: int) -> None:
         self._connection = connection
@@ -75,12 +75,6 @@ class Subscriber:
             maxsize=max_backlog + 1
         )
         self._dropped = False
-        self._offset: int | None = None
-
-    @property
-    def offset(self) -> int | None:
-        """The last offset actually sent, or None before the first."""
-        return self._offset
 
     def offer(self, frame: bytes) -> None:
         """Queue one frame. Never blocks, never awaits, never raises.
@@ -157,9 +151,8 @@ class Subscriber:
         work. See `Stream` for the arithmetic the defaults are chosen by.
         """
         if replay is not None:
-            async for offset, frame in replay:
+            async for _offset, frame in replay:
                 await self._connection.send(frame)
-                self._offset = offset
 
         while True:
             frame = await self._queue.get()
@@ -170,7 +163,6 @@ class Subscriber:
                 return
 
             await self._connection.send(frame)
-            self._offset = frame_offset(frame)
 
 
 __all__ = ["Subscriber"]

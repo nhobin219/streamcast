@@ -15,8 +15,21 @@ just check              # lint + format-check + typecheck + tests. What CI runs.
 just test-fast          # skips the backpressure tier, for an inner loop
 just test tests/test_resume.py -k partition
 just bench              # fan-out and publish throughput
+just bench-replay       # replay cost, and which layer it is spent in
 just demo               # a live public feed through a broker
 ```
+
+## The schema is the caller's
+
+streamcast declares no columns. The log is an ordinary litelink table with
+whatever shape the application gave it, and `send` takes a **row**.
+
+An earlier design owned a fixed `(recv_ts, kind, payload)` schema and stored
+each upstream frame whole. That threw away pruning, compression, a queryable
+archive and a cheap replay — everything the table was for — and litelink's own
+example says so in as many words: *"the reason to declare a schema rather than
+store the frame whole."* `docs/SPEC.md` §5 records why, because the mistake
+defended itself in a docstring and could be made again.
 
 ## What this library must never do
 
@@ -35,6 +48,9 @@ possible is wrong even if every test passes.
    at the wrong place is a hole at the join. Refuse with 4416 instead.
 5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8
    before offset 7.
+6. **Let a replayed frame differ from the live one it repeats.** Both project through the
+   log's declared column order, so the bytes match. `_log.replay` checks the batch's column
+   order against what it projected for exactly this reason.
 
 ## The two invariants that fail silently
 
@@ -77,7 +93,7 @@ src/streamcast/
     _errors.py      the refusal vocabulary and the close codes that carry it
     _stream.py      Stream — offsets, fan-out, the subscribe partition
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
-    _log.py         the litelink tier: SCHEMA, rows, replay, earliest
+    _log.py         the litelink tier: columns, replay, earliest
     _server.py      serve — routing and close codes. Thin on purpose.
     _client.py      connect, Subscription, and close code → exception
 ```

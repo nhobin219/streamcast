@@ -29,9 +29,10 @@ exported because they appear in what you catch and inspect.
 `serve` and `connect` have the same shapes and pass every keyword through. Two things
 differ:
 
-**Iterating a subscription yields `(offset, message)`**, not `message`. The offset is
-the only thing that makes a reconnect a resume rather than a restart, and a subscriber
-that has to ask for it separately will forget to.
+**Iterating a subscription yields `(offset, row)`**, not `message`. The offset is the
+only thing that makes a reconnect a resume rather than a restart, and a subscriber that
+has to ask for it separately will forget to. `row` is a `dict` over your declared
+columns.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
 because publishing is `Stream.send` in the broker's own process. Nothing inherits a
@@ -57,12 +58,12 @@ restart, so `?offset=` is refused outright rather than appearing to work until t
 subscriber needs it. With it, every message is durable *before* any subscriber sees it.
 
 ```python
-log = litelink.new("data", "trades", schema=streamcast.SCHEMA)   # or litelink.open
+log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
 stream = streamcast.Stream("trades", log=log)
 ```
 
-The log must be created with `streamcast.SCHEMA` and nothing else; any other shape is
-refused here rather than at the first message. The `Stream` does not close the log — you
+**Any shape of log works** — the schema is yours, and `Stream` reads its column order once
+at construction to fix the key order on the wire. The `Stream` does not close the log: you
 opened it, you close it.
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
@@ -72,30 +73,33 @@ while live messages queue behind it.
 ### Publishing
 
 ```python
-await stream.send(message: str | bytes) -> int
-await stream.send_many(messages: Iterable[str | bytes]) -> list[int]
+await stream.send(row: Row) -> int                      # Row = Mapping[str, object]
+await stream.send_many(rows: Iterable[Row]) -> list[int]
 ```
 
-Both return the assigned offsets, and with a log attached **the messages are durable
-when the call returns** — one SQLite transaction at `synchronous=FULL`.
+`Row` is litelink's — the same mapping `litelink.append` takes, over your declared
+columns. litelink validates it, so a wrong type or an unknown column raises here naming
+the column, and **nothing is broadcast**.
+
+Both return the assigned offsets, and with a log attached **the rows are durable when the
+call returns** — one SQLite transaction at `synchronous=FULL`.
 
 `send_many` commits the whole group in one transaction: *measured*, 1,707 us per message
 one at a time against 10 us at a group of 100. That call size is the write-throughput
 lever and it is a call-site choice; no setting tunes it.
 
-Each message in a group still gets its own offset and its own frame, so a subscriber
-cannot tell a group from the same messages sent singly. That is deliberate — batching is
-the broker's durability decision, and making it visible on the wire would make every
-subscriber's parser depend on how the publisher happened to poll. A batch that should
-*arrive* as one unit is one message: encode it yourself and call `send`.
+Each row in a group still gets its own offset and its own frame, so a subscriber cannot
+tell a group from the same rows sent singly. That is deliberate — batching is the broker's
+durability decision, and making it visible on the wire would make every subscriber's
+parser depend on how the publisher happened to poll.
 
 **Neither awaits a consumer**, and today neither awaits at all. See `SPEC.md` §3 for why
 that is a correctness property rather than a performance note — and for the one hazard it
 creates: a publish loop with no `await` of its own starves every subscriber.
 
-`bytearray` and `memoryview` are refused. `encode` concatenates a header onto the
-payload and `bytes.__add__` takes neither, so a buffer would be copied here anyway;
-`bytes(view)` at the call site at least shows the copy.
+The frame is the row as JSON text, encoded once with msgspec and shared by every
+subscriber (I6). **Key order comes from the log's schema, not from your dict**, which is
+what makes a replay of a row byte-identical to what went out live.
 
 ### Observing
 
@@ -155,7 +159,7 @@ Awaitable and an async context manager, like `websockets.connect`.
 
 ```python
 async with streamcast.connect("ws://broker:8765/trades", offset=123) as stream:
-    async for offset, message in stream:
+    async for offset, row in stream:
         ...
 ```
 
@@ -179,8 +183,8 @@ some `recv`.
 ### `Subscription`
 
 ```python
-await sub.recv() -> tuple[int, str | bytes]
-async for offset, message in sub: ...
+await sub.recv() -> tuple[int, dict[str, object]]
+async for offset, row in sub: ...
 await sub.close(code=1000, reason="") -> None
 
 sub.offset -> int | None          # the last offset RECEIVED — the resume cursor
@@ -205,8 +209,8 @@ offset = None
 while True:
     try:
         async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, message in stream:
-                handle(message)
+            async for offset, row in stream:
+                handle(row)
 
     except (ConnectionClosed, OSError, streamcast.TooSlow):
         offset = None if offset is None else offset + 1
@@ -243,28 +247,67 @@ StreamcastError
 `Close` is the code enum: `BAD_REQUEST` 4400, `NO_SUCH_STREAM` 4404, `NOT_REPLAYABLE`
 4416, `TOO_SLOW` 4429.
 
-## `SCHEMA`
+## The schema is yours
+
+streamcast declares no columns. Create the log the way litelink's own example does — every
+field the feed sends that is worth a column gets one:
 
 ```python
-pa.schema([
-    pa.field("recv_ts", pa.int64(),  nullable=False),   # broker clock, microseconds
-    pa.field("kind",    pa.int32(),  nullable=False),   # 0 text, 1 binary
-    pa.field("payload", pa.string(), nullable=False),   # text as-is; binary base64
+SCHEMA = pa.schema([
+    pa.field("event_ts", pa.int64(), nullable=False),   # microseconds, as the feed sends
+    pa.field("price", pa.float64()),
+    pa.field("amount", pa.float64()),
+    pa.field("side", pa.int64()),
 ])
+
+log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
 ```
 
-Pass it to `litelink.new` and pass nothing else — no `sort_by`, because litelink's
-default is offset order and every read streamcast makes is an offset range.
+**`sort_by` is a read-shape decision, not a knob** — only a leading column prunes, and
+changing it later rewrites every file. litelink's default is offset order, which is right
+when every query you will run is an offset range.
 
-A log written by streamcast is an ordinary litelink log. Everything litelink offers
-applies to it unchanged: `scan`, `sql`, archiving to S3, WAL replication, and reading it
-from another machine with `litelink.snapshot`. Reading the log is how you go further back
-than `max_replay`.
+That is what puts litelink underneath this rather than an append-only file:
+
+| | |
+|---|---|
+| **pruning** | Iceberg statistics per column, so a bounded query never reads the rest |
+| **compression** | a `price` column of float64 compresses against its neighbours |
+| **the archive** | any Iceberg engine reads it as a table, with nothing installed |
+| **the replay** | rows come off Arrow as columns, not as strings to re-parse |
+
+A log written by streamcast is an ordinary litelink log, so everything litelink offers
+applies unchanged: `scan`, `sql`, archiving to S3, WAL replication, and reading it from
+another machine with `litelink.snapshot`. Reading the log directly is how you go further
+back than `max_replay`.
 
 ```python
 with litelink.open("data", "trades", read_only=True) as reader:
-    reader.sql("SELECT count(*), max(litelink_offset) FROM log").read_all()
+    reader.sql("SELECT count(*), max(price) FROM log").read_all()
 ```
 
 Note litelink's own caution about opening a reader in the writer's process — a separate
 process is the supported shape.
+
+**A frame that is not a row has nowhere to go.** Subscription acks, heartbeats and
+reconnect notices are dropped by the feed handler, which is the same division of labour a
+kdb tickerplant has: the feed handler parses, the plant stores typed rows.
+
+## On the wire
+
+Every frame is JSON text. The greeting, then one object per row:
+
+```
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
+```
+
+No binary header, no length prefix, no payload kind. `wscat ws://broker:8765/trades?offset=0`
+is a working subscriber, and a consumer in any language needs a JSON parser rather than
+this document.
+
+Encoding is [msgspec](https://github.com/jcrist/msgspec), which sits on the hot path in
+both directions — every publish encodes a row, every replayed row re-encodes one. Measured
+on a six-column trade row: **0.285 us against 5.815 us** for stdlib `json` to encode
+(20.4x), and 0.386 against 4.989 to decode (12.9x). The ratio narrows as one large string
+column comes to dominate a frame; `just bench` prints both for your own shape.

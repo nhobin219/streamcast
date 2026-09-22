@@ -11,6 +11,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 import litelink
+import pyarrow as pa
 import pytest
 
 import streamcast
@@ -25,9 +26,41 @@ if TYPE_CHECKING:
     from streamcast import Stream
 
 
+SCHEMA = pa.schema(
+    [
+        pa.field("event_ts", pa.int64(), nullable=False),
+        pa.field("price", pa.float64()),
+        pa.field("amount", pa.float64()),
+        # 0 buy, 1 sell, as the feed spells it.
+        pa.field("side", pa.int64()),
+        pa.field("tag", pa.string()),
+    ]
+)
+"""A stream's columns — the CALLER's, which is the whole point.
+
+streamcast declares none of this. `tag` is nullable and the helper below
+leaves it out half the time, because a column a caller omits has to survive
+the round trip as NULL and come back the same way live or replayed.
+"""
+
+
+def trade(i: int) -> dict:
+    """One row. `i` is recoverable from it, so ordering is checkable."""
+    row = {
+        "event_ts": 1_790_038_800_000_000 + i,
+        "price": 85_565.0 + i,
+        "amount": 0.015,
+        "side": i % 2,
+    }
+    if i % 2 == 0:
+        row["tag"] = f"t{i}"
+
+    return row
+
+
 @pytest.fixture
 def log(tmp_path: Path) -> Iterator[WriteHandle]:
-    """A streamcast log, created with the schema the library owns.
+    """A log with the caller's schema, as litelink intends.
 
     `target_seal_size` is small so a test that seals actually seals rather
     than leaving every row in the SQLite buffer — a replay that never reads
@@ -36,7 +69,8 @@ def log(tmp_path: Path) -> Iterator[WriteHandle]:
     handle = litelink.new(
         tmp_path / "data",
         "trades",
-        schema=streamcast.SCHEMA,
+        schema=SCHEMA,
+        sort_by=("event_ts",),
         config=litelink.LogConfig(target_seal_size=4 * 1024, compact_min_files=2),
     )
     with handle:

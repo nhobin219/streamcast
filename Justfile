@@ -90,3 +90,8 @@ demo-clean root="streamcast-data":
 # What the fan-out costs per subscriber, and where it stops being free.
 bench *args:
     uv run python benchmarks/fanout.py {{args}}
+
+# What a replay costs, and which layer it is spent in. The numbers SPEC §4
+# sizes max_replay against come from here.
+bench-replay *args:
+    uv run python benchmarks/replay.py {{args}}

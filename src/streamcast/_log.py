@@ -1,145 +1,154 @@
-"""The litelink side: what a message looks like as a row, and how it comes back.
+"""The litelink side: the stream's table, and how a replay comes back off it.
 
 A broker with a log attached is a tickerplant — kx's term for a process that
 captures a feed, writes it to a log file, and publishes it to registered
-subscribers (https://code.kx.com/q/architecture/). The log is what turns an offset
-from a number that orders messages into a number a subscriber can *resume
-from*, and everything in this module exists to serve that one sentence.
+subscribers (https://code.kx.com/q/architecture/). The log is what turns an
+offset from a number that orders messages into a number a subscriber can
+*resume from*, and everything here serves that one sentence.
 
-**streamcast owns the schema.** `SCHEMA` is not a suggestion and a log with
-any other shape is refused at `Stream` construction rather than at the first
-send — see `validate`. That is stricter than it could be, and the alternative
-was considered and rejected: a log with an extra `venue` column would have to
-be filled by `send`, which has nothing to fill it with, so the column would be
-NULL on every row and the schema would be a lie told at creation. A stream
-that needs more columns than this wants litelink directly.
+**The schema is the caller's, per stream, and streamcast declares none of it.**
+That is litelink's own model — "the library owns exactly one column,
+`litelink_offset`; everything else is the caller's schema" — and it is the
+whole reason to put litelink underneath this rather than an append-only file.
 
-**Binary payloads are base64 and that is litelink's constraint, not a choice.**
-`litelink._types` refuses `binary` outright today — its buffer leg pushes the
-read's boundary predicate into SQLite, which decodes blobs as UTF-8 and fails
-— and says to encode as text for now. So a `bytes` message costs 4/3 its size
-on disk and one encode per direction. A `str` message, which is what every
-JSON feed sends, costs neither: it is stored as it arrived. When litelink's
-§15 blob fields land, `kind` is already on the row to tell the two apart and
-this becomes a storage change with no wire change.
+An earlier version of this module owned a fixed three-column schema and stored
+each upstream frame whole, as text, in a `payload` column. It is worth saying
+plainly why that was wrong, because it looked reasonable and it defended
+itself in a docstring: litelink's own websocket example says *"Every field the
+feed sends that is worth a column ... which is the reason to declare a schema
+rather than store the frame whole."* Storing it whole threw away every
+property the table was for —
+
+* **Pruning.** §7 prunes on Iceberg statistics per column. Against a blob
+  column there is nothing to prune on, so a query for one minute of trades
+  reads every byte of every message in range.
+* **Compression.** A `price` column of float64 compresses against its
+  neighbours; the same numbers inside a JSON string do not.
+* **The archive.** litelink's headline is that any Iceberg engine can read the
+  archive with nothing installed. Pointed at a blob column it gets one string
+  per row and has to parse JSON in SQL to ask anything.
+* **The replay.** Rows had to be read out of Arrow as strings and re-encoded,
+  when the columns were right there.
+
+The argument that defended it was circular: that a caller's extra column
+"would have to be filled by `send`, which has nothing to fill it with". True
+only because `send` took bytes. `send` takes a row, the caller fills it, and
+the premise disappears.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import time
-from typing import TYPE_CHECKING, Final, cast
-
-import pyarrow as pa
+from typing import TYPE_CHECKING
 
 # Imported rather than spelled again. `litelink_offset` is the one column that
-# library owns and it is named in its README, its API doc and every example —
-# but a copy here would be a second home for the fact, and the failure of a
-# drift is a scan for a column that is not there. An import fails at import
-# time instead, which is the whole of the argument.
+# library owns, and a copy here would be a second home for the fact whose
+# failure mode is a scan for a column that is not there.
 from litelink.log import OFFSET
 
-from streamcast._protocol import BINARY, TEXT, encode
+from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from litelink import LogHandle, Row, WriteHandle
-
-SCHEMA: Final = pa.schema(
-    [
-        # Microseconds, because that is what litelink's own examples store and
-        # what every exchange feed publishes. The broker's clock at the moment
-        # the message was accepted — NOT the publisher's event time, which is
-        # inside the payload where only the application can read it.
-        pa.field("recv_ts", pa.int64(), nullable=False),
-        # `TEXT` or `BINARY`. int32 rather than bool because a third kind is
-        # plausible (a §15 blob column would be one) and a bool that has to
-        # become an enum is a schema migration; int32 rather than int8 because
-        # litelink refuses int8, Iceberg widening it silently being the reason.
-        pa.field("kind", pa.int32(), nullable=False),
-        # The message. Text as it arrived; binary base64'd — see the module
-        # docstring. Not nullable: a zero-length message is "", which is a
-        # message, and NULL would be a message that was never sent.
-        pa.field("payload", pa.string(), nullable=False),
-    ]
-)
-"""The shape of a streamcast log. Pass it to `litelink.new` and pass nothing else.
-
-    log = litelink.new(root, "trades", schema=streamcast.SCHEMA)
-
-**No `sort_by`.** litelink's default is offset order, and every read this
-module makes is an offset range — so the default is not a fallback here, it is
-the correct answer, and naming a column would make bounded replay the slow
-path (§7 measures a non-leading predicate at 119 ms against 13 ms).
-"""
-
-_REPLAY_COLUMNS: Final = (OFFSET, "kind", "payload")
-"""What a replay reads. `recv_ts` is deliberately absent — it is stored so an
-operator can ask when a message arrived, and it is not on the wire, so reading
-it per replayed row would be bytes off disk that nothing consumes."""
+    import pyarrow as pa
+    from litelink import LogHandle, WriteHandle
 
 
-def validate(log: LogHandle) -> None:
-    """Refuse a log that is not a streamcast log, at construction.
+def columns(log: LogHandle) -> tuple[str, ...]:
+    """The stream's declared columns, in the order the wire uses.
 
-    The failure this prevents is the expensive one: a `Stream` that opens
-    fine, accepts a send, and raises inside `litelink.append` with a message
-    about a missing column — after the caller's upstream subscription is live
-    and messages are arriving with nowhere to go.
-
-    **The comparison is exact**, including the Arrow types, and that was
-    checked rather than assumed. litelink documents that it stores `string`
-    and returns `large_string` — Iceberg has one string type and cannot tell
-    them apart — which would make an exact check reject a perfectly good log.
-    It does not apply here: `LogHandle.schema` answers from the schema the log
-    recorded in its own `meta`, so `pa.string()` goes in and `pa.string()`
-    comes back. Only a handle whose schema was recovered from Parquet footers
-    sees `large_string`, and that is `litelink.snapshot`, which returns a read
-    handle a `Stream` cannot take. A tolerant comparison here was written
-    first and removed: it was six lines defending against a state this type
-    cannot be in, and `test_stream.py` pins the fact instead.
+    Read once at `Stream` construction and held, because it fixes the key
+    order of every frame — and a replayed row must serialise to the same bytes
+    as the live one it repeats (I6). `litelink_offset` is prepended by
+    `encode` rather than listed here, so there is one statement of "the offset
+    comes first" instead of two.
     """
-    declared = [(field.name, field.type) for field in log.schema]
-    wanted = [(field.name, field.type) for field in SCHEMA]
-    if declared == wanted:
-        return
-
-    msg = (
-        f"{log.name!r} is not a streamcast log: its schema is "
-        f"{[name for name, _ in declared]} and streamcast writes "
-        f"{[name for name, _ in wanted]}. Create it with "
-        f"`litelink.new(root, name, schema=streamcast.SCHEMA)`."
-    )
-    raise ValueError(msg)
+    return tuple(log.schema.names)
 
 
-def row(kind: int, message: str | bytes) -> Row:
-    """One message, as the row that stores it.
+def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
+    """One batch, or None at the end.
 
-    Takes the kind rather than deciding it, because `Stream.send` needs the
-    same answer for the frame it puts on the wire and a second `isinstance`
-    here would be a second place for text and binary to be told apart.
+    `StopIteration` is converted rather than propagated because this runs in a
+    worker thread under `asyncio.to_thread`: a `StopIteration` crossing a
+    coroutine boundary becomes a `RuntimeError` about a coroutine raising
+    StopIteration, which names nothing about the actual end of a scan.
     """
-    # The cast is the claim `kind` already makes. Branching on
-    # `isinstance(message, str)` instead would narrow without one — and would
-    # put a second decision about text-versus-binary in the library, which is
-    # the thing `kind_of` exists to prevent.
-    payload = (
-        message
-        if kind == TEXT
-        else base64.b64encode(cast("bytes", message)).decode("ascii")
-    )
+    try:
+        return reader.read_next_batch()
+    except StopIteration:
+        return None
 
-    return {
-        # Read once per message. `time.time_ns()` is a vDSO call — tens of
-        # nanoseconds — against the ~400 us the append it rides along with
-        # costs, so this is free at any rate the log can sustain.
-        "recv_ts": time.time_ns() // 1_000,
-        "kind": kind,
-        "payload": payload,
-    }
+
+async def replay(
+    log: WriteHandle, start: int, stop: int
+) -> AsyncGenerator[tuple[int, bytes], None]:
+    """Frames for `[start, stop)`, already encoded, oldest first.
+
+    **Every blocking call is in a thread**, which is not an optimisation. A
+    replay is DuckDB reading Parquet — measured at 2.11 us per row warm and
+    ~0.5 s cold for the first scan in a process, of which 91% is the read
+    itself — and on the event loop that is the whole broker stopped: no live
+    message fanned out, no other subscriber served, no keepalive answered.
+    litelink is built for this: its buffer and reader each hold their own lock
+    and its SQLite connections are opened `check_same_thread=False`.
+
+    Batches rather than rows, because that is the unit litelink hands back and
+    the unit a thread hop should cost: one hop per batch amortises over
+    thousands of rows, one per row would cost more than the read.
+
+    Yields `(offset, frame)` rather than the frame alone so the caller can
+    check the first offset against what was asked for — see `_stream`, where a
+    replay that starts above the request is a refusal rather than a short
+    serve.
+    """
+    names = (OFFSET, *columns(log))
+    # `include_archive` is deliberately not passed. litelink's default decides
+    # from the tiers: local disk while the local table holds files, which is
+    # every ordinary broker and keeps a replay off the network — and the
+    # archive when the log has been fully evicted and it is the only place the
+    # rows are, where refusing to look would be a silent short serve.
+    reader = await asyncio.to_thread(
+        log.scan, columns=names, start_offset=start, end_offset=stop
+    )
+    try:
+        while True:
+            batch = await asyncio.to_thread(_next_batch, reader)
+            if batch is None:
+                return
+
+            # **The scan was projected into wire order, so Arrow can build
+            # the dicts.** `to_pylist()` does it in C, in the batch's own
+            # column order — and because `names` put `litelink_offset` first
+            # and the declared columns after it, that order IS the wire's.
+            # So each row comes back ready to encode with no Python dict
+            # comprehension per row, which was 1.53x slower and is the
+            # difference between 2.38 us and 1.55 us a row on a path that is
+            # now ~86% encode.
+            #
+            # Checked rather than trusted: the whole property rests on DuckDB
+            # returning the columns in the order `scan` asked for, and a
+            # silent reordering would put a subscriber's replayed bytes out of
+            # step with the live ones (I6). One list compare per BATCH, not
+            # per row.
+            if tuple(batch.schema.names) != names:
+                msg = (
+                    f"the scan returned columns {batch.schema.names} where "
+                    f"{list(names)} was projected; a replayed row would not "
+                    f"match the live one"
+                )
+                raise RuntimeError(msg)
+
+            for row in batch.to_pylist():
+                yield row[OFFSET], _encode_projected(row)
+
+    finally:
+        # Releases the DuckDB result the scan is holding. A subscriber that
+        # disconnects mid-replay leaves this generator suspended otherwise,
+        # and under a reconnect storm that is an unbounded number of live
+        # scans against one log.
+        reader.close()
 
 
 def earliest(log: LogHandle) -> int | None:
@@ -170,74 +179,4 @@ def earliest(log: LogHandle) -> int | None:
     return min(lows)
 
 
-def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
-    """One batch, or None at the end.
-
-    `StopIteration` is converted rather than propagated because this runs in a
-    worker thread under `asyncio.to_thread`: a `StopIteration` crossing a
-    coroutine boundary becomes a `RuntimeError` about a coroutine raising
-    StopIteration, which names nothing about the actual end of a scan.
-    """
-    try:
-        return reader.read_next_batch()
-    except StopIteration:
-        return None
-
-
-async def replay(
-    log: WriteHandle, start: int, stop: int
-) -> AsyncGenerator[tuple[int, bytes], None]:
-    """Frames for `[start, stop)`, already encoded, oldest first.
-
-    **Every blocking call is in a thread**, which is not an optimisation. A
-    replay is DuckDB reading Parquet: milliseconds to seconds depending on how
-    far behind the subscriber is, and on the event loop that is the whole
-    broker stopped — no live message fanned out, no other subscriber served,
-    no keepalive answered. litelink's handle is built for this: its buffer and
-    reader each hold their own lock and its SQLite connections are opened
-    `check_same_thread=False`, so the appending coroutine and this scan are
-    the cross-thread case it already serialises.
-
-    Batches, not rows, because that is the unit litelink hands back and the
-    unit a thread hop should cost: one hop per batch amortises over thousands
-    of rows, one hop per row would cost more than the read.
-
-    Yields `(offset, frame)` rather than the frame alone so the caller can
-    check the first offset against what was asked for — see `_stream`, where
-    a replay that starts above the request is a refusal rather than a short
-    serve.
-    """
-    # `include_archive` is deliberately not passed. litelink's default decides
-    # from the tiers: local disk while the local table holds files, which is
-    # every ordinary broker and keeps a replay off the network — and the
-    # archive when the log has been fully evicted and it is the only place the
-    # rows are, where refusing to look would be a silent short serve.
-    reader = await asyncio.to_thread(
-        log.scan, columns=_REPLAY_COLUMNS, start_offset=start, end_offset=stop
-    )
-    try:
-        while True:
-            batch = await asyncio.to_thread(_next_batch, reader)
-            if batch is None:
-                return
-
-            # Column-at-a-time. `to_pylist()` on the batch would build a dict
-            # per row with three string keys apiece; this builds three lists
-            # and zips them, which is the same data without the dicts.
-            offsets = batch.column(0).to_pylist()
-            kinds = batch.column(1).to_pylist()
-            payloads = batch.column(2).to_pylist()
-            for offset, kind, payload in zip(offsets, kinds, payloads, strict=True):
-                message = base64.b64decode(payload) if kind == BINARY else payload
-                yield offset, encode(offset, kind, message)
-
-    finally:
-        # A subscriber that disconnects mid-replay leaves this generator
-        # suspended; `aclose()` runs the finally and the reader releases its
-        # DuckDB result. Without it the result set survives until the
-        # generator is collected, which under a burst of reconnects is an
-        # unbounded number of live scans.
-        reader.close()
-
-
-__all__ = ["SCHEMA", "earliest", "replay", "row", "validate"]
+__all__ = ["columns", "earliest", "replay"]

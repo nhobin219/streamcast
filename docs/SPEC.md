@@ -59,29 +59,46 @@ contiguous prefix", authentication, and transport security. The last two are
 
 ## 2. The wire
 
-Two frame kinds, told apart by WebSocket's own text/binary bit rather than by a
-discriminator this library defines.
-
-| | | |
-|---|---|---|
-| **greeting** | text, exactly one, first | JSON |
-| **message** | binary, one per message | `>QB` header, then payload |
+**Every frame is JSON text.** The greeting, then one object per row:
 
 ```
- 0        8   9                                   n
- ┌────────┬───┬───────────────────────────────────┐
- │ offset │ k │ payload                           │
- └────────┴───┴───────────────────────────────────┘
-   uint64   u8   UTF-8 if k=0, raw bytes if k=1
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
 ```
 
-The header is fixed-width rather than a varint: the saving would be ~6 bytes on
-a payload rarely under a hundred, and a fixed header can be sliced without being
-parsed — which is what `frame_offset` does on the send path.
+There is no binary header, no length prefix and no payload kind, and an earlier
+version of this protocol had all three — a `>QB` header in front of an opaque
+blob. They existed to carry a whole upstream frame stored verbatim, which §5
+explains was the wrong shape for the log. Once a message IS a row, a row is a
+JSON object and the offset is one of its columns.
 
-**`kind` is per message, not per stream.** WebSocket lets a feed mix text and
-binary, and a subscriber handed `str` where the publisher sent `bytes` has been
-handed different data, not a different encoding.
+Nothing read the offset out of that header except a field in `Subscriber` that
+nothing read either, so removing it cost nothing and bought this:
+
+```
+wscat ws://broker:8765/trades?offset=0
+```
+
+A working subscriber with no client library at all, printing rows a human can
+read. A consumer in another language needs a JSON parser rather than this
+document.
+
+**msgspec, not `json`.** Serialisation is on the hot path in both directions —
+every publish encodes a row, every replayed row re-encodes one — which is what
+earns a compiled dependency. Measured on a six-column trade row: **0.285 us
+against 5.815 us** to encode (20.4x) and 0.386 against 4.989 to decode (12.9x).
+At stdlib speed the encode would cost more than the Parquet read it rides on.
+The ratio narrows as one large string column comes to dominate a frame.
+
+**Key order comes from the log's schema, not from the caller's dict.** A live
+row arrives in whatever order the publisher built it; a replayed row arrives
+from Arrow in schema order. Both are projected through the declared columns, so
+a replayed frame is byte-identical to the live one it repeats — which is I6
+across the one boundary where it could break, and what stops two subscribers
+holding the same offset from holding different bytes.
+
+A nullable column the caller omits becomes JSON `null`, because that is exactly
+what the table stores for it and therefore exactly what a replay will send.
 
 ### A subscribe is a URL
 
@@ -91,18 +108,11 @@ ws://broker:8765/trades?offset=1200
 ```
 
 There is no application handshake in front of the data. The stream is the path
-and the resume point is the query, so subscribing is the WebSocket open.
-
-The price is that a refusal has to be a close code rather than a reply. The
-return is that `wscat ws://broker:8765/trades?offset=0` is a working subscriber
-— which is worth more than symmetry on a path nobody debugs when it works.
+and the resume point is the query, so subscribing is the WebSocket open. The
+price is that a refusal has to be a close code rather than a reply; the return
+is the `wscat` line above.
 
 ### The greeting
-
-```json
-{"streamcast": 1, "stream": "trades", "end_offset": 1861,
- "replay": [1200, 1861], "durable": true}
-```
 
 It exists so that "the connection opened" means something on a stream that is
 silent, which for market data outside a session is most of them. A subscriber
@@ -259,17 +269,25 @@ is avoiding.
 
 `max_backlog` is counted in **messages**, not bytes, because that is what the
 queue holds — a pointer to a frame every subscriber shares. The frame is encoded
-once (*measured*: 0.20 us, independent of subscriber count) and the per
-subscriber cost is the insert (*measured*: 0.95 us per subscriber at 100
-subscribers).
+once (*measured*: 0.285 us for a six-column row with msgspec, independent of
+subscriber count) and the per subscriber cost is the insert.
 
 **`max_backlog` and `max_replay` are sized against each other**, not
 independently. A replay streams while live messages queue behind it, so a
 subscriber that takes longer to catch up than `max_backlog` messages of live
-traffic is dropped the moment it arrives, having done all the work. The defaults
-hold with room: a replay reads at roughly 1M rows/s from local Parquet, so
-100,000 messages is ~0.1 s, and a feed would have to exceed 80,000 messages/s to
-put 8,192 messages in the queue in that time. Raise one and check the other.
+traffic is dropped the moment it arrives, having done all the work.
+
+*Measured* (§5): a replay runs at ~390,000 rows/s warm, so `max_replay` of
+100,000 is **~0.27 s**, and a feed above **~30,000 messages/s** would put 8,192
+messages in the queue while it ran. The first replay in a process also pays
+~0.6 s of cold cost — extension loading and Iceberg metadata — which drops that
+threshold to ~13,000 messages/s for that one subscriber. `just bench-replay`
+prints both, and the arithmetic, for your own shape and hardware.
+
+An earlier version of this section claimed ~1M rows/s and an 80,000/s threshold.
+Both were guesses stated as measurements, and both were roughly 2x optimistic;
+`benchmarks/replay.py` is where the real numbers come from now. Raise one of the
+two settings and check the other.
 
 ### A subscriber that walks away
 
@@ -289,31 +307,55 @@ something.
 
 ## 5. The durable tier
 
-streamcast owns three columns, and a log with any other shape is refused at
-`Stream` construction rather than at the first message:
+**The schema is the caller's, per stream.** streamcast declares no columns. The
+log is an ordinary litelink table with whatever shape the application gave it,
+which is litelink's own model — *"the library owns exactly one column,
+`litelink_offset`; everything else is the caller's schema"* — and the whole
+reason to put litelink underneath this rather than an append-only file.
 
 ```python
 SCHEMA = pa.schema([
-    pa.field("recv_ts", pa.int64(),  nullable=False),   # broker clock, microseconds
-    pa.field("kind",    pa.int32(),  nullable=False),   # 0 text, 1 binary
-    pa.field("payload", pa.string(), nullable=False),   # text as-is; binary base64
+    pa.field("event_ts", pa.int64(), nullable=False),
+    pa.field("price", pa.float64()),
+    pa.field("amount", pa.float64()),
+    pa.field("side", pa.int64()),
 ])
+log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
+await stream.send({"event_ts": …, "price": …, "amount": …, "side": …})
 ```
 
-**Strict on purpose.** A log with an extra `venue` column would have to be
-filled by `send`, which has nothing to fill it with — so the column would be
-NULL on every row and the schema would be a lie told at creation. A stream that
-needs more columns than this wants litelink directly.
+### Why not store the frame whole
 
-**No `sort_by`.** litelink's default is offset order and every read here is an
-offset range, so the default is the correct answer rather than a fallback.
+An earlier design owned a fixed three-column schema — `recv_ts`, `kind`,
+`payload` — and stored each upstream frame verbatim in the string column. It is
+worth recording why that was wrong, because it looked reasonable and it
+defended itself in a docstring.
 
-**Binary is base64, at 4/3 the size.** litelink refuses `binary` columns today —
-its buffer leg pushes the read's boundary predicate into SQLite, which decodes
-blobs as UTF-8 and fails — and says to encode as text for now. `kind` is already
-on the row, so when litelink's blob fields land this becomes a storage change
-with no wire change. A `str` message, which is what every JSON feed sends, pays
-nothing.
+litelink's own websocket example says it in as many words: *"Every field the
+feed sends that is worth a column. §7 prunes on Iceberg statistics, so a query
+for one minute of trades never reads the rest — **which is the reason to declare
+a schema rather than store the frame whole**."*
+
+Storing it whole threw away every property the table was for:
+
+| | with a blob column | with real columns |
+|---|---|---|
+| **pruning** | nothing to prune on; a one-minute query reads every byte in range | statistics per column (§7) |
+| **compression** | JSON text, poorly | float64 against its neighbours |
+| **the archive** | one string per row; parse JSON in SQL to ask anything | a table any Iceberg engine reads |
+| **the replay** | strings out of Arrow, re-encoded per row | columns, already typed |
+| **the subscriber** | a blob to parse, once per consumer | the row, parsed once at the publisher |
+
+The argument that defended it was circular: that a caller's extra column *"would
+have to be filled by `send`, which has nothing to fill it with"*. True only
+because `send` took bytes. `send` takes a row, the caller fills it, and the
+premise disappears.
+
+**The consequence is that a frame which is not a row has nowhere to go.**
+Subscription acks, heartbeats and reconnect notices are dropped by the feed
+handler. That is the same division of labour a kdb tickerplant has — the feed
+handler parses, the plant stores typed rows — and it forces the decision to be
+made once, by the publisher, instead of independently by every consumer.
 
 ### The counter
 
@@ -334,15 +376,40 @@ while (batch := await asyncio.to_thread(_next_batch, reader)) is not None:
     ...
 ```
 
-**Every blocking call is in a thread, and that is not an optimisation.** A
-replay is DuckDB reading Parquet: milliseconds to seconds depending on how far
-behind the subscriber is, and on the event loop that is the whole broker stopped
-— no live message fanned out, no other subscriber served, no keepalive answered.
-litelink is built for this: its buffer and reader each hold their own lock and
-its SQLite connections are opened `check_same_thread=False`.
+**Every blocking call is in a thread, and that is not an optimisation.** On the
+event loop a replay is the whole broker stopped — no live message fanned out, no
+other subscriber served, no keepalive answered. litelink is built for this: its
+buffer and reader each hold their own lock and its SQLite connections are opened
+`check_same_thread=False`.
 
 Batches rather than rows, because that is the unit litelink hands back and the
 unit a thread hop should cost.
+
+**Measured, and the shape matters more than the number.** A replay is dominated
+by DuckDB reading Parquet, not by anything this library does:
+
+| | |
+|---|---|
+| fixed, per scan | ~11 ms warm; **~0.6 s cold** for the first scan in a process |
+| marginal | **~2.5 us/row** (≈390,000 rows/s) |
+| where it goes | ~48% DuckDB, ~11% Arrow→Python, ~41% encode |
+
+The cold figure is extension loading and Iceberg metadata resolution, and it is
+paid by the first subscriber to resume after a broker starts.
+
+**The split moved, and the reason is worth recording.** Under the old blob
+schema the same profile read 91% DuckDB and 1% encode — the scan was dragging a
+long string column off disk, and the "encode" was `struct.pack` over bytes that
+were already bytes. Typed columns make the read far cheaper and give the
+encoder real work, so the two came into balance.
+
+Encode was briefly 86% of it, because the first version built a dict per row in
+Python before handing it to msgspec. `scan` already projects the batch into
+`(litelink_offset, *columns)` order, so `batch.to_pylist()` builds those dicts
+in Arrow's own C — 1.55 us a row against 2.38, for identical bytes. `_log.replay`
+checks the batch's column order against what it projected before relying on it,
+once per batch, because the saving is only sound while that holds and a silent
+reordering would break I6.
 
 **`include_archive` is not passed.** litelink's default decides from the tiers:
 local disk while the local table holds files — every ordinary broker, and it
@@ -415,7 +482,7 @@ it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 | **I3** | A message is durable before it is delivered, never after. |
 | **I4** | What a subscriber receives is a contiguous prefix of the stream from where it subscribed. A drop ends it; nothing punches a hole in it. |
 | **I5** | Offsets are assigned once and never reused for the life of a log. Inherited from litelink, which owns the column. |
-| **I6** | Every subscriber receives the identical frame bytes for a given offset — one `encode` call, shared. |
+| **I6** | Every subscriber receives the identical frame bytes for a given offset — one `encode` call, shared — and a **replayed** frame is byte-identical to the live one it repeats, because both project through the log's declared column order. |
 
 I1, I2 and the mechanisms behind I4 are checked by `tests/test_invariants.py`
 against the source. I3 and I4 are checked end to end. I5 is litelink's.
@@ -456,7 +523,19 @@ because that is what it holds; an operator thinks in memory. A byte bound needs
 the frame length per entry, which is one `len()` — the open question is whether
 two bounds or one replaced bound.
 
-**Binary without base64** — see §5. Waiting on litelink's §15.
+**Arrow IPC as a negotiated wire format.** Measured: one IPC batch of 10,000
+rows encodes 492x faster than 10,000 JSON frames and is 2.4x smaller (0.48 MB
+against 1.13). That lands almost entirely on replay, which is the bulk path — a
+live single row in a 1-row batch is mostly framing overhead. The cost is the
+`wscat` affordance and a subscriber that needs pyarrow, so it would be
+`?format=arrow` alongside the default rather than instead of it, with the
+client unpacking batches transparently. Two encoders and two client paths is
+the price; nobody has needed it yet.
+
+**Binary columns.** litelink refuses them today, so a stream whose rows carry
+real bytes has no column for them. There is no base64 workaround here any more
+— that belonged to the blob schema §5 removed — and the answer is litelink's
+§15.
 
 **Compression per stream rather than per connection.** permessage-deflate keeps
 a compressor per connection, so a frame encoded once is compressed N times; the

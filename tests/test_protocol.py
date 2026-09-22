@@ -1,9 +1,9 @@
 """The wire format, without a socket.
 
-Everything here is pure functions, which is the point of `_protocol` being a
-module of them: the frame layout, the greeting and the refusal codec are the
-three things both ends have to agree about, and none of them needs a
-connection to check.
+Every frame is JSON text now: the greeting, then one object per row. These are
+pure functions, which is the point of `_protocol` being a module of them —
+the frame layout, the greeting and the refusal codec are the three things both
+ends have to agree about, and none of them needs a connection to check.
 """
 
 from __future__ import annotations
@@ -14,15 +14,12 @@ import pytest
 
 from streamcast._errors import Close, ProtocolError
 from streamcast._protocol import (
-    BINARY,
     CLOSE_REASON_LIMIT,
     EARLIEST,
-    TEXT,
+    OFFSET,
     decode,
     encode,
-    frame_offset,
     greeting,
-    kind_of,
     parse_greeting,
     parse_refusal,
     parse_subscribe,
@@ -30,59 +27,78 @@ from streamcast._protocol import (
     subscribe_path,
 )
 
+COLUMNS = ("event_ts", "price", "amount", "side", "tag")
+ROW = {
+    "event_ts": 1_790_038_800_123_456,
+    "price": 85_565.0,
+    "amount": 0.015,
+    "side": 0,
+    "tag": "t0",
+}
+
 
 class TestFrames:
+    def test_a_row_survives_the_round_trip_unchanged(self):
+        offset, back = decode(encode(1861, ROW, COLUMNS))
+        assert offset == 1861
+        assert back == {OFFSET: 1861, **ROW}
+
+    def test_the_offset_travels_in_the_row_itself(self):
+        # Not in a binary header beside it. A subscriber writing what it
+        # receives into its own litelink log wants the column, and one that
+        # does not can ignore a key.
+        frame = encode(7, ROW, COLUMNS)
+        assert json.loads(frame)[OFFSET] == 7
+        assert decode(frame)[0] == 7
+
+    def test_a_frame_is_json_text_any_client_can_read(self):
+        # The affordance the format exists for: `wscat ws://broker/trades`
+        # prints the stream, readably, with no client library at all.
+        frame = encode(1861, ROW, COLUMNS)
+        assert isinstance(frame, bytes)
+        assert json.loads(frame.decode()) == {OFFSET: 1861, **ROW}
+
+    def test_the_column_order_comes_from_the_schema_not_the_dict(self):
+        """**This is what makes a replay byte-identical to the live send.**
+
+        A live row arrives in whatever order the caller built it; a replayed
+        row arrives from Arrow in schema order. Both are projected through the
+        declared columns, so the bytes match and a subscriber resuming across
+        the join cannot tell where it happened.
+        """
+        shuffled = {k: ROW[k] for k in reversed(COLUMNS)}
+        assert list(shuffled) != list(ROW)  # same data, opposite key order
+        assert encode(1861, shuffled, COLUMNS) == encode(1861, ROW, COLUMNS)
+
+        # And the projection is doing the work: without it the two orders
+        # produce different bytes, which is the bug this prevents.
+        assert encode(1861, shuffled, None) != encode(1861, ROW, None)
+
+    def test_a_column_the_caller_omitted_becomes_null(self):
+        # And comes back as None — which is what the table stores for it, and
+        # therefore what a replay of the same row will send.
+        without = {k: v for k, v in ROW.items() if k != "tag"}
+        _offset, back = decode(encode(1, without, COLUMNS))
+        assert back["tag"] is None
+
+    def test_a_stream_with_no_schema_uses_the_rows_own_keys(self):
+        # A live-only stream has no declared columns and nothing replays from
+        # it, so there is no second encoding to match.
+        _offset, back = decode(encode(1, {"b": 2, "a": 1}, None))
+        assert back == {OFFSET: 1, "b": 2, "a": 1}
+
     @pytest.mark.parametrize(
-        "message",
+        ("frame", "match"),
         [
-            "",
-            "hello",
-            '{"event":"trade","price":78501.62}',
-            "ünïcödé — a multi-byte payload",
-            b"",
-            b"\x00\x01\xff\xfe binary that is not UTF-8",
+            (b"not json at all", "not JSON"),
+            (b"[1, 2, 3]", "not a JSON object"),
+            (b'{"price": 1.0}', "carries no 'litelink_offset'"),
+            (b'{"litelink_offset": "eight"}', "carries no 'litelink_offset'"),
         ],
     )
-    @pytest.mark.parametrize("offset", [1, 2**31, 2**62])
-    def test_a_message_survives_the_round_trip_unchanged(self, message, offset):
-        kind = kind_of(message)
-        back_offset, back = decode(encode(offset, kind, message))
-        assert back_offset == offset
-        assert back == message
-        # And the TYPE, which is the whole reason `kind` is on the row: a
-        # subscriber handed `str` where the publisher sent `bytes` has been
-        # handed different data, not a different encoding.
-        assert type(back) is type(message)
-
-    def test_the_offset_is_readable_without_decoding_the_payload(self):
-        frame = encode(1861, TEXT, "x" * 10_000)
-        assert frame_offset(frame) == 1861
-
-    def test_kind_of_refuses_anything_that_is_not_a_message(self):
-        assert kind_of("a") == TEXT
-        assert kind_of(b"a") == BINARY
-        # Narrower than `websockets` on purpose: a buffer would be copied
-        # to `bytes` inside `encode` anyway, and refusing it makes the copy
-        # the caller's to see.
-        with pytest.raises(TypeError, match="not bytearray"):
-            kind_of(bytearray(b"a"))  # ty: ignore[invalid-argument-type]
-
-        with pytest.raises(TypeError, match="str or bytes, not dict"):
-            kind_of({"not": "a message"})  # ty: ignore[invalid-argument-type]
-
-    def test_a_frame_too_short_to_hold_a_header_is_a_protocol_error(self):
-        with pytest.raises(ProtocolError, match="too short"):
-            decode(b"\x00\x00\x00")
-
-    def test_an_unknown_payload_kind_is_a_protocol_error(self):
-        # A future build's third kind, reaching this one. It must not be
-        # guessed at: handing back the raw bytes would be a silent reinterpret.
-        with pytest.raises(ProtocolError, match="unknown payload kind 7"):
-            decode(encode(1, 7, b"payload"))
-
-    def test_bytes_marked_text_that_are_not_utf8_are_a_protocol_error(self):
-        with pytest.raises(ProtocolError, match="not valid UTF-8"):
-            decode(encode(1, TEXT, b"\xff\xfe"))
+    def test_anything_that_is_not_a_row_says_so(self, frame, match):
+        with pytest.raises(ProtocolError, match=match):
+            decode(frame)
 
 
 class TestGreeting:
@@ -127,8 +143,6 @@ class TestRefusals:
         assert fields == {"why": "too_old", "behind": 9}
 
     def test_it_fits_the_close_frame_by_dropping_the_least_useful_field(self):
-        # A broker serving hundreds of streams: the name list is unbounded and
-        # everything else in the refusal is not.
         reason = refusal(
             "no_such_stream", serves=[f"stream-{i:03}" for i in range(200)]
         )
@@ -149,16 +163,11 @@ class TestRefusals:
         }
 
     def test_a_reason_from_something_that_is_not_a_broker_never_raises(self):
-        # A proxy or a load balancer closing the connection with its own
-        # reason. The caller is already handling a closed connection; losing
-        # the detail is fine, raising inside the handler is not.
         assert parse_refusal("connection reset by peer") == ("", {})
         assert parse_refusal("") == ("", {})
         assert parse_refusal("[1, 2, 3]") == ("", {})
 
     def test_the_close_codes_echo_their_http_cousins(self):
-        # Not decoration: a `4416` in an operator's log should be readable as
-        # "range not satisfiable" without this repo open.
         assert Close.BAD_REQUEST == 4400
         assert Close.NO_SUCH_STREAM == 4404
         assert Close.NOT_REPLAYABLE == 4416
@@ -173,7 +182,6 @@ class TestSubscribePath:
             ("/trades", ("trades", None)),
             ("/trades?offset=1200", ("trades", 1200)),
             ("/trades?offset=0", ("trades", EARLIEST)),
-            ("/", ("", None)),
         ],
     )
     def test_it_reads_a_subscribe(self, path, expected):
@@ -192,19 +200,8 @@ class TestSubscribePath:
             parse_subscribe(path)
 
     @pytest.mark.parametrize(
-        ("name", "offset"), [("", None), ("trades", None), ("trades", 1200), ("t", 0)]
+        ("name", "offset"),
+        [("", None), ("trades", None), ("trades", 1200), ("t", 0)],
     )
     def test_the_builder_and_the_parser_are_inverses(self, name, offset):
-        # They live in one module so they cannot drift; this is the assertion
-        # that says so.
         assert parse_subscribe(subscribe_path(name, offset)) == (name, offset)
-
-
-def test_the_greeting_is_json_an_unrelated_client_can_read():
-    # The affordance the protocol is shaped around: `wscat ws://broker/trades`
-    # is a working subscriber, and the first thing it prints has to be legible.
-    fields = json.loads(
-        greeting(stream="trades", end_offset=7, replay=None, durable=True)
-    )
-    assert fields["streamcast"] == 1
-    assert fields["stream"] == "trades"

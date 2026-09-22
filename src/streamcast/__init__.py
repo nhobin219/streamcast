@@ -19,22 +19,28 @@ is argued; `Stream` is where it is enforced.
 
 **The API is `websockets` with one modification.** `serve` and `connect` have
 the same shapes and pass their keywords through; the difference is that
-iterating a subscription yields `(offset, message)` rather than `message`,
-because the offset is what makes a reconnect a resume.
+iterating a subscription yields `(offset, row)` rather than `message`, because
+the offset is what makes a reconnect a resume.
+
+**The schema is yours.** streamcast declares no columns — the log is an
+ordinary litelink table with whatever shape you gave it, so every column
+prunes, compresses, and is queryable from any Iceberg engine. `send` takes a
+row, subscribers receive that row, and the parse happens once at the publisher
+rather than once per consumer.
 
 .. code-block:: python
 
     # broker
-    log = litelink.new("data", "trades", schema=streamcast.SCHEMA)
+    log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
     stream = streamcast.Stream("trades", log=log)
 
     async with streamcast.serve(stream, "localhost", 8765):
-        async for message in exchange_feed:
-            await stream.send(message)
+        async for frame in exchange_feed:
+            await stream.send(parse(frame))      # a row
 
     # consumer
     async with streamcast.connect("ws://localhost:8765/trades", offset=123) as sub:
-        async for offset, message in sub:
+        async for offset, row in sub:
             ...
 
 **The object model is two classes and two functions.** `Stream` is the
@@ -43,9 +49,13 @@ it behind a port; `connect` reads it. `Subscription` is what a consumer holds,
 and it is read-only: it has no `send`, rather than a `send` that raises, for
 the reason litelink's read handles have no `append`.
 
-``SCHEMA`` and ``EARLIEST`` are exported because they appear in calls a user
-writes — the first is what a streamcast log is created with, the second is the
-offset that means "everything you still have".
+``EARLIEST`` is the offset that means "everything the log still holds";
+``OFFSET`` is litelink's column name, re-exported because it is a key in every
+row a subscriber receives.
+
+Every frame on the wire is JSON text — the greeting, then one object per row —
+so ``wscat ws://broker:8765/trades?offset=0`` is a working subscriber with no
+client library at all.
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -59,8 +69,7 @@ from streamcast._errors import (
     StreamNotFound,
     TooSlow,
 )
-from streamcast._log import SCHEMA
-from streamcast._protocol import BINARY, EARLIEST, TEXT, Greeting
+from streamcast._protocol import EARLIEST, OFFSET, Greeting
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
 
@@ -70,12 +79,10 @@ except PackageNotFoundError:  # a source tree that was never installed
     __version__ = "0.0.0"
 
 __all__ = [
-    "BINARY",
     "EARLIEST",
     "MAX_BACKLOG",
     "MAX_REPLAY",
-    "SCHEMA",
-    "TEXT",
+    "OFFSET",
     "Close",
     "Greeting",
     "NotReplayable",

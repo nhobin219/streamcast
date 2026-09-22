@@ -75,33 +75,54 @@ before you rely on it.
 uv add git+https://github.com/nhobin219/streamcast     # not on PyPI yet
 ```
 
+**The schema is yours.** streamcast declares no columns — the log is an ordinary
+[litelink](https://github.com/nhobin219/litelink) table with whatever shape you gave it,
+which is what makes it queryable rather than a pile of frames.
+
 ```python
-import asyncio
-import litelink
-import streamcast
-import websockets
+import asyncio, json, litelink, pyarrow as pa, streamcast, websockets
+
+SCHEMA = pa.schema([                       # every field worth a column
+    pa.field("event_ts", pa.int64(), nullable=False),
+    pa.field("price", pa.float64()),
+    pa.field("amount", pa.float64()),
+    pa.field("side", pa.int64()),
+])
 
 async def main():
-    # `SCHEMA` is streamcast's, and a log must be created with it and nothing
-    # else — three columns: when it arrived, whether it is text, and the bytes.
-    log = litelink.new("data", "trades", schema=streamcast.SCHEMA)
+    log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
     stream = streamcast.Stream("trades", log=log)
 
     with log, await streamcast.serve(stream, "localhost", 8765):
         async with websockets.connect("wss://ws.bitstamp.net") as feed:
             await feed.send(SUBSCRIBE)
             async for message in feed:
-                await stream.send(message)      # durable, then fanned out
+                trade = json.loads(message)["data"]
+                await stream.send({                  # a row, durable, then fanned out
+                    "event_ts": int(trade["microtimestamp"]),
+                    "price": float(trade["price"]),
+                    "amount": float(trade["amount"]),
+                    "side": int(trade["type"]),
+                })
 
 asyncio.run(main())
 ```
 
-Any number of consumers, on that box or another:
+Any number of consumers, on that box or another — and they receive the **row**, not a blob
+to parse:
 
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
-    async for offset, message in stream:
-        print(offset, message)
+    async for offset, row in stream:
+        print(offset, row["price"], row["amount"])
+```
+
+**The parse happens once, at the publisher.** Six consumers used to mean six JSON parses of
+the same frame; now it means none. And the log is a real table:
+
+```python
+log.sql("SELECT count(*), max(price), sum(amount) FROM log").read_all()
+log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on statistics
 ```
 
 That is the whole API for live fan-out. Replay, resume and the durable tier are the same
@@ -113,9 +134,10 @@ two calls with an `offset=`.
 `ping_interval`, `process_request` and the rest work exactly as they do there. Two things
 differ, both deliberately:
 
-**Iterating a subscription yields `(offset, message)`**, not `message`. The offset is the
-only thing that makes a reconnect a resume rather than a restart, and a subscriber that has
-to ask for it separately will forget to.
+**Iterating a subscription yields `(offset, row)`**, not `message`. The offset is the only
+thing that makes a reconnect a resume rather than a restart, and a subscriber that has to
+ask for it separately will forget to. `row` is a `dict` over your columns, with
+`litelink_offset` among its keys.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
 because publishing is `Stream.send` in the broker's own process. Nothing inherits a method
@@ -125,13 +147,13 @@ it has to refuse.
 import streamcast
 
 streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
-    await stream.send(message) -> int          # durable, then fan out
-    await stream.send_many(messages) -> list[int]   # ONE fsync for the group
+    await stream.send(row) -> int              # durable, then fan out
+    await stream.send_many(rows) -> list[int]  # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable
 
 streamcast.serve(streams, host, port, **websockets_kwargs) -> Server
 streamcast.connect(uri, *, offset=None, **websockets_kwargs) -> Subscription
-streamcast.SCHEMA · streamcast.EARLIEST
+streamcast.EARLIEST · streamcast.OFFSET
 ```
 
 Routing is by `Stream.name`: a stream named `trades` is served at `/trades`, an unnamed one
@@ -149,8 +171,8 @@ offset = None                       # live from now; or streamcast.EARLIEST for 
 while True:
     try:
         async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, message in stream:
-                handle(message)
+            async for offset, row in stream:
+                handle(row)
 
     except (ConnectionClosed, OSError, streamcast.TooSlow):
         offset = None if offset is None else offset + 1
@@ -226,14 +248,36 @@ right one across a WAN, where you pass `compression="deflate"` and get it back.
 **Not a replacement for reading the log.** `max_replay` bounds how far back a subscribe may
 ask; past that the answer is litelink directly, which needs nothing from streamcast.
 
+**Not a place for frames that are not rows.** A typed log has nowhere to put a subscription
+ack or a heartbeat, so the feed handler drops them — the same division of labour a kdb
+tickerplant has, where the feed handler parses and the plant stores typed rows.
+
+## What goes over the wire
+
+Every frame is JSON text — the greeting, then one object per row:
+
+```
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
+```
+
+So `wscat ws://localhost:8765/trades?offset=0` is a working subscriber with no client
+library at all, and a consumer in another language needs a JSON parser rather than this
+repo. Encoding is [msgspec](https://github.com/jcrist/msgspec) — measured at 0.285 µs for a
+six-column row against 5.815 µs for stdlib `json`, which is what earns it a place on a path
+every publish and every replayed row crosses.
+
+Key order comes from the log's schema, not from the dict you passed, so **a replayed row is
+byte-identical to the live one it repeats** — two subscribers holding the same offset hold
+the same bytes.
+
 ## Not implemented yet
 
 **Remote publishers.** `Stream.send` is in the broker's process; a client cannot publish
 into a stream. **Registered intent** — one designated publisher and many read-only nodes,
-coordinated through the broker — is designed and unbuilt. **Binary payloads cost 4/3 their
-size on disk**, because litelink refuses `binary` columns today and says to encode as text;
-`kind` is already on the row, so that becomes a storage change with no wire change. See
-[`docs/SPEC.md`](docs/SPEC.md) §9.
+coordinated through the broker — is designed and unbuilt. **Arrow IPC as a negotiated wire
+format** would make a bulk replay 492x cheaper to encode and 2.4x smaller, at the cost of
+the `wscat` affordance; it is measured and unbuilt. See [`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Documentation
 

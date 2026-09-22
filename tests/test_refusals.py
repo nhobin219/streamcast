@@ -13,6 +13,7 @@ import asyncio
 import pytest
 
 import streamcast
+from tests.conftest import SCHEMA, trade
 
 
 class TestNotReplayable:
@@ -41,7 +42,7 @@ class TestNotReplayable:
     ):
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
-            await stream.send_many(["a", "b"])
+            await stream.send_many([trade(0), trade(1)])
             with pytest.raises(streamcast.NotReplayable) as raised:
                 await streamcast.connect(uri, offset=9999)
 
@@ -55,7 +56,7 @@ class TestNotReplayable:
         # minutes. Past it the answer is to read the log directly.
         stream = streamcast.Stream("trades", log=log, max_replay=5)
         async with serve(stream) as uri:
-            await stream.send_many([f"m{i}" for i in range(20)])
+            await stream.send_many([trade(i) for i in range(20)])
             with pytest.raises(streamcast.NotReplayable) as raised:
                 await streamcast.connect(uri, offset=1)
 
@@ -81,12 +82,12 @@ class TestNotReplayable:
         import litelink
 
         handle = litelink.new(
-            tmp_path / "data", "trades", schema=streamcast.SCHEMA, start_offset=500
+            tmp_path / "data", "trades", schema=SCHEMA, start_offset=500
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle)
             async with serve(stream) as uri:
-                await stream.send_many(["a", "b", "c"])
+                await stream.send_many([trade(i) for i in range(3)])
                 with pytest.raises(streamcast.NotReplayable) as raised:
                     await streamcast.connect(uri, offset=100)
 
@@ -113,8 +114,8 @@ class TestNotReplayable:
 
         # And the stream still works afterwards.
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            await stream.send("still here")
-            assert await sub.recv() == (1, "still here")
+            await stream.send(trade(0))
+            assert (await sub.recv())[0] == 1
 
 
 class TestRoutingRefusals:
@@ -158,10 +159,10 @@ class TestTheClientSide:
         # The affordance that makes `wscat ws://broker/trades?offset=0` work.
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
-            await stream.send_many(["a", "b"])
+            await stream.send_many([trade(0), trade(1)])
             async with streamcast.connect(uri + "?offset=2") as sub:
                 assert sub.info.replay == (2, 3)
-                assert await sub.recv() == (2, "b")
+                assert (await sub.recv())[0] == 2
 
     async def test_a_peer_that_is_not_a_broker_is_a_protocol_error(self):
         # An unrelated WebSocket service on a reused port. The failure has to
@@ -208,7 +209,7 @@ async def test_a_refusal_inside_async_with_does_not_wedge_the_teardown(serve, lo
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                 await sub.recv()
 
-        await stream.send("the broker is still fine")
+        await stream.send(trade(0))
         async with streamcast.connect(uri) as sub:
-            await stream.send("and still serving")
-            assert await sub.recv() == (2, "and still serving")
+            await stream.send(trade(1))
+            assert (await sub.recv())[0] == 2

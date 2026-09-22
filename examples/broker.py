@@ -8,10 +8,18 @@ nothing to configure and no credentials to set. This holds **one** connection
 to it and serves every consumer on the box from that — which is the whole
 idea, and the reason it is not six connections to Bitstamp.
 
-Every message goes into a litelink log before any subscriber sees it, so a
+Every trade goes into a litelink log before any subscriber sees it, so a
 consumer that stops and starts again resumes from where it left off rather
 than from now. Stop `demo-consumer`, leave it stopped, start it again, and
 watch it replay the gap.
+
+**The schema below is this demo's, not streamcast's.** Every field the feed
+sends that is worth a column gets one, because that is what makes the log a
+table rather than a pile of frames: `SELECT max(price) FROM log` works,
+Iceberg statistics prune a query for one minute of trades, and a subscriber
+receives the row rather than a blob to parse. Frames that are not trades —
+the subscription ack, the reconnect notices — have no row and are dropped
+here, which is the feed handler's job in every tickerplant.
 
 `--no-log` is the other end of the range: a pure multicaster, no litelink, no
 replay, and `?offset=` refused outright. Right when the stream is a cache
@@ -36,6 +44,7 @@ import signal
 from pathlib import Path
 
 import litelink
+import pyarrow as pa
 import websockets
 
 import streamcast
@@ -43,6 +52,35 @@ import streamcast
 FEED = "wss://ws.bitstamp.net"
 CHANNEL = "live_trades_btcusd"
 SUBSCRIBE = json.dumps({"event": "bts:subscribe", "data": {"channel": CHANNEL}})
+
+SCHEMA = pa.schema(
+    [
+        # Microseconds, as the feed sends them. Leading column of `sort_by`,
+        # so a bounded query on it prunes whole files.
+        pa.field("event_ts", pa.int64(), nullable=False),
+        pa.field("trade_id", pa.int64(), nullable=False),
+        pa.field("price", pa.float64()),
+        pa.field("amount", pa.float64()),
+        # 0 buy, 1 sell, as the feed spells it.
+        pa.field("side", pa.int64()),
+    ]
+)
+
+
+def row(trade: dict) -> dict:
+    """One frame, as columns. The parse happens ONCE, here.
+
+    That is the difference between this and a blob multicaster: every
+    subscriber receives the parsed row, so nobody downstream parses it again,
+    and the log is queryable by anything that can read Iceberg.
+    """
+    return {
+        "event_ts": int(trade["microtimestamp"]),
+        "trade_id": int(trade["id"]),
+        "price": float(trade["price"]),
+        "amount": float(trade["amount"]),
+        "side": int(trade["type"]),
+    }
 
 
 async def publish(stream: streamcast.Stream) -> None:
@@ -57,12 +95,15 @@ async def publish(stream: streamcast.Stream) -> None:
         try:
             await feed.send(SUBSCRIBE)
             async for message in feed:
-                # The subscription ack and the reconnect notices go down the
-                # stream too, deliberately: this is a multicaster, and what
-                # the exchange said is what every consumer should see. An
-                # application that wants them filtered filters them, once,
-                # rather than each consumer guessing.
-                await stream.send(message)
+                frame = json.loads(message)
+                # The subscription ack and the reconnect notices are not
+                # trades and have no row, so they stop here. A typed log is
+                # what forces that decision to be made once, by the feed
+                # handler, instead of by every consumer independently.
+                if frame.get("event") != "trade":
+                    continue
+
+                await stream.send(row(frame["data"]))
 
         except websockets.ConnectionClosed:
             print("  upstream dropped; reconnecting")
@@ -101,7 +142,9 @@ async def main() -> None:
         try:
             log = litelink.open(args.root, "trades")
         except FileNotFoundError:
-            log = litelink.new(args.root, "trades", schema=streamcast.SCHEMA)
+            log = litelink.new(
+                args.root, "trades", schema=SCHEMA, sort_by=("event_ts",)
+            )
 
     with contextlib.ExitStack() as closing:
         if log is not None:

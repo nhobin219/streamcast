@@ -6,10 +6,14 @@
 
 **The one deviation from `websockets` is the pair.** Iterating a
 `websockets` connection yields a message; iterating this yields
-`(offset, message)`, because the offset is the only thing that makes a
-reconnect a resume rather than a restart, and a subscriber that has to ask for
-it separately will forget to. `message` is `str` or `bytes`, exactly as the
-publisher sent it.
+`(offset, row)`, because the offset is the only thing that makes a reconnect a
+resume rather than a restart, and a subscriber that has to ask for it
+separately will forget to.
+
+`row` is a `dict` over the stream's declared columns — the same row the
+publisher sent and the same row the log holds, with `litelink_offset` among
+its keys. It is not a blob to parse: the broker's table is typed, so the
+parsing happened once at the publisher rather than once per subscriber.
 
 **The second deviation is that there is no `send`.** A subscription is
 read-only, and rather than carrying a `send` that raises, it does not have
@@ -183,8 +187,8 @@ class Subscription:
         details, and anything else this class deliberately does not wrap."""
         return self._connection
 
-    async def recv(self) -> tuple[int, str | bytes]:
-        """The next `(offset, message)`.
+    async def recv(self) -> tuple[int, dict[str, object]]:
+        """The next `(offset, row)`.
 
         Raises the refusal the broker closed with, or `ConnectionClosed` as
         `websockets` raised it when the close carries no refusal.
@@ -198,22 +202,15 @@ class Subscription:
 
             raise refusal from None
 
-        if isinstance(frame, str):
-            # Only the greeting is text, and it was consumed before this
-            # object existed. A second one means the peer is not a streamcast
-            # broker, or is one from before the frame layout settled.
-            msg = f"the broker sent a text frame mid-stream: {frame[:120]!r}"
-            raise ProtocolError(msg)
-
-        offset, message = decode(frame)
+        offset, row = decode(frame)
         self._offset = offset
 
-        return offset, message
+        return offset, row
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> tuple[int, str | bytes]:
+    async def __anext__(self) -> tuple[int, dict[str, object]]:
         """Stops on an ordinary close; raises on anything else.
 
         Same contract as iterating a `websockets` connection — a normal

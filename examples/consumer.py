@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from pathlib import Path
 
 import websockets
@@ -63,10 +62,8 @@ async def run(uri: str, cursor: Path, label: str) -> None:
                     + ("" if stream.info.durable else "  (stream is NOT durable)")
                 )
 
-                async for offset, message in stream:
-                    handle(
-                        label, offset, message, replayed=offset < stream.info.end_offset
-                    )
+                async for offset, row in stream:
+                    handle(label, offset, row, replayed=offset < stream.info.end_offset)
                     cursor.write_text(str(offset))
 
             print(f"[{label}] the broker closed the stream")
@@ -93,20 +90,17 @@ async def run(uri: str, cursor: Path, label: str) -> None:
             await asyncio.sleep(1)
 
 
-def handle(label: str, offset: int, message: str | bytes, *, replayed: bool) -> None:
-    """Print trades and ignore the rest. Whatever your consumer actually does."""
-    if not isinstance(message, str):
-        return
+def handle(label: str, offset: int, row: dict, *, replayed: bool) -> None:
+    """Whatever your consumer actually does. Note there is no parsing here.
 
-    frame = json.loads(message)
-    if frame.get("event") != "trade":
-        return
-
-    trade = frame["data"]
+    The broker's table is typed, so `row` arrives as columns — the feed
+    handler parsed once, at the publisher, rather than every subscriber
+    parsing the same frame independently.
+    """
     mark = "replay" if replayed else " live "
     print(
-        f"[{label}] {mark} {offset:>8,}  {float(trade['price']):>12,.2f}"
-        f"  {float(trade['amount']):.8f}"
+        f"[{label}] {mark} {offset:>8,}  {row['price']:>12,.2f}"
+        f"  {row['amount']:.8f}  {'sell' if row['side'] else 'buy '}"
     )
 
 

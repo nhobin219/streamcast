@@ -20,10 +20,17 @@ import asyncio
 import pytest
 
 import streamcast
+from tests.conftest import trade
 
 # Large enough that a handful fill the kernel buffer and `websockets`'
-# 32 KB `write_limit`, so the broker's pump actually parks.
-PAYLOAD = "x" * 65_536
+# 32 KB `write_limit`, so the broker's pump actually parks. A row is small,
+# so the bulk goes in the one string column the schema has.
+BULK = "x" * 65_536
+
+
+def fat(i: int) -> dict:
+    """A row big enough to apply real backpressure."""
+    return {**trade(i), "tag": f"{i:06}{BULK}"}
 
 
 class TestIsolation:
@@ -35,7 +42,7 @@ class TestIsolation:
             async with streamcast.connect(uri) as healthy:
                 try:
                     for i in range(40):
-                        await stream.send(f"{i:04}{PAYLOAD}")
+                        await stream.send(fat(i))
                         # `send` never yields — that is the atomicity the
                         # ordering guarantee rests on — so a publish loop
                         # with no await of its own starves every pump and
@@ -63,12 +70,12 @@ class TestIsolation:
         async with serve(stream) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             try:
-                await stream.send(PAYLOAD)
+                await stream.send(fat(0))
                 await asyncio.sleep(0.1)  # let the pump park on the socket
 
                 started = asyncio.get_running_loop().time()
                 for _ in range(500):
-                    await stream.send(PAYLOAD)
+                    await stream.send(fat(0))
 
                 elapsed = asyncio.get_running_loop().time() - started
 
@@ -87,7 +94,7 @@ class TestDropping:
         async with serve(stream) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             for i in range(200):
-                await stream.send(f"{i:04}{PAYLOAD}")
+                await stream.send(fat(i))
 
             received = []
             with pytest.raises(streamcast.TooSlow) as raised:
@@ -119,7 +126,7 @@ class TestDropping:
         async with serve(stream) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             for i in range(total):
-                await stream.send(f"{i:04}{PAYLOAD}")
+                await stream.send(fat(i))
 
             received = []
             with pytest.raises(streamcast.TooSlow):
@@ -135,8 +142,8 @@ class TestDropping:
 
         offsets = [offset for offset, _ in received + rest]
         assert offsets == list(range(1, total + 1))
-        assert [message[:4] for _, message in received + rest] == [
-            f"{i:04}" for i in range(total)
+        assert [row["tag"][:6] for _, row in received + rest] == [
+            f"{i:06}" for i in range(total)
         ]
 
     async def test_dropping_one_subscriber_leaves_the_others_alone(self, serve):
@@ -146,7 +153,7 @@ class TestDropping:
             async with streamcast.connect(uri) as healthy:
                 try:
                     for i in range(80):
-                        await stream.send(f"{i:04}{PAYLOAD}")
+                        await stream.send(fat(i))
                         await asyncio.sleep(0)  # as above: a publisher yields
 
                     received = [
@@ -166,7 +173,7 @@ async def test_the_broker_forgets_a_dropped_subscriber(serve):
     async with serve(stream) as uri:
         stalled = await streamcast.connect(uri, max_queue=1)
         for i in range(60):
-            await stream.send(f"{i:04}{PAYLOAD}")
+            await stream.send(fat(i))
 
         with pytest.raises(Exception):  # noqa: B017, PT011
             while True:
