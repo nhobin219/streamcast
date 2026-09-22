@@ -620,6 +620,10 @@ runs it):
 | optional + `"string"` | valid | **invalid** — by `type` | valid |
 | optional + `["string","null"]` | valid | valid | valid |
 
+A schema whose columns are all nullable is the shape for **best-effort capture** — parse
+what you can, keep the raw message in its own column, and never lose a message to a feed
+that changed. The README has the pattern.
+
 Arrow has two states, not four — a column is nullable or it is not, and there is no
 "absent", because **a row that omits a column stores NULL**. So:
 

@@ -83,6 +83,72 @@ and litestream if the log has `wal_replication` on. Both are opt-out (`maintain=
 `Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened yourself
 and does no I/O. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you want it.
 
+## Surviving a feed that changes
+
+`send` validates the row against the schema, so a feed that changes shape breaks capture —
+a missing field, an unexpected type or a new key all raise, and that message is lost:
+
+```
+ValueError: row leaves non-nullable columns NULL: ['price']
+ValueError: row names columns this log does not have: ['surprise']
+```
+
+If keeping every message matters more than strictness, declare the columns nullable, add
+one for the raw message, and parse best-effort:
+
+```python
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "event_ts": {"type": ["integer", "null"]},
+        "price": {"type": ["number", "null"]},
+        "raw": {"type": ["string", "null"]},
+    },
+    "required": ["event_ts", "price", "raw"],
+}
+
+def number(value):                      # whatever the feed sent, or nothing
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def row(message: str) -> dict:
+    """Best effort: take what parses, keep the whole message either way."""
+    try:
+        data = json.loads(message)["data"]
+    except (ValueError, KeyError, TypeError):
+        data = {}
+
+    return {
+        "event_ts": number(data.get("microtimestamp")),
+        "price": number(data.get("price")),
+        "raw": message,
+    }
+
+await stream.send(row(message))
+```
+
+The row and its source land in **one append**, so a message is never captured without the
+bytes it came from, and whatever the parse missed can be backfilled from the log later.
+Run against a feed that drops a field, sends a non-trade event, and then sends invalid
+JSON, all four rows are captured with the typed columns null and `raw` intact.
+
+`required` still names every column, because in JSON Schema `required` is about the key
+being present and `["number", "null"]` is what makes the value nullable — see
+[`docs/API.md`](docs/API.md). Every column is nullable here precisely because best-effort
+extraction means any of them can be missing.
+
+Two costs, both real. A raw string column roughly doubles the log and compresses worse than
+typed columns, which is [`SPEC.md`](docs/SPEC.md) §5's argument running the other way — this
+is a deliberate trade, not a default. And subscribers receive the column too, since the wire
+carries every declared column.
+
+streamcast does not do the extraction for you. Feeds nest their payloads differently — the
+example above reaches through `["data"]` — so a general extractor needs per-field paths, at
+which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
+where it already knows the feed.
+
 ## Consumer
 
 ```python
