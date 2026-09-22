@@ -89,28 +89,49 @@ jobs:
           cd /tmp && "$GITHUB_WORKSPACE/cold/bin/python" - <<'PY'
           import asyncio, tempfile
           from pathlib import Path
-          import litelink, streamcast
+          import litelink, pyarrow as pa, streamcast
 
           assert (Path(streamcast.__file__).parent / "py.typed").exists()
 
+          # The CALLER's schema, which is the point: streamcast declares none.
+          SCHEMA = pa.schema([
+              pa.field("event_ts", pa.int64(), nullable=False),
+              pa.field("price", pa.float64()),
+              pa.field("side", pa.int64()),
+          ])
+
+          def row(i):
+              return {"event_ts": 1_790_038_800_000_000 + i,
+                      "price": 85_565.0 + i, "side": i % 2}
+
           async def main():
               root = Path(tempfile.mkdtemp())
-              with litelink.new(root, "trades", schema=streamcast.SCHEMA) as log:
+              with litelink.new(root, "trades", schema=SCHEMA,
+                                sort_by=("event_ts",)) as log:
                   stream = streamcast.Stream("trades", log=log)
                   server = await streamcast.serve(stream, "127.0.0.1", 0)
                   port = server.sockets[0].getsockname()[1]
                   uri = f"ws://127.0.0.1:{port}/trades"
 
-                  await stream.send_many([f"m{i}" for i in range(50)])
+                  await stream.send_many([row(i) for i in range(50)])
                   async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                       got = [await sub.recv() for _ in range(50)]
 
                   assert [offset for offset, _ in got] == list(range(1, 51)), got[:3]
+                  assert got[7][1]["price"] == 85_572.0, got[7]
+                  # And the log is a TABLE, which is the whole reason litelink
+                  # is underneath this rather than an append-only file. A wheel
+                  # that shipped a working broker over an unqueryable log would
+                  # pass every other check in this job.
+                  n, high = log.sql(
+                      "SELECT count(*) n, max(price) high FROM log"
+                  ).read_all().to_pylist()[0].values()
+                  assert (n, high) == (50, 85_614.0), (n, high)
                   server.close()
                   await server.wait_closed()
 
           asyncio.run(main())
-          print("cold box: 50 messages replayed out of a log through an installed wheel")
+          print("cold box: 50 rows replayed out of a queryable log via an installed wheel")
           PY
 
   ci-success:
