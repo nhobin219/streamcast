@@ -1,24 +1,20 @@
-"""A WebSocket multicaster with replay.
+"""A replayable WebSocket multicaster.
 
-One process holds the upstream subscription; every consumer on the box reads
-from it. That is the whole idea, and it exists because the alternative — every
-consumer opening its own connection to the exchange — runs into a subscription
-limit, pays N times the bandwidth, and gives each consumer a stream that can
-quietly differ from its neighbour's. One connection in, one stream out, the
-same bytes to everyone.
+One upstream stream in, appended to a litelink log — an Iceberg table on disk
+— and broadcast to any number of downstream subscribers. One process holds the
+upstream connection; every consumer reads from it and receives the same bytes
+in the same order, from one `encode` call.
 
-A streamcast server is effectively a Python WebSocket tickerplant — a term
-used in kdb+/q systems for a process that captures a feed, optionally writes
-it to a log file, and publishes it to registered subscribers
-(https://code.kx.com/q/architecture/), which is this one almost exactly.
+A streamcast server is a Python WebSocket tickerplant: a process that captures
+a feed, optionally writes it to a log, and publishes it to registered
+subscribers (https://code.kx.com/q/architecture/).
 
-The log is what makes an offset a resume cursor. With one attached every
-message is durable *before* any subscriber sees it, so a consumer that falls
-behind, crashes, or is restarted reconnects with the last offset it processed
-and the server replays the gap before switching it to live — with no window in
-which a message is in neither place. Without one the fan-out is identical,
-offsets are `null`, and `?offset=` is refused. `docs/SPEC.md` §3 is where that
-partition is argued; `Stream` is where it is enforced.
+With a log attached, every message is durable *before* any subscriber sees it,
+so a consumer that falls behind, crashes or restarts reconnects with the last
+offset it processed and the server replays the gap before switching it to
+live, with no window in which a message is in neither place. Without one the
+fan-out is identical, offsets are `null`, and `?offset=` is refused.
+`docs/SPEC.md` §3 argues that partition; `Stream` enforces it.
 
 **The API is `websockets` with one modification.** `serve` and `connect` have
 the same shapes and pass their keywords through; the difference is that

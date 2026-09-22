@@ -1,8 +1,9 @@
 # streamcast
 
-A WebSocket multicaster with a durable log behind it. One process holds the upstream
-subscription and fans it out; with a litelink log attached, an offset is a resume cursor
-and a consumer that stops can catch up.
+A replayable WebSocket multicaster. One upstream stream in, appended to a litelink log —
+an Iceberg table on disk — and broadcast to any number of downstream subscribers. Each
+message carries the offset it was written at, so a subscriber that stops can reconnect
+and ask for the rest.
 
 Read [`docs/SPEC.md`](docs/SPEC.md) before changing behaviour. It is short and it carries
 the reasoning — particularly §3 (the two atomicity invariants) and §4 (why a slow

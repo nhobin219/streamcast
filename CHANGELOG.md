@@ -13,9 +13,10 @@ has to migrate across them.
 
 ## 0.1.0 — unreleased
 
-A WebSocket multicaster with replay. One process holds the upstream
-subscription and fans it out; with a litelink log attached, an offset is a
-resume cursor and a consumer that stops can catch up.
+A replayable WebSocket multicaster. One upstream stream in, appended to a
+litelink log — an Iceberg table on disk — and broadcast to any number of
+downstream subscribers. Each message carries the offset it was written at, so
+a subscriber that stops can reconnect and ask for the rest.
 
 ### Construction
 

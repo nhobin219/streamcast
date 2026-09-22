@@ -82,20 +82,15 @@ offset is the server's framing; `msg` is the publisher's row, untouched — no
 offset key, no injected metadata, so a subscriber can log it, forward it or
 append it to another stream whole.
 
-Two earlier versions put the offset INSIDE the object, first as
-`litelink_offset` and then as `offset`, and both were wrong the same way. A
-subscriber consumes the offset positionally — `offset, msg = await sub.recv()`
-in Python, `const [offset, msg] = JSON.parse(frame)` in JS — so the key name
-was a contract nobody wanted, argued about twice; and injecting it meant `msg`
-was never quite the row that was published. A pair has no key to name, which
-is the point.
+Positional, not a key in the object. A subscriber consumes it positionally
+either way — `offset, msg = await sub.recv()` in Python,
+`const [offset, msg] = JSON.parse(frame)` in JS — so a key would be a name in
+the contract that nothing reads, and injecting one would mean `msg` is not
+quite the row that was published.
 
-There is no binary header, no length prefix and no payload kind either, and an
-earlier protocol had all three — a `>QB` header in front of an opaque blob.
-They existed to carry a whole upstream frame stored verbatim, which §5 explains
-was the wrong shape for the log. Nothing read the offset out of that header
-except a field in `Subscriber` that nothing read either, so removing it cost
-nothing and bought this:
+There is no binary header, no length prefix and no payload kind. A message is
+a row of a typed table (§5), and a row is a JSON object — there is nothing for
+a header to describe. What text buys:
 
 ```
 wscat ws://localhost:8765/trades?offset=0
@@ -313,10 +308,8 @@ messages in the queue while it ran. The first replay in a process also pays
 threshold to ~13,000 messages/s for that one subscriber. `just bench-replay`
 prints both, and the arithmetic, for your own shape and hardware.
 
-An earlier version of this section claimed ~1M rows/s and an 80,000/s threshold.
-Both were guesses stated as measurements, and both were roughly 2x optimistic;
-`benchmarks/replay.py` is where the real numbers come from now. Raise one of the
-two settings and check the other.
+Every number here comes from `benchmarks/replay.py`. Raise one of the two
+settings and check the other.
 
 ### A subscriber that walks away
 
@@ -353,19 +346,16 @@ log = litelink.new("data", "trades", schema=SCHEMA, sort_by=("event_ts",))
 await stream.send({"event_ts": …, "price": …, "amount": …, "side": …})
 ```
 
-### Why not store the frame whole
+### Why a typed table, not the frame whole
 
-An earlier design owned a fixed three-column schema — `recv_ts`, `kind`,
-`payload` — and stored each upstream frame verbatim in the string column. It is
-worth recording why that was wrong, because it looked reasonable and it
-defended itself in a docstring.
+The alternative shape is a fixed three-column schema — a receive timestamp, a
+kind, and the upstream frame verbatim in a string column. litelink's own
+websocket example rules it out in as many words: *"Every field the feed sends
+that is worth a column. §7 prunes on Iceberg statistics, so a query for one
+minute of trades never reads the rest — **which is the reason to declare a
+schema rather than store the frame whole**."*
 
-litelink's own websocket example says it in as many words: *"Every field the
-feed sends that is worth a column. §7 prunes on Iceberg statistics, so a query
-for one minute of trades never reads the rest — **which is the reason to declare
-a schema rather than store the frame whole**."*
-
-Storing it whole threw away every property the table was for:
+A blob column gives up every property the table exists for:
 
 | | with a blob column | with real columns |
 |---|---|---|
@@ -375,10 +365,8 @@ Storing it whole threw away every property the table was for:
 | **the replay** | strings out of Arrow, re-encoded per row | columns, already typed |
 | **the subscriber** | a blob to parse, once per consumer | the row, parsed once at the publisher |
 
-The argument that defended it was circular: that a caller's extra column *"would
-have to be filled by `send`, which has nothing to fill it with"*. True only
-because `send` took bytes. `send` takes a row, the caller fills it, and the
-premise disappears.
+`send` takes a row and the caller fills it, so there is no column the library
+would have to invent a value for.
 
 **The consequence is that a frame which is not a row has nowhere to go.**
 Subscription acks, heartbeats and reconnect notices are dropped by the feed
@@ -432,13 +420,12 @@ long string column off disk, and the "encode" was `struct.pack` over bytes that
 were already bytes. Typed columns make the read far cheaper and give the
 encoder real work, so the two came into balance.
 
-Encode was briefly 86% of it, because the first version built a dict per row in
-Python before handing it to msgspec. `scan` already projects the batch into
-`(litelink_offset, *columns)` order, so `batch.to_pylist()` builds those dicts
-in Arrow's own C — 1.55 us a row against 2.38, for identical bytes. `_log.replay`
-checks the batch's column order against what it projected before relying on it,
-once per batch, because the saving is only sound while that holds and a silent
-reordering would break I6.
+The dicts the encoder receives are built by Arrow, not by Python. `scan`
+projects each batch into `(litelink_offset, *columns)` order, so
+`batch.to_pylist()` builds them in C — 1.55 us a row against 2.38 for
+rebuilding them in Python, for identical bytes. `_log.rows` checks the batch's
+column order against what it projected before relying on it, once per batch:
+the saving holds only while that does, and a silent reordering would break I6.
 
 **`include_archive` is not passed.** litelink's default decides from the tiers:
 local disk while the local table holds files — every ordinary server, and it
