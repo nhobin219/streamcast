@@ -139,7 +139,13 @@ class Stream:
         # number the previous call already returned. The one risk of a cached
         # counter — drifting from the log — cannot happen, because nothing
         # else writes this log: litelink allows exactly one writer.
-        self._end_offset = log.end_offset() if log is not None else 1
+        #
+        # None with no log, and there is deliberately no counter to stand in.
+        # An in-memory sequence would look exactly like a resume cursor to
+        # every subscriber and to every operator reading a greeting, and would
+        # be wrong the moment the process restarted. Nothing assigned an
+        # offset, so nothing reports one.
+        self._end_offset: int | None = log.end_offset() if log is not None else None
         self._subscribers: set[Subscriber] = set()
 
     def __repr__(self) -> str:
@@ -167,12 +173,15 @@ class Stream:
         return self._log is not None
 
     @property
-    def end_offset(self) -> int:
-        """The offset the next message will be assigned.
+    def end_offset(self) -> int | None:
+        """The offset the next row will be assigned, or None without a log.
 
         The same quantity as litelink's `end_offset()`, and deliberately the
         same name — but an attribute here and a call there, because litelink
         reads it from SQLite and this is the counter `send` already maintains.
+
+        None means nothing is assigning offsets, which is a different fact
+        from "no rows yet" and should not be confused with 0 or 1.
         """
         return self._end_offset
 
@@ -183,8 +192,13 @@ class Stream:
 
     # -- publish -----------------------------------------------------------
 
-    async def send(self, row: Row) -> int:
+    async def send(self, row: Row) -> int | None:
         """Make one row durable, then fan it out. Returns its offset.
+
+        **None without a log**, because nothing assigned one. A live-only
+        stream fans out and forgets; handing back a per-process counter would
+        give the caller a number that behaves like a resume cursor until the
+        day the broker restarts.
 
         `row` is a mapping over the log's declared columns — litelink's `Row`,
         the same thing `litelink.append` takes. litelink validates it against
@@ -223,18 +237,16 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
+        offset = None
         if self._log is not None:
             offset = self._log.append(row)
-            self._end_offset = offset + 1
-        else:
-            offset = self._end_offset
             self._end_offset = offset + 1
 
         self._fan_out(encode(offset, row, self._columns))
 
         return offset
 
-    async def send_many(self, rows: Iterable[Row]) -> list[int]:
+    async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Make a group of rows durable in ONE transaction, then fan each out.
 
         The write-throughput lever, and it is a call-site choice rather than a
@@ -251,13 +263,10 @@ class Stream:
         if not batch:
             return []
 
+        offsets: list[int | None] = [None] * len(batch)
         if self._log is not None:
-            offsets = self._log.extend(batch)
-            self._end_offset = offsets[-1] + 1
-        else:
-            first = self._end_offset
-            offsets = list(range(first, first + len(batch)))
-            self._end_offset = first + len(batch)
+            offsets = list(self._log.extend(batch))
+            self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
 
         for offset, row in zip(offsets, batch, strict=True):
             self._fan_out(encode(offset, row, self._columns))
@@ -304,7 +313,6 @@ class Stream:
         # re-narrowing `self._log` at the use site, which is an assertion
         # about a branch three statements away.
         resolved = await self._resolve(requested)
-        start = None if resolved is None else resolved[1]
 
         subscriber = Subscriber(connection, max_backlog=self._max_backlog)
         # ── ATOMIC. Do not put an await between these two statements. ──
@@ -316,15 +324,25 @@ class Stream:
         # ──────────────────────────────────────────────────────────────
 
         replay: AsyncGenerator[tuple[int, bytes], None] | None = None
+        replaying: tuple[int, int] | None = None
         try:
             if resolved is not None:
+                if frontier is None:  # pragma: no cover — implied by `resolved`
+                    # A resolved replay means `_resolve` found a log, and a
+                    # log means the counter is an integer. Stated as a raise
+                    # rather than an assert because the alternative — skipping
+                    # the replay — would be a silent gap at the join.
+                    msg = "a replay resolved against a stream with no offsets"
+                    raise RuntimeError(msg)
+
+                replaying = (resolved[1], frontier)
                 replay = await self._replay_from(*resolved, frontier)
 
             await connection.send(
                 greeting(
                     stream=self._name,
                     end_offset=frontier,
-                    replay=None if start is None else (start, frontier),
+                    replay=replaying,
                     durable=self._log is not None,
                 )
             )
@@ -353,6 +371,10 @@ class Stream:
             raise NotReplayable("not_durable")
 
         frontier = self._end_offset
+        if frontier is None:  # pragma: no cover — a log always has a counter
+            msg = "a stream with a log has no offset counter"
+            raise RuntimeError(msg)
+
         if requested == EARLIEST:
             # The only call that asks the log where it starts, and it is in a
             # thread because `coverage()` resolves offset extents from table

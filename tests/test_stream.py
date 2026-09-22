@@ -10,19 +10,28 @@ from __future__ import annotations
 import litelink
 import pyarrow as pa
 import pytest
+from litelink.log import OFFSET as COLUMN
 
 import streamcast
-from streamcast._protocol import OFFSET, encode
+from streamcast._protocol import decode, encode
 from tests.conftest import SCHEMA, trade
 
 
 class TestOffsets:
-    async def test_a_live_only_stream_counts_from_one(self):
+    async def test_a_live_only_stream_assigns_no_offsets_at_all(self):
+        """None, not a counter.
+
+        An in-memory sequence would look exactly like a resume cursor to every
+        subscriber and every operator reading a greeting, and would be wrong
+        the moment the process restarted. Nothing assigned an offset, so
+        nothing reports one.
+        """
         stream = streamcast.Stream()
-        assert stream.end_offset == 1
-        assert await stream.send(trade(0)) == 1
-        assert await stream.send(trade(1)) == 2
-        assert stream.end_offset == 3
+        assert stream.end_offset is None
+        assert await stream.send(trade(0)) is None
+        assert await stream.send(trade(1)) is None
+        assert await stream.send_many([trade(2), trade(3)]) == [None, None]
+        assert stream.end_offset is None
         assert stream.durable is False
 
     async def test_a_durable_stream_takes_its_offsets_from_the_log(self, log):
@@ -63,6 +72,7 @@ class TestOffsets:
         # cooperation from the stream. This is the ordering the whole recovery
         # story rests on: a row a subscriber can have seen is always a row the
         # log already holds.
+        assert offset is not None
         rows = (
             log.scan(start_offset=offset, end_offset=offset + 1).read_all().to_pylist()
         )
@@ -164,8 +174,20 @@ async def test_repr_says_what_it_is(log):
     assert "live-only" in repr(streamcast.Stream())
 
 
-def test_the_offset_column_is_litelinks(log):
-    # Imported from litelink rather than spelled here, so a rename there is an
-    # ImportError instead of a scan for a column that is not there.
-    assert OFFSET == "litelink_offset"
-    assert OFFSET not in SCHEMA.names
+def test_the_message_never_carries_an_offset_column(log):
+    """The frame is `[offset, msg]`; `msg` is the publisher's row, period.
+
+    litelink's column lives in the TABLE, where it belongs — the caller never
+    declares it and litelink refuses a schema that does (I11) — and it never
+    reaches the wire under any name.
+    """
+    assert COLUMN == "litelink_offset"
+    assert COLUMN not in SCHEMA.names
+    assert COLUMN in log.scan().read_all().schema.names
+
+    frame = encode(1861, trade(0), tuple(SCHEMA.names))
+    offset, message = decode(frame)
+    assert offset == 1861
+    assert set(message) <= set(SCHEMA.names)
+    assert COLUMN not in message
+    assert "offset" not in message

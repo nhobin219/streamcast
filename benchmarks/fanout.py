@@ -110,7 +110,7 @@ async def main() -> None:
 
     started = time.perf_counter()
     for offset in range(args.messages):
-        json.dumps({"litelink_offset": offset, **row}).encode()
+        json.dumps((offset, row)).encode()
 
     _report("encode (stdlib json)", time.perf_counter() - started, args.messages)
 

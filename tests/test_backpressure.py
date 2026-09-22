@@ -61,7 +61,9 @@ class TestIsolation:
                 finally:
                     await stalled.close()
 
-        assert [offset for offset, _ in received] == list(range(1, 41))
+        assert [str(row["tag"])[:6] for _offset, row in received] == [
+            f"{i:06}" for i in range(40)
+        ]
 
     async def test_send_returns_without_waiting_for_any_consumer(self, serve):
         # The property stated as a measurement rather than as prose: with a
@@ -104,14 +106,21 @@ class TestDropping:
         assert raised.value.backlog == 8
         # What it received is a CONTIGUOUS PREFIX. This is the property that
         # makes dropping better than drop-oldest: a hole in the middle would
-        # be invisible, and this is not one.
-        offsets = [offset for offset, _ in received]
-        assert offsets == list(range(1, len(offsets) + 1))
-        # And it is told where to resume, from what it actually received.
-        assert raised.value.offset == offsets[-1]
-        assert f"resume at offset {offsets[-1] + 1}" in str(raised.value)
+        # be invisible, and this is not one. Checked on the tag rather than
+        # the offset, because this stream has no log and therefore no offsets
+        # — see below.
+        tags = [str(row["tag"])[:6] for _offset, row in received]
+        assert tags == [f"{i:06}" for i in range(len(tags))]
         # Bounded: it did not get all 200, which is the whole point.
-        assert len(offsets) < 200
+        assert len(tags) < 200
+
+        # **On a live-only stream a drop IS data loss**, and the absence of a
+        # resume point is how the library says so: nothing assigned offsets,
+        # so there is nothing to reconnect at. That is the plainest argument
+        # for attaching a log, and the next test is the other half of it.
+        assert all(offset is None for offset, _row in received)
+        assert raised.value.offset is None
+        assert "resume at offset" not in str(raised.value)
 
     @pytest.mark.slow
     async def test_a_dropped_consumer_resumes_with_nothing_missed(self, serve, log):
@@ -142,7 +151,7 @@ class TestDropping:
 
         offsets = [offset for offset, _ in received + rest]
         assert offsets == list(range(1, total + 1))
-        assert [row["tag"][:6] for _, row in received + rest] == [
+        assert [str(row["tag"])[:6] for _, row in received + rest] == [
             f"{i:06}" for i in range(total)
         ]
 
@@ -165,7 +174,9 @@ class TestDropping:
                         while True:
                             await asyncio.wait_for(stalled.recv(), timeout=15)
 
-        assert [offset for offset, _ in received] == list(range(1, 81))
+        assert [str(row["tag"])[:6] for _offset, row in received] == [
+            f"{i:06}" for i in range(80)
+        ]
 
 
 async def test_the_broker_forgets_a_dropped_subscriber(serve):

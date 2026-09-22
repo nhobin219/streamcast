@@ -59,21 +59,33 @@ contiguous prefix", authentication, and transport security. The last two are
 
 ## 2. The wire
 
-**Every frame is JSON text.** The greeting, then one object per row:
+**Every frame is JSON text.** The greeting, then an `[offset, msg]` pair per
+message:
 
 ```
 {"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
-{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
+[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-There is no binary header, no length prefix and no payload kind, and an earlier
-version of this protocol had all three — a `>QB` header in front of an opaque
-blob. They existed to carry a whole upstream frame stored verbatim, which §5
-explains was the wrong shape for the log. Once a message IS a row, a row is a
-JSON object and the offset is one of its columns.
+**The frame is a pair, and the halves are different kinds of thing.** The
+offset is the broker's framing; `msg` is the publisher's row, untouched — no
+offset key, no injected metadata, so a subscriber can log it, forward it or
+append it to another stream whole.
 
-Nothing read the offset out of that header except a field in `Subscriber` that
-nothing read either, so removing it cost nothing and bought this:
+Two earlier versions put the offset INSIDE the object, first as
+`litelink_offset` and then as `offset`, and both were wrong the same way. A
+subscriber consumes the offset positionally — `offset, msg = await sub.recv()`
+in Python, `const [offset, msg] = JSON.parse(frame)` in JS — so the key name
+was a contract nobody wanted, argued about twice; and injecting it meant `msg`
+was never quite the row that was published. A pair has no key to name, which
+is the point.
+
+There is no binary header, no length prefix and no payload kind either, and an
+earlier protocol had all three — a `>QB` header in front of an opaque blob.
+They existed to carry a whole upstream frame stored verbatim, which §5 explains
+was the wrong shape for the log. Nothing read the offset out of that header
+except a field in `Subscriber` that nothing read either, so removing it cost
+nothing and bought this:
 
 ```
 wscat ws://broker:8765/trades?offset=0
@@ -92,13 +104,19 @@ The ratio narrows as one large string column comes to dominate a frame.
 
 **Key order comes from the log's schema, not from the caller's dict.** A live
 row arrives in whatever order the publisher built it; a replayed row arrives
-from Arrow in schema order. Both are projected through the declared columns, so
-a replayed frame is byte-identical to the live one it repeats — which is I6
-across the one boundary where it could break, and what stops two subscribers
-holding the same offset from holding different bytes.
+from Arrow in the order the scan projected. Both resolve to the declared
+columns, so a replayed frame is byte-identical to the live one it repeats —
+which is I6 across the one boundary where it could break, and what stops two
+subscribers holding the same offset from holding different bytes.
 
 A nullable column the caller omits becomes JSON `null`, because that is exactly
 what the table stores for it and therefore exactly what a replay will send.
+
+**`offset` is `null` on a stream with no log.** Such a stream assigns nothing,
+and a per-process counter would hand a subscriber an integer that looks exactly
+like a resume cursor and is not one — right until the broker restarts and the
+same integers mean different messages. `null` cannot be mistaken for a cursor;
+arithmetic on it fails where `7 + 1` quietly succeeds.
 
 ### A subscribe is a URL
 
@@ -536,6 +554,28 @@ the price; nobody has needed it yet.
 real bytes has no column for them. There is no base64 workaround here any more
 — that belonged to the blob schema §5 removed — and the answer is litelink's
 §15.
+
+**litelink should own the JSON/Arrow conversion, in both directions.** Today
+streamcast parses nothing on the way in — the caller's feed handler does — and
+turns Arrow back into JSON itself on the way out. The better division is that
+litelink is explicitly for JSON stream capture and owns the codec: a feed
+handler hands it a JSON frame, and a replay asks it for JSON back. Three things
+follow, and the third is why it is worth doing:
+
+* One home for "how a row becomes JSON", instead of a parser in every feed
+  handler and an encoder here.
+* I6's byte-identity becomes litelink's guarantee rather than an argument
+  about column projection held in two modules.
+* **Columnar Arrow → JSON, which this cannot do.** A replay here goes Arrow →
+  Python dicts → msgspec, and the dict-building is real work (~1.0 us a row
+  even with Arrow doing it in C). A codec inside litelink could write JSON
+  straight off the Arrow buffers and skip the row materialisation entirely.
+  For scale, the measured ceiling: one Arrow IPC batch of 10,000 rows encodes
+  492x faster than 10,000 JSON frames.
+
+The open question is scope, and it is litelink's to answer: today that library
+is deliberately format-agnostic — typed columns, no JSON anywhere — and this
+would make a JSON codec part of its public surface.
 
 **Compression per stream rather than per connection.** permessage-deflate keeps
 a compressor per connection, so a frame encoded once is compressed N times; the

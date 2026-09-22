@@ -110,11 +110,21 @@ async def publish(stream: streamcast.Stream) -> None:
 
 
 async def report(stream: streamcast.Stream) -> None:
-    """A line every five seconds, and nothing when nothing is happening."""
+    """A line every five seconds, and nothing when nothing is happening.
+
+    `end_offset` is None on a broker run with `--no-log`: nothing assigns
+    offsets there, so there is no count to report and the line says only how
+    many subscribers are attached.
+    """
     last = stream.end_offset
     while True:
         await asyncio.sleep(5)
         now = stream.end_offset
+        if now is None or last is None:
+            print(f"  live-only  {stream.subscribers} subscriber(s)")
+            last = now
+            continue
+
         if now != last:
             print(
                 f"  offset {now - 1:,}  (+{now - last} in 5s)  "
@@ -177,7 +187,9 @@ async def main() -> None:
                 # `async for` ends cleanly instead of raising.
                 await stream.aclose()
 
-        print(f"\nstopped at offset {stream.end_offset - 1:,}")
+        stopped = stream.end_offset
+        where = f"offset {stopped - 1:,}" if stopped is not None else "live-only"
+        print(f"\nstopped at {where}")
         if log is not None:
             # Sealing is litelink's, not streamcast's — and it is the one
             # thing worth doing on the way out, because an orderly shutdown

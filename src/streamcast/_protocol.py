@@ -4,7 +4,7 @@
 is one row of the stream's table with `litelink_offset` in it:
 
     {"streamcast":1,"stream":"trades","end_offset":1861,...}
-    {"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,...}
+    [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]
 
 There is no binary framing, no length header and no payload kind, and an
 earlier version of this file had all three. They existed to carry an opaque
@@ -39,11 +39,6 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 import msgspec
 
-# The one column litelink owns, imported rather than spelled again. It is the
-# key a subscriber resumes from, so a drift between the name on the wire and
-# the name in the table is a resume that reads a column that is not there.
-from litelink.log import OFFSET
-
 from streamcast._errors import ProtocolError
 
 if TYPE_CHECKING:
@@ -51,6 +46,19 @@ if TYPE_CHECKING:
 
 _ENCODER: Final = msgspec.json.Encoder()
 _DECODER: Final = msgspec.json.Decoder()
+
+# A data frame is a PAIR, `[offset, msg]`, and the two halves are different
+# kinds of thing: the offset is the broker's framing, and `msg` is the
+# publisher's row, untouched.
+#
+# Two earlier versions put the offset INSIDE the object — first as
+# `litelink_offset`, then as `offset` — and both were wrong for the same
+# reason. A subscriber consumes the offset positionally (`offset, msg = ...`
+# in Python, `const [offset, msg] = JSON.parse(f)` in JS), so the key name was
+# a contract nobody wanted, argued about twice; and injecting it meant `msg`
+# was never quite the row that was published. It is now, exactly.
+#
+# There is no key name here on purpose. That is the point.
 
 VERSION: Final = 1
 """The protocol this build speaks. A greeting naming any other is refused.
@@ -71,9 +79,11 @@ negative offset is refused rather than being given a second meaning.
 
 
 def encode(
-    offset: int, row: Mapping[str, object], columns: tuple[str, ...] | None
+    offset: int | None,
+    row: Mapping[str, object],
+    columns: tuple[str, ...] | None,
 ) -> bytes:
-    """One row, as the JSON text bytes every subscriber gets.
+    """One message, as the `[offset, msg]` bytes every subscriber gets.
 
     Encoded ONCE per message by the broker and handed to every subscriber's
     queue, which is why this takes a row rather than a connection: fan-out is
@@ -92,70 +102,68 @@ def encode(
     becomes JSON `null`. That is exactly what the table stores for it, and
     therefore exactly what a replay of the same row will send.
 
-    **The offset key is litelink's column, not one streamcast invents.** The
-    caller never declares it — litelink owns it and refuses a schema that
-    names it (I11) — so the row that goes on the wire and the row the table
-    holds are the same shape, and a subscriber can write what it receives
-    straight into a litelink log of its own.
+    **`msg` is the publisher's row and nothing else.** No offset key, no
+    injected metadata — what a subscriber receives is what was sent, so it can
+    be logged, forwarded or appended to another stream whole.
 
-    On a stream with NO log it is still spelled `litelink_offset`, which is
-    the one place the name overreaches: there is no litelink and no column,
-    only a counter in this process. It keeps the name so that both kinds of
-    stream have one wire shape and a subscriber needs no branch — and the
-    greeting's `durable: false` is the signal that these particular offsets
-    will not survive a restart and cannot be resumed from.
+    **`offset` is `null` on a stream with no log.** A live-only stream assigns
+    nothing: there is no log, so there is no offset, and a per-process counter
+    would hand a subscriber an integer that looks exactly like a resume cursor
+    and is not one. `null` cannot be mistaken for that — arithmetic on it
+    fails where `7 + 1` quietly succeeds against a broker that has restarted.
     """
-    payload: dict[str, object] = {OFFSET: offset}
     if columns is None:
-        payload.update(row)
+        message: dict[str, object] = dict(row)
     else:
-        for name in columns:
-            payload[name] = row.get(name)
+        message = {name: row.get(name) for name in columns}
 
-    return _ENCODER.encode(payload)
+    return _ENCODER.encode((offset, message))
 
 
-def encode_projected(row: Mapping[str, object]) -> bytes:
-    """The same frame, for a row whose keys are ALREADY in wire order.
+def encode_projected(offset: int | None, message: Mapping[str, object]) -> bytes:
+    """The same frame, for a message whose keys are ALREADY in wire order.
 
-    The replay path only: a scan projected into `(litelink_offset, *columns)`
+    The replay path only. A scan projected into `(litelink_offset, *columns)`
     hands back batches in that order, so Arrow's `to_pylist()` builds each
-    dict already correct and re-projecting it in Python would be work done
-    twice. Measured at 1.55 us a row against 2.38 for the rebuild, on a path
-    that is ~86% encode.
+    dict in C and popping the offset off the front leaves exactly the message
+    the live path would have built — 1.00 us a row against 2.58 for rebuilding
+    each dict in Python.
 
-    It is a second entry point into one encoder rather than a second encoder,
-    so there is still one answer to "what does a frame look like" — and
-    `_log.replay` checks the batch's column order against what it projected
-    before using this, because the saving is only sound while that holds.
+    A second entry point into one encoder rather than a second encoder, so
+    there is still one answer to "what does a frame look like". `_log.replay`
+    checks the batch's column order against what it projected before using
+    this, because the saving is sound only while that holds.
     """
-    return _ENCODER.encode(row)
+    return _ENCODER.encode((offset, message))
 
 
-def decode(frame: str | bytes) -> tuple[int, dict[str, object]]:
-    """The inverse: `(offset, row)`, with the offset still in the row.
+def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
+    """The inverse: `(offset, msg)`.
 
-    Left in rather than popped, because the row is the log's row and
-    `litelink_offset` is one of its columns — a subscriber that writes what it
-    receives into its own litelink log wants the column, and one that does not
-    can ignore a key.
+    `None` is a legitimate offset — a stream with no log. Everything else here
+    is a peer that is not a streamcast broker, which is why each shape gets
+    its own message rather than one "malformed frame".
     """
     try:
-        row = _DECODER.decode(frame)
+        pair = _DECODER.decode(frame)
     except msgspec.DecodeError as exc:
         msg = f"a data frame is not JSON: {frame[:120]!r}"
         raise ProtocolError(msg) from exc
 
-    if not isinstance(row, dict):
-        msg = f"a data frame is not a JSON object: {frame[:120]!r}"
+    if not isinstance(pair, list) or len(pair) != 2:
+        msg = f"a data frame is not an [offset, msg] pair: {frame[:120]!r}"
         raise ProtocolError(msg)
 
-    offset = row.get(OFFSET)
-    if not isinstance(offset, int):
-        msg = f"a data frame carries no {OFFSET!r}: {frame[:120]!r}"
+    offset, message = pair
+    if offset is not None and not isinstance(offset, int):
+        msg = f"a frame's offset is {type(offset).__name__}, not an integer or null"
         raise ProtocolError(msg)
 
-    return offset, row
+    if not isinstance(message, dict):
+        msg = f"a frame's message is {type(message).__name__}, not an object"
+        raise ProtocolError(msg)
+
+    return offset, message
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +179,7 @@ class Greeting:
 
     version: int
     stream: str
-    end_offset: int
+    end_offset: int | None
     """The offset the next message will be assigned, as of this subscribe.
 
     Also the exclusive upper bound of `replay`: everything below it comes from
@@ -197,7 +205,7 @@ class Greeting:
 def greeting(
     *,
     stream: str,
-    end_offset: int,
+    end_offset: int | None,
     replay: tuple[int, int] | None,
     durable: bool,
 ) -> str:
@@ -246,7 +254,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
     return Greeting(
         version=version,
         stream=fields.get("stream", ""),
-        end_offset=int(fields["end_offset"]),
+        end_offset=None if fields["end_offset"] is None else int(fields["end_offset"]),
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
         durable=bool(fields.get("durable", False)),
     )
@@ -358,7 +366,6 @@ def subscribe_path(name: str, offset: int | None) -> str:
 __all__ = [
     "CLOSE_REASON_LIMIT",
     "EARLIEST",
-    "OFFSET",
     "VERSION",
     "Greeting",
     "decode",

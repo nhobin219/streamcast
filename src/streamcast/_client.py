@@ -187,7 +187,7 @@ class Subscription:
         details, and anything else this class deliberately does not wrap."""
         return self._connection
 
-    async def recv(self) -> tuple[int, dict[str, object]]:
+    async def recv(self) -> tuple[int | None, dict[str, object]]:
         """The next `(offset, row)`.
 
         Raises the refusal the broker closed with, or `ConnectionClosed` as
@@ -210,7 +210,7 @@ class Subscription:
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> tuple[int, dict[str, object]]:
+    async def __anext__(self) -> tuple[int | None, dict[str, object]]:
         """Stops on an ordinary close; raises on anything else.
 
         Same contract as iterating a `websockets` connection — a normal

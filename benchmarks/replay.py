@@ -34,10 +34,11 @@ from pathlib import Path
 
 import litelink
 import pyarrow as pa
+from litelink.log import OFFSET as COLUMN
 
 import streamcast
 from streamcast._log import _next_batch, columns, replay
-from streamcast._protocol import OFFSET, encode_projected
+from streamcast._protocol import encode_projected
 
 SCHEMA = pa.schema(
     [
@@ -120,7 +121,7 @@ async def main() -> None:
         )
 
         # --- where the warm time goes ---------------------------------------
-        names = (OFFSET, *columns(log))
+        names = (COLUMN, *columns(log))
 
         started = time.perf_counter()
         reader = log.scan(columns=names, start_offset=1, end_offset=args.rows + 1)
@@ -131,14 +132,18 @@ async def main() -> None:
         reader.close()
         scan = time.perf_counter() - started
 
-        # The path `_log.replay` actually takes: Arrow builds each dict, in
-        # the order the scan projected, and the encoder takes it as-is.
+        # The path `_log.replay` actually takes: Arrow builds each dict in C,
+        # and popping the offset off the front leaves the message.
         started = time.perf_counter()
         pulled = [b.to_pylist() for b in batches]
         topy = time.perf_counter() - started
 
         started = time.perf_counter()
-        total = sum(len(encode_projected(r)) for rows in pulled for r in rows)
+        total = 0
+        for rows in pulled:
+            for message in rows:
+                total += len(encode_projected(message.pop(COLUMN), message))
+
         enc = time.perf_counter() - started
 
         whole = scan + topy + enc

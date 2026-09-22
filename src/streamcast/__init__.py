@@ -40,7 +40,7 @@ rather than once per consumer.
 
     # consumer
     async with streamcast.connect("ws://localhost:8765/trades", offset=123) as sub:
-        async for offset, row in sub:
+        async for offset, msg in sub:
             ...
 
 **The object model is two classes and two functions.** `Stream` is the
@@ -49,13 +49,13 @@ it behind a port; `connect` reads it. `Subscription` is what a consumer holds,
 and it is read-only: it has no `send`, rather than a `send` that raises, for
 the reason litelink's read handles have no `append`.
 
-``EARLIEST`` is the offset that means "everything the log still holds";
-``OFFSET`` is litelink's column name, re-exported because it is a key in every
-row a subscriber receives.
+``EARLIEST`` is the offset that means "everything the log still holds".
 
-Every frame on the wire is JSON text — the greeting, then one object per row —
-so ``wscat ws://broker:8765/trades?offset=0`` is a working subscriber with no
-client library at all.
+Every frame on the wire is JSON text — the greeting, then an ``[offset, msg]``
+pair per message — so ``wscat ws://broker:8765/trades?offset=0`` is a working
+subscriber with no client library at all. **``msg`` is the row the publisher
+sent and nothing else**: no offset key, no injected metadata, so a subscriber
+can log it, forward it or append it to another stream whole.
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -69,7 +69,7 @@ from streamcast._errors import (
     StreamNotFound,
     TooSlow,
 )
-from streamcast._protocol import EARLIEST, OFFSET, Greeting
+from streamcast._protocol import EARLIEST, Greeting
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
 
@@ -82,7 +82,6 @@ __all__ = [
     "EARLIEST",
     "MAX_BACKLOG",
     "MAX_REPLAY",
-    "OFFSET",
     "Close",
     "Greeting",
     "NotReplayable",

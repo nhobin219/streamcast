@@ -122,9 +122,10 @@ class TestReplay:
         # And the frames, not only what they decode to. Key order is the thing
         # that could differ, and dict equality would not catch it.
         declared = columns(log)
-        for offset, row in live_rows:
-            plain = {k: v for k, v in row.items() if k != "litelink_offset"}
-            assert encode(offset, plain, declared) == encode(offset, row, declared)
+        for offset, message in live_rows:
+            assert encode(offset, message, declared) == encode(
+                offset, dict(reversed(list(message.items()))), declared
+            )
 
 
 class TestThePartition:

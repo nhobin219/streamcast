@@ -29,10 +29,10 @@ exported because they appear in what you catch and inspect.
 `serve` and `connect` have the same shapes and pass every keyword through. Two things
 differ:
 
-**Iterating a subscription yields `(offset, row)`**, not `message`. The offset is the
+**Iterating a subscription yields `(offset, msg)`**, not `message`. The offset is the
 only thing that makes a reconnect a resume rather than a restart, and a subscriber that
-has to ask for it separately will forget to. `row` is a `dict` over your declared
-columns.
+has to ask for it separately will forget to. `msg` is a `dict` over your declared columns
+**and nothing else** — the offset is framing, not data, and never appears inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
 because publishing is `Stream.send` in the broker's own process. Nothing inherits a
@@ -159,7 +159,7 @@ Awaitable and an async context manager, like `websockets.connect`.
 
 ```python
 async with streamcast.connect("ws://broker:8765/trades", offset=123) as stream:
-    async for offset, row in stream:
+    async for offset, msg in stream:
         ...
 ```
 
@@ -183,8 +183,8 @@ some `recv`.
 ### `Subscription`
 
 ```python
-await sub.recv() -> tuple[int, dict[str, object]]
-async for offset, row in sub: ...
+await sub.recv() -> tuple[int | None, dict[str, object]]
+async for offset, msg in sub: ...
 await sub.close(code=1000, reason="") -> None
 
 sub.offset -> int | None          # the last offset RECEIVED — the resume cursor
@@ -192,7 +192,13 @@ sub.info -> Greeting              # what the broker said at subscribe
 sub.connection -> ClientConnection  # the websockets object, unwrapped
 ```
 
-`message` is `str` or `bytes`, exactly as the publisher sent it.
+`msg` is a `dict` over the stream's declared columns — **exactly** the row the publisher
+sent, with no offset key and nothing else injected, so it can be logged, forwarded or
+appended to another stream whole. There is nothing to parse: the broker's table is typed,
+so the parse happened once at the publisher.
+
+`offset` is `None` on a stream with no log. Nothing assigned one, and `?offset=` is
+refused on such a stream, so there is nothing to resume from.
 
 Iteration **stops** on a normal close (1000/1001) and **raises** on anything else — the
 same contract as iterating a `websockets` connection, with the refusals below filling in
@@ -209,8 +215,8 @@ offset = None
 while True:
     try:
         async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, row in stream:
-                handle(row)
+            async for offset, msg in stream:
+                handle(msg)
 
     except (ConnectionClosed, OSError, streamcast.TooSlow):
         offset = None if offset is None else offset + 1
@@ -299,7 +305,7 @@ Every frame is JSON text. The greeting, then one object per row:
 
 ```
 {"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
-{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
+[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
 No binary header, no length prefix, no payload kind. `wscat ws://broker:8765/trades?offset=0`

@@ -16,7 +16,6 @@ from streamcast._errors import Close, ProtocolError
 from streamcast._protocol import (
     CLOSE_REASON_LIMIT,
     EARLIEST,
-    OFFSET,
     decode,
     encode,
     greeting,
@@ -38,25 +37,36 @@ ROW = {
 
 
 class TestFrames:
-    def test_a_row_survives_the_round_trip_unchanged(self):
-        offset, back = decode(encode(1861, ROW, COLUMNS))
-        assert offset == 1861
-        assert back == {OFFSET: 1861, **ROW}
+    def test_a_frame_is_a_positional_pair(self):
+        """`[offset, msg]`, and the halves are different kinds of thing.
 
-    def test_the_offset_travels_in_the_row_itself(self):
-        # Not in a binary header beside it. A subscriber writing what it
-        # receives into its own litelink log wants the column, and one that
-        # does not can ignore a key.
-        frame = encode(7, ROW, COLUMNS)
-        assert json.loads(frame)[OFFSET] == 7
-        assert decode(frame)[0] == 7
+        The offset is the broker's framing; `msg` is the publisher's row. Two
+        earlier versions put the offset INSIDE the object — first as
+        `litelink_offset`, then as `offset` — and both were wrong the same
+        way: a subscriber takes the offset positionally, so the key name was a
+        contract nobody wanted, and injecting it meant `msg` was never quite
+        the row that was sent.
+        """
+        pair = json.loads(encode(7, ROW, COLUMNS))
+        assert isinstance(pair, list)
+        assert len(pair) == 2
+        assert pair[0] == 7
+        assert pair[1] == ROW
+        assert "offset" not in pair[1]
+        assert "litelink_offset" not in pair[1]
+
+    def test_the_message_is_exactly_what_was_published(self):
+        offset, message = decode(encode(1861, ROW, COLUMNS))
+        assert offset == 1861
+        assert message == ROW
 
     def test_a_frame_is_json_text_any_client_can_read(self):
         # The affordance the format exists for: `wscat ws://broker/trades`
-        # prints the stream, readably, with no client library at all.
+        # prints the stream readably, and `const [offset, msg] =
+        # JSON.parse(frame)` is the whole client in another language.
         frame = encode(1861, ROW, COLUMNS)
         assert isinstance(frame, bytes)
-        assert json.loads(frame.decode()) == {OFFSET: 1861, **ROW}
+        assert json.loads(frame.decode()) == [1861, ROW]
 
     def test_the_column_order_comes_from_the_schema_not_the_dict(self):
         """**This is what makes a replay byte-identical to the live send.**
@@ -84,19 +94,29 @@ class TestFrames:
     def test_a_stream_with_no_schema_uses_the_rows_own_keys(self):
         # A live-only stream has no declared columns and nothing replays from
         # it, so there is no second encoding to match.
-        _offset, back = decode(encode(1, {"b": 2, "a": 1}, None))
-        assert back == {OFFSET: 1, "b": 2, "a": 1}
+        _offset, back = decode(encode(None, {"b": 2, "a": 1}, None))
+        assert back == {"b": 2, "a": 1}
+
+    def test_a_stream_with_no_log_sends_a_null_offset(self):
+        # Null rather than a counter: `null` cannot be mistaken for a resume
+        # cursor, where an integer from a process-local sequence can.
+        frame = encode(None, {"price": 1.0}, ("price",))
+        assert json.loads(frame)[0] is None
+        offset, message = decode(frame)
+        assert offset is None
+        assert message == {"price": 1.0}
 
     @pytest.mark.parametrize(
         ("frame", "match"),
         [
             (b"not json at all", "not JSON"),
-            (b"[1, 2, 3]", "not a JSON object"),
-            (b'{"price": 1.0}', "carries no 'litelink_offset'"),
-            (b'{"litelink_offset": "eight"}', "carries no 'litelink_offset'"),
+            (b"[1, 2, 3]", r"not an \[offset, msg\] pair"),
+            (b'{"price": 1.0}', r"not an \[offset, msg\] pair"),
+            (b'["eight", {}]', "not an integer or null"),
+            (b"[1, 2]", "not an object"),
         ],
     )
-    def test_anything_that_is_not_a_row_says_so(self, frame, match):
+    def test_anything_that_is_not_a_frame_says_so(self, frame, match):
         with pytest.raises(ProtocolError, match=match):
             decode(frame)
 

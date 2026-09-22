@@ -133,20 +133,44 @@ def test_a_replay_is_read_in_a_thread():
 
 
 def test_the_wire_key_order_comes_from_one_place():
-    """A replayed row must encode to the same bytes as the live one.
+    """A replayed message must encode to the same bytes as the live one.
 
     The live path projects the caller's dict through `Stream._columns`; the
-    replay path projects an Arrow batch through `_log.columns(log)`. Both must
-    be the log's declared order, and `encode` must be the only thing that
-    decides where the offset goes.
+    replay path gets its order from the scan's projection and pops the offset
+    off the front. Both must resolve to the log's declared column order.
     """
     from streamcast import _protocol
 
     encode_src = inspect.getsource(_protocol.encode)
-    assert "payload: dict[str, object] = {OFFSET: offset}" in encode_src
+    # The frame is a PAIR, so the offset is never a key in the message.
+    assert "_ENCODER.encode((offset, message))" in encode_src
+    assert "{name: row.get(name) for name in columns}" in encode_src
 
     stream_src = inspect.getsource(_stream.Stream.__init__)
     assert "_log.columns(log)" in stream_src
 
     replay_src = inspect.getsource(_log.replay)
-    assert "columns(log)" in replay_src
+    assert "names = (COLUMN, *declared)" in replay_src
+    # The order check is what makes popping the front sound.
+    assert "tuple(batch.schema.names) != names" in replay_src
+
+
+def test_the_offset_is_never_a_key_in_the_message():
+    """Non-negotiable: the broker sends `offset, msg`, and `msg` is the row.
+
+    Checked against the source as well as behaviour, because a future
+    convenience — "let us put the offset back in so subscribers can store one
+    object" — would be an easy change to make and a silent contract break for
+    every consumer that iterates the message's keys.
+    """
+    from streamcast import _log as log_module
+    from streamcast import _protocol
+
+    for source in (
+        inspect.getsource(_protocol.encode),
+        inspect.getsource(_protocol.encode_projected),
+    ):
+        assert "OFFSET" not in source, source
+
+    # And the replay pops litelink's column rather than passing it through.
+    assert "message.pop(COLUMN)" in inspect.getsource(log_module.replay)

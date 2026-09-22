@@ -1,6 +1,6 @@
 [project]
 name = "streamcast"
-version = "0.2.0"
+version = "0.1.0"
 description = "A WebSocket multicaster with replay. One connection in, one stream out, resumable."
 readme = "README.md"
 authors = [

@@ -63,8 +63,18 @@ async def run(uri: str, cursor: Path, label: str) -> None:
                 )
 
                 async for offset, row in stream:
-                    handle(label, offset, row, replayed=offset < stream.info.end_offset)
-                    cursor.write_text(str(offset))
+                    # `offset` is None on a broker with no log — nothing
+                    # assigned one, so there is nothing to persist and nothing
+                    # to resume from. `?offset=` is refused on such a stream
+                    # anyway, so this consumer simply stops tracking.
+                    replayed = (
+                        offset is not None
+                        and stream.info.end_offset is not None
+                        and offset < stream.info.end_offset
+                    )
+                    handle(label, offset, row, replayed=replayed)
+                    if offset is not None:
+                        cursor.write_text(str(offset))
 
             print(f"[{label}] the broker closed the stream")
             return
@@ -90,7 +100,7 @@ async def run(uri: str, cursor: Path, label: str) -> None:
             await asyncio.sleep(1)
 
 
-def handle(label: str, offset: int, row: dict, *, replayed: bool) -> None:
+def handle(label: str, offset: int | None, row: dict, *, replayed: bool) -> None:
     """Whatever your consumer actually does. Note there is no parsing here.
 
     The broker's table is typed, so `row` arrives as columns — the feed
@@ -98,8 +108,9 @@ def handle(label: str, offset: int, row: dict, *, replayed: bool) -> None:
     parsing the same frame independently.
     """
     mark = "replay" if replayed else " live "
+    where = f"{offset:>8,}" if offset is not None else "       -"
     print(
-        f"[{label}] {mark} {offset:>8,}  {row['price']:>12,.2f}"
+        f"[{label}] {mark} {where}  {row['price']:>12,.2f}"
         f"  {row['amount']:.8f}  {'sell' if row['side'] else 'buy '}"
     )
 

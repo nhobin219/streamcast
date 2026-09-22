@@ -113,9 +113,12 @@ to parse:
 
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
-    async for offset, row in stream:
-        print(offset, row["price"], row["amount"])
+    async for offset, msg in stream:
+        print(offset, msg["price"], msg["amount"])
 ```
+
+`msg` is exactly what was published — no offset key, nothing injected — so it can be
+logged, forwarded, or appended to another stream whole.
 
 **The parse happens once, at the publisher.** Six consumers used to mean six JSON parses of
 the same frame; now it means none. And the log is a real table:
@@ -134,10 +137,10 @@ two calls with an `offset=`.
 `ping_interval`, `process_request` and the rest work exactly as they do there. Two things
 differ, both deliberately:
 
-**Iterating a subscription yields `(offset, row)`**, not `message`. The offset is the only
+**Iterating a subscription yields `(offset, msg)`**, not `message`. The offset is the only
 thing that makes a reconnect a resume rather than a restart, and a subscriber that has to
-ask for it separately will forget to. `row` is a `dict` over your columns, with
-`litelink_offset` among its keys.
+ask for it separately will forget to. `msg` is a `dict` over your columns and nothing
+else — the offset is framing, not data, and never appears inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
 because publishing is `Stream.send` in the broker's own process. Nothing inherits a method
@@ -153,7 +156,7 @@ streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
 
 streamcast.serve(streams, host, port, **websockets_kwargs) -> Server
 streamcast.connect(uri, *, offset=None, **websockets_kwargs) -> Subscription
-streamcast.EARLIEST · streamcast.OFFSET
+streamcast.EARLIEST
 ```
 
 Routing is by `Stream.name`: a stream named `trades` is served at `/trades`, an unnamed one
@@ -171,8 +174,8 @@ offset = None                       # live from now; or streamcast.EARLIEST for 
 while True:
     try:
         async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, row in stream:
-                handle(row)
+            async for offset, msg in stream:
+                handle(msg)
 
     except (ConnectionClosed, OSError, streamcast.TooSlow):
         offset = None if offset is None else offset + 1
@@ -258,18 +261,24 @@ Every frame is JSON text — the greeting, then one object per row:
 
 ```
 {"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
-{"litelink_offset":1861,"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}
+[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-So `wscat ws://localhost:8765/trades?offset=0` is a working subscriber with no client
-library at all, and a consumer in another language needs a JSON parser rather than this
-repo. Encoding is [msgspec](https://github.com/jcrist/msgspec) — measured at 0.285 µs for a
+A frame is a **positional pair**: the offset is the broker's framing, `msg` is the
+publisher's row. `const [offset, msg] = JSON.parse(frame)` is the whole client in another
+language, and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber with none
+at all.
+
+Encoding is [msgspec](https://github.com/jcrist/msgspec) — measured at 0.285 µs for a
 six-column row against 5.815 µs for stdlib `json`, which is what earns it a place on a path
 every publish and every replayed row crosses.
 
-Key order comes from the log's schema, not from the dict you passed, so **a replayed row is
-byte-identical to the live one it repeats** — two subscribers holding the same offset hold
-the same bytes.
+Key order comes from the log's schema, not from the dict you passed, so **a replayed
+message is byte-identical to the live one it repeats** — two subscribers holding the same
+offset hold the same bytes.
+
+**`offset` is `null` on a stream with no log.** Nothing assigned one, and a per-process
+counter would look exactly like a resume cursor until the broker restarted.
 
 ## Not implemented yet
 

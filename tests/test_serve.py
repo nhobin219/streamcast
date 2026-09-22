@@ -22,10 +22,12 @@ async def drain(subscription, count):
 
 
 class TestLiveFanOut:
-    async def test_every_subscriber_gets_the_same_bytes_in_the_same_order(self, serve):
+    async def test_every_subscriber_gets_the_same_bytes_in_the_same_order(
+        self, serve, log
+    ):
         # The sentence the library exists for. Six consumers on one box, one
         # upstream connection, and no way for two of them to disagree.
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             subs = [await streamcast.connect(uri) for _ in range(6)]
             try:
@@ -46,9 +48,9 @@ class TestLiveFanOut:
             assert one == first
 
     async def test_a_subscriber_joins_at_the_frontier_and_misses_what_came_before(
-        self, serve
+        self, serve, log
     ):
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             await stream.send(trade(0))
             async with streamcast.connect(uri) as sub:
@@ -59,29 +61,29 @@ class TestLiveFanOut:
                 assert offset == 2
                 assert row["price"] == 85_566.0
 
-    async def test_a_row_arrives_as_the_row_that_was_sent(self, serve):
-        stream = streamcast.Stream("trades")
+    async def test_a_row_arrives_as_the_row_that_was_sent(self, serve, log):
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send(trade(4))
             offset, row = await sub.recv()
             assert offset == 1
-            # The offset rides IN the row, so a subscriber writing what it
-            # receives into its own litelink log has the column already.
-            assert row == {"litelink_offset": 1, **trade(4)}
+            # EXACTLY the row that was published — no offset key, nothing
+            # injected — so a subscriber can forward or store it whole.
+            assert row == trade(4)
 
-    async def test_send_many_arrives_as_separate_messages(self, serve):
+    async def test_send_many_arrives_as_separate_messages(self, serve, log):
         # Batching is the broker's durability decision. Making it visible on
         # the wire would make every subscriber's parser depend on how the
         # publisher happened to poll.
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send_many([trade(i) for i in range(3)])
             got = await drain(sub, 3)
             assert [o for o, _ in got] == [1, 2, 3]
             assert [r["side"] for _, r in got] == [0, 1, 0]
 
-    async def test_the_subscriber_count_tracks_attach_and_detach(self, serve):
-        stream = streamcast.Stream("trades")
+    async def test_the_subscriber_count_tracks_attach_and_detach(self, serve, log):
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             assert stream.subscribers == 0
             async with streamcast.connect(uri) as sub:
@@ -124,7 +126,8 @@ class TestRouting:
             async with streamcast.connect(uri) as sub:
                 assert sub.info.stream == ""
                 await stream.send(trade(0))
-                assert (await sub.recv())[0] == 1
+                # Live-only: nothing assigned an offset, so None arrives.
+                assert (await sub.recv())[0] is None
 
     def test_two_streams_with_one_name_are_refused(self):
         # No correct resolution exists: whichever loses is unreachable, and
@@ -139,8 +142,8 @@ class TestRouting:
 
 
 class TestWebsocketsCompatibility:
-    async def test_connect_works_as_an_await_and_as_a_context_manager(self, serve):
-        stream = streamcast.Stream("trades")
+    async def test_connect_works_as_an_await_and_as_a_context_manager(self, serve, log):
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             sub = await streamcast.connect(uri)
             try:
@@ -153,21 +156,21 @@ class TestWebsocketsCompatibility:
                 await stream.send(trade(1))
                 assert (await sub.recv())[0] == 2
 
-    async def test_keywords_reach_websockets(self, serve):
+    async def test_keywords_reach_websockets(self, serve, log):
         # The claim the README makes: `serve` and `connect` pass everything
         # through. `compression` is the one with a different default, so it is
         # the one worth proving still reaches the other side.
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream, compression="deflate") as uri:
             async with streamcast.connect(uri, compression="deflate") as sub:
                 await stream.send(trade(0))
                 assert (await sub.recv())[0] == 1
 
-    async def test_a_plain_websocket_client_can_subscribe(self, serve):
+    async def test_a_plain_websocket_client_can_subscribe(self, serve, log):
         # The affordance the URL-shaped subscribe exists for. Nothing from
         # streamcast on this side: a greeting it can read, then frames whose
         # layout is documented.
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri, websockets.connect(uri) as raw:
             import json
 
@@ -178,19 +181,20 @@ class TestWebsocketsCompatibility:
             # And every frame after it is a readable JSON row. No header to
             # slice, no payload kind, no library needed on this side.
             await stream.send(trade(0))
-            row = json.loads(await raw.recv())
-            assert row == {"litelink_offset": 1, **trade(0)}
+            offset, row = json.loads(await raw.recv())
+            assert offset == 1
+            assert row == trade(0)
 
     async def test_the_subscription_exposes_the_connection_it_does_not_wrap(
-        self, serve
+        self, serve, log
     ):
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             pong = await sub.connection.ping()
             await asyncio.wait_for(pong, timeout=5)
 
-    async def test_iteration_stops_cleanly_when_the_broker_goes_away(self, serve):
-        stream = streamcast.Stream("trades")
+    async def test_iteration_stops_cleanly_when_the_broker_goes_away(self, serve, log):
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(trade(0))
@@ -205,7 +209,7 @@ class TestWebsocketsCompatibility:
 
 
 class TestLeaks:
-    async def test_a_disconnect_from_a_quiet_stream_leaks_nothing(self, serve):
+    async def test_a_disconnect_from_a_quiet_stream_leaks_nothing(self, serve, log):
         """The regression this suite was written to catch.
 
         A subscriber that walks away is noticed by `send` raising — but only
@@ -217,7 +221,7 @@ class TestLeaks:
 
         Deliberately NO message is sent, because sending one hides the bug.
         """
-        stream = streamcast.Stream("trades")
+        stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
             before = len(asyncio.all_tasks())
             for _ in range(25):
@@ -237,9 +241,9 @@ class TestLeaks:
             assert len(asyncio.all_tasks()) <= before + 2
 
 
-async def test_a_subscription_has_no_send(serve):
+async def test_a_subscription_has_no_send(serve, log):
     # Not a `send` that raises. The type simply does not carry one, which is
     # the same reason litelink's read handles have no `append`.
-    stream = streamcast.Stream("trades")
+    stream = streamcast.Stream("trades", log=log)
     async with serve(stream) as uri, streamcast.connect(uri) as sub:
         assert not hasattr(sub, "send")

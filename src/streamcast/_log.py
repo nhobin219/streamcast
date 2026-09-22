@@ -41,10 +41,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-# Imported rather than spelled again. `litelink_offset` is the one column that
-# library owns, and a copy here would be a second home for the fact whose
-# failure mode is a scan for a column that is not there.
-from litelink.log import OFFSET
+# litelink's own column name, imported rather than spelled again: a copy here
+# would be a second home for the fact, and its failure mode is a scan for a
+# column that is not there. It is NOT what goes on the wire — see
+# `_protocol.OFFSET`, which this module aliases it to.
+from litelink.log import OFFSET as COLUMN
 
 from streamcast._protocol import encode_projected as _encode_projected
 
@@ -103,7 +104,8 @@ async def replay(
     replay that starts above the request is a refusal rather than a short
     serve.
     """
-    names = (OFFSET, *columns(log))
+    declared = columns(log)
+    names = (COLUMN, *declared)
     # `include_archive` is deliberately not passed. litelink's default decides
     # from the tiers: local disk while the local table holds files, which is
     # every ordinary broker and keeps a replay off the network — and the
@@ -118,30 +120,28 @@ async def replay(
             if batch is None:
                 return
 
-            # **The scan was projected into wire order, so Arrow can build
-            # the dicts.** `to_pylist()` does it in C, in the batch's own
-            # column order — and because `names` put `litelink_offset` first
-            # and the declared columns after it, that order IS the wire's.
-            # So each row comes back ready to encode with no Python dict
-            # comprehension per row, which was 1.53x slower and is the
-            # difference between 2.38 us and 1.55 us a row on a path that is
-            # now ~86% encode.
+            # **Arrow builds the dicts; popping the offset leaves the message.**
+            # `to_pylist()` is one C call for the whole batch, and because the
+            # projection put litelink's column first, `pop` off the front
+            # leaves exactly the key order the live path produces. Measured at
+            # 1.00 us a row, against 1.50 for selecting the columns twice and
+            # 2.58 for rebuilding each dict in Python.
             #
-            # Checked rather than trusted: the whole property rests on DuckDB
-            # returning the columns in the order `scan` asked for, and a
-            # silent reordering would put a subscriber's replayed bytes out of
-            # step with the live ones (I6). One list compare per BATCH, not
-            # per row.
+            # Checked rather than trusted: the property rests on DuckDB
+            # returning columns in the order `scan` asked for, and a silent
+            # reordering would put a subscriber's replayed bytes out of step
+            # with the live ones (I6). One list compare per BATCH.
             if tuple(batch.schema.names) != names:
                 msg = (
                     f"the scan returned columns {batch.schema.names} where "
-                    f"{list(names)} was projected; a replayed row would not "
-                    f"match the live one"
+                    f"{list(names)} was projected; a replayed message would "
+                    f"not match the live one"
                 )
                 raise RuntimeError(msg)
 
-            for row in batch.to_pylist():
-                yield row[OFFSET], _encode_projected(row)
+            for message in batch.to_pylist():
+                offset = message.pop(COLUMN)
+                yield offset, _encode_projected(offset, message)
 
     finally:
         # Releases the DuckDB result the scan is holding. A subscriber that
