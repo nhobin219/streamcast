@@ -50,10 +50,28 @@ has to ask for it separately will forget to. `msg` is a `dict` over your declare
 because publishing is `Stream.send` in the server's own process. Nothing inherits a
 method it has to refuse.
 
-**`compression` is `None` here and `"deflate"` there.**
-permessage-deflate keeps a 32 KB compressor per connection, so a frame this library
-deliberately encodes once is then compressed once *per subscriber* — the wrong trade on
-the LAN this is built for. Pass `compression="deflate"` for subscribers across a WAN.
+**`compression` is `None` here and `"deflate"` there.** permessage-deflate is per
+connection while the encode is shared: `send` encodes a frame once and hands the same
+bytes to every subscriber, and deflate compresses those identical bytes once per
+subscriber. *Measured* on a six-column trade row:
+
+| subscribers | CPU per message, off | on |
+|---|---|---|
+| 1 | 0.564 µs | 4.02 µs |
+| 6 | 0.564 µs | 21.3 µs |
+| 50 | 0.564 µs | 173 µs |
+| 200 | 0.564 µs | 691 µs |
+
+At 50 subscribers and 30,000 msg/s that is 1.5M compressions/s against roughly 290k a
+core manages, and the symptom is subscribers hitting `max_backlog` and being dropped —
+an outage that reads like a bug. With it off the cost of being wrong is bandwidth: 26.9
+against 4.6 Mbit/s per subscriber, since deflate is **5.8× smaller** here (112 bytes to
+19). Pass `compression="deflate"` when bandwidth costs more than CPU, which is a WAN
+with few subscribers.
+
+There is no middle setting. Without context takeover — the variant that would let one
+compressed frame be shared across connections — the same frames compress 1.1×, so
+"compress once, fan out" is not on the table.
 
 ## `Stream`
 

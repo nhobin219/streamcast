@@ -215,14 +215,32 @@ def serve(
     keyword it takes is passed through — `ssl`, `process_request`,
     `ping_interval`, and the rest.
 
-    **`compression` defaults to None here and to `"deflate"` there**, which is
-    the one deviation. permessage-deflate keeps a 32 KB compressor per
-    connection, so a frame this library deliberately encodes once is then
-    compressed once *per subscriber*: fan-out becomes O(subscribers) CPU, on
-    the loop, at the message rate. streamcast's case is many subscribers on
-    one box or one LAN — that is what it was built for — where the bandwidth
-    is free and the CPU is not. Pass `compression="deflate"` to turn it back
-    on for subscribers across a WAN, where the trade reverses.
+    **`compression` defaults to None here and to `"deflate"` there.** Not a
+    judgement about LAN versus WAN — a WebSocket server is a network server
+    and this one is used across boxes. It is that permessage-deflate is PER
+    CONNECTION while the encode is shared. `send` encodes a frame once and
+    hands the same bytes to every subscriber; deflate then compresses those
+    identical bytes once per subscriber, so fan-out becomes O(subscribers)
+    CPU at the message rate on a frame that was already serialised.
+
+    *Measured* on a six-column trade row: encode 0.564 us once, deflate 3.454
+    us each. CPU per message is 4 us at one subscriber and 691 us at 200. At
+    50 subscribers and 30,000 msg/s that asks for 1.5M compressions/s where a
+    core manages roughly 290k.
+
+    **The two failure modes are not symmetric, which is what picks the
+    default.** Wrong with it ON, the server goes CPU-bound, subscribers fall
+    behind, and `max_backlog` drops them — an outage that reads like a bug.
+    Wrong with it OFF, you send 26.9 Mbit/s per subscriber instead of 4.6 at
+    30,000 msg/s: a bill, and one keyword to fix. So it is off, and
+    `compression="deflate"` turns it on where bandwidth costs more than CPU —
+    few subscribers, over a WAN. It is worth having there: 5.8x smaller on
+    this row, 112 bytes to 19.
+
+    There is no middle setting. Without context takeover — the variant that
+    would in principle let one compressed frame be shared across connections
+    — the same frames compress 1.1x, so "compress once, fan out" is not
+    available.
 
     **`maintain=True` starts one maintainer subprocess per stream that has a
     log**, and stops it when the server closes. That is a departure from

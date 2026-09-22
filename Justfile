@@ -180,3 +180,9 @@ bench *args:
 # sizes max_replay against come from here.
 bench-replay *args:
     uv run python benchmarks/replay.py {{args}}
+
+# What permessage-deflate costs per subscriber against what it saves. This is
+# the measurement `compression`'s default rests on — rerun it before arguing
+# with the default.
+bench-deflate *args:
+    uv run python benchmarks/deflate.py {{args}}
