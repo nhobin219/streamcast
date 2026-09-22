@@ -35,6 +35,67 @@ optionally writes it to a log, and publishes it to registered subscribers.
 uv add git+https://github.com/nhobin219/streamcast     # not on PyPI yet
 ```
 
+## API
+
+**It is the `websockets` API.** `serve` and `connect` have the same shapes and pass every
+keyword through, so `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest
+behave exactly as they do there, and `serve` returns an object that proxies
+`websockets.Server` — `sockets`, `serve_forever`, `connections`, `is_serving`. If you know
+`websockets`, you know this.
+
+```python
+streamcast.Stream(name="", *, log=None, owns_log=False,
+                  max_backlog=8192, max_replay=100_000)
+streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
+                      archive=None, s3=None, replay_archive=False,
+                      max_backlog=8192, max_replay=100_000)   # None = no bound
+    await stream.send(row) -> int | None       # durable, then fan out
+    await stream.send_many(rows) -> list       # ONE fsync for the group
+    stream.end_offset · stream.subscribers · stream.durable · stream.schema
+
+streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
+streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
+                   catch_up=False, ...) -> Subscription
+streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
+```
+
+Three deliberate exceptions:
+
+- **Iterating yields `(offset, msg)`**, not `message`. The offset is what makes a reconnect
+  a resume rather than a restart, and a subscriber that has to ask for it separately will
+  forget to.
+- **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
+  Publishing is `Stream.send`, in the server's own process.
+- **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`.
+  permessage-deflate keeps a 32 KB compressor per connection and compresses once per
+  subscriber a frame that was encoded once — the wrong trade on a LAN, the right one across
+  a WAN, where you pass `compression="deflate"` and get it back.
+
+Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
+`serve([trades, quotes])` serves both on one port.
+
+Full reference in [`docs/API.md`](docs/API.md).
+
+## The wire
+
+Every frame is JSON text: a greeting, then an `[offset, msg]` pair per message.
+
+```
+{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
+[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
+```
+
+The offset is positional, so `const [offset, msg] = JSON.parse(frame)` is a client in
+another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
+with none at all. Key order comes from the log's schema, so a replayed message is
+byte-identical to the live one it repeats.
+
+Encoding is [msgspec](https://github.com/jcrist/msgspec): 0.285 µs for a six-column row
+against 5.815 µs for stdlib `json`.
+
+`offset` is `null` on a stream with no log — nothing assigned one, and a per-process
+counter would look like a resume cursor until the server restarted.
+
 ## Server
 
 The schema is yours, declared in JSON Schema. `streamcast` is the only import a durable
@@ -247,56 +308,6 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
 
-## API
-
-```python
-streamcast.Stream(name="", *, log=None, owns_log=False,
-                  max_backlog=8192, max_replay=100_000)
-streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      archive=None, s3=None, replay_archive=False,
-                      max_backlog=8192, max_replay=100_000)   # None = no bound
-    await stream.send(row) -> int | None       # durable, then fan out
-    await stream.send_many(rows) -> list       # ONE fsync for the group
-    stream.end_offset · stream.subscribers · stream.durable · stream.schema
-
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
-streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
-                   catch_up=False, ...) -> Subscription
-streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
-```
-
-Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
-`serve([trades, quotes])` serves both on one port.
-
-Two differences from `websockets`, which otherwise passes every keyword through:
-
-- **Iterating yields `(offset, msg)`**, not `message`. The offset is what makes a
-  reconnect a resume rather than a restart.
-- **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
-  Publishing is `Stream.send`, in the server's own process.
-
-Full reference in [`docs/API.md`](docs/API.md).
-
-## The wire
-
-Every frame is JSON text: a greeting, then an `[offset, msg]` pair per message.
-
-```
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
-[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
-```
-
-The offset is positional, so `const [offset, msg] = JSON.parse(frame)` is a client in
-another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
-with none at all. Key order comes from the log's schema, so a replayed message is
-byte-identical to the live one it repeats.
-
-Encoding is [msgspec](https://github.com/jcrist/msgspec): 0.285 µs for a six-column row
-against 5.815 µs for stdlib `json`.
-
-`offset` is `null` on a stream with no log — nothing assigned one, and a per-process
-counter would look like a resume cursor until the server restarted.
-
 ## Chaining
 
 Each stage is a server, so a pipeline is servers end to end and every hop is independently
@@ -315,9 +326,8 @@ Offsets are per server and are not translated between hops.
 - **Not a message broker.** No fan-in: nothing publishes into a stream over the wire. No
   topics beyond a name, no consumer groups, no acknowledgements. A subscriber needing
   at-least-once with acks wants a queue.
-- **Not a wide-area transport.** `compression` defaults to off, because permessage-deflate
-  keeps a 32 KB compressor per connection and compresses once per subscriber a frame that
-  was encoded once. Pass `compression="deflate"` across a WAN.
+- **Not a wide-area transport.** Built for a LAN, which is why `compression` defaults off
+  — see the API section. Pass `compression="deflate"` across a WAN.
 - **Not a query interface.** `catch_up` covers resuming from further back than
   `max_replay`; querying history is litelink directly, or any Iceberg engine.
 - **Not a place for frames that are not rows.** A typed log has nowhere to put a
