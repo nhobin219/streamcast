@@ -237,6 +237,37 @@ example above reaches through `["data"]` — so a general extractor needs per-fi
 which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
 where it already knows the feed.
 
+### Backpressure
+
+`Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
+queue insert per subscriber. A consumer that stops reading fills its own queue, hits
+`max_backlog`, and is **dropped**:
+
+```
+streamcast.TooSlow: the server dropped this subscriber for falling more than
+8192 messages behind; resume at offset 20481
+```
+
+Dropping rather than buffering bounds the server's memory. Dropping rather than evicting
+the oldest keeps what the subscriber received a contiguous prefix, so on a durable stream
+the drop costs a reconnect and nothing else.
+
+**`max_backlog` and `max_replay` are different limits**, and the names invite confusing
+them:
+
+| | `max_backlog` (8,192) | `max_replay` (100,000) |
+|---|---|---|
+| bounds | messages queued for **one** subscriber | how far back a subscribe may **ask** |
+| checked | on every send, per subscriber | once, when the subscriber attaches |
+| exceeded | that subscriber is **dropped** — `TooSlow`, 4429 | the subscribe is **refused** — `too_old`, 4416 |
+| protects | the server's memory | the worker thread a replay scan holds |
+
+**They interact, which is why sizing one without the other goes wrong.** A replay is
+served *before* the live queue, and live messages pile up behind it — so a subscriber
+replaying `max_replay` messages has to finish within `max_backlog` new ones or it is
+dropped at the moment it catches up, having done all the work. Raise one and check the
+other; `just bench-replay` prints the arithmetic for your hardware.
+
 ### Serving the whole history
 
 `replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
@@ -260,21 +291,6 @@ messages for as long as that takes and is dropped the moment it catches up if it
 backlog on the way. Size the two together, or run it on a stream quiet enough that the
 arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
 (`min(32, cpu + 4)`) for its whole scan.
-
-### Backpressure
-
-`Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
-queue insert per subscriber. A consumer that stops reading fills its own queue, hits
-`max_backlog`, and is **dropped**:
-
-```
-streamcast.TooSlow: the server dropped this subscriber for falling more than
-8192 messages behind; resume at offset 20481
-```
-
-Dropping rather than buffering bounds the server's memory. Dropping rather than evicting
-the oldest keeps what the subscriber received a contiguous prefix, so on a durable stream
-the drop costs a reconnect and nothing else.
 
 ## Client
 
