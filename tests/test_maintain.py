@@ -140,7 +140,7 @@ class TestLifecycle:
     async def test_the_maintainer_stops_when_the_server_closes(self, log):
         stream = streamcast.Stream("trades", log=log)
         server = await streamcast.serve(stream, "127.0.0.1", 0)
-        alive = list(server._maintainers)  # noqa: SLF001
+        alive = list(server._children)  # noqa: SLF001
         assert len(alive) == 1
         assert alive[0]._process is not None  # noqa: SLF001
         assert alive[0]._process.poll() is None  # noqa: SLF001
@@ -162,7 +162,7 @@ class TestLifecycle:
         """
         stream = streamcast.Stream("trades", log=log)
         server = await streamcast.serve(stream, "127.0.0.1", 0)
-        supervisor = server._maintainers[0]  # noqa: SLF001
+        supervisor = server._children[0]  # noqa: SLF001
         try:
             first = supervisor._process  # noqa: SLF001
             assert first is not None
@@ -226,65 +226,7 @@ def test_there_is_no_thread_mode_to_get_wrong():
     assert "sys.executable" in spawn
 
 
-class TestWalReplication:
-    """A log that ships its WAL needs a sidecar this maintainer does not run."""
-
-    @pytest.fixture
-    def replicated(self, tmp_path):
-        handle = litelink.new(
-            tmp_path / "shipped",
-            "shipped",
-            schema=SCHEMA,
-            sort_by=("event_ts",),
-            config=litelink.LogConfig(wal_replication=True),
-            archive="s3://bucket/prefix",
-        )
-        with handle:
-            yield handle
-
-    async def test_maintain_true_is_refused(self, replicated):
-        """Refused rather than half-maintained.
-
-        Sealing a replicated log while nothing ships its WAL leaves an
-        operator believing they have continuous RPO protection when they have
-        none — a safety property silently absent, which is the worst shape a
-        failure can take.
-        """
-        stream = streamcast.Stream("shipped", log=replicated)
-        with pytest.raises(ValueError, match="wal_replication"):
-            streamcast.serve(stream, "127.0.0.1", 0, maintain=True)
-
-    async def test_the_message_names_both_ways_out(self, replicated):
-        stream = streamcast.Stream("shipped", log=replicated)
-        with pytest.raises(ValueError) as raised:
-            streamcast.serve(stream, "127.0.0.1", 0)
-
-        assert "maintain=False" in str(raised.value)
-        assert "litestream" in str(raised.value)
-        assert "'shipped'" in str(raised.value)
-
-    async def test_maintain_false_serves_it_fine(self, replicated):
-        # The operator is running litelink's maintainer and its sidecar.
-        stream = streamcast.Stream("shipped", log=replicated)
-        server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=False)
-        try:
-            assert server._maintainers == []  # noqa: SLF001
-        finally:
-            server.close()
-            await server.wait_closed()
-
-    async def test_an_ordinary_log_beside_it_is_not_punished(self, log, replicated):
-        # Only the replicated one is named, so an operator with several
-        # streams is told which.
-        with pytest.raises(ValueError) as raised:
-            streamcast.serve(
-                [
-                    streamcast.Stream("plain", log=log),
-                    streamcast.Stream("shipped", log=replicated),
-                ],
-                "127.0.0.1",
-                0,
-            )
-
-        assert "'shipped'" in str(raised.value)
-        assert "'plain'" not in str(raised.value)
+# `TestWalReplication` lived here and tested that `serve` REFUSED a log with
+# `wal_replication` on, because the maintainer did not run litestream. It now
+# does — see `test_replicate.py`, which exercises the sidecar against a real
+# endpoint rather than asserting an apology.

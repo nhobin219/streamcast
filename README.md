@@ -108,9 +108,11 @@ the same frame; now it means none.
 it when the server closes. Without one nothing ever seals: litelink is explicit that *"a
 maintainer is not optional"*, and measured on 100,000 rows past the 8 MiB seal target, a
 server without one held every row in its SQLite buffer and wrote zero Parquet files.
-`maintain=False` opts out; see [`docs/API.md`](docs/API.md#maintain) for the cadences and
-for why it is never a thread. A log with `wal_replication=True` is refused there, because
-its WAL needs a litestream sidecar this maintainer does not run.
+**And litestream**, if the log has `wal_replication` on — `serve` is the one thing you
+start. Both are opt-out (`maintain=False`, `replicate=False`) for a deployment running its
+own; see [`docs/API.md`](docs/API.md#maintain) for the cadences, why the maintainer is
+never a thread, how the sidecar guarantees only one litestream ever touches a database,
+and where the subprocesses get their credentials.
 
 And the log is a real table:
 

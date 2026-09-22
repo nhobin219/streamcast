@@ -16,7 +16,7 @@ a second spelling of "no name".
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from websockets.asyncio.server import serve as _ws_serve
 from websockets.exceptions import ConnectionClosed
@@ -24,6 +24,7 @@ from websockets.exceptions import ConnectionClosed
 from streamcast._errors import Close, NotReplayable
 from streamcast._maintain import Maintain, Supervisor
 from streamcast._protocol import parse_subscribe, refusal
+from streamcast._replicate import Sidecar
 from streamcast._stream import Stream
 
 if TYPE_CHECKING:
@@ -65,8 +66,23 @@ def _routes(streams: Stream | Iterable[Stream]) -> dict[str, Stream]:
     return routes
 
 
+class _Child(Protocol):
+    """What `_Served` needs of a supervised subprocess.
+
+    Two kinds satisfy it — the maintainer and the litestream sidecar — and
+    they are different enough that a shared base class would carry nothing.
+    What they owe the server is a lifetime, which is these three calls.
+    """
+
+    def start(self) -> None: ...
+
+    def terminate(self) -> None: ...
+
+    async def wait_closed(self) -> None: ...
+
+
 class _Served:
-    """The websockets server, plus the maintainers that must die with it.
+    """The websockets server, plus the subprocesses that must die with it.
 
     A thin proxy rather than a new object model: everything
     `websockets.Server` exposes — `sockets`, `serve_forever`, `connections`,
@@ -80,11 +96,11 @@ class _Served:
     to fix.
     """
 
-    __slots__ = ("_maintainers", "_server", "_serving")
+    __slots__ = ("_children", "_server", "_serving")
 
-    def __init__(self, serving: Server, maintainers: list[Supervisor]) -> None:
+    def __init__(self, serving: Server, children: list[_Child]) -> None:
         self._serving = serving
-        self._maintainers = maintainers
+        self._children = children
         self._server: Server | None = None
 
     async def _start(self) -> _Served:
@@ -92,8 +108,8 @@ class _Served:
             self._server = await self._serving
             # After the listener is up, so a bind failure does not leave a
             # subprocess sweeping a log nothing is writing to.
-            for maintainer in self._maintainers:
-                maintainer.start()
+            for child in self._children:
+                child.start()
 
         return self
 
@@ -108,8 +124,8 @@ class _Served:
         await self.wait_closed()
 
     def close(self, close_connections: bool = True) -> None:
-        for maintainer in self._maintainers:
-            maintainer.terminate()
+        for child in self._children:
+            child.terminate()
 
         if self._server is not None:
             self._server.close(close_connections)
@@ -118,8 +134,8 @@ class _Served:
         if self._server is not None:
             await self._server.wait_closed()
 
-        for maintainer in self._maintainers:
-            await maintainer.wait_closed()
+        for child in self._children:
+            await child.wait_closed()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
@@ -133,46 +149,38 @@ def _supervisors(
     A live-only stream has nothing to sweep, so `maintain=True` on a server of
     them spawns nothing rather than a process with no work to do.
 
-    **A log with `wal_replication` on is refused rather than half-maintained.**
-    That log needs a litestream sidecar shipping its WAL, and this maintainer
-    does not run one — so sealing it while nothing replicates leaves an
-    operator believing they have continuous RPO protection when they have
-    none. Measured: `wal_replication=True`, a streamcast server maintaining
-    the log, zero litestream processes.
-
-    Starting one here is not a small omission to fix later. litelink's own
-    maintainer does it through a flock-guarded `Sidecar` that lives in its
-    EXAMPLES rather than its library, because two litestream instances on one
-    database is "the one thing litestream says never to do" and is reachable
-    through an ordinary SIGTERM — two orphans were observed in its testing
-    before the guard existed. Reimplementing that as a side effect of a
-    convenience flag is how it would be got wrong.
+    WAL replication is a separate concern with its own argument — see
+    `_sidecars`, which runs litestream for a log that needs it.
     """
     if maintain is False:
         return []
 
     plan = Maintain() if maintain is True else maintain
 
-    replicated = [
-        stream.name or "/"
-        for stream in routes.values()
-        if stream.log is not None and stream.log.config.wal_replication
-    ]
-    if replicated:
-        msg = (
-            f"{', '.join(repr(name) for name in replicated)} replicate their WAL "
-            f"(wal_replication=True), which needs a litestream sidecar that "
-            f"streamcast's maintainer does not run — so it would seal while "
-            f"nothing shipped. Pass maintain=False and run litelink's own "
-            f"maintainer, which supervises the sidecar, or turn wal_replication "
-            f"off."
-        )
-        raise ValueError(msg)
-
     return [
         Supervisor(Path(stream.log.root), stream.log.name, plan)
         for stream in routes.values()
         if stream.log is not None
+    ]
+
+
+def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
+    """One litestream sidecar per stream whose log replicates its WAL.
+
+    `wal_replication` is opt-in on the log, so this is empty for almost every
+    deployment and starts nothing. When it is on, the log's whole point is
+    surviving the loss of its machine — and a server that came up and
+    replicated nothing would leave that belief in place with none of the
+    protection, which is why a missing binary raises here rather than at the
+    first missed push.
+    """
+    if not replicate:
+        return []
+
+    return [
+        Sidecar(stream.log)
+        for stream in routes.values()
+        if stream.log is not None and stream.log.config.wal_replication
     ]
 
 
@@ -182,6 +190,7 @@ def serve(
     port: int | None = None,
     *,
     maintain: bool | Maintain = True,
+    replicate: bool = True,
     compression: str | None = None,
     **kwargs: Any,
 ) -> _Served:
@@ -224,7 +233,9 @@ def serve(
     send, and is closed by the keepalive when its pongs stop arriving.
     """
     routes = _routes(streams)
-    maintainers = _supervisors(routes, maintain)
+    # Both resolved here, synchronously, so a missing litestream or a bad
+    # stream set fails at the call rather than inside a task nobody awaits.
+    children = [*_supervisors(routes, maintain), *_sidecars(routes, replicate)]
 
     async def handler(connection: ServerConnection) -> None:
         # `request` is optional on the connection because a `ServerConnection`
@@ -271,7 +282,7 @@ def serve(
 
     return _Served(
         _ws_serve(handler, host, port, compression=compression, **kwargs),
-        maintainers,
+        children,
     )
 
 

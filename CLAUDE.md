@@ -17,7 +17,13 @@ just test tests/test_resume.py -k partition
 just bench              # fan-out and publish throughput
 just bench-replay       # replay cost, and which layer it is spent in
 just demo               # a live public feed through a server
+just rustfs             # an S3 endpoint, so the replication tier runs
+just check-all          # every gate with replication REQUIRED, as CI runs it
 ```
+
+The replication tier SKIPS without an endpoint, and a skip is not a pass — it is
+where litestream is actually run and where "never two instances on one database"
+is checked. `just rustfs` then `just check-all` is the honest local gate.
 
 ## The schema is the caller's
 
@@ -52,10 +58,14 @@ possible is wrong even if every test passes.
    `_maintain`. A server started with `maintain=False` and no external maintainer buffers
    every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
    target, with zero Parquet files.
-7. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
+7. **Run two litestream instances against one database.** It is the one thing litestream
+   forbids. The sidecar takes an `flock` beside the log — not beside `log.root`, which is
+   the shared parent — holds it for the server's life, sets `PR_SET_PDEATHSIG` so a
+   `SIGKILL` cannot orphan the child, and stands by rather than starting a second.
+8. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
    which is safe; a cursor ahead of it skips messages for ever. `_cursor` advances only
    when the loop asks for the next message, and never when the handler raised.
-8. **Let a replayed frame differ from the live one it repeats.** Both project through the
+9. **Let a replayed frame differ from the live one it repeats.** Both project through the
    log's declared column order, so the bytes match. `_log.replay` checks the batch's column
    order against what it projected for exactly this reason.
 
@@ -103,6 +113,7 @@ src/streamcast/
     _log.py         the litelink tier: columns, replay, earliest
     _cursor.py      where a consumer keeps the offset it finished with
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
+    _replicate.py   the litestream sidecar: flock-guarded, never two on one db
     _server.py      serve — routing, close codes, maintainer lifetime
     _client.py      connect, Subscription, and close code → exception
 ```

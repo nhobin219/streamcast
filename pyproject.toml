@@ -74,6 +74,14 @@ dev = [
     # usually a coroutine waiting for a message that will never arrive — which
     # without this is a CI job that burns its whole limit and reports nothing.
     "pytest-timeout>=2.3",
+    # A TEST dependency, not a library one. The replication tier ships a WAL
+    # to object storage through litestream, and these fixtures assert against
+    # the bucket directly — which is a different job from anything streamcast
+    # itself does, and streamcast reaches S3 through nothing at all.
+    #
+    # Its absence would skip the whole tier silently, which is how a tier goes
+    # unchecked; `STREAMCAST_REQUIRE_S3` turns that skip into a failure.
+    "s3fs>=2024.6.0",
     "ruff>=0.15.0",
     "ty>=0.0.15",
 ]
@@ -118,5 +126,6 @@ asyncio_default_fixture_loop_scope = "function"
 # Per-test, so a suite that hangs names the test that hung.
 timeout = 60
 markers = [
+    "replication: ships a WAL to object storage through litestream — `just rustfs` starts an endpoint, or set AWS_ENDPOINT_URL. Skipped when none answers, unless STREAMCAST_REQUIRE_S3 is set.",
     "slow: drives real fsync volume or a real backlog overflow — wall-clock bound rather than CPU bound. Deselect with -m 'not slow'.",
 ]

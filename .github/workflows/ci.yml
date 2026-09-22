@@ -48,6 +48,26 @@ jobs:
   test:
     name: Tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    # An S3-compatible endpoint, because without one the replication tier
+    # SKIPS — and a skip is not a pass. That tier is where litestream is
+    # actually run and where "never two instances on one database" is
+    # checked, so leaving it unrun would be the safety property going
+    # unverified in the one place that verifies it.
+    #
+    # Same image as `just rustfs`, so CI and a developer machine are one
+    # environment rather than two that drift. Pinned, not `:latest`: a
+    # floating tag that renamed its credential env vars would still answer on
+    # the port, the bucket call would fail, and the tier would vanish green.
+    services:
+      rustfs:
+        image: rustfs/rustfs:1.0.0-rc.4
+        env:
+          RUSTFS_ACCESS_KEY: streamcast
+          RUSTFS_SECRET_KEY: streamcast-secret
+        ports:
+          - 9002:9000
+
     strategy:
       fail-fast: false
       matrix:
@@ -62,11 +82,31 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync
+      # Any HTTP answer means it is listening. NOT `curl -f`: an
+      # unauthenticated S3 root answers 403, which is a healthy server
+      # refusing an anonymous request, and -f reads that as a failure.
+      - name: Wait for the S3 endpoint
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -s -o /dev/null http://127.0.0.1:9002 2>/dev/null; then
+              echo "rustfs is listening"; exit 0
+            fi
+            sleep 1
+          done
+          echo "rustfs never came up; the replication tier would not run" >&2
+          exit 1
+
       # Not `-m "not slow"`. The slow tier here is the backpressure suite —
       # the only place a real queue overflow is forced against a real socket —
       # and it is where the isolation guarantee either holds or does not.
       # Skipping it in CI would leave that claim checked nowhere.
+      #
+      # STREAMCAST_REQUIRE_S3 turns a skipped replication tier into a
+      # failure. Without it, a dead endpoint would look exactly like an
+      # absent one and eight tests would vanish green.
       - run: uv run pytest -q
+        env:
+          STREAMCAST_REQUIRE_S3: "1"
 
   packaging:
     name: The wheel imports and serves

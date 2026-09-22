@@ -58,6 +58,10 @@ MAINTAIN_EVERY: Final = 10.0
 # How long a maintainer gets to exit on its own before it is killed.
 _STOP_GRACE: Final = 5.0
 
+# How often a supervisor looks at its child. Polled rather than waited on;
+# see `_supervise` for why a thread is the wrong tool here.
+_POLL: Final = 0.5
+
 # Restart backoff after an unexpected exit. Capped, because a maintainer that
 # cannot start is usually a permanent condition — a missing root, a corrupt
 # log — and retrying it every 100 ms would bury the reason in its own noise.
@@ -207,10 +211,22 @@ class Supervisor:
             if process is None:
                 return
 
-            code = await asyncio.to_thread(process.wait)
+            # POLLED, not `to_thread(process.wait)`. Waiting in a thread
+            # parks a default-executor worker for the child's whole life —
+            # the entire server run — and that pool is `min(32, cpu + 4)`,
+            # six on a two-core box, shared with every replay scan. Three
+            # maintained streams would have taken half of it permanently.
+            while process.poll() is None:
+                if self._process is not process:
+                    # Stopped deliberately; `terminate` swapped it out.
+                    return
+
+                await asyncio.sleep(_POLL)
+
             if self._process is not process:
-                # Stopped deliberately; `stop` swapped it out.
                 return
+
+            code = process.returncode
 
             print(
                 f"[streamcast] maintainer for {self._name!r} exited ({code}); "

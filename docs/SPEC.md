@@ -572,27 +572,27 @@ real bytes has no column for them. There is no base64 workaround here any more
 — that belonged to the blob schema §5 removed — and the answer is litelink's
 §15.
 
-**litelink should own the JSON/Arrow conversion, in both directions.** Today
-streamcast parses nothing on the way in — the caller's feed handler does — and
-turns Arrow back into JSON itself on the way out. The better division is that
-litelink is explicitly for JSON stream capture and owns the codec: a feed
-handler hands it a JSON frame, and a replay asks it for JSON back. Three things
-follow, and the third is why it is worth doing:
+**A JSON schema for a stream.** The conversion between JSON types and Arrow
+types belongs HERE, and that is a decision rather than an accident: litelink
+speaks Arrow and is deliberately format-agnostic, while streamcast is
+specifically about JSON websockets — so the layer that maps one onto the other
+sits on the side that knows about JSON. Putting it in litelink was considered
+and rejected: it would make a JSON codec part of the public surface of a
+library whose value is being general about what it stores.
 
-* One home for "how a row becomes JSON", instead of a parser in every feed
-  handler and an encoder here.
-* I6's byte-identity becomes litelink's guarantee rather than an argument
-  about column projection held in two modules.
-* **Columnar Arrow → JSON, which this cannot do.** A replay here goes Arrow →
-  Python dicts → msgspec, and the dict-building is real work (~1.0 us a row
-  even with Arrow doing it in C). A codec inside litelink could write JSON
-  straight off the Arrow buffers and skip the row materialisation entirely.
-  For scale, the measured ceiling: one Arrow IPC batch of 10,000 rows encodes
-  492x faster than 10,000 JSON frames.
+What follows from owning it is a schema declared in JSON terms rather than as a
+`pa.schema`, so a caller imports nothing but `streamcast` — and a stream could
+then publish its own schema in the greeting, which is what a polyglot
+subscriber actually wants. What makes it real work is that JSON Schema does not
+express what Arrow needs: "number" does not choose between float32 and float64,
+"integer" does not choose between int32 and int64, and litelink refuses the
+narrow types outright. The mapping needs a vocabulary of its own, and it needs
+to refuse up front what litelink would refuse at the first append.
 
-The open question is scope, and it is litelink's to answer: today that library
-is deliberately format-agnostic — typed columns, no JSON anywhere — and this
-would make a JSON codec part of its public surface.
+A caveat that applies either way, and is a documentation problem today:
+**JSON integers beyond 2^53 do not survive every parser.** msgspec and Python
+carry int64 exactly, but a JavaScript subscriber does not — and a nanosecond
+`event_ts` is past it. Microseconds, which is what the examples use, are not.
 
 **Compression per stream rather than per connection.** permessage-deflate keeps
 a compressor per connection, so a frame encoded once is compressed N times; the

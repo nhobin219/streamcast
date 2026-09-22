@@ -3,6 +3,19 @@
 
 set dotenv-load := true
 
+# The local S3-compatible endpoint the replication tier is tested against.
+# Matches tests/conftest.py; change both together. Ported from litelink, whose
+# archive tier needs the same thing — same image, same port, same shape — so a
+# developer moving between the two repos configures nothing.
+# Port 9002, not litelink's 9000. That is the one deliberate difference from
+# the recipe this is copied from: a developer with both repos checked out runs
+# `just rustfs` in each, and the same port means the second one fails to bind
+# with a docker error that says nothing about why.
+RUSTFS_ENDPOINT := "http://127.0.0.1:9002"
+RUSTFS_KEY := "streamcast"
+RUSTFS_SECRET := "streamcast-secret"
+RUSTFS_BUCKET := "streamcast-demo"
+
 # Default recipe: list available commands
 default:
     @just --list
@@ -52,6 +65,78 @@ check: lint format-check typecheck test
 # Build the wheel + sdist into dist/
 build:
     uv build
+
+# WAL replication needs somewhere to ship to. `wal_replication` is opt-in on a
+# log and the tests that exercise it SKIP without an endpoint — which is how
+# a whole tier goes unchecked, so `just check-all` sets STREAMCAST_REQUIRE_S3
+# and turns that skip into a failure.
+#
+#   just rustfs        bring it up (idempotent)
+#   just check-all     every gate, with replication actually run
+#   just rustfs-stop   tear it down, discarding its data
+
+# Bring up a local S3-compatible object store for the replication tier.
+rustfs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(docker ps -q -f name=^streamcast-rustfs$)" ]; then
+        echo "rustfs already running on {{RUSTFS_ENDPOINT}}"
+        exit 0
+    fi
+    docker rm -f streamcast-rustfs >/dev/null 2>&1 || true
+    # Pinned, not `:latest`. A floating tag that renamed its credential env
+    # vars would still answer on the port — the readiness check below only
+    # asks for any HTTP response — so the bucket call would fail, the fixture
+    # would skip, and the tier would vanish green.
+    docker run -d --name streamcast-rustfs -p 9002:9000 \
+        -e RUSTFS_ACCESS_KEY={{RUSTFS_KEY}} \
+        -e RUSTFS_SECRET_KEY={{RUSTFS_SECRET}} \
+        rustfs/rustfs:1.0.0-rc.4 >/dev/null
+    for _ in $(seq 1 40); do
+        # Any HTTP answer means it is listening. NOT `curl -f`: an
+        # unauthenticated S3 root answers 403, which is a healthy server
+        # refusing an anonymous request, and -f reads that as a failure.
+        if curl -s -o /dev/null "{{RUSTFS_ENDPOINT}}" 2>/dev/null; then
+            just _rustfs-bucket
+            echo "rustfs up on {{RUSTFS_ENDPOINT}}"
+            echo
+            echo "  just check-all    # every gate, replication included"
+            exit 0
+        fi
+        sleep 0.25
+    done
+    echo "rustfs did not answer on {{RUSTFS_ENDPOINT}}" >&2
+    docker logs streamcast-rustfs 2>&1 | tail -20 >&2
+    exit 1
+
+# Create the test bucket. Idempotent, and through the same s3fs the tests use.
+_rustfs-bucket:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    AWS_ENDPOINT_URL={{RUSTFS_ENDPOINT}} \
+    AWS_ACCESS_KEY_ID={{RUSTFS_KEY}} \
+    AWS_SECRET_ACCESS_KEY={{RUSTFS_SECRET}} \
+    AWS_REGION=us-east-1 \
+    uv run python -c "
+    import os, s3fs
+    fs = s3fs.S3FileSystem(
+        key=os.environ['AWS_ACCESS_KEY_ID'],
+        secret=os.environ['AWS_SECRET_ACCESS_KEY'],
+        client_kwargs={'endpoint_url': os.environ['AWS_ENDPOINT_URL'],
+                       'region_name': os.environ['AWS_REGION']},
+    )
+    if not fs.exists('{{RUSTFS_BUCKET}}'):
+        fs.mkdir('{{RUSTFS_BUCKET}}')
+    "
+
+# Stop rustfs and discard its data. The container is disposable on purpose.
+rustfs-stop:
+    @docker rm -f streamcast-rustfs >/dev/null 2>&1 && echo "rustfs stopped" || echo "not running"
+
+# Every gate, with the replication tier REQUIRED rather than skipped. Needs
+# `just rustfs` first. This is what CI runs.
+check-all: lint format-check typecheck
+    STREAMCAST_REQUIRE_S3=1 uv run pytest
 
 # START HERE. A live public feed through a server, in one process: Bitstamp
 # publishes BTC/USD trades over an unauthenticated websocket, so there is

@@ -8,6 +8,8 @@ that is a change to reject.
 from __future__ import annotations
 
 import contextlib
+import os
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import litelink
@@ -99,3 +101,103 @@ def serve() -> Callable[..., contextlib.AbstractAsyncContextManager[str]]:
             await server.wait_closed()
 
     return _serve
+
+
+# -- the replication tier ----------------------------------------------------
+#
+# Ported from litelink's conftest, and for the same reason it exists there: a
+# tier that needs infrastructure will skip without it, and a skip is not a
+# pass. `just rustfs` brings up an endpoint; `STREAMCAST_REQUIRE_S3` turns the
+# skip into a failure, which is what CI sets.
+
+_BUCKET = "STREAMCAST_TEST_BUCKET"
+
+
+def s3_options() -> litelink.S3Options:
+    """Explicit for rustfs, environment for anything else.
+
+    `just rustfs` is the default because it needs no credentials to exist
+    anywhere. Naming a bucket through `STREAMCAST_TEST_BUCKET` — or pointing
+    `AWS_ENDPOINT_URL` elsewhere — switches to whatever the environment
+    resolves, which on AWS is the ordinary chain: profile, instance metadata,
+    SSO.
+    """
+    if os.environ.get("AWS_ENDPOINT_URL") or os.environ.get(_BUCKET):
+        return litelink.S3Options().resolved()
+
+    return litelink.S3Options(
+        endpoint="http://127.0.0.1:9002",
+        access_key="streamcast",
+        secret_key="streamcast-secret",
+        region="us-east-1",
+    ).resolved()
+
+
+def filesystem(s3: litelink.S3Options):  # noqa: ANN201 — s3fs is a dev import
+    s3fs = pytest.importorskip(
+        "s3fs",
+        reason="s3fs is a dev dependency used by these fixtures. Run `uv sync`.",
+    )
+
+    return s3fs.S3FileSystem(
+        key=s3.access_key,
+        secret=s3.secret_key,
+        client_kwargs={"endpoint_url": s3.endpoint, "region_name": s3.region},
+    )
+
+
+@pytest.fixture(scope="session")
+def s3() -> Iterator[litelink.S3Options]:
+    """The endpoint, or a skip. Reachability is checked once, by listing.
+
+    A connection error means no endpoint is running and the tier is untestable
+    here; anything else is a real failure and must not be swallowed into a
+    skip, or a broken endpoint would look like an absent one.
+    """
+    resolved = s3_options()
+    fs = filesystem(resolved)
+    try:
+        fs.ls("/")
+    except Exception as exc:  # noqa: BLE001
+        if os.environ.get("STREAMCAST_REQUIRE_S3"):
+            pytest.fail(
+                f"STREAMCAST_REQUIRE_S3 is set but the endpoint at "
+                f"{resolved.endpoint or 'the AWS default'} did not answer: {exc}"
+            )
+
+        pytest.skip(f"no S3 endpoint ({exc}); `just rustfs` starts one")
+
+    # **Into the environment, because the children read it from there.**
+    # `serve` starts two subprocesses — the maintainer and litestream — and
+    # neither is handed an `S3Options`: litelink deliberately never persists
+    # credentials, and its model is that they resolve from the ordinary AWS
+    # chain at the point of use. Without this the maintainer talks to real
+    # AWS and reports NO_SUCH_BUCKET about the local one, which is how this
+    # was first found.
+    #
+    # litestream reads its own pair rather than the AWS ones, because the
+    # config litelink generates is safe to commit and carries no secret.
+    with pytest.MonkeyPatch.context() as patch:
+        for name, value in (
+            ("AWS_ENDPOINT_URL", resolved.endpoint),
+            ("AWS_ACCESS_KEY_ID", resolved.access_key),
+            ("AWS_SECRET_ACCESS_KEY", resolved.secret_key),
+            ("AWS_REGION", resolved.region),
+            ("LITESTREAM_ACCESS_KEY_ID", resolved.access_key),
+            ("LITESTREAM_SECRET_ACCESS_KEY", resolved.secret_key),
+        ):
+            if value:
+                patch.setenv(name, value)
+
+        yield resolved
+
+
+@pytest.fixture
+def bucket(s3: litelink.S3Options) -> str:
+    """A prefix inside the shared bucket, unique to this test."""
+    name = os.environ.get(_BUCKET, "streamcast-demo")
+    fs = filesystem(s3)
+    if not fs.exists(name):
+        fs.mkdir(name)
+
+    return f"s3://{name}/{uuid.uuid4().hex}"

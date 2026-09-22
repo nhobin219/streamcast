@@ -185,16 +185,61 @@ silently returns the server to never sealing.
 else that sweeps it. `python -m streamcast maintain --root PATH --name NAME` is the same
 loop, runnable by hand.
 
-**A log with `wal_replication=True` is refused under `maintain=True`.** That log needs a
-litestream sidecar shipping its WAL, and this maintainer does not run one — so it would
-seal while nothing shipped, leaving you believing you have continuous RPO protection when
-you have none. Pass `maintain=False` and run litelink's own maintainer, which supervises
-the sidecar.
+### `replicate`
 
-Starting one here is not a small omission to fix later: litelink does it through a
-flock-guarded `Sidecar` that lives in its *examples* rather than its library, because two
-litestream instances on one database is "the one thing litestream says never to do" and is
-reachable through an ordinary `SIGTERM`. See [`SPEC.md`](SPEC.md) §9.
+**`replicate=True` runs litestream** for any stream whose log has `wal_replication` on,
+which is what makes that log survive losing its machine. `serve` is the one thing you
+start; there is no second process to remember.
+
+```python
+log = litelink.new(root, "trades", schema=SCHEMA,
+                   config=litelink.LogConfig(wal_replication=True),
+                   archive="s3://bucket/prefix")
+
+async with streamcast.serve(streamcast.Stream("trades", log=log), host, port):
+    ...        # sealing, compaction, and WAL shipping all running
+```
+
+`wal_replication` is opt-in on the log, so for almost every deployment this starts
+nothing. `replicate=False` opts out, for someone running their own more finely tuned
+litestream.
+
+**Two litestream instances on one database is the thing litestream forbids**, and the
+sidecar is built around not doing it:
+
+- an `flock` taken non-blocking and held for the server's life, on a file **beside the
+  log** — litelink's own example locks `log.root`, which is the *parent* and shared
+  between streams;
+- `PR_SET_PDEATHSIG` on the child, so a `SIGKILL` of the server cannot orphan it — a
+  handler cannot cover `SIGKILL`, only the kernel can;
+- a server that cannot take the lock **stands by and retries**, so one started beside a
+  dying one takes over when the kernel frees it.
+
+Replication lives exactly as long as the writer, which is the property litelink's example
+cannot offer — it hangs the sidecar off the maintainer, and notes that a writer without
+one has `wal_replication=True` and no replication. That is also why `replicate` is its own
+argument rather than part of `maintain`.
+
+A missing litestream binary raises `SidecarUnavailable` at `serve`, not at the first
+missed push: a server that came up and replicated nothing would leave you believing you
+had protection you did not have. The wheel bundles one, so this is only reachable on a
+platform litelink ships no binary for.
+
+### Credentials
+
+**Both subprocesses resolve credentials from the environment**, because litelink never
+persists them — its model is the ordinary AWS chain at the point of use, so a profile,
+instance metadata or SSO all work untouched. An `S3Options` you passed to `litelink.new`
+does **not** reach them.
+
+```bash
+AWS_ENDPOINT_URL=...  AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...   # the maintainer
+LITESTREAM_ACCESS_KEY_ID=...  LITESTREAM_SECRET_ACCESS_KEY=...           # litestream
+```
+
+litestream reads its own pair rather than the AWS ones, which is why the config litelink
+generates carries no secret and is safe to commit. On AWS with an instance role, none of
+this needs setting.
 
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
