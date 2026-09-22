@@ -551,7 +551,7 @@ StreamcastError
 | `empty` | subscribe live; there is nothing to replay yet |
 | `ahead` | your cursor is above the server's frontier — it was restored or rebuilt |
 | `too_old` | `catch_up=True`, or read the log directly and subscribe from where you stopped |
-| `evicted` | the rows are gone from the log; `catch_up=True`, or accept the gap |
+| `evicted` | below what the scan's tier holds; `catch_up=True` if the archive goes back further, else accept the gap |
 
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.

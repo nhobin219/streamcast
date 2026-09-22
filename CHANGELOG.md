@@ -31,6 +31,20 @@ a subscriber that stops can reconnect and ask for the rest.
 
 ### Fixed
 
+- **A catch-up whose archive does not go back far enough is refused, not
+  half-served.** `Catcher.prepare` ruled out an archive that *ended* below the
+  request; nothing ruled out one that *started* above it. A consumer asking
+  for offset 100 against an archive floored at 500 was handed 500 first and
+  told nothing — 400 rows lost, and a cursor advanced past them. It now fails
+  at `connect`, naming both ends of the missing range. This is the same hole
+  at the join `_replay_from` prevents on the server side.
+- **The `evicted` refusal no longer promises what it cannot deliver.** It said
+  the rows were "gone from the log" and to read them from the archive, which
+  is contradictory: `earliest` there is the first offset the SCAN returned,
+  and litelink picks the tier per scan, so the archive may or may not go back
+  further. The message now says "if it still holds them", and `catch_up`
+  reports the difference.
+
 - **Closing a subscription mid-stream no longer waits out `close_timeout`.**
   `websockets` pauses its reader at `max_queue` (16), so a consumer with more
   than that buffered had already stopped reading the socket — and the server's

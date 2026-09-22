@@ -164,8 +164,9 @@ An offset the server cannot serve is refused, never silently rounded:
 
 ```
 NotReplayable: offset 100 is below 5000, the earliest offset this stream's log
-still holds. The rows between are gone from it — reconnect with catch_up=True
-to read them from the archive, or with offset=0 to accept the gap.
+still serves. Reconnect with catch_up=True to read the rows between from the
+archive if it still holds them — it will say so if it does not — or with
+offset=streamcast.EARLIEST to take what is left and accept the gap.
 ```
 
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the

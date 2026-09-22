@@ -157,9 +157,9 @@ travels as compact JSON and the sentence is built at the subscriber:
 4416  {"error":"not_replayable","why":"evicted","offset":100,"earliest":5000}
       ↓
       offset 100 is below 5000, the earliest offset this stream's log still
-      holds. The rows between are gone from it — reconnect with
-      catch_up=True to read them from the archive, or with offset=0 to
-      accept the gap.
+      serves. Reconnect with catch_up=True to read the rows between from
+      the archive if it still holds them — it will say so if it does not —
+      or with offset=streamcast.EARLIEST to take what is left.
 ```
 
 The English has exactly one home (`_errors._WHY`) and can be reworded without a
@@ -505,7 +505,7 @@ one failure this convenience would otherwise introduce.
 | `empty` | the log holds nothing yet | subscribe live |
 | `ahead` | above the frontier | the server was restored or rebuilt; investigate |
 | `too_old` | further back than `max_replay` | `catch_up=True`, or read the log directly |
-| `evicted` | below what the log still holds | `catch_up=True`, or accept the gap |
+| `evicted` | below what the scan's tier holds | `catch_up=True` if the archive goes back further, else accept the gap |
 
 Five rather than one, because the move differs for each and collapsing them made
 every one of them a guess.

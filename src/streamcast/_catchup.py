@@ -161,6 +161,23 @@ class CatchUp:
                 _credentials_help(self._archive, self._name, self._s3, exc)
             ) from exc
 
+    async def floor(self) -> int | None:
+        """The lowest offset the archive holds, or None if it will not say.
+
+        Read so that an archive which does not go back far enough fails at
+        `connect` rather than at the caller's first `recv` — the same reason
+        `open` is eager. None is not "holds nothing": it is the reader
+        declining to report an extent, and the check in `Catcher.stream`
+        covers that case from the rows themselves.
+        """
+        if self._reader is None:  # pragma: no cover — `open` comes first
+            msg = "open() before floor()"
+            raise RuntimeError(msg)
+
+        extent = (await asyncio.to_thread(self._reader.coverage)).archive
+
+        return None if extent is None else extent[0]
+
     def rows(self, start: int, stop: int) -> AsyncGenerator[tuple[int, dict], None]:
         """`[start, stop)` from the archive, one batch in memory at a time.
 
@@ -246,6 +263,16 @@ class Catcher:
             self._first = None
             raise _nothing_above(self._name, self._archive, self._frontier, self.start)
 
+        # And the other end of the range. An archive can end above the
+        # request and still not go back far enough to cover it, which is the
+        # case that used to be served silently from wherever the archive did
+        # start — 400 rows missing and a cursor advanced past them.
+        floor = await self._first.floor()
+        if floor is not None and floor > self.start:
+            await self._first.close()
+            self._first = None
+            raise _gap_below(self._name, self._archive, floor, self.start)
+
     async def close(self) -> None:
         """Release a reader `prepare` opened that `stream` never took.
 
@@ -269,6 +296,11 @@ class Catcher:
         Nothing is connected while rows are being yielded. That is the point.
         """
         refused: NotReplayable | None = None
+        # What the consumer actually asked for, kept because `self.start`
+        # advances as rows are delivered. The first row to come out of the
+        # archive is checked against THIS.
+        requested = self.start
+        checked = False
         for _attempt in range(self._retries):
             # Round one uses what `prepare` already opened, so the credential
             # check and the first read are not two round trips.
@@ -281,6 +313,30 @@ class Catcher:
 
                 if frontier > self.start:
                     async for offset, row in reader.rows(self.start, frontier):
+                        if not checked:
+                            checked = True
+                            if offset > requested:
+                                # **The hole at the join, caught at the other
+                                # end.** `prepare` rules out an archive that
+                                # ENDS below the request; this rules out one
+                                # that STARTS above it. Measured before this
+                                # existed: a consumer asking for offset 100
+                                # against an archive floored at 500 was
+                                # handed 500 first and told nothing, losing
+                                # 400 messages and advancing its cursor past
+                                # them. `_stream._replay_from` pulls a row
+                                # early for exactly this reason on the server
+                                # side; the archive needed the same guard.
+                                #
+                                # `prepare` normally catches this first, from
+                                # the reader's own extent. This is the
+                                # backstop for a reader that will not report
+                                # one, and for retention moving the floor up
+                                # between `prepare` and the read.
+                                raise _gap_below(
+                                    self._name, self._archive, offset, requested
+                                )
+
                         yield offset, row
                         # Tracked per ROW, so a round that fails partway still
                         # leaves the next one starting where this one stopped.
@@ -329,6 +385,27 @@ def _nothing_above(
         f"holds them: the server has forgotten them and the archive never "
         f"received them. Reconnect with offset=streamcast.EARLIEST to take "
         f"what is left and accept the loss."
+    )
+
+
+def _gap_below(
+    name: str, archive: str, earliest: int, requested: int
+) -> CatchUpUnavailable:
+    """The archive does not go back as far as the offset being asked for.
+
+    The server refused because its own tier had already dropped the rows, and
+    the archive turns out not to hold them either — so they are gone. Raised
+    rather than served from wherever the archive does start, because a
+    consumer handed a stream that silently begins above where it asked has
+    lost data and been told it recovered.
+    """
+    return CatchUpUnavailable(
+        f"{name!r} asked to catch up from offset {requested}, but the archive "
+        f"at {archive} starts at {earliest} — the {earliest - requested} rows "
+        f"between are in neither the server nor the archive. They are gone. "
+        f"Reconnect with offset=streamcast.EARLIEST to take what is left and "
+        f"accept the loss, or with offset={earliest} to state that you know "
+        f"what is missing."
     )
 
 

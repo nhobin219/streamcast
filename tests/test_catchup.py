@@ -288,6 +288,48 @@ class TestItClosesTheGap:
             assert closed, "`prepare` opened a reader that `close` left open"
 
 
+class TestTheGapItCannotClose:
+    async def test_an_archive_that_starts_above_the_request_is_refused(
+        self, tmp_path, s3, bucket, serve
+    ):
+        """The hole at the join, on the catch-up path.
+
+        `prepare` already rules out an archive that ENDS below the request.
+        This is the other end: one that ENDS above it and still does not go
+        back far enough. Served naively, the consumer asks for 100, is handed
+        500 first, and is told nothing — 400 rows lost and a cursor advanced
+        past them. Measured doing exactly that before the guard existed.
+
+        `_stream._replay_from` pulls a row early to prevent the same thing on
+        the server side; the archive needed its own check, because the
+        server's refusal is what sends the consumer here in the first place.
+        """
+        handle = litelink.new(
+            tmp_path / "data",
+            "trades",
+            schema=streamcast.to_arrow(SCHEMA),
+            archive=bucket,
+            s3=s3,
+            # Nothing below 500 exists in ANY tier.
+            start_offset=500,
+            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle, max_replay=50)
+            await fill(stream, handle, total=4_000)
+
+            async with serve(stream, maintain=False) as uri:
+                with pytest.raises(streamcast.CatchUpUnavailable) as raised:
+                    await streamcast.connect(uri, offset=100, catch_up=True, s3=s3)
+
+        message = str(raised.value)
+        assert "in neither the server nor the archive" in message
+        # Both ends of the missing range, and how many rows it is.
+        assert "500" in message, message
+        assert "100" in message, message
+        assert "400" in message, message
+
+
 class TestWhereTheArchiveComesFrom:
     async def test_the_greeting_publishes_it(self, serve, archived, s3):
         stream = streamcast.Stream("trades", log=archived)

@@ -124,11 +124,20 @@ _WHY: Final = {
         "at most {max_replay}. Reconnect with catch_up=True to read the gap "
         "from the log's archive, or read the log directly."
     ),
+    # **Conditional on purpose.** `earliest` here is the first offset the
+    # SCAN returned, and litelink picks the tier per scan: local files while
+    # the table still holds any, the archive only once it does not. So the
+    # rows below it may still be in the archive — in which case catch_up
+    # reads them — or may be below the archive too, in which case they are
+    # gone. The server does not know which without a metadata GET it would
+    # have to pay on every refusal, so the message says "if", and
+    # `catch_up` reports the difference from the archive's own extent.
     "evicted": (
         "offset {offset} is below {earliest}, the earliest offset this "
-        "stream's log still holds. The rows between are gone from it — "
-        "reconnect with catch_up=True to read them from the archive, or with "
-        "offset=0 to accept the gap."
+        "stream's log still serves. Reconnect with catch_up=True to read the "
+        "rows between from the archive if it still holds them — it will say "
+        "so if it does not — or with offset=streamcast.EARLIEST to take what "
+        "is left and accept the gap."
     ),
 }
 """One home for every refusal sentence, keyed by what travels on the wire.

@@ -107,11 +107,20 @@ async def rows(
     """
     declared = columns(log)
     names = (COLUMN, *declared)
-    # `include_archive` is deliberately not passed. litelink's default decides
-    # from the tiers: local disk while the local table holds files, which is
-    # every ordinary server and keeps a replay off the network — and the
-    # archive when the log has been fully evicted and it is the only place the
-    # rows are, where refusing to look would be a silent short serve.
+    # **`include_archive` is not passed, and that is a choice rather than an
+    # omission.** litelink's default is "whether the archive is load-bearing":
+    # False while the local table holds files, True once it holds nothing and
+    # the archive is the only source. Passing True would let a server serve a
+    # replay the local tier has dropped but the archive still has.
+    #
+    # It is deliberately not passed, because that replay is a long network
+    # read held open on a worker thread while the subscriber's socket sits
+    # attached — the server queues for a consumer that is not reading, and
+    # `max_backlog` drops it. That is the exact failure `_catchup` exists to
+    # avoid, and it avoids it by reading the archive CLIENT-side with nothing
+    # connected. So a request below the local floor is refused `evicted` and
+    # the consumer is pointed at `catch_up=True`, which does the same read
+    # without holding a socket through it.
     reader = await asyncio.to_thread(
         log.scan, columns=names, start_offset=start, end_offset=stop
     )
