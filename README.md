@@ -1,4 +1,4 @@
-# A WebSocket multicaster, and a tickerplant when you give it a log
+# A WebSocket multicaster with replay
 
 **One connection in, one stream out, resumable.**
 
@@ -25,7 +25,9 @@ streamcast broker ──► litelink log      durable BEFORE any subscriber sees
 ```
 
 With a [litelink](https://github.com/nhobin219/litelink) log attached it stops being a
-fan-out and becomes a tickerplant. Every message is durable before any subscriber sees it,
+fan-out and becomes a [tickerplant](https://code.kx.com/q/architecture/) — kx's term for a process that
+captures a feed, writes it to a log file, and publishes it to registered subscribers,
+which is this one almost exactly. Every message is durable before any subscriber sees it,
 so an offset is a **resume cursor**: a consumer that crashes, restarts, or falls behind
 reconnects with the last offset it processed and the broker replays the gap out of the log
 before switching it to live — with no window in which a message is in neither place.

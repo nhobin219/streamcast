@@ -1,4 +1,4 @@
-"""A WebSocket multicaster, and a tickerplant when you give it a log.
+"""A WebSocket multicaster with replay.
 
 One process holds the upstream subscription; every consumer on the box reads
 from it. That is the whole idea, and it exists because the alternative — every
@@ -8,11 +8,13 @@ quietly differ from its neighbour's. One connection in, one stream out, the
 same bytes to everyone.
 
 With a litelink log attached it stops being a fan-out and becomes a
-tickerplant: every message is durable *before* any subscriber sees it, which
-means an offset is a resume cursor. A consumer that falls behind, crashes, or
-is restarted reconnects with the last offset it processed and the broker
-replays the gap out of the log before switching it to live — with no window in
-which a message is in neither place. `docs/SPEC.md` §3 is where that partition
+tickerplant — kx's term for a process that captures a feed, writes it to a
+log file, and publishes it to registered subscribers, which is this one almost
+exactly (https://code.kx.com/q/architecture/). Every message is durable
+*before* any subscriber sees it, which means an offset is a resume cursor: a
+consumer that falls behind, crashes, or is restarted reconnects with the last
+offset it processed and the broker replays the gap out of the log before
+switching it to live — with no window in which a message is in neither place. `docs/SPEC.md` §3 is where that partition
 is argued; `Stream` is where it is enforced.
 
 **The API is `websockets` with one modification.** `serve` and `connect` have

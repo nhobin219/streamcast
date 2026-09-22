@@ -84,7 +84,9 @@ class Stream:
             async for message in upstream:
                 await stream.send(message)
 
-    **`log` is what separates a multicaster from a tickerplant.** Without it
+    **`log` is what separates a multicaster from a tickerplant** — kx's term
+    for a process that captures a feed, logs it, and publishes it to registered
+    subscribers (https://code.kx.com/q/architecture/). Without it
     the offsets are a counter in this process: they order the stream correctly
     and mean nothing after a restart, so `?offset=` is refused outright rather
     than appearing to work until the day a subscriber needs it. With it, every

@@ -1,6 +1,8 @@
 """The litelink side: what a message looks like as a row, and how it comes back.
 
-A broker with a log attached is a tickerplant. The log is what turns an offset
+A broker with a log attached is a tickerplant — kx's term for a process that
+captures a feed, writes it to a log file, and publishes it to registered
+subscribers (https://code.kx.com/q/architecture/). The log is what turns an offset
 from a number that orders messages into a number a subscriber can *resume
 from*, and everything in this module exists to serve that one sentence.
 

@@ -1,7 +1,7 @@
 [project]
 name = "streamcast"
 version = "0.1.0"
-description = "A WebSocket multicaster, and a tickerplant when you give it a log. One connection in, one stream out, resumable."
+description = "A WebSocket multicaster with replay. One connection in, one stream out, resumable."
 readme = "README.md"
 authors = [
     { name = "Nico Bautista Hobin", email = "nico@penca.io" }
