@@ -1,7 +1,8 @@
 <p align="center">
-  <img src="docs/assets/streamcast-logo.svg" alt="streamcast" width="330">
+  <img src="https://raw.githubusercontent.com/nhobin219/streamcast/main/docs/assets/streamcast-logo.svg" alt="streamcast" width="330">
 </p>
 
+[![CI](https://github.com/nhobin219/streamcast/actions/workflows/ci.yml/badge.svg)](https://github.com/nhobin219/streamcast/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/streamcast)](https://pypi.org/project/streamcast/)
 [![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
