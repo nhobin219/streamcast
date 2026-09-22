@@ -72,19 +72,16 @@ Three deliberate exceptions:
 - **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
   Publishing is `Stream.send`, in the server's own process.
 - **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`.
-  Not a LAN-versus-WAN judgement: permessage-deflate is **per connection** while the
-  encode is shared. `send` encodes a frame once and hands the same bytes to every
-  subscriber; deflate then compresses those identical bytes once per subscriber.
-  *Measured* on a six-column trade row — encode 0.564 µs once, deflate 3.454 µs each,
-  so CPU per message is 4 µs at one subscriber and 691 µs at 200. At 50 subscribers and
-  30,000 msg/s that is 1.5M compressions/s against roughly 290k a core can do, and the
-  symptom is subscribers hitting `max_backlog` and being dropped.
+  permessage-deflate is per connection while the encode is shared: `send` encodes a frame
+  once and hands the same bytes to every subscriber, and deflate compresses those identical
+  bytes once per subscriber. Measured on a six-column trade row — 0.564 µs to encode once,
+  3.454 µs to deflate each — CPU per message is 4 µs at one subscriber and 691 µs at 200.
+  Past that the server is CPU-bound and starts dropping subscribers at `max_backlog`.
 
-  It compresses well when you want it — **5.8× smaller**, 112 bytes to 19, or 26.9 down
-  to 4.6 Mbit/s per subscriber at 30,000 msg/s. Pass `compression="deflate"` when
-  bandwidth costs more than CPU, which is a WAN with few subscribers. There is no middle
-  setting: without context takeover the same frames compress 1.1×, so "compress once and
-  share" is not available.
+  Turn it on where bandwidth costs more than CPU, which is few subscribers over a WAN:
+  it is **5.8× smaller** here, 112 bytes to 19. There is no middle setting — without
+  context takeover the same frames compress 1.1×, so compressing once and sharing the
+  result is not available.
 
 Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
 `serve([trades, quotes])` serves both on one port.
@@ -341,9 +338,9 @@ Offsets are per server and are not translated between hops.
 - **Not a message broker.** No fan-in: nothing publishes into a stream over the wire. No
   topics beyond a name, no consumer groups, no acknowledgements. A subscriber needing
   at-least-once with acks wants a queue.
-- **Not tuned for high fan-out across a WAN.** `compression` defaults off because deflate
-  costs CPU per subscriber while the encode is shared — see the API section for the
-  numbers. Turn it on for few subscribers over a WAN; it is the wrong trade at fan-out.
+- **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
+  while the encode is shared, so it defaults off — see the API section. Turn it on for
+  few subscribers over a WAN.
 - **Not a query interface.** `catch_up` covers resuming from further back than
   `max_replay`; querying history is litelink directly, or any Iceberg engine.
 - **Not a place for frames that are not rows.** A typed log has nowhere to put a

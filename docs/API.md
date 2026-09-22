@@ -53,7 +53,7 @@ method it has to refuse.
 **`compression` is `None` here and `"deflate"` there.** permessage-deflate is per
 connection while the encode is shared: `send` encodes a frame once and hands the same
 bytes to every subscriber, and deflate compresses those identical bytes once per
-subscriber. *Measured* on a six-column trade row:
+subscriber. Measured on a six-column trade row:
 
 | subscribers | CPU per message, off | on |
 |---|---|---|
@@ -62,16 +62,15 @@ subscriber. *Measured* on a six-column trade row:
 | 50 | 0.564 µs | 173 µs |
 | 200 | 0.564 µs | 691 µs |
 
-At 50 subscribers and 30,000 msg/s that is 1.5M compressions/s against roughly 290k a
-core manages, and the symptom is subscribers hitting `max_backlog` and being dropped —
-an outage that reads like a bug. With it off the cost of being wrong is bandwidth: 26.9
-against 4.6 Mbit/s per subscriber, since deflate is **5.8× smaller** here (112 bytes to
-19). Pass `compression="deflate"` when bandwidth costs more than CPU, which is a WAN
-with few subscribers.
+At 50 subscribers and 30,000 msg/s that asks for 1.5M compressions/s where a core
+manages roughly 290k: the server goes CPU-bound and `max_backlog` drops the subscribers
+that fall behind. Off, the cost is bandwidth instead — 26.9 against 4.6 Mbit/s per
+subscriber, since deflate is **5.8× smaller** here (112 bytes to 19).
 
-There is no middle setting. Without context takeover — the variant that would let one
-compressed frame be shared across connections — the same frames compress 1.1×, so
-"compress once, fan out" is not on the table.
+Pass `compression="deflate"` when bandwidth costs more than CPU, which is a WAN with few
+subscribers. There is no middle setting: without context takeover — the variant that
+would let one compressed frame be shared across connections — the same frames compress
+1.1×.
 
 ## `Stream`
 
@@ -450,13 +449,11 @@ async with streamcast.connect(uri, cursor=".trades.offset", catch_up=True) as st
 The consumer sees one stream. Underneath, rows below the server's window come from object
 storage and the rest from the socket.
 
-**Nothing is connected while the archive is read.** This is the part that matters. Opening
-the socket first and then streaming the gap closes the window by construction — and makes
-the server queue for a subscriber that will not read a message until it has pulled
-millions of rows out of S3. `max_backlog` is 8,192, so the connection is dropped with
-`TooSlow` before the catch-up finishes: a recovery that guarantees its own failure on
-exactly the consumers that need it. Measured with `max_backlog=16`, where the old shape
-died immediately and this one caught up 20,000 rows.
+**Nothing is connected while the archive is read**, and that is the part that matters.
+Holding the socket open through the read would make the server queue for a subscriber that
+will not take a message until it has pulled millions of rows out of S3 — and `max_backlog`
+is 8,192, so it would be dropped with `TooSlow` before the catch-up finished, failing
+exactly the consumers that need it. Tested at `max_backlog=16`, catching up 20,000 rows.
 
 So it is a **loop**: read the archive, try to connect at the offset it reached, and if the
 server has moved on far enough to refuse again, read the newly archived rows and try once
