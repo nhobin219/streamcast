@@ -13,6 +13,7 @@ import pytest
 import websockets
 
 import streamcast
+import streamcast._protocol
 from tests.conftest import trade
 
 
@@ -175,8 +176,12 @@ class TestWebsocketsCompatibility:
             import json
 
             info = json.loads(await raw.recv())
-            assert info["streamcast"] == 1
+            assert info["streamcast"] == streamcast._protocol.VERSION
             assert info["stream"] == "trades"
+            # Enough to open the log without this library: `litelink.snapshot`
+            # takes exactly these two.
+            assert set(info["log"]) == {"name", "archive"}
+            assert info["log"]["name"] == log.name
 
             # And every frame after it is a readable JSON row. No header to
             # slice, no payload kind, no library needed on this side.

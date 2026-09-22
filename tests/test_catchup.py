@@ -289,6 +289,90 @@ class TestItClosesTheGap:
             assert closed, "`prepare` opened a reader that `close` left open"
 
 
+class TestTheLogIsNamedInTheGreeting:
+    async def test_catch_up_works_when_the_log_is_named_differently(
+        self, tmp_path, s3, bucket, serve
+    ):
+        """A stream's name is not the log's, and the archive is keyed on the log's.
+
+        `Stream.new` feeds one name through, so the two agree. `Stream(log=)`
+        takes a handle the caller opened and named, and nothing makes them
+        equal. Catch-up asked the archive for a table named after the STREAM,
+        found nothing, and reported it as a credentials failure — the message
+        named an endpoint and a credential chain for a problem that was
+        neither. The server knows the log's name, so the greeting says it.
+
+        Falsify by passing the stream name to `Catcher` instead of
+        `probe.log.name`.
+        """
+        handle = litelink.new(
+            tmp_path / "data",
+            "raw_trades_v2",  # deliberately not "trades"
+            schema=streamcast.to_arrow(SCHEMA),
+            archive=bucket,
+            s3=s3,
+            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle, max_replay=10)
+            await fill(stream, handle, total=4_000)
+
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri) as sub:
+                    assert sub.info.stream == "trades"
+                    assert sub.info.log is not None
+                    assert sub.info.log.name == "raw_trades_v2", (
+                        "the greeting must publish the LOG's name, not the "
+                        "stream's, or a reader cannot open it"
+                    )
+
+                async with streamcast.connect(
+                    uri, offset=1, catch_up=True, s3=s3
+                ) as sub:
+                    first, _row = await sub.recv()
+
+                assert first == 1
+
+    async def test_the_greeting_is_enough_to_open_the_log_directly(
+        self, tmp_path, s3, bucket, serve
+    ):
+        """The point of publishing it: a subscriber reads the log itself.
+
+        Name and archive are what `litelink.snapshot` takes, so a consumer
+        that wants the whole history — or any Iceberg engine — goes straight
+        to object storage instead of through the socket. Credentials stay the
+        reader's own; a server that sent them would be handing every
+        subscriber its keys.
+        """
+        handle = litelink.new(
+            tmp_path / "data",
+            "raw_trades_v2",
+            schema=streamcast.to_arrow(SCHEMA),
+            archive=bucket,
+            s3=s3,
+            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle)
+            await fill(stream, handle, total=4_000)
+
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri) as sub:
+                    info = sub.info.log
+
+            assert info is not None
+            assert info.archive is not None
+            # Nothing from the server but the greeting, plus the reader's own
+            # credentials.
+            reader = await asyncio.to_thread(
+                litelink.snapshot, info.name, archive=info.archive, s3=s3
+            )
+            try:
+                assert await asyncio.to_thread(reader.end_offset) > 1
+            finally:
+                await asyncio.to_thread(reader.close)
+
+
 class TestTheWholeHistoryGateway:
     async def test_no_replay_bound_and_an_archive_serves_everything(
         self, tmp_path, s3, bucket, serve
@@ -488,15 +572,19 @@ class TestTheGapItCannotClose:
 
 
 class TestWhereTheArchiveComesFrom:
-    async def test_the_greeting_publishes_it(self, serve, archived, s3):
+    async def test_the_greeting_publishes_the_log(self, serve, archived, s3):
+        """Name and archive together, which is what opening one needs."""
         stream = streamcast.Stream("trades", log=archived)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.archive == archived.archive
+            assert sub.info.log is not None
+            assert sub.info.log.archive == archived.archive
+            assert sub.info.log.name == archived.name
 
     async def test_a_stream_without_a_log_publishes_none(self, serve):
         stream = streamcast.Stream("live")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.archive is None
+            assert sub.info.log is None
+            assert sub.info.durable is False
 
     async def test_an_explicit_archive_wins(self, serve, archived, s3):
         # A caller that named one meant that one — it also covers a server

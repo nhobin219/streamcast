@@ -9,6 +9,26 @@ rather than what changed for users, since there is nothing to have changed
 from — and the design decisions it records are kept because they were arrived
 at expensively, not because anybody has to migrate across them.
 
+## 0.2.0 — unreleased
+
+### Changed — breaking
+
+- **The greeting publishes the log as an object**: `"log": {"name", "archive"}`,
+  replacing the flat `"archive"` field, and the protocol version goes to 2 —
+  a 0.1.0 client gets a clear `ProtocolError` rather than a silent
+  misreading. `info.log` is what `litelink.snapshot` takes, so a subscriber
+  holding a greeting can read the whole history straight from object storage
+  instead of through the socket.
+
+### Fixed
+
+- **Catch-up worked only when the log was named after the stream.** They need
+  not be equal: `Stream.new` feeds one name through, `Stream(log=handle)`
+  takes a log the caller named. `catch_up` asked the archive for a table named
+  after the STREAM, found nothing, and reported it as a credentials failure —
+  naming an endpoint and a credential chain for a problem that was neither.
+  The server knows the log's name, so the greeting carries it.
+
 ## 0.1.0 — 2026-09-22
 
 A replayable WebSocket multicaster. One upstream stream in, appended to a

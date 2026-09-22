@@ -3,7 +3,7 @@
 **Every frame is JSON text.** The greeting is one, and every message after it
 is a two-element pair — the offset, then one row of the stream's table:
 
-    {"streamcast":1,"stream":"trades","end_offset":1861,...}
+    {"streamcast":2,"stream":"trades","end_offset":1861,"log":{...},...}
     [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]
 
 **The offset is POSITIONAL, and the row is untouched.** It is element 0 of
@@ -69,7 +69,7 @@ _DECODER: Final = msgspec.json.Decoder()
 #
 # There is no key name here on purpose. That is the point.
 
-VERSION: Final = 1
+VERSION: Final = 2
 """The protocol this build speaks. A greeting naming any other is refused.
 
 One number for the whole protocol rather than a feature list, because there is
@@ -176,6 +176,36 @@ def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
 
 
 @dataclass(frozen=True, slots=True)
+class LogInfo:
+    """Enough to open the stream's log without asking anyone.
+
+        reader = litelink.snapshot(info.log.name, archive=info.log.archive)
+
+    The NAME is the part that cannot be guessed. A stream serves at its own
+    name and its log has its own, and nothing makes them equal: `Stream.new`
+    feeds one through, but `Stream(log=handle)` takes a log the caller opened
+    and named. A subscriber that assumed `stream` was the log name asked the
+    archive for a table that was not there, and `catch_up` reported it as a
+    credentials problem.
+
+    Credentials are deliberately absent. They are the reader's own, resolved
+    from its environment the way litelink resolves them, and a server that
+    sent them would be handing every subscriber its own keys.
+    """
+
+    name: str
+    archive: str | None
+    """Where the log is archived, or None if it has none.
+
+    Published so a subscriber that falls behind the server's replay window
+    knows where to read the gap — see `_catchup`. It is here rather than only
+    in the refusal because a close frame has 123 bytes and a bucket URI plus
+    the numbers that diagnose the refusal do not both fit; the refusal carries
+    it too, last, so the numbers win when something has to go.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class Greeting:
     """What the server says before the first message, and the only reply there is.
 
@@ -200,14 +230,12 @@ class Greeting:
     replay: tuple[int, int] | None
     """The `[start, end)` about to be replayed, or None for a live-only subscribe."""
 
-    archive: str | None
-    """Where the stream's log is archived, or None if it has none.
+    log: LogInfo | None
+    """The log behind this stream, or None if it has none.
 
-    Published so a subscriber that later falls behind the server's replay
-    window knows where to read the gap — see `_catchup`. It is here rather
-    than only in the refusal because a close frame has 123 bytes and a bucket
-    URI plus the numbers that diagnose the refusal do not both fit; the
-    refusal carries it too, last, so the numbers win when something has to go.
+    `durable` answers whether there is one; this says which, so a subscriber
+    can read it directly rather than through the socket — the whole history
+    with `litelink.snapshot`, or any Iceberg engine pointed at the archive.
     """
 
     schema: dict[str, object] | None
@@ -238,9 +266,15 @@ def greeting(
     replay: tuple[int, int] | None,
     durable: bool,
     schema: dict[str, object] | None = None,
-    archive: str | None = None,
+    log: tuple[str, str | None] | None = None,
 ) -> str:
-    """The greeting, as the JSON that goes on the wire."""
+    """The greeting, as the JSON that goes on the wire.
+
+    `log` is the log's `(name, archive)`, or None for a stream with none. A
+    nested object rather than flat keys, so the things a subscriber needs to
+    open the log arrive together and `null` says plainly that there is
+    nothing to open.
+    """
     return _ENCODER.encode(
         {
             "streamcast": VERSION,
@@ -249,7 +283,7 @@ def greeting(
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
             "schema": schema,
-            "archive": archive,
+            "log": None if log is None else {"name": log[0], "archive": log[1]},
         }
     ).decode()
 
@@ -284,7 +318,18 @@ def parse_greeting(frame: str | bytes) -> Greeting:
 
     replay = fields.get("replay")
     schema = fields.get("schema")
-    archive = fields.get("archive")
+
+    # A log with no name is not a log this can open, so it is not one worth
+    # reporting: `None` says "nothing to read directly", which is also what a
+    # stream without a log says.
+    raw = fields.get("log")
+    log = None
+    if isinstance(raw, dict) and isinstance(raw.get("name"), str):
+        archive = raw.get("archive")
+        log = LogInfo(
+            name=raw["name"],
+            archive=archive if isinstance(archive, str) else None,
+        )
 
     return Greeting(
         version=version,
@@ -292,7 +337,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         end_offset=None if fields["end_offset"] is None else int(fields["end_offset"]),
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
         schema=schema if isinstance(schema, dict) else None,
-        archive=archive if isinstance(archive, str) else None,
+        log=log,
         durable=bool(fields.get("durable", False)),
     )
 
@@ -405,6 +450,7 @@ __all__ = [
     "EARLIEST",
     "VERSION",
     "Greeting",
+    "LogInfo",
     "decode",
     "encode",
     "encode_projected",

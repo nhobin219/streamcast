@@ -367,8 +367,20 @@ for what a bare code cannot say.
 
 `info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
-a server restart), `schema` (the stream's columns as JSON Schema), `archive` (where its
-log is archived, which is what `catch_up` reads), `stream`, `version`.
+a server restart), `schema` (the stream's columns as JSON Schema), `log`, `stream`,
+`version`.
+
+**`info.log` is enough to open the log yourself** — `name` and `archive`, which is what
+`litelink.snapshot` takes:
+
+```python
+reader = litelink.snapshot(sub.info.log.name, archive=sub.info.log.archive)
+```
+
+`None` when the stream has no log. The **name** is the part that cannot be guessed: a
+stream serves at its own name and its log has its own, and `Stream(log=handle)` takes one
+the caller named. Credentials are never published — they are the reader's own, resolved
+from its environment the way litelink resolves them.
 
 ## Resuming
 
@@ -676,7 +688,7 @@ streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
 without this repo:
 
 ```json
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+{"streamcast":2,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
  "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
 ```
 
@@ -733,8 +745,8 @@ Every frame is JSON text. The greeting, then a **two-element pair** per message 
 offset, then the row:
 
 ```
-{"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "archive":"s3://market-data/prod","schema":{...},"durable":true}
+{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "log":{"name":"trades","archive":"s3://market-data/prod"},"schema":{...},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
