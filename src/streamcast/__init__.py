@@ -16,10 +16,14 @@ live, with no window in which a message is in neither place. Without one the
 fan-out is identical, offsets are `null`, and `?offset=` is refused.
 `docs/SPEC.md` §3 argues that partition; `Stream` enforces it.
 
-**The API is `websockets` with one modification.** `serve` and `connect` have
-the same shapes and pass their keywords through; the difference is that
-iterating a subscription yields `(offset, row)` rather than `message`, because
-the offset is what makes a reconnect a resume.
+**The API is `websockets`, with three deviations.** `serve` and `connect`
+have the same shapes and pass their keywords through, and `serve` returns an
+object that proxies `websockets.Server`. What differs: iterating a
+subscription yields `(offset, row)` rather than `message`, because the offset
+is what makes a reconnect a resume; a subscription is read-only, with no
+`send` rather than a `send` that raises; and `compression` defaults to None
+here where `websockets` defaults to `"deflate"`, because permessage-deflate
+compresses once per subscriber a frame this encodes once.
 
 **The schema is yours, declared in JSON Schema.** streamcast declares no
 columns — the log is an ordinary litelink table with whatever shape you gave

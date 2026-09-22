@@ -34,10 +34,12 @@ is what a streamcast log is created with, the second is the offset that means
 "everything you still have". `Greeting`, `Close` and the five exception types are
 exported because they appear in what you catch and inspect.
 
-## The API is `websockets`, with one modification
+## The API is `websockets`, with three deviations
 
-`serve` and `connect` have the same shapes and pass every keyword through. Two things
-differ:
+`serve` and `connect` have the same shapes and pass every keyword through — `ssl`,
+`ping_interval`, `process_request`, `max_queue` and the rest behave exactly as they do
+there — and `serve` returns an object that proxies `websockets.Server` (`sockets`,
+`serve_forever`, `connections`, `is_serving`). Three things differ:
 
 **Iterating a subscription yields `(offset, msg)`**, not `message`. The offset is the
 only thing that makes a reconnect a resume rather than a restart, and a subscriber that
@@ -48,7 +50,7 @@ has to ask for it separately will forget to. `msg` is a `dict` over your declare
 because publishing is `Stream.send` in the server's own process. Nothing inherits a
 method it has to refuse.
 
-One default differs: **`compression` is `None` here and `"deflate"` there.**
+**`compression` is `None` here and `"deflate"` there.**
 permessage-deflate keeps a 32 KB compressor per connection, so a frame this library
 deliberately encodes once is then compressed once *per subscriber* — the wrong trade on
 the LAN this is built for. Pass `compression="deflate"` for subscribers across a WAN.
