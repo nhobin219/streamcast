@@ -519,6 +519,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         "_catch_up_retries",
         "_cursor",
         "_kwargs",
+        "_offset",
         "_remote",
         "_resolved",
         "_s3",
@@ -564,44 +565,21 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
                 self._cursor, cursor_uri, s3=s3, upload_every=upload_every
             )
 
-        resolved: int | None
-        # ALWAYS read, even when an explicit offset makes the value unused:
-        # `load` is what seeds the cursor's high-water mark, and without it
-        # the forward-only guard is inert. A one-off `offset=1` beside a
-        # production cursor then wrote 1, 2, 3 over a file that said 400.
-        saved = self._cursor.load() if self._cursor is not None else None
-
-        if saved is None and self._remote is not None and self._cursor is not None:
-            # **Local first, remote only when there is no local.** This is
-            # disaster recovery: the box is gone, so there is no local file.
-            # Preferring the remote when a local one exists would mean a
-            # consumer's own position losing to a copy that lags it by up to
-            # `upload_every` — or to another box's, which is a configuration
-            # this deliberately does not support.
-            saved = self._remote.load()
-            if saved is not None:
-                # Written down locally too, so a second restart on this box
-                # does not need the bucket at all.
-                self._cursor.save(saved, force=True, rewind=True)
-
-        if offset is _UNSET:
-            # Not given: the file decides. `+ 1` because the file holds the
-            # last offset FINISHED with, and a resume asks for the next one.
-            resolved = None if saved is None else saved + 1
-        elif offset is None or isinstance(offset, int):
-            # Given: it wins, including when it is None. Overriding a stale
-            # file has to be expressible, and so does "ignore the file, take
-            # the live stream" — which is why `None` is not the default.
-            resolved = offset
-        else:
+        if not (offset is _UNSET or offset is None or isinstance(offset, int)):
             msg = f"offset is an int, None, or omitted — not {type(offset).__name__}"
             raise TypeError(msg)
 
-        self._resolved = resolved
-        # Called for its validation — it raises when an offset is given twice
-        # — and discarded, because `_handshake` builds each connection as it
-        # needs one. A catch-up opens a second at a different offset.
-        _with_offset(uri, resolved)
+        if isinstance(offset, int):
+            # Called for its validation — it raises when an offset is given
+            # BOTH as an argument and in the URI — and discarded, because
+            # `_handshake` builds each connection as it needs one. Only the
+            # explicit case is checkable without reading the cursor; a
+            # file-resolved offset that collides with the URI is caught by
+            # the same function in `_handshake`.
+            _with_offset(uri, offset)
+
+        self._offset = offset
+        self._resolved: int | None = None
         self._subscription: Subscription | None = None
 
     async def _handshake(self, offset: int | None) -> tuple[ClientConnection, Greeting]:
@@ -667,6 +645,49 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
 
         return self._subscription
 
+    def _resolve(self) -> int | None:
+        """The offset to subscribe at, reading the cursor if there is one.
+
+        **Called from `_open`, not from `__init__`.** It reads a file and can
+        reach S3 — a remote cursor is fetched when there is no local one —
+        and neither belongs in a constructor: `streamcast.connect(...)` that
+        nobody has awaited yet would do network I/O, on the event loop,
+        before the object it returns is used for anything. litelink's rule
+        (`__init__` takes built collaborators and does no I/O) is the same
+        rule, and this is where it was being broken.
+
+        `Cursor` and `RemoteCursor` are still BUILT in `__init__`, because
+        building them is pure: one holds a path, the other validates a URI.
+        """
+        # ALWAYS read, even when an explicit offset makes the value unused:
+        # `load` is what seeds the cursor's high-water mark, and without it
+        # the forward-only guard is inert. A one-off `offset=1` beside a
+        # production cursor then wrote 1, 2, 3 over a file that said 400.
+        saved = self._cursor.load() if self._cursor is not None else None
+
+        if saved is None and self._remote is not None and self._cursor is not None:
+            # **Local first, remote only when there is no local.** This is
+            # disaster recovery: the box is gone, so there is no local file.
+            # Preferring the remote when a local one exists would mean a
+            # consumer's own position losing to a copy that lags it by up to
+            # `upload_every` — or to another box's, which is a configuration
+            # this deliberately does not support.
+            saved = self._remote.load()
+            if saved is not None:
+                # Written down locally too, so a second restart on this box
+                # does not need the bucket at all.
+                self._cursor.save(saved, force=True, rewind=True)
+
+        if self._offset is _UNSET:
+            # Not given: the file decides. `+ 1` because the file holds the
+            # last offset FINISHED with, and a resume asks for the next one.
+            return None if saved is None else saved + 1
+
+        # Given: it wins, including when it is None. Overriding a stale file
+        # has to be expressible, and so does "ignore the file, take the live
+        # stream" — which is why `None` is not the default.
+        return self._offset if isinstance(self._offset, int) else None
+
     async def _open(self) -> Subscription:
         """Connect, then read the greeting before handing anything back.
 
@@ -676,6 +697,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         `recv` the application happened to reach first, which on a stream that
         is quiet out of hours is minutes later and somewhere else.
         """
+        self._resolved = self._resolve()
         try:
             connection, info = await self._handshake(self._resolved)
 

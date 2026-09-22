@@ -12,7 +12,7 @@ from streamcast import Cursor, EARLIEST, Maintain, Stream, Subscription, to_arro
 `Stream` creates the log, while `serve` maintains and replicates it:
 
 ```python
-stream = streamcast.Stream("trades", root="data", schema=SCHEMA)
+stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
 
 async with streamcast.serve(stream, "localhost", 8765):
     await stream.send({"event_ts": ..., "price": ...})
@@ -56,21 +56,29 @@ the LAN this is built for. Pass `compression="deflate"` for subscribers across a
 ## `Stream`
 
 ```python
-streamcast.Stream(name="", *, log=None,
-                  root=None, schema=None, sort_by=None, config=None,
-                  archive=None, s3=None,
+streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
+
+streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
+                      sort_by=None, config=None, archive=None, s3=None,
+                      max_backlog=8192, max_replay=100_000)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**Two ways to give it a log, and they are mutually exclusive.** `root=` + `schema=` (plus
-the optional `sort_by`, `config`, `archive`, `s3` — litelink's own `new()` keywords, with
-the name fed through) creates it here: `new` the first time, `open` every time after,
-which is the try/except every caller otherwise writes. `log=` takes a handle you already
-opened. Passing both raises, and so does `schema=` beside a `log=`: `open` reads the shape
-off disk, so a declaration there could not be enforced.
+**Two ways to give it a log, and they are separate calls.** `Stream.new(root=, schema=)`
+creates or opens one — `new` the first time, `open` every time after, which is the
+try/except every caller otherwise writes — and takes litelink's own `new()` keywords
+(`sort_by`, `config`, `archive`, `s3`) with the stream's name fed through. The plain
+initialiser takes a handle you already opened.
+
+The split follows litelink, whose own handles say it outright: *"the initialiser takes
+already built collaborators and does no I/O, so a test can substitute any of them."*
+`Stream(...)` builds nothing and touches no disk; `Stream.new(...)` is where the I/O is.
+It also deletes two hand-written errors — `new` has no `log=` parameter and `root`/`schema`
+are required, so the bad combinations are refused by the signature rather than checked at
+runtime.
 
 **`log` is what makes an offset a resume cursor**, and it is optional — a
 [tickerplant](https://code.kx.com/q/architecture/)'s log is optional too, and some kdb
@@ -80,16 +88,17 @@ refused outright rather than appearing to work until the day a subscriber needs 
 it, every row is durable *before* any subscriber sees it.
 
 ```python
-stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
-                           sort_by=("event_ts",))
+stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+                               sort_by=("event_ts",))
 ```
 
 **Any shape of log works** — the schema is yours, and `Stream` reads its column order once
 at construction to fix the key order on the wire.
 
-**Who closes it depends on who opened it.** `aclose` closes a log the `Stream` created
-from `root=`+`schema=`, and never one passed in as `log=` — that one stays yours, for a
-process that also reads or writes it through litelink. An existing log is checked against
+**Who closes it depends on who opened it.** `aclose` closes a log the `Stream` owns —
+which `Stream.new` sets — and never one passed to the initialiser, since that one stays
+yours, for a process that also reads or writes it through litelink. Pass `owns_log=True`
+alongside `log=` to hand over the lifetime of a handle you opened. An existing log is checked against
 a declared `schema=` rather than adopted, because a declaration that disagreed with the
 disk would be silently ignored and every `send` validated against columns the caller never
 wrote down.
@@ -565,7 +574,7 @@ SCHEMA = {
     "required": ["event_ts", "price", "amount", "side"],
 }
 
-stream = streamcast.Stream("trades", root="data", schema=SCHEMA, sort_by=("event_ts",))
+stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA, sort_by=("event_ts",))
 ```
 
 `Stream` creates the log at `root/name` if it is not there and opens it if it is — the

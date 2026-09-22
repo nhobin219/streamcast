@@ -99,28 +99,53 @@ class Sidecar:
         "_watch",
     )
 
-    def __init__(self, log: WriteHandle, binary: str | None = None) -> None:
-        # Written now, at `serve` time, while this process indisputably owns
-        # the log — before any maintainer is spawned against it.
-        self._config = Path(log.write_replication_config())
-        self._name = log.name
-        self._binary = litestream_binary(binary)
+    def __init__(self, *, config: Path, name: str, binary: str) -> None:
+        """Takes built values and does no I/O. Construct through `new`.
+
+        litelink's own rule, and this class had been breaking it: writing a
+        config file and probing PATH from an initialiser means a `Sidecar`
+        cannot be made without a real log and a real filesystem.
+        """
+        self._config = config
+        self._name = name
+        self._binary = binary
         self._lock: object | None = None
         self._owner = False
         self._process: subprocess.Popen[bytes] | None = None
         self._stopping = False
         self._watch: asyncio.Task[None] | None = None
 
-        if not Path(self._binary).is_absolute() or not Path(self._binary).exists():
+    @classmethod
+    def new(cls, log: WriteHandle, binary: str | None = None) -> Sidecar:
+        """Write the config, resolve litestream, and build the sidecar.
+
+        **Both ordering guarantees the initialiser used to carry are kept
+        here, and they are the reason this is a factory rather than a
+        lazily-initialised field.** The config is written NOW, at `serve`
+        time, while this process indisputably owns the log and before any
+        maintainer is spawned against it. And a missing binary raises HERE,
+        which `_sidecars` reaches before the listener binds — so a server
+        that cannot replicate never starts accepting subscribers who would
+        believe it was.
+        """
+        # Written before the binary is checked, deliberately: the config
+        # belongs to the log and is useful to an operator running their own
+        # litestream, which is exactly what the failure below suggests.
+        config = Path(log.write_replication_config())
+        resolved = litestream_binary(binary)
+
+        if not Path(resolved).is_absolute() or not Path(resolved).exists():
             # `litestream_binary` falls through to the bare name for a
             # PATH install, so resolve it the way `Popen` would.
-            if shutil.which(self._binary) is None:
+            if shutil.which(resolved) is None:
                 msg = (
                     f"{log.name!r} has wal_replication on, but litestream was not "
-                    f"found (tried {self._binary!r}). Install it, or pass "
+                    f"found (tried {resolved!r}). Install it, or pass "
                     f"replicate=False and run your own."
                 )
                 raise SidecarUnavailable(msg)
+
+        return cls(config=config, name=log.name, binary=resolved)
 
     @property
     def config(self) -> Path:

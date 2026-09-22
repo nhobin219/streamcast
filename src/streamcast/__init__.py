@@ -35,8 +35,8 @@ per consumer.
 
 .. code-block:: python
 
-    # server — creates the log at data/trades, or opens what is there
-    stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
+    # server — `new` creates the log at data/trades, or opens what is there
+    stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                sort_by=("event_ts",))
 
     # Fan-out, sealing, compaction and WAL shipping: all of it, one call.

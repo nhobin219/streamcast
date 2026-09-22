@@ -75,8 +75,8 @@ SCHEMA = {                                 # every field worth a column
 
 async def main():
     # Creates the log at data/trades, or opens it if it is already there.
-    stream = streamcast.Stream("trades", root="data", schema=SCHEMA,
-                               sort_by=("event_ts",))
+    stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+                                   sort_by=("event_ts",))
 
     # Fan-out, sealing, compaction and WAL shipping — all of it, one call.
     async with streamcast.serve(stream, "localhost", 8765):
@@ -152,9 +152,11 @@ it has to refuse.
 ```python
 import streamcast
 
-streamcast.Stream(name="", *, log=None, root=None, schema=None, sort_by=None,
-                  config=None, archive=None, s3=None,
+streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
+streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
+                      archive=None, s3=None,
+                      max_backlog=8192, max_replay=100_000)
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema

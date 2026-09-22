@@ -17,6 +17,17 @@ A WebSocket multicaster with replay. One process holds the upstream
 subscription and fans it out; with a litelink log attached, an offset is a
 resume cursor and a consumer that stops can catch up.
 
+### Construction
+
+- **`Stream.new(root=…, schema=…)`** creates or opens the log; `Stream(log=…)`
+  takes one already open and does no I/O. litelink's own rule — *"the
+  initialiser takes already built collaborators and does no I/O, so a test can
+  substitute any of them"* — applied here, with the same split it uses for
+  `litelink.new`. `Sidecar.new` and `connect`'s deferred cursor read are the
+  same change: constructing a `connect(...)` no longer reaches S3 before
+  anything has awaited it. The split also deletes two hand-written errors —
+  the bad argument combinations are now refused by the signature.
+
 ### Fixed
 
 - **Closing a subscription mid-stream no longer waits out `close_timeout`.**

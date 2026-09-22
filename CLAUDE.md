@@ -104,6 +104,12 @@ it in the same PR.
   disconnect, and a replay that refused every `EARLIEST` once the buffer had sealed.
 - **Comments carry the reasoning, not the mechanics.** Why the obvious alternative was
   rejected, with the measurement if there was one. Match the density of the file.
+- **`__init__` takes built collaborators and does no I/O.** litelink's rule, and
+  `tests/test_invariants.py` enforces it. Construction that opens a log, reads a cursor,
+  writes a config or probes PATH belongs in a factory — `Stream.new`, `Sidecar.new`,
+  `connect._resolve`. The one recorded exception is `Stream.__init__` reading
+  `end_offset()` off the log it was handed: a read on an injected collaborator rather
+  than the construction of one.
 - **A durable fact has one home.** The stream's name is on the `Stream` and routing reads
   it; the offset counter is maintained by `send` and nothing re-reads it from the log;
   refusal sentences live in `_errors._WHY` and both ends build from there.

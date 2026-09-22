@@ -114,13 +114,13 @@ class TestNeverTwo:
         # is right for the single log it runs and wrong here: `log.root` is
         # the PARENT, so two streams under one root would contend for one
         # lock and only one would ever replicate.
-        sidecar = Sidecar(shipped)
+        sidecar = Sidecar.new(shipped)
         assert sidecar.config.parent.name == "trades"
         assert sidecar.config.parent != shipped.root
 
     async def test_a_second_sidecar_stands_by_rather_than_starting_one(self, shipped):
-        first = Sidecar(shipped)
-        second = Sidecar(shipped)
+        first = Sidecar.new(shipped)
+        second = Sidecar.new(shipped)
         first.start()
         second.start()
         try:
@@ -141,7 +141,7 @@ class TestNeverTwo:
                 await sidecar.wait_closed()
 
     async def test_the_lock_is_released_so_the_next_server_takes_over(self, shipped):
-        first = Sidecar(shipped)
+        first = Sidecar.new(shipped)
         first.start()
         for _ in range(60):
             if first.owner:
@@ -154,7 +154,7 @@ class TestNeverTwo:
         await first.wait_closed()
 
         # Answered once, a standby would never become the owner.
-        second = Sidecar(shipped)
+        second = Sidecar.new(shipped)
         assert second._claim() is True  # noqa: SLF001
         second.terminate()
         await second.wait_closed()

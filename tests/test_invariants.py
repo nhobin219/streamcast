@@ -178,3 +178,68 @@ def test_the_offset_is_never_a_key_in_the_message():
 
     # And the reader pops litelink's column rather than passing it through.
     assert "message.pop(COLUMN)" in inspect.getsource(log_module.rows)
+
+
+# Anything here reaches the world: it opens a file, hits SQLite or S3, spawns
+# a process, or builds a litelink handle. An `__init__` that calls one is
+# building a collaborator rather than receiving one.
+_REACHES_THE_WORLD = frozenset(
+    {
+        "new",
+        "open",
+        "restore",
+        "snapshot",
+        "load",
+        "read_text",
+        "write_replication_config",
+        "which",
+        "Popen",
+        "_open_or_create",
+    }
+)
+
+# `Stream.__init__` reads the offset counter off the log it was handed. That
+# is a read on an INJECTED collaborator, not the construction of one — a fake
+# log with an `end_offset()` substitutes cleanly, which is the property the
+# rule exists to protect. Written down here rather than left as a silent gap.
+_ALLOWED = {("Stream", "end_offset")}
+
+
+def test_no_initialiser_builds_its_own_collaborators():
+    """litelink's rule, applied here: `__init__` takes what it is given.
+
+    *"The initialiser takes already built collaborators and does no I/O, so a
+    test can substitute any of them."* Three classes here were breaking it —
+    `Stream` called `litelink.new`/`open`, `connect` read a cursor file and
+    fetched one from S3, and `Sidecar` wrote a config file and probed PATH —
+    so construction touched the disk and, in one case, the network before
+    anything had been awaited.
+
+    Each of those moved to a factory (`Stream.new`, `Sidecar.new`,
+    `connect._resolve`). This is the audit that found them, kept as a test,
+    because the pull back the other way is constant: doing the work in
+    `__init__` always looks like one less call at the call site.
+    """
+    offenders = []
+    for path in sorted(Path("src/streamcast").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            for fn in cls.body:
+                if not isinstance(fn, ast.FunctionDef) or fn.name != "__init__":
+                    continue
+
+                for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+                    name = (
+                        getattr(call.func, "attr", None)
+                        or getattr(call.func, "id", None)
+                        or ""
+                    )
+                    if name in _REACHES_THE_WORLD and (cls.name, name) not in _ALLOWED:
+                        offenders.append(
+                            f"{path.name}:{call.lineno} {cls.name} -> {name}()"
+                        )
+
+    assert not offenders, (
+        "an initialiser builds a collaborator or does I/O; move it to a "
+        f"factory (see `Stream.new`): {offenders}"
+    )

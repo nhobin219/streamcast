@@ -82,7 +82,7 @@ class Stream:
     `serve` is what starts the maintainer and the litestream sidecar, and it
     stops them again.
 
-        stream = streamcast.Stream("trades", root="data", schema=SCHEMA)
+        stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
 
         async with streamcast.serve(stream, "localhost", 8765):
             async for frame in upstream:
@@ -132,36 +132,22 @@ class Stream:
         name: str = "",
         *,
         log: WriteHandle | None = None,
-        root: str | PathLike[str] | None = None,
-        schema: Mapping[str, object] | None = None,
-        sort_by: Sequence[str] | None = None,
-        config: object | None = None,
-        archive: str | None = None,
-        s3: object | None = None,
+        owns_log: bool = False,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int = MAX_REPLAY,
     ) -> None:
-        owned = None
-        if root is not None or schema is not None:
-            if log is not None:
-                msg = "pass either an open `log=` or `root=`+`schema=`, not both"
-                raise ValueError(msg)
+        """Takes an already-open log and builds nothing. See `Stream.new`.
 
-            if root is None or schema is None:
-                msg = "`root=` and `schema=` go together — one without the other"
-                raise ValueError(msg)
+        litelink's rule, which this used to break: it took `root=`+`schema=`
+        and called `litelink.new`/`open` from here, so constructing a
+        `Stream` created directories and a SQLite database. That moved to
+        `new`, which is where litelink puts the same work.
 
-            owned = _open_or_create(
-                root,
-                name,
-                schema=schema,
-                sort_by=sort_by,
-                config=config,
-                archive=archive,
-                s3=s3,
-            )
-            log = owned
-
+        `owns_log` is the one piece of lifetime this object holds: `aclose`
+        closes a log it owns and never one it was merely lent. `new` sets it;
+        a caller passing `log=` can set it too, to hand over the lifetime of
+        a handle they opened.
+        """
         # The declared column order, read once. It fixes the key order of
         # every frame, and a replayed row must encode to the same bytes as the
         # live one it repeats (I6) — so this cannot be re-derived per message
@@ -174,11 +160,11 @@ class Stream:
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish.
         self._shape = None if log is None else _schema.from_arrow(log.schema)
-        # Closed by `aclose` only when this object created it. A log the
-        # caller opened stays the caller's — they may be sharing it, and a
-        # library that closes a handle it was lent is a library you cannot
-        # lend one to.
-        self._owned = owned
+        # Closed by `aclose` only when this object owns it. A log the caller
+        # opened stays the caller's — they may be sharing it, and a library
+        # that closes a handle it was lent is a library you cannot lend one
+        # to.
+        self._owned = log if (owns_log and log is not None) else None
         self._name = name
         self._log = log
         self._max_backlog = max_backlog
@@ -195,8 +181,63 @@ class Stream:
         # every subscriber and to every operator reading a greeting, and would
         # be wrong the moment the process restarted. Nothing assigned an
         # offset, so nothing reports one.
+        #
+        # This is the one read left in this initialiser, and it is a read on
+        # an INJECTED collaborator rather than the construction of one — a
+        # fake log with an `end_offset()` substitutes cleanly, which is the
+        # property litelink's rule exists to protect. Deferring it would put
+        # a branch on `send`, which is the hot path, to buy nothing.
         self._end_offset: int | None = log.end_offset() if log is not None else None
         self._subscribers: set[Subscriber] = set()
+
+    @classmethod
+    def new(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        schema: Mapping[str, object],
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
+        archive: str | None = None,
+        s3: object | None = None,
+        max_backlog: int = MAX_BACKLOG,
+        max_replay: int = MAX_REPLAY,
+    ) -> Stream:
+        """A stream and the log underneath it, created if it is not there yet.
+
+            stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
+
+        **This is where the I/O lives, and that is the whole point of it
+        being a separate call.** litelink says it plainly — *"the initialiser
+        takes already built collaborators and does no I/O, so a test can
+        substitute any of them"* — and puts its own assembly in
+        `litelink.new`. This is the same split under the same name.
+
+        Everything but `name` goes to litelink's `new`, with the stream's
+        name fed through, so a durable stream needs no import but this one.
+        `name` is both the stream's route and the log's name: one fact, one
+        home, and a server cannot serve `/trades` off a log called something
+        else.
+
+        The returned `Stream` OWNS its log and closes it in `aclose`. Pass
+        `log=` to the initialiser instead when the handle is yours to keep.
+        """
+        return cls(
+            name,
+            log=_open_or_create(
+                root,
+                name,
+                schema=schema,
+                sort_by=sort_by,
+                config=config,
+                archive=archive,
+                s3=s3,
+            ),
+            owns_log=True,
+            max_backlog=max_backlog,
+            max_replay=max_replay,
+        )
 
     def __repr__(self) -> str:
         durable = "durable" if self._log is not None else "live-only"

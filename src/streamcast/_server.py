@@ -188,7 +188,7 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
         return []
 
     return [
-        Sidecar(stream.log)
+        Sidecar.new(stream.log)
         for stream in routes.values()
         if stream.log is not None and stream.log.config.wal_replication
     ]

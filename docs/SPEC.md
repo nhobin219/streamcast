@@ -456,7 +456,7 @@ onto the other sits on the side that knows about JSON. Putting it in litelink
 was considered and rejected; it would make a JSON codec part of the public
 surface of a library whose value is being general.
 
-What it buys is an import list of one. `Stream(name, root=…, schema=…)` creates
+What it buys is an import list of one. `Stream.new(name, root=…, schema=…)` creates
 the log, `serve` maintains and replicates it, and a caller reaches for neither
 litelink nor pyarrow.
 
@@ -504,7 +504,7 @@ and a microsecond one — which the examples use — is not.
 
 ### An existing log is checked, not adopted
 
-`Stream(root=…, schema=…)` opens a log that is already there, and litelink's
+`Stream.new(root=…, schema=…)` opens a log that is already there, and litelink's
 `open` takes none of the shape: it reads it from disk. So a declaration that
 disagreed would be silently ignored and every send validated against columns
 the caller never wrote down. It is compared and refused instead, which is the

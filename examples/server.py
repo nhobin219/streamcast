@@ -157,7 +157,7 @@ async def main() -> None:
     if args.no_log:
         stream = streamcast.Stream("trades")
     else:
-        stream = streamcast.Stream(
+        stream = streamcast.Stream.new(
             "trades", root=args.root, schema=SCHEMA, sort_by=("event_ts",)
         )
 
