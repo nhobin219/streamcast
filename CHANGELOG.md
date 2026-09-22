@@ -17,6 +17,16 @@ A WebSocket multicaster with replay. One process holds the upstream
 subscription and fans it out; with a litelink log attached, an offset is a
 resume cursor and a consumer that stops can catch up.
 
+### Fixed
+
+- **Closing a subscription mid-stream no longer waits out `close_timeout`.**
+  `websockets` pauses its reader at `max_queue` (16), so a consumer with more
+  than that buffered had already stopped reading the socket — and the server's
+  Close echo is just another frame on it. `close()` waited the full 10s and
+  then dropped the connection. Measured: 10.01s before, 0.00s after, and the
+  close code goes from 1006 to 1000. It hit any consumer killed mid-replay,
+  any `break` out of the loop, and any `async with` exited early.
+
 ### Recovery
 
 - **`connect(catch_up=True)`** reads the gap from the log's archive when a

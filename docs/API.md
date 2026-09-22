@@ -311,7 +311,7 @@ some `recv`.
 ```python
 await sub.recv() -> tuple[int | None, dict[str, object]]
 async for offset, msg in sub: ...
-await sub.close(code=1000, reason="") -> None
+await sub.close(code=1000, reason="") -> None   # drains what is in flight
 sub.commit(offset=None) -> None   # save the cursor now — see Resuming
 
 

@@ -651,6 +651,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 |---|---|
 | a subscriber stops reading | its queue fills, it is dropped with 4429, everyone else is unaffected |
 | a subscriber disconnects | the pump's race with `wait_closed` unwinds the handler; the set entry goes |
+| a subscriber closes mid-replay | `close` drains what is in flight so the handshake completes. Without that, `websockets` pauses its reader at `max_queue` and the peer's Close is never read — measured at a full 10s `close_timeout` and a 1006 |
 | the upstream feed drops | the server's business — `examples/server.py` reconnects and the offsets simply continue |
 | the server dies | subscribers see a reset; on restart they resume from their cursors and the log fills the gap |
 | the log is full / the disk is full | `append` raises, `send` raises, **nothing is broadcast** — the failure is at the publisher, where it can be handled |

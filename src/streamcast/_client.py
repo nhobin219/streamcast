@@ -35,6 +35,7 @@ process; a remote publisher is an open question, not an omission (`docs/SPEC.md`
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -402,7 +403,51 @@ class Subscription:
             await catcher.close()
 
         if self._connection is not None:
-            await self._connection.close(code, reason)
+            await _close(self._connection, code, reason)
+
+
+async def _close(connection: ClientConnection, code: int, reason: str) -> None:
+    """Close, draining what is still in flight so the handshake can finish.
+
+    **Measured: 10.01s without the drain, 0.00s with it.** `websockets`
+    applies flow control at `max_queue` (16 by default): once that many
+    unread messages are buffered, the client STOPS READING THE SOCKET. A
+    consumer that closes mid-replay has far more than 16 frames in flight, so
+    its reader is already paused — and the server's Close echo, which is just
+    another frame on that socket, is never consumed. `close()` then waits out
+    `close_timeout` (10s) and gives up.
+
+    That is the ordinary case, not an exotic one: a consumer killed while
+    catching up, a `break` out of the loop, or any `async with` exited early.
+    Every one of them paid ten seconds, and the shutdown looked like a hang.
+
+    So a task reads and discards until the socket is done, which un-pauses
+    the reader and lets the echo through. Discarding is correct rather than
+    merely expedient — the caller has said it wants no more messages, and the
+    cursor was committed before this ran. Nothing here touches `_offset`, so
+    a drained frame can never be mistaken for one the consumer handled.
+    """
+    drain = asyncio.create_task(_discard(connection))
+    try:
+        await connection.close(code, reason)
+
+    finally:
+        drain.cancel()
+        # Awaited, or a cancelled task that had already failed logs
+        # "Task exception was never retrieved" on the next collection.
+        await asyncio.gather(drain, return_exceptions=True)
+
+
+async def _discard(connection: ClientConnection) -> None:
+    """Read and throw away until the connection ends."""
+    try:
+        while True:
+            await connection.recv()
+
+    except (ConnectionClosed, RuntimeError):
+        # RuntimeError covers `websockets` refusing a read on a connection
+        # that is already finished, which is a race this does not need to win.
+        return
 
 
 class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirrors it

@@ -241,6 +241,38 @@ class TestLeaks:
             assert len(asyncio.all_tasks()) <= before + 2
 
 
+async def test_closing_mid_replay_completes_the_handshake(serve, log):
+    """Walking away with frames still in flight must not hang.
+
+    **`websockets` applies flow control at `max_queue` (16).** Once that many
+    unread messages are buffered the client stops reading the socket — and
+    the server's Close echo is just another frame on that socket, so it is
+    never consumed. `close()` then waits out `close_timeout` (10s) and gives
+    up. Measured before the fix: 10.01s on every close that left more than 16
+    frames unread, which is any consumer killed mid-replay, any `break` out
+    of the loop, and any `async with` exited early. It looked like a hang.
+
+    **Asserted on the close CODE, not on a stopwatch.** 1000 means the
+    handshake completed; 1006 is `websockets` giving up and dropping the TCP
+    connection, which is exactly what the timeout produces. That makes this a
+    statement about what happened rather than about how fast this machine is
+    — the same test on a loaded box gives the same answer.
+    """
+    stream = streamcast.Stream("trades", log=log)
+    async with serve(stream) as uri:
+        # Comfortably past `max_queue`, so the reader is certainly paused.
+        await stream.send_many([trade(i) for i in range(50)])
+
+        sub = await streamcast.connect(uri, offset=0, close_timeout=2)
+        await sub.recv()  # one of fifty, then walk away
+        await sub.close()
+
+        assert sub.connection.close_code == 1000, (
+            "the close handshake did not complete; 1006 means `websockets` "
+            "timed out and dropped the connection"
+        )
+
+
 async def test_a_subscription_has_no_send(serve, log):
     # Not a `send` that raises. The type simply does not carry one, which is
     # the same reason litelink's read handles have no `append`.
