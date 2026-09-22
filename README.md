@@ -13,8 +13,11 @@ bandwidth, a subscription limit you were not told about until you hit it, and si
 that can quietly differ from each other. One process holds the upstream subscription;
 everything else on the box reads from it, and gets **the same bytes in the same order**.
 
+Market data is the case it was built against and the one the examples use, but nothing
+here is specific to it: a feed is a websocket that sends messages, and a message is a row.
+
 ```
-exchange ws feed
+upstream ws feed
       │  one connection
       ▼
 streamcast server ──► litelink log      durable BEFORE any subscriber sees it

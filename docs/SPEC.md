@@ -13,8 +13,12 @@ Numbers marked *measured* were taken on the machine this was developed on with
 One process holds the upstream subscription. Everything else on the box reads
 from it.
 
+**Any websocket feed.** Nothing in this section is specific to market data —
+that is only the case it was built against, and the one the examples use. A
+feed is a websocket that sends messages; a message is a row.
+
 ```
-exchange ws feed
+upstream ws feed
       │  ONE connection
       ▼
 ┌─────────────────────────────────────────┐
@@ -34,8 +38,9 @@ exchange ws feed
 
 Three problems, one shape:
 
-**Subscription limits.** Exchanges cap connections per account and per IP. Six
-consumers on a VM is six connections; one server is one.
+**Subscription limits.** Websocket APIs cap connections per account, per IP,
+or both — exchanges are the case this was built against, but it is not special
+to them. Six consumers on a VM is six connections; one server is one.
 
 **Divergence.** Six connections can be served six subtly different streams —
 different reconnect points, different dropped frames, a rebalance that reaches

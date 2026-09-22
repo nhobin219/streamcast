@@ -38,7 +38,7 @@ rather than once per consumer.
     stream = streamcast.Stream("trades", log=log)
 
     async with streamcast.serve(stream, "localhost", 8765):
-        async for frame in exchange_feed:
+        async for frame in upstream:
             await stream.send(parse(frame))      # a row
 
     # consumer
