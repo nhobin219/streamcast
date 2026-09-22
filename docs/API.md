@@ -126,7 +126,8 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 ## `serve`
 
 ```python
-streamcast.serve(streams, host=None, port=None, **websockets_kwargs) -> Server
+streamcast.serve(streams, host=None, port=None, *, maintain=True,
+                 **websockets_kwargs) -> Server
 ```
 
 `streams` is a `Stream` or an iterable of them. Returns exactly what `websockets.serve`
@@ -147,6 +148,42 @@ wanted it would get somebody else's messages — which looks like working softwa
 `host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for a
 server that should only serve its own box, which is the case this library is built for.
 TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECURITY.md).
+
+### `maintain`
+
+**`maintain=True` starts one maintainer subprocess per stream that has a log**, and stops
+it when the server closes. Without it, nothing in this library ever calls litelink's
+`seal_due()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
+held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
+growing. litelink says it plainly: *"A maintainer is not optional."*
+
+```python
+streamcast.serve(stream, host, port)                           # a maintainer per log
+streamcast.serve(stream, host, port, maintain=False)           # you run your own
+streamcast.serve(stream, host, port,
+                 maintain=streamcast.Maintain(seal_every=0.1, maintain_every=30))
+```
+
+`Maintain` is a frozen dataclass of `seal_every` (0.25 s) and `maintain_every` (10 s). The
+cadences differ by 40x because the costs do: `seal_due` is an indexed read of one row when
+there is nothing to seal, while `maintain` reads table metadata to compact, evict and
+expire.
+
+**It is always a subprocess, and there is deliberately no thread option.** A seal is
+CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no
+lock — litelink measured appends running 45.2 ms behind an in-process seal. On a fan-out
+server that is 45 ms with nothing fanned out and no keepalive answered, which surfaces as
+latency spikes that look like a network problem.
+
+It dies with the server, which is safe because litelink allows one writer: nothing is
+appending, so an unsealed buffer is not growing. The other direction is supervised — a
+maintainer that exits while the server runs is restarted with backoff, because losing it
+silently returns the server to never sealing.
+
+`maintain=False` is right when you run litelink's own four-process shape
+(`examples/adsb/`, one process per storage role), or when the log is shared with something
+else that sweeps it. `python -m streamcast maintain --root PATH --name NAME` is the same
+loop, runnable by hand.
 
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.

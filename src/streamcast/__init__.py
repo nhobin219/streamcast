@@ -72,6 +72,7 @@ from streamcast._errors import (
     StreamNotFound,
     TooSlow,
 )
+from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
@@ -87,6 +88,7 @@ __all__ = [
     "MAX_REPLAY",
     "Close",
     "Greeting",
+    "Maintain",
     "NotReplayable",
     "ProtocolError",
     "Stream",

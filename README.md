@@ -102,7 +102,16 @@ async with streamcast.connect("ws://localhost:8765/trades") as stream:
 logged, forwarded, or appended to another stream whole.
 
 **The parse happens once, at the publisher.** Six consumers used to mean six JSON parses of
-the same frame; now it means none. And the log is a real table:
+the same frame; now it means none.
+
+**`serve` also starts a maintainer**, one subprocess per stream that has a log, and stops
+it when the server closes. Without one nothing ever seals: litelink is explicit that *"a
+maintainer is not optional"*, and measured on 100,000 rows past the 8 MiB seal target, a
+server without one held every row in its SQLite buffer and wrote zero Parquet files.
+`maintain=False` opts out; see [`docs/API.md`](docs/API.md#maintain) for the cadences and
+for why it is never a thread.
+
+And the log is a real table:
 
 ```python
 log.sql("SELECT count(*), max(price), sum(amount) FROM log").read_all()

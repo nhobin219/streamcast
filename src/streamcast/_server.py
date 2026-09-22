@@ -15,12 +15,14 @@ a second spelling of "no name".
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from websockets.asyncio.server import serve as _ws_serve
 from websockets.exceptions import ConnectionClosed
 
 from streamcast._errors import Close, NotReplayable
+from streamcast._maintain import Maintain, Supervisor
 from streamcast._protocol import parse_subscribe, refusal
 from streamcast._stream import Stream
 
@@ -63,14 +65,95 @@ def _routes(streams: Stream | Iterable[Stream]) -> dict[str, Stream]:
     return routes
 
 
+class _Served:
+    """The websockets server, plus the maintainers that must die with it.
+
+    A thin proxy rather than a new object model: everything
+    `websockets.Server` exposes — `sockets`, `serve_forever`, `connections`,
+    `is_serving` — is reached through `__getattr__` untouched, and only
+    `close`/`wait_closed` are wrapped, because those are the two that must
+    also stop a subprocess.
+
+    Wrapping at all is a cost, and the alternative was worse: a separate
+    `async with streamcast.maintaining(stream)` beside the `serve` is one more
+    line to forget, and forgetting it is the whole defect `_maintain` exists
+    to fix.
+    """
+
+    __slots__ = ("_maintainers", "_server", "_serving")
+
+    def __init__(self, serving: Server, maintainers: list[Supervisor]) -> None:
+        self._serving = serving
+        self._maintainers = maintainers
+        self._server: Server | None = None
+
+    async def _start(self) -> _Served:
+        if self._server is None:
+            self._server = await self._serving
+            # After the listener is up, so a bind failure does not leave a
+            # subprocess sweeping a log nothing is writing to.
+            for maintainer in self._maintainers:
+                maintainer.start()
+
+        return self
+
+    def __await__(self):  # noqa: ANN204 — an awaitable's own protocol
+        return self._start().__await__()
+
+    async def __aenter__(self) -> _Served:
+        return await self._start()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.close()
+        await self.wait_closed()
+
+    def close(self, close_connections: bool = True) -> None:
+        for maintainer in self._maintainers:
+            maintainer.terminate()
+
+        if self._server is not None:
+            self._server.close(close_connections)
+
+    async def wait_closed(self) -> None:
+        if self._server is not None:
+            await self._server.wait_closed()
+
+        for maintainer in self._maintainers:
+            await maintainer.wait_closed()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._server, name)
+
+
+def _supervisors(
+    routes: dict[str, Stream], maintain: bool | Maintain
+) -> list[Supervisor]:
+    """One maintainer per stream that has a log, or none.
+
+    A live-only stream has nothing to sweep, so `maintain=True` on a server of
+    them spawns nothing rather than a process with no work to do.
+    """
+    if maintain is False:
+        return []
+
+    plan = Maintain() if maintain is True else maintain
+
+    return [
+        Supervisor(Path(stream.log.root), stream.log.name, plan)
+        for stream in routes.values()
+        if stream.log is not None
+    ]
+
+
 def serve(
     streams: Stream | Iterable[Stream],
     host: str | None = None,
     port: int | None = None,
     *,
+    maintain: bool | Maintain = True,
     compression: str | None = None,
     **kwargs: Any,
-) -> Server:
+) -> _Served:
     """Serve one or more streams. Same shape as `websockets.serve`.
 
         async with streamcast.serve(stream, "localhost", 8765):
@@ -91,11 +174,26 @@ def serve(
     is free and the CPU is not. Pass `compression="deflate"` to turn it back
     on for subscribers across a WAN, where the trade reverses.
 
+    **`maintain=True` starts one maintainer subprocess per stream that has a
+    log**, and stops it when the server closes. That is a departure from
+    litelink's "the library owns neither the thread nor the interval", and it
+    is deliberate: a streamcast server already owns a socket, a task per
+    subscriber and a queue per subscriber, so owning its own storage
+    maintenance is consistent — and the alternative default reproduces the
+    defect it exists to fix. Nothing in this library sealed before it existed;
+    measured on 120,000 rows, every one of them still in the SQLite buffer.
+    See `_maintain`, which also says why it is never a thread.
+
+    `maintain=False` opts out, for a deployment that runs its own the way
+    litelink's `examples/adsb/` does — four processes, one per storage role,
+    which is the right shape once the costs justify it.
+
     A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to
     send, and is closed by the keepalive when its pongs stop arriving.
     """
     routes = _routes(streams)
+    maintainers = _supervisors(routes, maintain)
 
     async def handler(connection: ServerConnection) -> None:
         # `request` is optional on the connection because a `ServerConnection`
@@ -140,7 +238,10 @@ def serve(
             # reload.
             return
 
-    return _ws_serve(handler, host, port, compression=compression, **kwargs)
+    return _Served(
+        _ws_serve(handler, host, port, compression=compression, **kwargs),
+        maintainers,
+    )
 
 
 __all__ = ["serve"]

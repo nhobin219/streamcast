@@ -48,7 +48,11 @@ possible is wrong even if every test passes.
    at the wrong place is a hole at the join. Refuse with 4416 instead.
 5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8
    before offset 7.
-6. **Let a replayed frame differ from the live one it repeats.** Both project through the
+6. **Let a log grow without a maintainer.** Nothing here calls `seal_due()` except
+   `_maintain`. A server started with `maintain=False` and no external maintainer buffers
+   every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
+   target, with zero Parquet files.
+7. **Let a replayed frame differ from the live one it repeats.** Both project through the
    log's declared column order, so the bytes match. `_log.replay` checks the batch's column
    order against what it projected for exactly this reason.
 
@@ -94,7 +98,8 @@ src/streamcast/
     _stream.py      Stream — offsets, fan-out, the subscribe partition
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
-    _server.py      serve — routing and close codes. Thin on purpose.
+    _maintain.py    the maintainer subprocess, and the supervisor that owns it
+    _server.py      serve — routing, close codes, maintainer lifetime
     _client.py      connect, Subscription, and close code → exception
 ```
 
