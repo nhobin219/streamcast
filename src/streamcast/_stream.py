@@ -91,9 +91,10 @@ class Stream:
     prunes, compresses and is queryable from any Iceberg engine. A row goes in
     and the same row comes back out, live or replayed.
 
-    **`log` is what separates a multicaster from a tickerplant** — kx's term
-    for a process that captures a feed, logs it, and publishes it to registered
-    subscribers (https://code.kx.com/q/architecture/). Without it
+    **`log` is what makes an offset a resume cursor**, and it is optional in
+    both directions: a tickerplant's log is optional too — some kdb
+    implementations omit it — so a stream without one is not a lesser thing,
+    just one nothing can resume from. Without it
     nothing assigns offsets at all — `send` returns None and every frame
     carries `null` — so `?offset=` is refused outright rather than appearing to
     work until the day a subscriber needs it. With it, every row is durable

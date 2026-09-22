@@ -52,7 +52,9 @@ streamcast.Stream(name="", *, log=None, max_backlog=8192, max_replay=100_000)
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**`log` is what separates a multicaster from a [tickerplant](https://code.kx.com/q/architecture/).** Without it nothing assigns
+**`log` is what makes an offset a resume cursor**, and it is optional — a
+[tickerplant](https://code.kx.com/q/architecture/)'s log is optional too, and some kdb
+implementations omit it. Without one nothing assigns
 offsets at all — `send` returns None and every frame carries `null` — so `?offset=` is
 refused outright rather than appearing to work until the day a subscriber needs it. With
 it, every row is durable *before* any subscriber sees it.

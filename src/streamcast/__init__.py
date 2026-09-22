@@ -7,14 +7,17 @@ limit, pays N times the bandwidth, and gives each consumer a stream that can
 quietly differ from its neighbour's. One connection in, one stream out, the
 same bytes to everyone.
 
-With a litelink log attached it stops being a fan-out and becomes a
-tickerplant — kx's term for a process that captures a feed, writes it to a
-log file, and publishes it to registered subscribers, which is this one almost
-exactly (https://code.kx.com/q/architecture/). Every message is durable
-*before* any subscriber sees it, which means an offset is a resume cursor: a
-consumer that falls behind, crashes, or is restarted reconnects with the last
-offset it processed and the server replays the gap out of the log before
-switching it to live — with no window in which a message is in neither place. `docs/SPEC.md` §3 is where that partition
+A streamcast server is effectively a Python WebSocket tickerplant — a term
+used in kdb+/q systems for a process that captures a feed, optionally writes
+it to a log file, and publishes it to registered subscribers
+(https://code.kx.com/q/architecture/), which is this one almost exactly.
+
+The log is what makes an offset a resume cursor. With one attached every
+message is durable *before* any subscriber sees it, so a consumer that falls
+behind, crashes, or is restarted reconnects with the last offset it processed
+and the server replays the gap before switching it to live — with no window in
+which a message is in neither place. Without one the fan-out is identical,
+offsets are `null`, and `?offset=` is refused. `docs/SPEC.md` §3 is where that partition
 is argued; `Stream` is where it is enforced.
 
 **The API is `websockets` with one modification.** `serve` and `connect` have

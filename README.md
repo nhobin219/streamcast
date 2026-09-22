@@ -24,42 +24,24 @@ streamcast server ──► litelink log      durable BEFORE any subscriber sees
       └──► recorder          offset 1861
 ```
 
-With a [litelink](https://github.com/nhobin219/litelink) log attached it stops being a
-fan-out and becomes a Python [tickerplant](https://code.kx.com/q/architecture/) — a term
-used in kdb+/q systems for a process that captures a feed, writes it to a log file, and
-publishes it to registered subscribers, which is this one almost exactly. Every message is
-durable before any subscriber sees it,
-so an offset is a **resume cursor**: a consumer that crashes, restarts, or falls behind
-reconnects with the last offset it processed and the server replays the gap out of the log
-before switching it to live — with no window in which a message is in neither place.
+A streamcast server is effectively a Python WebSocket
+[tickerplant](https://code.kx.com/q/architecture/) — a term used in kdb+/q systems for a
+process that captures a feed, optionally writes it to a log file, and publishes it to
+registered subscribers, which is this one almost exactly.
+
+**The log is what makes an offset a resume cursor.** With a
+[litelink](https://github.com/nhobin219/litelink) log attached, every message is durable
+before any subscriber sees it, so a consumer that crashes, restarts, or falls behind
+reconnects with the last offset it processed and the server replays the gap before
+switching it to live — with no window in which a message is in neither place. Without one
+the fan-out is identical, offsets are `null`, and `?offset=` is refused: there is simply
+nothing to resume from.
 
 ```python
 async with streamcast.connect(uri, offset=1862) as stream:
-    async for offset, message in stream:
+    async for offset, msg in stream:
         ...
 ```
-
-### Multicaster or tickerplant?
-
-The argument that decides it is `log=`.
-
-**Without a log it is a multicaster.** One `encode` per message, one frame object shared
-by every queue, identical bytes to every subscriber — a guarantee
-([`SPEC.md`](docs/SPEC.md) I6), not an implementation detail. No per-consumer filtering,
-no partitioning, no per-message routing. Offsets are `null`, because nothing assigned any.
-
-**With one it is a tickerplant.** The feed is captured, logged, and published to
-subscribers that can resume — named streams on one port, a subscribe negotiation, an
-offset namespace it owns, and a delivery contract written in close codes.
-
-```python
-streamcast.Stream("trades")            # a multicaster. no offsets, nothing to resume from
-streamcast.Stream("trades", log=log)   # a tickerplant. offsets are resume cursors
-```
-
-**It is not a message broker**, and the machinery that would make it one is deliberately
-absent: no fan-in — nothing publishes into a stream over the wire — no acknowledgements,
-no consumer groups, no per-message routing. See [what it is not](#what-it-is-not).
 
 **Status: early.** The fan-out, the replay and the backpressure isolation work and are
 tested. Read [what it is not](#what-it-is-not) and [not implemented yet](#not-implemented-yet)
@@ -253,7 +235,7 @@ tickerplant has, where the feed handler parses and the plant stores typed rows.
 
 ## What goes over the wire
 
-Every frame is JSON text — the greeting, then one object per row:
+Every frame is JSON text — the greeting, then an `[offset, msg]` pair per message:
 
 ```
 {"streamcast":1,"stream":"trades","end_offset":1861,"replay":[1200,1861],"durable":true}
