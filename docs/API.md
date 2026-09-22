@@ -191,7 +191,8 @@ receive buffer, stops being able to send, and is closed by the keepalive.
 ## `connect`
 
 ```python
-streamcast.connect(uri, *, offset=None, **websockets_kwargs) -> Subscription
+streamcast.connect(uri, *, offset=<unset>, cursor=None,
+                   **websockets_kwargs) -> Subscription
 ```
 
 Awaitable and an async context manager, like `websockets.connect`.
@@ -249,22 +250,53 @@ a server restart), `stream`, `version`.
 
 ## Resuming
 
-```python
-offset = None
-while True:
-    try:
-        async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, msg in stream:
-                handle(msg)
+**`cursor=path` is the whole of it.** The file holds the last offset finished with; the
+subscription loads it at connect, resumes one above, and saves as the loop runs.
 
-    except (ConnectionClosed, OSError, streamcast.TooSlow):
-        offset = None if offset is None else offset + 1
+```python
+async with streamcast.connect(uri, cursor=".trades.offset") as stream:
+    async for offset, msg in stream:
+        handle(msg)
 ```
 
-The `+ 1` belongs at the call site rather than inside a helper, because only the caller
-knows whether the last message was actually *processed* — a subscriber that persists its
-work resumes from what it committed, not from what it received. `examples/consumer.py` is
-this with a cursor file.
+Stop the consumer, start it again, and it picks up where it stopped.
+
+| `cursor` | `offset` | resumes from |
+|---|---|---|
+| — | — | live, from now |
+| — | `N` | `N`, inclusive |
+| path | — | the file, one above |
+| path | `N` | `N` — the file is overridden, and still updated |
+| path | `None` | live, from now — the file is ignored, and still updated |
+
+`offset`'s default is a sentinel rather than `None`, because with a cursor those last two
+rows have to be different things: *not given* means "use the file", `None` means "ignore
+it and take the live stream".
+
+**The cursor lags deliberately, and must never lead.** A cursor behind the work
+re-delivers, which is safe and visible; a cursor ahead of it skips messages for ever,
+which is neither. So three things are arranged around that:
+
+- it advances when you ask for the **next** message, not when you receive this one —
+  coming back for another is the only evidence the library has that the last was handled;
+- saves are throttled to once a second, because an atomic rename per message is three
+  syscalls to record something allowed to be stale;
+- a block that exits with an **exception** saves nothing, so the message whose handler
+  raised is re-delivered.
+
+```python
+sub.commit()          # force a save now — for a batching or non-idempotent consumer
+sub.commit(offset)    # ...at an offset you actually committed
+```
+
+**It is a file, not SQLite**, written beside the target and renamed over it — atomic on
+POSIX and Windows both. SQLite was considered and is the wrong tool for one integer: the
+case it would genuinely earn is a cursor committed in the *same transaction* as the
+consumer's work, and that only works in the consumer's own database, which is not a file
+this library can own. `commit()` is the hand-back for that.
+
+An unreadable or empty file is treated as absent rather than as an error — a cursor is a
+recovery hint, and refusing to start because a save was torn turns a crash into an outage.
 
 ## Refusals
 

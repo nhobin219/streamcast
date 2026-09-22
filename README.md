@@ -160,16 +160,19 @@ Details in [`docs/API.md`](docs/API.md).
 A consumer's whole recovery story is one integer.
 
 ```python
-offset = None                       # live from now; or streamcast.EARLIEST for all of it
-while True:
-    try:
-        async with streamcast.connect(uri, offset=offset) as stream:
-            async for offset, msg in stream:
-                handle(msg)
-
-    except (ConnectionClosed, OSError, streamcast.TooSlow):
-        offset = None if offset is None else offset + 1
+async with streamcast.connect(uri, cursor=".trades.offset") as stream:
+    async for offset, msg in stream:
+        handle(msg)
 ```
+
+Pass `cursor=` a path and the resume point lives on disk: loaded at connect, resumed one
+above, saved as the loop runs. Stop the consumer and start it again and it picks up where
+it stopped. `offset=` still wins if you give it.
+
+**The cursor lags on purpose and never leads.** It advances when you ask for the *next*
+message — coming back for another is the only evidence that the last was handled — and it
+is not saved at all if the block exits with an exception, so a crash re-delivers rather
+than skips. `sub.commit()` forces it for a consumer that batches.
 
 The server records its frontier at the instant the subscriber attaches, replays
 `[requested, frontier)` out of the log, and only then switches it to the live queue.

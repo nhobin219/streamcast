@@ -213,3 +213,135 @@ async def test_a_refusal_inside_async_with_does_not_wedge_the_teardown(serve, lo
         async with streamcast.connect(uri) as sub:
             await stream.send(trade(1))
             assert (await sub.recv())[0] == 2
+
+
+class TestTheCursor:
+    """`connect(cursor=path)` — the loop every consumer otherwise hand-writes."""
+
+    async def test_it_saves_and_resumes(self, serve, log, tmp_path):
+        cursor = tmp_path / "trades.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(10)])
+
+            async with streamcast.connect(uri, offset=0, cursor=cursor) as sub:
+                first = [await sub.recv() for _ in range(4)]
+
+            assert [o for o, _ in first] == [1, 2, 3, 4]
+            assert cursor.read_text() == "4"
+
+            # No offset= at all: the file decides, and resumes ONE ABOVE it.
+            async with streamcast.connect(uri, cursor=cursor) as sub:
+                rest = [await sub.recv() for _ in range(6)]
+
+        assert [o for o, _ in rest] == [5, 6, 7, 8, 9, 10]
+        assert cursor.read_text() == "10"
+
+    async def test_a_handler_that_raises_does_not_advance_it(
+        self, serve, log, tmp_path
+    ):
+        """The asymmetry the whole design rests on.
+
+        A cursor behind the work re-delivers, which is safe. A cursor ahead of
+        it skips for ever, which is not. So leaving the block on an exception
+        saves nothing, and the message whose handler raised comes back.
+        """
+        cursor = tmp_path / "trades.offset"
+        cursor.write_text("3")
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(10)])
+
+            with pytest.raises(RuntimeError, match="handler"):
+                async with streamcast.connect(uri, cursor=cursor) as sub:
+                    assert (await sub.recv())[0] == 4
+                    raise RuntimeError("handler blew up")
+
+            assert cursor.read_text() == "3"
+
+            # And it is re-delivered rather than skipped.
+            async with streamcast.connect(uri, cursor=cursor) as sub:
+                assert (await sub.recv())[0] == 4
+
+    async def test_it_advances_only_when_the_next_message_is_asked_for(
+        self, serve, log, tmp_path
+    ):
+        # Receiving is not finishing. Coming back for another is the only
+        # evidence the library has that the last one was handled.
+        cursor = tmp_path / "trades.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(5)])
+
+            async with streamcast.connect(uri, offset=0, cursor=cursor) as sub:
+                await sub.recv()
+                assert not cursor.exists(), "saved before the caller came back"
+                await sub.recv()
+                # Throttled to once a second, so force it to observe the value.
+                sub.commit(1)
+                assert cursor.read_text() == "1"
+
+    async def test_an_explicit_offset_overrides_the_file(self, serve, log, tmp_path):
+        cursor = tmp_path / "trades.offset"
+        cursor.write_text("7")
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(10)])
+
+            async with streamcast.connect(uri, offset=2, cursor=cursor) as sub:
+                assert (await sub.recv())[0] == 2
+
+    async def test_offset_none_overrides_the_file_with_live_only(
+        self, serve, log, tmp_path
+    ):
+        # Which is why the default is a sentinel: `None` has to stay available
+        # as "ignore the file", distinct from "no offset given".
+        cursor = tmp_path / "trades.offset"
+        cursor.write_text("3")
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(10)])
+
+            async with streamcast.connect(uri, offset=None, cursor=cursor) as sub:
+                assert sub.info.replay is None
+
+    async def test_a_missing_or_unreadable_file_is_treated_as_absent(
+        self, serve, log, tmp_path
+    ):
+        """A torn write must not be an outage.
+
+        A cursor is a recovery hint; refusing to start because it is empty
+        turns a crash mid-save into a service that will not come up.
+        """
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(3)])
+
+            for content in ("", "   ", "not-a-number"):
+                cursor = tmp_path / f"c{len(content)}.offset"
+                cursor.write_text(content)
+                async with streamcast.connect(uri, cursor=cursor) as sub:
+                    assert sub.info.replay is None
+
+    async def test_the_save_is_atomic(self, tmp_path):
+        # Written beside the target and renamed over it, so a reader sees the
+        # old value or the new one and never half of either.
+        from streamcast._cursor import Cursor
+
+        path = tmp_path / "c.offset"
+        cursor = Cursor(path, every=0.0)
+        cursor.save(1)
+        cursor.save(1234567)
+        assert path.read_text() == "1234567"
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    async def test_without_a_cursor_nothing_is_written(self, serve, log, tmp_path):
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            await stream.send(trade(0))
+            async with streamcast.connect(uri, offset=0) as sub:
+                await sub.recv()
+                sub.commit()  # a no-op, not an error
+
+        assert list(tmp_path.glob("*.offset")) == []
+        assert list(tmp_path.glob("*.tmp")) == []

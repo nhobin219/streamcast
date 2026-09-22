@@ -20,9 +20,11 @@ holds — and `+ 1` belongs at the reconnect rather than inside the library,
 because only this file knows whether the last message was actually *processed*
 or merely received.
 
-A cursor file stands in for whatever a real consumer persists. It is written
-after the message is handled, never before: a cursor ahead of the work is a
-message skipped for ever, where a cursor behind it is one handled twice.
+`cursor=` is the whole of the recovery machinery: pass a path and the offset
+is loaded at connect, resumed one above, and saved as the loop runs. It
+advances only when the loop comes back for another message and never when the
+handler raised — a cursor ahead of the work is a message skipped for ever,
+where a cursor behind it is one handled twice.
 """
 
 from __future__ import annotations
@@ -36,24 +38,19 @@ import websockets
 import streamcast
 
 
-def load(cursor: Path) -> int | None:
-    """The offset to resume from, or None for live-only.
-
-    `+ 1` here rather than at save time, so the file always holds an offset
-    that was DONE. A crash between handling and saving re-delivers one
-    message; the other order loses one.
-    """
-    if not cursor.exists():
-        return None
-
-    return int(cursor.read_text()) + 1
-
-
 async def run(uri: str, cursor: Path, label: str) -> None:
-    offset = load(cursor)
+    """The whole recovery story, and `cursor=` is most of it.
+
+    The offset is loaded from the file at connect, resumed one above, and
+    saved as the loop goes — so stopping this and starting it again picks up
+    where it left off. The hand-rolled version of that was twenty lines here
+    and got the save ORDERING subtly right by accident; `streamcast` now
+    guarantees it (`_cursor`: the file advances only when the loop comes back
+    for another message, and not at all if the handler raised).
+    """
     while True:
         try:
-            async with streamcast.connect(uri, offset=offset) as stream:
+            async with streamcast.connect(uri, cursor=cursor) as stream:
                 replay = stream.info.replay
                 behind = 0 if replay is None else replay[1] - replay[0]
                 print(
@@ -62,40 +59,30 @@ async def run(uri: str, cursor: Path, label: str) -> None:
                     + ("" if stream.info.durable else "  (stream is NOT durable)")
                 )
 
-                async for offset, row in stream:
-                    # `offset` is None on a server with no log — nothing
-                    # assigned one, so there is nothing to persist and nothing
-                    # to resume from. `?offset=` is refused on such a stream
-                    # anyway, so this consumer simply stops tracking.
+                async for offset, msg in stream:
                     replayed = (
                         offset is not None
                         and stream.info.end_offset is not None
                         and offset < stream.info.end_offset
                     )
-                    handle(label, offset, row, replayed=replayed)
-                    if offset is not None:
-                        cursor.write_text(str(offset))
+                    handle(label, offset, msg, replayed=replayed)
 
             print(f"[{label}] the server closed the stream")
             return
 
         except streamcast.TooSlow as exc:
             # Dropped for falling behind. Not data loss on a durable stream:
-            # what arrived is a contiguous prefix, so resuming one above it
-            # replays the gap.
+            # what arrived is a contiguous prefix, and the cursor holds the
+            # last one handled, so reconnecting fills the gap.
             print(f"[{label}] {exc}")
-            offset = None if exc.offset is None else exc.offset + 1
 
         except streamcast.NotReplayable as exc:
-            # The one failure a retry cannot fix. Printing `why` rather than
-            # just the sentence, because it is what an operator greps for.
+            # The one failure a retry cannot fix. Printing `why` as well as
+            # the sentence, because it is what an operator greps for.
             print(f"[{label}] cannot resume ({exc.why}): {exc}")
             return
 
         except (OSError, websockets.ConnectionClosed) as exc:
-            # The ordinary case: the server restarted, or the network blipped.
-            # The cursor is on disk, so the reconnect resumes rather than
-            # restarts — which is the difference a log makes.
             print(f"[{label}] {type(exc).__name__}: reconnecting in 1s")
             await asyncio.sleep(1)
 
@@ -134,8 +121,9 @@ async def main() -> None:
 
     cursor = args.cursor or Path(f".{args.label}.offset")
     if args.from_start:
-        # `load` adds one to whatever is here, so -1 resolves to EARLIEST (0),
-        # which is "everything the log still holds".
+        # The file holds the last offset FINISHED with and a resume asks for
+        # one above it, so -1 resolves to EARLIEST (0) — everything the log
+        # still holds.
         cursor.write_text(str(streamcast.EARLIEST - 1))
 
     await run(args.uri, cursor, args.label)

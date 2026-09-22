@@ -25,12 +25,13 @@ process; a remote publisher is an open question, not an omission (`docs/SPEC.md`
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
     NotReplayable,
@@ -42,12 +43,23 @@ from streamcast._errors import (
 from streamcast._protocol import decode, parse_greeting, parse_refusal
 
 if TYPE_CHECKING:
+    from os import PathLike
     from types import TracebackType
     from typing import Self
 
     from websockets.asyncio.client import ClientConnection
 
     from streamcast._protocol import Greeting
+
+_UNSET: Final = object()
+"""Tells `offset=None` apart from "offset not given".
+
+Both are meaningful once `cursor=` exists: not given means "use the file",
+and `None` means "ignore the file and take the live stream". A default of
+`None` could not express the difference, and the two are one keystroke apart
+at the call site.
+"""
+
 
 # The close codes that end a subscription rather than break it. Normal closure
 # and going-away both mean the server finished with this connection on
@@ -135,15 +147,24 @@ def _with_offset(uri: str, offset: int | None) -> str:
 class Subscription:
     """A live subscription. Async-iterable, read-only, and offset-aware."""
 
-    __slots__ = ("_connection", "_info", "_offset", "_stream")
+    __slots__ = ("_connection", "_cursor", "_info", "_offset", "_stream", "_unsaved")
 
     def __init__(
-        self, connection: ClientConnection, info: Greeting, stream: str
+        self,
+        connection: ClientConnection,
+        info: Greeting,
+        stream: str,
+        cursor: Cursor | None = None,
     ) -> None:
         self._connection = connection
         self._info = info
         self._stream = stream
         self._offset: int | None = None
+        self._cursor = cursor
+        # The offset received but not yet known to be handled. It becomes the
+        # saved value when the caller comes back for another message, which is
+        # the only evidence this library has that the last one was finished.
+        self._unsaved: int | None = None
 
     def __repr__(self) -> str:
         return (
@@ -193,6 +214,12 @@ class Subscription:
         Raises the refusal the server closed with, or `ConnectionClosed` as
         `websockets` raised it when the close carries no refusal.
         """
+        # Asking for another message is what says the last one is done. Saved
+        # here rather than on delivery, so a consumer that crashes inside its
+        # handler re-reads that message instead of skipping it.
+        if self._cursor is not None:
+            self._cursor.save(self._unsaved)
+
         try:
             frame = await self._connection.recv()
         except ConnectionClosed as exc:
@@ -204,6 +231,7 @@ class Subscription:
 
         offset, row = decode(frame)
         self._offset = offset
+        self._unsaved = offset
 
         return offset, row
 
@@ -225,6 +253,16 @@ class Subscription:
 
             raise
 
+    def commit(self, offset: int | None = None) -> None:
+        """Save the cursor now, rather than at the next message.
+
+        For a consumer whose work is not idempotent, or that batches: call it
+        once the batch is durable, and pass the offset you actually committed
+        if it is not simply the last one received. A no-op without `cursor=`.
+        """
+        if self._cursor is not None:
+            self._cursor.save(self._offset if offset is None else offset, force=True)
+
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """End the subscription. Idempotent, and awaits the close handshake."""
         await self._connection.close(code, reason)
@@ -241,23 +279,60 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     inclusive. It is refused rather than ignored when the server cannot serve
     it — see `NotReplayable`, which says which of the five reasons it is.
 
+    **`cursor=path` keeps the resume point on disk**, which is the loop every
+    consumer otherwise writes by hand. The file holds the last offset finished
+    with; the subscription resumes one above it and saves as it goes.
+
+        async with streamcast.connect(uri, cursor=".trades.offset") as sub:
+            async for offset, msg in sub:
+                handle(msg)
+
+    That is the whole recovery story — stop the consumer, start it again, and
+    it picks up where it stopped. `offset` still wins if given, including
+    `offset=None` for "ignore the file, take the live stream", which is why
+    its default is a sentinel rather than None.
+
+    **The cursor lags on purpose.** It advances when you ask for the NEXT
+    message, is throttled to once a second, and is not saved at all if the
+    block exits with an exception — so a crash re-delivers rather than skips.
+    `Subscription.commit()` forces it for a consumer that batches or whose
+    work is not idempotent. See `_cursor`.
+
     Every other keyword goes to `websockets.connect` unchanged. `compression`
     defaults to None for the same reason it does in `serve`.
     """
 
-    __slots__ = ("_connect", "_stream", "_subscription")
+    __slots__ = ("_connect", "_cursor", "_stream", "_subscription")
 
     def __init__(
         self,
         uri: str,
         *,
-        offset: int | None = None,
+        offset: int | None | object = _UNSET,
+        cursor: str | PathLike[str] | None = None,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._stream = urlsplit(uri).path.lstrip("/")
+        self._cursor = Cursor(cursor) if cursor is not None else None
+
+        resolved: int | None
+        if offset is _UNSET:
+            # Not given: the file decides. `+ 1` because the file holds the
+            # last offset FINISHED with, and a resume asks for the next one.
+            saved = self._cursor.load() if self._cursor is not None else None
+            resolved = None if saved is None else saved + 1
+        elif offset is None or isinstance(offset, int):
+            # Given: it wins, including when it is None. Overriding a stale
+            # file has to be expressible, and so does "ignore the file, take
+            # the live stream" — which is why `None` is not the default.
+            resolved = offset
+        else:
+            msg = f"offset is an int, None, or omitted — not {type(offset).__name__}"
+            raise TypeError(msg)
+
         self._connect = _ws_connect(
-            _with_offset(uri, offset), compression=compression, **kwargs
+            _with_offset(uri, resolved), compression=compression, **kwargs
         )
         self._subscription: Subscription | None = None
 
@@ -288,7 +363,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             await connection.close()
             raise
 
-        self._subscription = Subscription(connection, info, self._stream)
+        self._subscription = Subscription(connection, info, self._stream, self._cursor)
 
         return self._subscription
 
@@ -304,8 +379,17 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._subscription is not None:
-            await self._subscription.close()
+        if self._subscription is None:
+            return
+
+        # Only on a clean exit. Leaving the block because a handler raised
+        # means the last message was NOT finished with, and saving it there
+        # would skip it on the next run — the one thing a cursor must never
+        # do. It is re-delivered instead.
+        if exc_type is None:
+            self._subscription.commit()
+
+        await self._subscription.close()
 
 
 __all__ = ["Subscription", "connect"]
