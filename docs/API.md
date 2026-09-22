@@ -373,6 +373,49 @@ sub.commit()          # force a save now — for a batching or non-idempotent co
 sub.commit(offset)    # ...at an offset you actually committed
 ```
 
+### `cursor_uri` — resuming on another box
+
+A local cursor recovers a consumer that restarted. It does not recover one whose machine
+is gone, which is what this is for — the same idea as the server's WAL replication, one
+layer out:
+
+```python
+async with streamcast.connect(
+    uri,
+    cursor=".trades.offset",
+    cursor_uri="s3://streamcast/consumer1/",   # trailing / = prefix; name appended
+) as stream:
+    ...
+```
+
+A **daemon thread** uploads the cursor every `upload_every` seconds (30 by default) and
+once more on a clean exit. It is a thread rather than the event loop or `asyncio.to_thread`
+because the PUT is blocking and best-effort, and that pool — `min(32, cpu + 4)` — is what
+every replay scan uses.
+
+**On connect the local cursor wins**; the remote is read only when there is no local one.
+That is the disaster-recovery case, and the only one where a copy that lags by up to
+`upload_every` should decide. When it is used, the value is written down locally too, so a
+second restart on the new box needs no bucket.
+
+Credentials resolve from the environment and `s3=streamcast.S3Options(...)` overrides them
+— litelink's model, so a profile, instance metadata or SSO all work untouched. The upload
+goes through pyarrow, which litelink already brings, so this adds no dependency.
+
+**What it deliberately does not solve.** It is periodic, so recovering on another box
+re-delivers whatever happened in the last `upload_every`. Two consumers sharing one key is
+last-writer-wins and is not supported. Re-delivery is the safe direction, and a consumer
+needing exactly-once wants its cursor in the same transaction as its work — its own
+database, not this.
+
+Logging is `logging.getLogger("streamcast.cursor")` at DEBUG. Failures to reach the bucket
+are logged and never raised: a disaster-recovery convenience must not become a dependency
+of the stream. A *configuration* error — a `cursor_uri` that is not `s3://` — raises at
+`connect`, because a consumer that believed it was shipping a cursor and never was is the
+failure this whole feature exists to prevent.
+
+### Storage
+
 **It is a file, not SQLite**, written beside the target and renamed over it — atomic on
 POSIX and Windows both. SQLite was considered and is the wrong tool for one integer: the
 case it would genuinely earn is a cursor committed in the *same transaction* as the

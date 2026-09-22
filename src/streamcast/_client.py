@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from litelink import S3Options
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
@@ -41,6 +42,7 @@ from streamcast._errors import (
     TooSlow,
 )
 from streamcast._protocol import decode, parse_greeting, parse_refusal
+from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -350,11 +352,24 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     `Subscription.commit()` forces it for a consumer that batches or whose
     work is not idempotent. See `_cursor`.
 
+    **`cursor_uri` ships that cursor to object storage**, so a consumer can
+    resume on a different box after losing this one:
+
+        streamcast.connect(uri, cursor=".trades.offset",
+                           cursor_uri="s3://streamcast/consumer1/")
+
+    A daemon thread uploads it every `upload_every` seconds; credentials
+    resolve from the environment and `s3=S3Options(...)` overrides them, the
+    same way litelink does it. On connect the LOCAL cursor wins and the remote
+    is read only when there is no local one — the disaster-recovery case, and
+    the only one where a copy that lags should decide. See `_remote` for what
+    this deliberately does not solve.
+
     Every other keyword goes to `websockets.connect` unchanged. `compression`
     defaults to None for the same reason it does in `serve`.
     """
 
-    __slots__ = ("_connect", "_cursor", "_stream", "_subscription")
+    __slots__ = ("_connect", "_cursor", "_remote", "_stream", "_subscription")
 
     def __init__(
         self,
@@ -362,11 +377,24 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         *,
         offset: int | None | object = _UNSET,
         cursor: str | PathLike[str] | None = None,
+        cursor_uri: str | None = None,
+        s3: S3Options | None = None,
+        upload_every: float = UPLOAD_EVERY,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._stream = urlsplit(uri).path.lstrip("/")
         self._cursor = Cursor(cursor) if cursor is not None else None
+
+        self._remote: RemoteCursor | None = None
+        if cursor_uri is not None:
+            if self._cursor is None:
+                msg = "cursor_uri needs a cursor= to ship; it is a copy of one"
+                raise ValueError(msg)
+
+            self._remote = RemoteCursor(
+                self._cursor, cursor_uri, s3=s3, upload_every=upload_every
+            )
 
         resolved: int | None
         # ALWAYS read, even when an explicit offset makes the value unused:
@@ -374,6 +402,19 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         # the forward-only guard is inert. A one-off `offset=1` beside a
         # production cursor then wrote 1, 2, 3 over a file that said 400.
         saved = self._cursor.load() if self._cursor is not None else None
+
+        if saved is None and self._remote is not None and self._cursor is not None:
+            # **Local first, remote only when there is no local.** This is
+            # disaster recovery: the box is gone, so there is no local file.
+            # Preferring the remote when a local one exists would mean a
+            # consumer's own position losing to a copy that lags it by up to
+            # `upload_every` — or to another box's, which is a configuration
+            # this deliberately does not support.
+            saved = self._remote.load()
+            if saved is not None:
+                # Written down locally too, so a second restart on this box
+                # does not need the bucket at all.
+                self._cursor.save(saved, force=True, rewind=True)
 
         if offset is _UNSET:
             # Not given: the file decides. `+ 1` because the file holds the
@@ -421,6 +462,8 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             raise
 
         self._subscription = Subscription(connection, info, self._stream, self._cursor)
+        if self._remote is not None:
+            self._remote.start()
 
         return self._subscription
 
@@ -445,6 +488,11 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         # the one thing a cursor must never do. It is re-delivered instead.
         if exc_type is None and self._subscription.pending:
             self._subscription.commit()
+
+        # Before the socket closes, so its final upload sees the committed
+        # value rather than racing the commit above.
+        if self._remote is not None:
+            self._remote.stop()
 
         await self._subscription.close()
 

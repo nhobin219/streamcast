@@ -21,7 +21,9 @@ because only this file knows whether the last message was actually *processed*
 or merely received.
 
 `cursor=` is the whole of the recovery machinery: pass a path and the offset
-is loaded at connect, resumed one above, and saved as the loop runs. It
+is loaded at connect, resumed one above, and saved as the loop runs. Add
+`--cursor-uri s3://bucket/consumer1/` and it is shipped to object storage too,
+so this consumer can come back on a different machine. It
 advances only when the loop comes back for another message and never when the
 handler raised — a cursor ahead of the work is a message skipped for ever,
 where a cursor behind it is one handled twice.
@@ -38,7 +40,7 @@ import websockets
 import streamcast
 
 
-async def run(uri: str, cursor: Path, label: str) -> None:
+async def run(uri: str, cursor: Path, label: str, cursor_uri: str | None) -> None:
     """The whole recovery story, and `cursor=` is most of it.
 
     The offset is loaded from the file at connect, resumed one above, and
@@ -50,7 +52,9 @@ async def run(uri: str, cursor: Path, label: str) -> None:
     """
     while True:
         try:
-            async with streamcast.connect(uri, cursor=cursor) as stream:
+            async with streamcast.connect(
+                uri, cursor=cursor, cursor_uri=cursor_uri
+            ) as stream:
                 replay = stream.info.replay
                 behind = 0 if replay is None else replay[1] - replay[0]
                 print(
@@ -113,6 +117,14 @@ async def main() -> None:
         help="where the resume offset is kept (default: .<label>.offset)",
     )
     parser.add_argument(
+        "--cursor-uri",
+        default=None,
+        help=(
+            "an s3:// prefix to ship the cursor to, so this consumer can "
+            "resume on another box after losing this one"
+        ),
+    )
+    parser.add_argument(
         "--from-start",
         action="store_true",
         help="ignore the cursor and replay everything the log still holds",
@@ -126,7 +138,7 @@ async def main() -> None:
         # still holds.
         cursor.write_text(str(streamcast.EARLIEST - 1))
 
-    await run(args.uri, cursor, args.label)
+    await run(args.uri, cursor, args.label, args.cursor_uri)
 
 
 if __name__ == "__main__":

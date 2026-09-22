@@ -63,6 +63,8 @@ can log it, forward it or append it to another stream whole.
 
 from importlib.metadata import PackageNotFoundError, version
 
+from litelink import S3Options
+
 from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
 from streamcast._errors import (
@@ -92,6 +94,7 @@ __all__ = [
     "Cursor",
     "Greeting",
     "Maintain",
+    "S3Options",
     "NotReplayable",
     "ProtocolError",
     "Stream",

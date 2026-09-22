@@ -316,3 +316,72 @@ def test_the_exported_converters_are_the_public_surface():
     # And a log made with one is an ordinary litelink log.
     assert isinstance(to_arrow(TRADES), pa.Schema)
     assert litelink is not None
+
+
+class TestRequiredIsEnforced:
+    """`required` is not decoration — litelink refuses a row that violates it.
+
+    Worth pinning because the README and API docs promise it, and the promise
+    lives one library down: `required` becomes `nullable=False` here, and
+    `litelink.append` is what checks it.
+    """
+
+    async def test_a_missing_required_column_is_refused(self, tmp_path):
+        stream = streamcast.Stream("trades", root=tmp_path, schema=TRADES)
+        try:
+            with pytest.raises(ValueError, match="non-nullable"):
+                await stream.send({"price": 1.0, "side": 0, "live": True})
+
+        finally:
+            await stream.aclose()
+
+    async def test_an_explicit_none_in_a_required_column_is_refused(self, tmp_path):
+        # The other way to violate it, and litelink tells them apart:
+        # "Absent from the row" against "Supplied as None".
+        stream = streamcast.Stream("trades", root=tmp_path, schema=TRADES)
+        try:
+            with pytest.raises(ValueError, match="Supplied as None"):
+                await stream.send(
+                    {"event_ts": None, "price": 1.0, "side": 0, "live": True}
+                )
+
+        finally:
+            await stream.aclose()
+
+    async def test_an_optional_column_may_be_omitted_or_null(self, tmp_path):
+        stream = streamcast.Stream("trades", root=tmp_path, schema=TRADES)
+        try:
+            assert (
+                await stream.send(
+                    {"event_ts": 1, "price": 1.0, "side": 0, "live": True}
+                )
+                == 1
+            )
+            assert (
+                await stream.send(
+                    {"event_ts": 2, "price": 1.0, "side": 0, "live": True, "tag": None}
+                )
+                == 2
+            )
+            assert stream.log is not None
+            rows = stream.log.scan(columns=["tag"]).read_all().to_pylist()
+            assert [row["tag"] for row in rows] == [None, None]
+
+        finally:
+            await stream.aclose()
+
+    async def test_nothing_is_broadcast_when_a_row_is_refused(self, serve, tmp_path):
+        # The refusal happens inside `append`, before the fan-out — so a
+        # subscriber never sees a row the log rejected.
+        stream = streamcast.Stream("trades", root=tmp_path, schema=TRADES)
+        async with serve(stream) as uri, streamcast.connect(uri) as sub:
+            with pytest.raises(ValueError, match="non-nullable"):
+                await stream.send({"price": 1.0, "side": 0, "live": True})
+
+            await stream.send({"event_ts": 7, "price": 2.0, "side": 1, "live": False})
+            offset, msg = await sub.recv()
+
+        assert offset == 1
+        assert msg["event_ts"] == 7
+
+        await stream.aclose()

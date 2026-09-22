@@ -628,6 +628,14 @@ real bytes has no column for them. There is no base64 workaround here any more
 — that belonged to the blob schema §5 removed — and the answer is litelink's
 §15.
 
+**A consumer cursor that is not last-writer-wins.** `cursor_uri` ships one
+integer to object storage on an interval so a consumer can resume on another
+box, and two consumers sharing a key overwrite each other. That is documented
+rather than solved: the fix is a compare-and-set, which S3 gained only
+recently and which litelink does not use either — and the failure it prevents
+is re-delivery, which is the safe direction. A consumer that needs more wants
+its cursor committed in the same transaction as its work, in its own database.
+
 **A batching consumer's cursor.** The automatic save advances as the consumer
 reads, which for a batch is ahead of what it has flushed — so such a consumer
 must drive `streamcast.Cursor` itself. A `connect(..., autosave=False)` that

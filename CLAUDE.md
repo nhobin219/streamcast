@@ -121,6 +121,7 @@ src/streamcast/
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
     _cursor.py      where a consumer keeps the offset it finished with
+    _remote.py      shipping a consumer's cursor to S3, for recovery on another box
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db

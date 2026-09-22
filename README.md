@@ -189,6 +189,11 @@ message — coming back for another is the only evidence that the last was handl
 is not saved at all if the block exits with an exception, so a crash re-delivers rather
 than skips. `sub.commit()` forces it for a consumer that batches.
 
+**Add `cursor_uri="s3://bucket/consumer1/"` and it survives the box too.** A daemon thread
+ships the cursor to object storage, and a consumer starting on a different machine with no
+local file resumes from there — the same idea as the server's WAL replication, one layer
+out.
+
 The server records its frontier at the instant the subscriber attaches, replays
 `[requested, frontier)` out of the log, and only then switches it to the live queue.
 Everything below the frontier is already durable; everything from it up is already in the
