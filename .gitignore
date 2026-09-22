@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Demo capture roots. A streamcast log is a litelink log — a SQLite buffer, a
+# file:// warehouse and two catalog databases. Never commit a database.
+streamcast-data/
+*.db
+*.db-wal
+*.db-shm
+
+# Working plans. Scaffolding for a change rather than documentation of the
+# system — what survives a plan belongs in SPEC, and what does not is answered
+# by the commit messages.
+docs/plans/
+
+# Claude work artifacts
+.claude/worktrees/
+/.roborev/
+.env

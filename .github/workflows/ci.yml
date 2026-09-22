@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  # Fold the commit in for pushes, so every main push gets its own group and
+  # can never displace another. github.sha is empty on pull_request, so PRs
+  # keep superseding themselves; merge_group is unaffected.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  # Only a pull_request supersedes itself. Cancelling a merge_group entry can
+  # eject the PR from the queue.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint + format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: python scripts/check_blank_lines.py
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ty check
+
+  test:
+    name: Tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared floor and the current top of the supported range. The
+        # floor is what .python-version pins locally, so a 3.13-only regression
+        # is the one CI catches that a dev machine does not.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync
+      # Not `-m "not slow"`. The slow tier here is the backpressure suite —
+      # the only place a real queue overflow is forced against a real socket —
+      # and it is where the isolation guarantee either holds or does not.
+      # Skipping it in CI would leave that claim checked nowhere.
+      - run: uv run pytest -q
+
+  packaging:
+    name: The wheel imports and serves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv build --wheel --out-dir dist
+
+      # Installed into a clean environment and driven end to end, because
+      # every packaging defect this could have looks identical from a source
+      # checkout: a module left out of the wheel, a dependency declared in the
+      # dev group by accident, a `py.typed` that did not ship.
+      - name: Install it and run a stream through it
+        run: |
+          uv venv --python 3.11 cold
+          uv pip install --python cold/bin/python dist/*.whl
+          cd /tmp && "$GITHUB_WORKSPACE/cold/bin/python" - <<'PY'
+          import asyncio, tempfile
+          from pathlib import Path
+          import litelink, streamcast
+
+          assert (Path(streamcast.__file__).parent / "py.typed").exists()
+
+          async def main():
+              root = Path(tempfile.mkdtemp())
+              with litelink.new(root, "trades", schema=streamcast.SCHEMA) as log:
+                  stream = streamcast.Stream("trades", log=log)
+                  server = await streamcast.serve(stream, "127.0.0.1", 0)
+                  port = server.sockets[0].getsockname()[1]
+                  uri = f"ws://127.0.0.1:{port}/trades"
+
+                  await stream.send_many([f"m{i}" for i in range(50)])
+                  async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                      got = [await sub.recv() for _ in range(50)]
+
+                  assert [offset for offset, _ in got] == list(range(1, 51)), got[:3]
+                  server.close()
+                  await server.wait_closed()
+
+          asyncio.run(main())
+          print("cold box: 50 messages replayed out of a log through an installed wheel")
+          PY
+
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [lint, typecheck, test, packaging]
+    runs-on: ubuntu-latest
+    steps:
+      # One required check for branch protection / the merge queue.
+      #
+      # **Every job must be listed in `needs` above.** `needs.*` expands only
+      # to the jobs named, so a job added later and not listed here can fail
+      # red on a PR while this reports success.
+      #
+      # `skipped` counts as a failure too. A needed job that never ran is not
+      # a job that passed.
+      - if: >-
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
+        run: exit 1

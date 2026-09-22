@@ -1,0 +1,119 @@
+[project]
+name = "streamcast"
+version = "0.1.0"
+description = "A WebSocket multicaster with a durable log behind it. One connection in, one stream out, resumable."
+readme = "README.md"
+authors = [
+    { name = "Nico Bautista Hobin", email = "nico@penca.io" }
+]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+# litelink's floor, and for the same reason: 3.10 reaches end of life in
+# October 2026 and nothing here needs it. The ceiling is litelink's too — it
+# caps at <3.14 through pyiceberg — and a library whose whole durable tier is
+# that one cannot claim a wider range than it.
+requires-python = ">=3.11,<3.14"
+keywords = ["websocket", "multicast", "broadcast", "tickerplant", "market-data"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The transport, and the interface this library is shaped after. 14 is the
+    # floor because `websockets.asyncio` is what everything here imports: the
+    # legacy `websockets.server`/`websockets.client` implementation is
+    # deprecated, and the two have different connection objects, so a build
+    # that resolved 12 would import successfully and fail at `serve`.
+    "websockets>=14",
+    # The durable tier. NOT optional, and that was a real decision: a
+    # live-only broker needs nothing from it, and litelink pulls in duckdb,
+    # pyarrow and pyiceberg, which is ~124 MB of wheel for a library whose own
+    # code is a few thousand lines.
+    #
+    # It is required anyway, because the alternative is an install where
+    # `offset=` does not work. Replay is not a feature of streamcast — it is
+    # the reason it exists rather than being a fifty-line broadcast loop, and
+    # an extra that gates it would put the difference between a multicaster
+    # and a tickerplant behind a dependency marker nobody reads until the
+    # first consumer restart.
+    "litelink>=0.3.1",
+    # Named directly rather than inherited through litelink: `SCHEMA` is a
+    # `pa.schema` in this library's public surface, and a dependency that
+    # appears in a signature is a dependency this package declares.
+    "pyarrow>=17.0.0",
+]
+
+[project.urls]
+Source = "https://github.com/nhobin219/streamcast"
+Specification = "https://github.com/nhobin219/streamcast/blob/main/docs/SPEC.md"
+
+[build-system]
+# uv_build rather than litelink's hatchling: the build hook there exists to
+# stamp a platform tag and put a native binary in the wheel, and streamcast
+# ships no binaries. A pure wheel needs no hook.
+requires = ["uv_build>=0.9.0,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "streamcast"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.0",
+    # A hung test must fail, not hang. Every test here drives a real socket
+    # and a real event loop, and the failure mode of a broadcast bug is
+    # usually a coroutine waiting for a message that will never arrive — which
+    # without this is a CI job that burns its whole limit and reports nothing.
+    "pytest-timeout>=2.3",
+    "ruff>=0.15.0",
+    "ty>=0.0.15",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+# force-exclude keeps exclusions in force when paths are passed explicitly —
+# pre-commit and `ruff format <path>` both do that.
+force-exclude = true
+# ruff's default `include` minus `*.md`: docs/SPEC.md's snippets are aligned
+# by hand to read as prose, and the formatter rewrites every one of them.
+include = [
+    "*.py",
+    "*.pyi",
+    "*.pyw",
+    "*.ipynb",
+    "**/pyproject.toml",
+    "**/ruff.toml",
+    "**/.ruff.toml",
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Must be the ini form rather than `addopts`: on pytest 9 the flag only appends
+# to `override_ini`, and `Config.parse` builds `_inicfg` from the command line
+# before injecting `addopts` and never recomputes it — so a typo'd mark
+# degrades to a warning instead of failing collection.
+strict_markers = true
+# Every test here drives an event loop. Declaring the mode rather than marking
+# ~80 coroutines individually, and `strict` so a sync test is never silently
+# treated as async.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# Generous against a slow machine and still far under a wedged coroutine.
+# Per-test, so a suite that hangs names the test that hung.
+timeout = 60
+markers = [
+    "slow: drives real fsync volume or a real backlog overflow — wall-clock bound rather than CPU bound. Deselect with -m 'not slow'.",
+]
