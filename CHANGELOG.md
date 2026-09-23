@@ -4,10 +4,8 @@ All notable changes are recorded here. Versions follow
 [Semantic Versioning](https://semver.org); the format is loosely
 [Keep a Changelog](https://keepachangelog.com).
 
-**This is the first release.** The entry below describes what the library is
-rather than what changed for users, since there is nothing to have changed
-from — and the design decisions it records are kept because they were arrived
-at expensively, not because anybody has to migrate across them.
+The 0.1.0 entry describes what the library is rather than what changed, since
+there was nothing to have changed from. Everything above it is ordinary.
 
 ## 0.4.0 — 2026-09-23
 

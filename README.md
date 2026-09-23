@@ -26,14 +26,11 @@ streamcast server ──► litelink log      durable BEFORE any subscriber sees
 ```
 
 Every subscriber receives the same bytes in the same order, from one `encode` call.
-The API is `websockets` with two deliberate differences, listed below.
+The API is `websockets` with a few deliberate differences, listed below.
 
 A streamcast server is a Python WebSocket
 [tickerplant](https://code.kx.com/q/architecture/): a process that captures a feed,
 optionally writes it to a log, and publishes it to registered subscribers.
-
-**Status: early.** 0.1.0 is the first release. Read [what it is not](#what-it-is-not)
-and [not implemented yet](#not-implemented-yet) first.
 
 ## Install
 
