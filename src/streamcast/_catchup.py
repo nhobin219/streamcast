@@ -148,6 +148,34 @@ class CatchUp:
         The credential failure is caught HERE rather than at the first batch,
         because this is the call that touches the bucket first and the caller
         should learn it cannot read before it has been told it is recovering.
+
+        **`include_archive` is left at its default of False, so this reads the
+        archive and not the replicated WAL.** Three reasons, and the first is
+        decisive:
+
+        * **The band it would add is the server's to send.** A WAL replica
+          carries the buffer — the unsealed tail and the range between
+          `archived_through` and the frontier. That is exactly what the
+          server still holds and is about to stream once this hands back to
+          the socket. Restoring it here would fetch a second copy of the next
+          few seconds of the subscription.
+        * **It fails outright on a log with no replica**, and
+          `wal_replication` is opt-in, so most logs have none. litelink
+          measures `include_wal=True` raising in 0.10 s where archive-only
+          served 3,870 rows. A catch-up that worked only for replicated logs
+          would fail for the common case at the moment it was needed.
+        * **It needs the litestream binary on the CONSUMER.** Today a
+          catching-up consumer needs S3 read access and nothing else — no
+          subprocess, no scratch directory, no binary to provision on every
+          box that might fall behind. litelink measures a 1.9 MB buffer
+          taking 7.2 s to restore at 60-75 ms RTT, of which ~0.2 s is
+          transfer; the rest is a LIST plus ~20 serial GETs whose count grows
+          with the log's AGE rather than its size.
+
+        A consumer that genuinely wants the whole history with no server in
+        the picture is not doing a catch-up: it wants `litelink.snapshot`
+        directly, with `include_wal=True` if it has the binary. The greeting
+        publishes what it needs to do that (`info.log`).
         """
         try:
             self._reader = await asyncio.to_thread(

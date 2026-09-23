@@ -569,6 +569,27 @@ the 123-byte trim and a long bucket URI is what drops; the greeting has no such
 limit, and a client that did not get it from the refusal spends one throwaway
 connection asking.
 
+**The archive, not the WAL replica.** `snapshot(include_wal=False)`, which is
+the default, and the choice is load-bearing rather than incidental. A WAL
+replica carries the buffer — the unsealed tail and the range between
+`archived_through` and the frontier — and that band is exactly what the
+SERVER still holds and streams once the catch-up hands back to the socket.
+Restoring it here fetches a second copy of the next few seconds of the
+subscription.
+
+It would also fail on a log with no replica, and `wal_replication` is opt-in
+so most have none: litelink measures `include_wal=True` raising in 0.10 s
+where archive-only served 3,870 rows. And it needs the litestream binary on
+the CONSUMER, where today a catch-up needs S3 read access and nothing else —
+no subprocess, no scratch directory, nothing to provision on every box that
+might fall behind. A 1.9 MB buffer takes 7.2 s to restore at 60-75 ms RTT, of
+which ~0.2 s is transfer; the rest is a LIST plus ~20 serial GETs whose count
+grows with the log's AGE rather than its size.
+
+A consumer that wants the whole history with no server in the picture is not
+doing a catch-up — it wants `litelink.snapshot` directly, and the greeting
+publishes what it needs (`info.log`).
+
 **Credentials are the client's.** The server never sends any, and the client
 resolves them the way litelink does — the ordinary AWS chain, overridable with
 `S3Options`. An archive that cannot be read raises `CatchUpUnavailable` at

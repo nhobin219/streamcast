@@ -352,16 +352,12 @@ async with streamcast.connect(uri, cursor=".trades.offset") as stream:
 |---|---|
 | `offset=N` | resume from `N` inclusive; `streamcast.EARLIEST` for everything the log holds |
 | `cursor=path` | keep the resume point on disk — loaded at connect, saved as the loop runs |
-| `cursor_uri=s3://…` | ship that cursor to object storage, so another box can resume |
-| `catch_up=True` | read the gap from the archive when the server will not replay that far |
+| `cursor_uri=s3://…` | ship that cursor to object storage — see [consumer failover](#consumer-failover) |
+| `catch_up=True` | read the gap from the archive — see [consumer failover](#consumer-failover) |
 
 The cursor advances when you ask for the *next* message, and is not saved if the block
 exits with an exception — so a crash re-delivers rather than skips. `sub.commit()` forces
 it for a consumer that batches.
-
-`catch_up` reads the archive with **nothing connected**, then opens the socket where the
-archive ended, looping if the server moved on. Holding a socket through a long catch-up
-would get the subscriber dropped for falling behind.
 
 An offset the server cannot serve is refused, never silently rounded:
 
@@ -374,6 +370,39 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
+
+### Consumer failover
+
+A local cursor recovers a consumer that restarted. It does not recover one whose machine
+is gone — the counterpart to [producer failover](#producer-failover), one layer out.
+
+```python
+async with streamcast.connect(
+    uri, cursor=".trades.offset", cursor_uri="s3://streamcast/consumer1/", catch_up=True
+) as stream:
+    async for offset, msg in stream:
+        handle(msg)
+```
+
+**`cursor_uri` moves the box.** A daemon thread ships the cursor to object storage, and a
+consumer starting elsewhere with no local file resumes from there. On connect the **local
+cursor wins** — the remote is read only when there is no local one, which is the
+disaster-recovery case and the only one where a copy that lags by up to `upload_every`
+should decide.
+
+**`catch_up` covers having been down too long.** A consumer past the server's `max_replay`
+is refused; the rows are in the archive, not gone. It reads them with **nothing
+connected** — holding a socket through a long catch-up gets the subscriber dropped for
+falling behind — then opens the socket where the archive ended, looping if the server
+moved on meanwhile.
+
+It reads the **archive**, not the replicated WAL, so a catching-up consumer needs S3 read
+access and nothing else: no litestream binary, no subprocess. The band the WAL would add
+is the one the server is about to send anyway. [`SPEC.md`](docs/SPEC.md) §5 has the
+measurements.
+
+Neither is automatic. Both are keywords on `connect`, because a consumer that would rather
+fail loudly than resume from a copy that lags should be able to say so.
 
 ## Chaining
 
