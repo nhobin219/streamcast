@@ -8,7 +8,7 @@ one integer, somewhere that survives the host.
     async with streamcast.connect(
         uri,
         cursor=".trades.offset",
-        cursor_uri="s3://streamcast/consumer1/",
+        cursor_uri="s3://streamcast/consumer1/stream.offset",
     ) as stream:
         ...
 
@@ -88,14 +88,31 @@ def _filesystem(uri: str, s3: S3Options | None) -> tuple[pafs.S3FileSystem, str]
     return pafs.S3FileSystem(**options), f"{split.netloc}{split.path}"
 
 
-def _key(path: str, cursor: Cursor) -> str:
-    """Where this cursor lives in the bucket.
+def _key(path: str) -> str:
+    """Where this cursor lives in the bucket: the whole object key.
 
-    A `cursor_uri` ending in `/` is a PREFIX and the local file's name is
-    appended, which is what makes one prefix per consumer read naturally
-    (`s3://bucket/consumer1/`). Anything else is the full key.
+    **A URI identifies one object.** It used to also accept a prefix — a
+    trailing `/` meant "append the local file's name" — which made the remote
+    key depend on what the local one happened to be called, and made two
+    spellings of the same argument mean different kinds of thing. Renaming a
+    local file moved the remote object; the same `cursor_uri` passed by two
+    consumers with different local names wrote to two different places while
+    reading as one configuration.
+
+    The local path and this are now independent, which is what they always
+    were in substance: `cursor=".trades.offset"` with
+    `cursor_uri="s3://bucket/consumer1/stream.offset"` is an ordinary pairing
+    and neither name constrains the other.
     """
-    return f"{path}{cursor.path.name}" if path.endswith("/") else path
+    if path.endswith("/"):
+        msg = (
+            f"cursor_uri must name the object, not the prefix holding it: "
+            f"{path!r} ends in '/'. Append the key you want, e.g. "
+            f"{path}cursor.offset"
+        )
+        raise ValueError(msg)
+
+    return path
 
 
 class RemoteCursor:
@@ -125,7 +142,7 @@ class RemoteCursor:
         self._uri = uri
         self._s3 = s3
         self._every = upload_every
-        self._key = _key(urlsplit(uri).netloc + urlsplit(uri).path, cursor)
+        self._key = _key(urlsplit(uri).netloc + urlsplit(uri).path)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 

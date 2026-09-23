@@ -378,7 +378,10 @@ is gone — the counterpart to [producer failover](#producer-failover), one laye
 
 ```python
 async with streamcast.connect(
-    uri, cursor=".trades.offset", cursor_uri="s3://streamcast/consumer1/", catch_up=True
+    uri,
+    cursor=".trades.offset",
+    cursor_uri="s3://streamcast/consumer1/stream.offset",
+    catch_up=True,
 ) as stream:
     async for offset, msg in stream:
         handle(msg)

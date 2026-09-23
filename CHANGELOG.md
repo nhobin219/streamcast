@@ -9,6 +9,20 @@ rather than what changed for users, since there is nothing to have changed
 from — and the design decisions it records are kept because they were arrived
 at expensively, not because anybody has to migrate across them.
 
+## 0.4.0 — unreleased
+
+### Changed — breaking
+
+- **`cursor_uri` names the object, not the prefix holding it.** A trailing `/`
+  used to mean "append the local file's name", so the remote key depended on
+  what the local one happened to be called: renaming a local file moved the
+  remote object, and one `cursor_uri` shared by two consumers with different
+  local names wrote to two places while reading as one setting. A URI
+  identifies one object. A prefix is now refused, naming the key it would have
+  built, and the local path and the remote key are independent —
+  `cursor=".trades.offset"` with
+  `cursor_uri="s3://bucket/consumer1/stream.offset"` is an ordinary pairing.
+
 ## 0.3.0 — 2026-09-23
 
 ### Added

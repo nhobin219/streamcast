@@ -22,7 +22,8 @@ or merely received.
 
 `cursor=` is the whole of the recovery machinery: pass a path and the offset
 is loaded at connect, resumed one above, and saved as the loop runs. Add
-`--cursor-uri s3://bucket/consumer1/` and it is shipped to object storage too,
+`--cursor-uri s3://bucket/consumer1/stream.offset` and it is shipped to object
+storage too,
 so this consumer can come back on a different machine — and `--catch-up` for
 when it has been down long enough that the server will not replay that far
 back, which reads the gap from the log's archive before going live. It
@@ -141,8 +142,8 @@ async def main() -> None:
         "--cursor-uri",
         default=None,
         help=(
-            "an s3:// prefix to ship the cursor to, so this consumer can "
-            "resume on another box after losing this one"
+            "an s3:// object key to ship the cursor to, so this consumer "
+            "can resume on another box after losing this one"
         ),
     )
     parser.add_argument(

@@ -505,7 +505,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     resume on a different box after losing this one:
 
         streamcast.connect(uri, cursor=".trades.offset",
-                           cursor_uri="s3://streamcast/consumer1/")
+                           cursor_uri="s3://streamcast/consumer1/stream.offset")
 
     A daemon thread uploads it every `upload_every` seconds; credentials
     resolve from the environment and `s3=S3Options(...)` overrides them, the
