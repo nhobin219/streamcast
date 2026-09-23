@@ -9,7 +9,7 @@ rather than what changed for users, since there is nothing to have changed
 from — and the design decisions it records are kept because they were arrived
 at expensively, not because anybody has to migrate across them.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-09-23
 
 ### Added
 
