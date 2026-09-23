@@ -275,8 +275,7 @@ A consumer moves boxes with `connect(cursor=)`. A producer moves with
 
 ```python
 stream = streamcast.Stream.restore(
-    "trades", root="data", archive="s3://market-data/prod",
-    replay_archive=True, max_replay=None,   # so existing cursors still resume
+    "trades", root="data", archive="s3://market-data/prod", replay_archive=True,
 )
 ```
 
@@ -284,10 +283,11 @@ Offsets are **fenced, not reissued** — litelink burns 2²⁰ — so no offset 
 holds is ever handed out again carrying different data. The consumer resumes from the
 cursor it already had and sees a gap, which `recv` allows.
 
-Those two keywords are not optional if existing consumers must resume: the fence puts the
-new frontier a million offsets up, so a default server refuses their cursors as `too_old`.
-`catch_up` still recovers their **data** — it reads the archive — but cannot rejoin the
-live stream, because the fence range above the archive was never issued.
+Existing consumers resume with no intervention, because `max_replay` counts **rows**
+rather than offset distance. The fence puts the new frontier a million offsets up, and a
+consumer 150 rows behind is 150 rows behind — the distance check runs first and free, and
+only a subscribe it would refuse pays to find out what the replay actually costs.
+
 `hydrate=timedelta(days=7)` copies archived files back to local disk; without it the local
 tier comes back empty and reads go to the archive.
 

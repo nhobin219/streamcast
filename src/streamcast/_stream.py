@@ -625,6 +625,20 @@ class Stream:
         # with no litelink, no credentials and no dependency on this repo —
         # see `Stream.new` for what it costs.
         if self._max_replay is not None and behind > self._max_replay:
+            # **The offset distance said too far. Ask what it actually costs.**
+            # `max_replay` bounds the work a replay does, and that work is
+            # rows — offset distance is a proxy, exact only while the offset
+            # space is dense. It is not: a `restore` fences 2**20 offsets
+            # that were never issued, so a consumer 150 rows behind a
+            # failed-over producer measures as a million and is refused a
+            # replay the server could serve instantly.
+            #
+            # Only reached when the free check has already failed, so an
+            # ordinary subscribe never pays for it — and a subscribe about to
+            # be REFUSED can afford 30 ms to find out whether it should be.
+            behind = await asyncio.to_thread(_log.rows_from, log, requested)
+
+        if self._max_replay is not None and behind > self._max_replay:
             raise NotReplayable(
                 "too_old",
                 # Numbers FIRST, archive LAST, because `refusal` trims from

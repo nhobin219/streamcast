@@ -674,20 +674,32 @@ anything the dead machine may have served. No offset a consumer holds is ever
 handed out again carrying different data — the one thing a resume cannot
 survive. `recv` permits a forward jump for exactly this reason (I4).
 
-**The fence is a million offsets, so a consumer looks a million behind.** A
-default server refuses that as `too_old` — *measured*: `offset 51 is 1048746
-messages behind and this server replays at most 100000`.
+**The fence is a million offsets wide, and it does not strand anyone,
+because `max_replay` counts ROWS rather than offset distance.** A consumer
+150 rows behind a failed-over producer is 150 rows behind; measuring it as
+1,048,746 was a property of the proxy, not of the work.
 
-`catch_up` recovers the **data** but not the **live join**, and the difference
-matters. *Measured*: it read offsets 51–200 from the archive and delivered all
-150 — every row that existed — then failed, because the server still refuses
-201 and the fence range above it was never issued, so no archive or WAL
-replica will ever hold it. A consumer in that position has lost nothing and
-can reconnect above the fence once the server will serve it.
+`max_replay` exists to bound what a replay costs, and that cost is rows.
+Offset distance is a proxy for it and an exact one only while the offset space
+is dense — which litelink's is not, by design: a `restore` fences 2**20
+offsets that were never issued, and I4 already says a forward jump is
+ordinary. So the distance check runs first, free, and only a subscribe it
+would REFUSE pays to find out what the replay actually costs:
 
-So a failover meant to be transparent restores with `max_replay=None` and
-`replay_archive=True`, and the consumer resumes from the cursor it already
-had with no intervention.
+```
+behind = frontier - requested            # free
+if behind > max_replay:
+    behind = rows the log holds from `requested` on    # ~30 ms, in a thread
+    if behind > max_replay:  refuse
+```
+
+*Measured* at 30.8 ms over 1,000,000 rows in 59 files, and it scales with FILE
+COUNT — roughly 0.4 ms each, because the manifests are read per file rather
+than pruned. Affordable once per subscribe against a replay that costs 0.27 s
+for 100,000 rows, and never paid by a consumer near the frontier.
+
+An existing consumer therefore resumes from the cursor it already had, with a
+default server and a plain `connect` — no raised bound, no `catch_up`.
 
 | what is recovered | what is not |
 |---|---|

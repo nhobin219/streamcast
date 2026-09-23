@@ -160,6 +160,30 @@ async def rows(
         reader.close()
 
 
+def rows_from(log: LogHandle, offset: int) -> int:
+    """How many rows the log actually holds from `offset` onward, inclusive.
+
+    **`max_replay` bounds the WORK a replay costs, and that work is rows.**
+    Offset distance is a proxy for it, and an exact one only while the offset
+    space is dense — which litelink's is not. A `restore` fences 2**20
+    offsets that were never issued, so a consumer 150 rows behind measures as
+    a million and a bounded server refuses a replay it could serve instantly.
+
+    Asked only when the cheap proxy has already said "too far", so the common
+    subscribe pays nothing for it. *Measured* at 30.8 ms over 1,000,000 rows
+    in 59 files — it scales with FILE COUNT, around 0.4 ms each, because the
+    manifests are read per file rather than pruned. That is affordable once
+    per subscribe against a replay that costs 0.27 s for 100,000 rows, and it
+    runs in a thread like every other read here.
+    """
+    # `>=`, because a replay serves the requested offset itself. `>` counts
+    # one fewer than the replay will produce, which made a bounded server
+    # report "19 messages behind" for a subscribe that would have read 20.
+    quoted = f'SELECT count(*) AS n FROM log WHERE "{COLUMN}" >= {int(offset)}'
+
+    return int(log.sql(quoted).read_all()["n"][0].as_py())
+
+
 def earliest(log: LogHandle) -> int | None:
     """The lowest offset this handle can serve, or None if it holds nothing.
 
@@ -214,4 +238,4 @@ async def replay(
         yield offset, _encode_projected(offset, message)
 
 
-__all__ = ["columns", "earliest", "replay", "rows"]
+__all__ = ["columns", "earliest", "replay", "rows", "rows_from"]
