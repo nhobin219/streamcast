@@ -524,10 +524,17 @@ layer out:
 async with streamcast.connect(
     uri,
     cursor=".trades.offset",
-    cursor_uri="s3://streamcast/consumer1/",   # trailing / = prefix; name appended
+    cursor_uri="s3://streamcast/consumer1/stream.offset",
 ) as stream:
     ...
 ```
+
+**`cursor_uri` names the object, not the prefix holding it.** The local path and the
+remote key are independent — `.trades.offset` locally and `…/consumer1/stream.offset`
+remotely is an ordinary pairing — and a URI ending in `/` is refused rather than completed
+with the local filename. Deriving one from the other meant renaming a local file moved the
+remote object, and one `cursor_uri` shared by two consumers with different local names
+wrote to two places while reading as one setting.
 
 A **daemon thread** uploads the cursor every `upload_every` seconds (30 by default) and
 once more on a clean exit. It is a thread rather than the event loop or `asyncio.to_thread`

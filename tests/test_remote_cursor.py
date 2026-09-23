@@ -21,14 +21,19 @@ pytestmark = pytest.mark.replication
 
 
 @pytest.fixture
-def prefix(bucket: str) -> str:
-    """An `s3://.../` prefix unique to this test, so the key is derived."""
-    return f"{bucket}/consumer/"
+def remote_key(bucket: str) -> str:
+    """The whole object key, unique to this test.
+
+    Deliberately NOT named after the local cursor file: the two are
+    independent, and a test that made them match would not notice if one
+    started deriving from the other again.
+    """
+    return f"{bucket}/consumer/stream.offset"
 
 
 class TestCrossBoxRecovery:
     async def test_a_box_with_no_local_cursor_resumes_from_the_bucket(
-        self, serve, log, tmp_path, prefix, s3
+        self, serve, log, tmp_path, remote_key, s3
     ):
         """The case this exists for: the machine is gone.
 
@@ -45,7 +50,7 @@ class TestCrossBoxRecovery:
                 uri,
                 offset=0,
                 cursor=first,
-                cursor_uri=prefix,
+                cursor_uri=remote_key,
                 s3=s3,
                 # **Long on purpose, and no sleep.** This used to set 0.2s
                 # and then sleep 0.6s hoping the interval had fired — a race
@@ -67,7 +72,7 @@ class TestCrossBoxRecovery:
             second.parent.mkdir()
             assert not second.exists()
             async with streamcast.connect(
-                uri, cursor=second, cursor_uri=prefix, s3=s3, upload_every=0.2
+                uri, cursor=second, cursor_uri=remote_key, s3=s3, upload_every=0.2
             ) as sub:
                 assert (await sub.recv())[0] == 31
 
@@ -76,7 +81,7 @@ class TestCrossBoxRecovery:
             assert second.exists()
 
     async def test_a_local_cursor_wins_over_the_remote(
-        self, serve, log, tmp_path, prefix, s3
+        self, serve, log, tmp_path, remote_key, s3
     ):
         """Local first, remote only when there is no local.
 
@@ -92,7 +97,7 @@ class TestCrossBoxRecovery:
                 uri,
                 offset=0,
                 cursor=cursor,
-                cursor_uri=prefix,
+                cursor_uri=remote_key,
                 s3=s3,
                 # As above: the push on close is the guarantee, not the timer.
                 upload_every=30.0,
@@ -104,12 +109,12 @@ class TestCrossBoxRecovery:
             cursor.write_text("40")
 
             async with streamcast.connect(
-                uri, cursor=cursor, cursor_uri=prefix, s3=s3, upload_every=30.0
+                uri, cursor=cursor, cursor_uri=remote_key, s3=s3, upload_every=30.0
             ) as sub:
                 assert (await sub.recv())[0] == 41
 
     async def test_the_final_upload_happens_on_a_clean_exit(
-        self, serve, log, tmp_path, prefix, s3
+        self, serve, log, tmp_path, remote_key, s3
     ):
         # Otherwise the bucket holds what it held `upload_every` ago, and a
         # short-lived consumer would ship nothing at all.
@@ -122,14 +127,14 @@ class TestCrossBoxRecovery:
                 uri,
                 offset=0,
                 cursor=cursor,
-                cursor_uri=prefix,
+                cursor_uri=remote_key,
                 s3=s3,
                 upload_every=600.0,  # never on the interval
             ) as sub:
                 for _ in range(15):
                     await sub.recv()
 
-            remote = RemoteCursor(Cursor(cursor), prefix, s3=s3)
+            remote = RemoteCursor(Cursor(cursor), remote_key, s3=s3)
             assert remote.load() == 15
 
 
@@ -152,7 +157,7 @@ class TestItIsBestEffort:
                     uri,
                     offset=0,
                     cursor=cursor,
-                    cursor_uri="s3://nope-does-not-exist-xyz/consumer/",
+                    cursor_uri="s3://nope-does-not-exist-xyz/consumer/stream.offset",
                     s3=streamcast.S3Options(
                         endpoint="http://127.0.0.1:1",
                         access_key="x",
@@ -170,15 +175,17 @@ class TestItIsBestEffort:
             assert any("cursor" in record.message for record in caplog.records)
             assert cursor.read_text() == "1"
 
-    async def test_a_missing_remote_is_not_an_error(self, tmp_path, prefix, s3):
-        remote = RemoteCursor(Cursor(tmp_path / "absent.offset"), prefix, s3=s3)
+    async def test_a_missing_remote_is_not_an_error(self, tmp_path, remote_key, s3):
+        remote = RemoteCursor(Cursor(tmp_path / "absent.offset"), remote_key, s3=s3)
         assert remote.load() is None
 
 
 class TestConfiguration:
     def test_cursor_uri_needs_a_cursor(self):
         with pytest.raises(ValueError, match="needs a cursor="):
-            streamcast.connect("ws://127.0.0.1:1/t", cursor_uri="s3://b/p/")
+            streamcast.connect(
+                "ws://127.0.0.1:1/t", cursor_uri="s3://b/p/cursor.offset"
+            )
 
     def test_a_bad_scheme_raises_at_construction_not_silently(self, tmp_path):
         """Configuration errors fail loudly; only I/O is best-effort.
@@ -198,24 +205,37 @@ class TestConfiguration:
                 cursor_uri="/tmp/nope",
             )
 
-    def test_a_trailing_slash_is_a_prefix_and_the_filename_is_appended(self, tmp_path):
+    def test_the_uri_is_the_whole_key(self, tmp_path):
+        """A URI identifies an object, and the local name does not reach it."""
         cursor = Cursor(tmp_path / "trades.offset")
         assert (
-            RemoteCursor(cursor, "s3://bucket/consumer1/")._key
-            == "bucket/consumer1/trades.offset"
-        )
-
-    def test_without_one_it_is_the_whole_key(self, tmp_path):
-        cursor = Cursor(tmp_path / "trades.offset")
-        assert (
-            RemoteCursor(cursor, "s3://bucket/exact/key.offset")._key
+            RemoteCursor(cursor, "s3://bucket/exact/key.offset")._key  # noqa: SLF001
             == "bucket/exact/key.offset"
         )
 
-    def test_the_thread_is_a_daemon(self, tmp_path, prefix, s3):
+        # The local file can be called anything; the key does not move.
+        other = Cursor(tmp_path / "something-else.offset")
+        assert (
+            RemoteCursor(other, "s3://bucket/exact/key.offset")._key  # noqa: SLF001
+            == "bucket/exact/key.offset"
+        )
+
+    def test_a_prefix_is_refused_rather_than_completed(self, tmp_path):
+        """It used to append the local filename, which tied the two together.
+
+        Renaming a local file moved the remote object, and one `cursor_uri`
+        passed by two consumers with different local names wrote to two
+        places while reading as one configuration. Refused now, naming the
+        key it would have built.
+        """
+        cursor = Cursor(tmp_path / "trades.offset")
+        with pytest.raises(ValueError, match="must name the object"):
+            RemoteCursor(cursor, "s3://bucket/consumer1/")
+
+    def test_the_thread_is_a_daemon(self, tmp_path, remote_key, s3):
         # A consumer exiting with an upload in flight simply exits; a
         # best-effort backup has no business holding the interpreter open.
-        remote = RemoteCursor(Cursor(tmp_path / "c.offset"), prefix, s3=s3)
+        remote = RemoteCursor(Cursor(tmp_path / "c.offset"), remote_key, s3=s3)
         remote.start()
         try:
             assert remote._thread is not None
