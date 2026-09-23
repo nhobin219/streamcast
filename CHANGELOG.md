@@ -24,7 +24,12 @@ at expensively, not because anybody has to migrate across them.
   consumer holds is ever handed out again carrying different data. The fence
   is also a million wide, so existing cursors look a million behind: a
   failover meant to be transparent restores with `max_replay=None` and
-  `replay_archive=True`. Measured, and documented in SPEC §8b.
+  `replay_archive=True`. `catch_up` still recovers their data from the archive
+  but cannot rejoin the live stream across a range that was never issued.
+  Measured, and documented in SPEC §8b.
+- `CatchUpUnavailable` names both causes of a gap that will not close — an
+  archive falling behind, and a restore fence — because the fixes differ and
+  the message asserted the first.
 
   ⚠️ Stop the old producer first. The fence prevents offset reuse; nothing
   prevents two writers, and litelink cannot detect a live one on another host

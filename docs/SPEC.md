@@ -676,11 +676,18 @@ survive. `recv` permits a forward jump for exactly this reason (I4).
 
 **The fence is a million offsets, so a consumer looks a million behind.** A
 default server refuses that as `too_old` — *measured*: `offset 51 is 1048746
-messages behind and this server replays at most 100000`. `catch_up` does not
-rescue it either: the gap is the fence, and the archive cannot hold offsets
-that were never issued. So a failover meant to be transparent to existing
-consumers restores with `max_replay=None` and `replay_archive=True`, and the
-consumer resumes from the cursor it already had.
+messages behind and this server replays at most 100000`.
+
+`catch_up` recovers the **data** but not the **live join**, and the difference
+matters. *Measured*: it read offsets 51–200 from the archive and delivered all
+150 — every row that existed — then failed, because the server still refuses
+201 and the fence range above it was never issued, so no archive or WAL
+replica will ever hold it. A consumer in that position has lost nothing and
+can reconnect above the fence once the server will serve it.
+
+So a failover meant to be transparent restores with `max_replay=None` and
+`replay_archive=True`, and the consumer resumes from the cursor it already
+had with no intervention.
 
 | what is recovered | what is not |
 |---|---|

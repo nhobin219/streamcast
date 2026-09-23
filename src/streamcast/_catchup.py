@@ -359,11 +359,25 @@ class Catcher:
 
         msg = (
             f"{self._name!r} could not be caught up in {self._retries} rounds: "
-            f"after reading the archive at {self._archive} up to offset "
-            f"{self.start}, the server still will not replay from there "
-            f"({refused}). The stream is being published faster than its "
-            f"archive is synced — raise the server's `max_replay`, sync more "
-            f"often, or pass a larger `catch_up_retries`."
+            f"everything the archive holds was delivered, up to offset "
+            f"{self.start}, and the server still will not replay from there "
+            f"({refused}).\n"
+            f"\n"
+            f"Two things look like this and the fix differs:\n"
+            f"\n"
+            f"  * The stream is published faster than its archive is synced, "
+            f"so the gap keeps moving. Sync more often, raise the server's "
+            f"`max_replay`, or pass a larger `catch_up_retries`.\n"
+            f"  * The server was RESTORED onto another machine. litelink "
+            f"fences offsets on a restore — 2**20 of them — so the range "
+            f"below its window was never issued and no archive will ever "
+            f"hold it. Only raising `max_replay` (or `None`) helps; syncing "
+            f"and retrying cannot. Restore a failed-over producer with "
+            f"`max_replay=None` if existing consumers must resume.\n"
+            f"\n"
+            f"Either way the rows that DO exist were delivered, so a consumer "
+            f"that has committed them can reconnect at offset={self.start} "
+            f"once the server will serve it."
         )
         raise CatchUpUnavailable(msg)
 

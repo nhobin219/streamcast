@@ -286,6 +286,8 @@ cursor it already had and sees a gap, which `recv` allows.
 
 Those two keywords are not optional if existing consumers must resume: the fence puts the
 new frontier a million offsets up, so a default server refuses their cursors as `too_old`.
+`catch_up` still recovers their **data** — it reads the archive — but cannot rejoin the
+live stream, because the fence range above the archive was never issued.
 `hydrate=timedelta(days=7)` copies archived files back to local disk; without it the local
 tier comes back empty and reads go to the archive.
 

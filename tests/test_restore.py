@@ -177,9 +177,13 @@ class TestItStandsUpElsewhere:
         # one, so every existing cursor looks a million messages behind and a
         # bounded server refuses it as `too_old` — measured: "offset 51 is
         # 1048746 messages behind and this server replays at most 100000".
-        # `catch_up` does not rescue it either: the gap is the fence, and the
-        # archive does not hold the offsets inside it because they were never
-        # issued.
+        #
+        # `catch_up` recovers the DATA but not the live join, which is worth
+        # being precise about: measured, it delivered offsets 51..200 out of
+        # the archive — every row that existed — and then failed, because the
+        # server still refuses 201 and the fence range above it was never
+        # issued, so no archive will ever hold it. Raising the bound is the
+        # only thing that closes it.
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
@@ -209,6 +213,68 @@ class TestItStandsUpElsewhere:
                 f"resumed at {offsets[0]} having handled {handled}: a restored "
                 f"producer must never reissue an offset a consumer holds"
             )
+
+        finally:
+            await revived.aclose()
+
+
+class TestWhatCatchUpCanAndCannotDo:
+    async def test_catch_up_recovers_the_data_but_not_the_live_join(
+        self, tmp_path, s3, bucket, serve, litestream
+    ):
+        """A stranded cursor loses no data, and still cannot rejoin.
+
+        The two halves are worth separating, because "catch_up cannot help"
+        is wrong and "catch_up fixes it" is also wrong. It reads the archive,
+        so every row that exists below the fence is delivered. It then cannot
+        reach the live stream: the server refuses the offset the archive ends
+        at, and the fence range above it was never issued, so no archive and
+        no WAL replica will ever hold it.
+
+        A consumer here has lost nothing. It can commit what it received and
+        reconnect above the fence.
+        """
+        stream, handle = produce(tmp_path / "box_a", bucket, s3)
+        with handle:
+            await stream.send_many([row(i) for i in range(200)])
+            while handle.seal() is not None:
+                pass
+
+            handle.maintain()
+            handle.sync(push_unsettled=True)
+            ship(handle.write_replication_config(), s3, litestream)
+
+        # A BOUNDED server, which is the default and the case that strands it.
+        revived = streamcast.Stream.restore(
+            "trades",
+            root=tmp_path / "box_b",
+            archive=bucket,
+            s3=s3,
+            binary=str(litestream),
+            replay_archive=True,
+        )
+        try:
+            async with serve(revived, maintain=False) as uri:
+                await revived.send_many([row(i) for i in range(500, 520)])
+
+                delivered: list[int | None] = []
+                with pytest.raises(streamcast.CatchUpUnavailable) as raised:
+                    sub = await streamcast.connect(uri, offset=51, catch_up=True, s3=s3)
+                    try:
+                        for _ in range(400):
+                            offset, _payload = await sub.recv()
+                            delivered.append(offset)
+                    finally:
+                        await sub.close()
+
+            # Every row that existed, out of the archive.
+            assert delivered == list(range(51, 201)), (
+                f"catch_up delivered {len(delivered)} rows; the archive held "
+                f"51..200 and all of them should have arrived"
+            )
+            # And then an honest failure, naming the fence rather than
+            # blaming archive lag.
+            assert "fences offsets on a restore" in str(raised.value)
 
         finally:
             await revived.aclose()
