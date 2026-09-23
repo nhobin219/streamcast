@@ -662,6 +662,57 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 
 ---
 
+## 8b. Producer failover
+
+`Stream.restore(name, root=…, archive=…)` stands a stream up on a box that
+never held its log: litelink rebuilds it from the archive and the replicated
+WAL, and the result serves and appends like any other.
+
+**Offsets are fenced, not reissued**, and that is what makes the move safe for
+consumers. litelink burns 2**20 offsets, so the restored stream resumes above
+anything the dead machine may have served. No offset a consumer holds is ever
+handed out again carrying different data — the one thing a resume cannot
+survive. `recv` permits a forward jump for exactly this reason (I4).
+
+**The fence is a million offsets, so a consumer looks a million behind.** A
+default server refuses that as `too_old` — *measured*: `offset 51 is 1048746
+messages behind and this server replays at most 100000`. `catch_up` does not
+rescue it either: the gap is the fence, and the archive cannot hold offsets
+that were never issued. So a failover meant to be transparent to existing
+consumers restores with `max_replay=None` and `replay_archive=True`, and the
+consumer resumes from the cursor it already had.
+
+| what is recovered | what is not |
+|---|---|
+| the archive in full, adopted via `version-hint.text` | the local table — rebuilt EMPTY; its Parquet was on the dead machine |
+| the unsealed tail and the band between `archived_through` and `end_offset`, from the replicated `buffer.db` | rows appended inside the replication lag — served to callers, never shipped |
+
+`hydrate=timedelta(...)` re-registers archived files into the local tier. It
+has no default because it costs egress and the window is the caller's; without
+it the local table stays empty and a local-only read sees nothing.
+
+**A planned cutover loses nothing**: stop the writer, let the sidecar ship its
+last frames, then restore. Only unplanned failover loses rows, and it loses
+the ones the old box never managed to replicate.
+
+### ⚠️ Two writers on one log corrupts it
+
+The fence stops offsets being REUSED. Nothing stops the machine you are
+failing over from, if it is still alive. litelink cannot detect a live writer
+on another host — there is no lock that spans machines — and `restore`
+succeeds against one.
+
+*Measured*: a restore against a live primary returned a handle fenced
+1,048,575 offsets above it. Both handles then appended (offset 202 on the
+primary, 1048777 on the revived one — no collision, because the fence works),
+and both synced to the same archive. Nothing refused, nothing warned.
+
+**Stop the old producer before restoring.** This is an operational
+requirement, not something either library enforces, and it is
+[tracked upstream](https://github.com/nhobin219/litelink/issues/75).
+
+---
+
 ## 9. Open
 
 **A catch-up that does not re-read what it already has.** `catch_up` reads

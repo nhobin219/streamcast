@@ -268,6 +268,35 @@ replaying `max_replay` messages has to finish within `max_backlog` new ones or i
 dropped at the moment it catches up, having done all the work. Raise one and check the
 other; `just bench-replay` prints the arithmetic for your hardware.
 
+### Producer failover
+
+A consumer moves boxes with `connect(cursor=)`. A producer moves with
+`Stream.restore`, which rebuilds the log from the archive and the replicated WAL:
+
+```python
+stream = streamcast.Stream.restore(
+    "trades", root="data", archive="s3://market-data/prod",
+    replay_archive=True, max_replay=None,   # so existing cursors still resume
+)
+```
+
+Offsets are **fenced, not reissued** — litelink burns 2²⁰ — so no offset a consumer
+holds is ever handed out again carrying different data. The consumer resumes from the
+cursor it already had and sees a gap, which `recv` allows.
+
+Those two keywords are not optional if existing consumers must resume: the fence puts the
+new frontier a million offsets up, so a default server refuses their cursors as `too_old`.
+`hydrate=timedelta(days=7)` copies archived files back to local disk; without it the local
+tier comes back empty and reads go to the archive.
+
+A **planned** cutover loses nothing — stop the writer, let the sidecar ship its last
+frames, then restore. Unplanned failover loses whatever never shipped.
+
+> ⚠️ **Stop the old producer first.** The fence prevents offset reuse; nothing prevents two
+> writers. litelink cannot detect a live writer on another host, and a restore against one
+> succeeds — see [`SPEC.md`](docs/SPEC.md) §8b and
+> [litelink#75](https://github.com/nhobin219/litelink/issues/75).
+
 ### Serving the whole history
 
 `replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
