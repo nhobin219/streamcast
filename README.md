@@ -10,7 +10,7 @@
 # A replayable WebSocket multicaster
 
 One upstream stream in, appended to a
-[litelink](https://github.com/nhobin219/litelink) log — an Iceberg table on disk — and
+[litelink](https://github.com/nhobin219/litelink) log — an Iceberg table — and
 broadcast to any number of downstream subscribers. Each message carries the offset it was
 written at, so a subscriber that stops can reconnect and ask for the rest.
 
