@@ -148,6 +148,34 @@ class CatchUp:
         The credential failure is caught HERE rather than at the first batch,
         because this is the call that touches the bucket first and the caller
         should learn it cannot read before it has been told it is recovering.
+
+        **`include_archive` is left at its default of False, so this reads the
+        archive and not the replicated WAL.** Three reasons, and the first is
+        decisive:
+
+        * **The band it would add is the server's to send.** A WAL replica
+          carries the buffer — the unsealed tail and the range between
+          `archived_through` and the frontier. That is exactly what the
+          server still holds and is about to stream once this hands back to
+          the socket. Restoring it here would fetch a second copy of the next
+          few seconds of the subscription.
+        * **It fails outright on a log with no replica**, and
+          `wal_replication` is opt-in, so most logs have none. litelink
+          measures `include_wal=True` raising in 0.10 s where archive-only
+          served 3,870 rows. A catch-up that worked only for replicated logs
+          would fail for the common case at the moment it was needed.
+        * **It needs the litestream binary on the CONSUMER.** Today a
+          catching-up consumer needs S3 read access and nothing else — no
+          subprocess, no scratch directory, no binary to provision on every
+          box that might fall behind. litelink measures a 1.9 MB buffer
+          taking 7.2 s to restore at 60-75 ms RTT, of which ~0.2 s is
+          transfer; the rest is a LIST plus ~20 serial GETs whose count grows
+          with the log's AGE rather than its size.
+
+        A consumer that genuinely wants the whole history with no server in
+        the picture is not doing a catch-up: it wants `litelink.snapshot`
+        directly, with `include_wal=True` if it has the binary. The greeting
+        publishes what it needs to do that (`info.log`).
         """
         try:
             self._reader = await asyncio.to_thread(
@@ -359,11 +387,25 @@ class Catcher:
 
         msg = (
             f"{self._name!r} could not be caught up in {self._retries} rounds: "
-            f"after reading the archive at {self._archive} up to offset "
-            f"{self.start}, the server still will not replay from there "
-            f"({refused}). The stream is being published faster than its "
-            f"archive is synced — raise the server's `max_replay`, sync more "
-            f"often, or pass a larger `catch_up_retries`."
+            f"everything the archive holds was delivered, up to offset "
+            f"{self.start}, and the server still will not replay from there "
+            f"({refused}).\n"
+            f"\n"
+            f"Two things look like this and the fix differs:\n"
+            f"\n"
+            f"  * The stream is published faster than its archive is synced, "
+            f"so the gap keeps moving. Sync more often, raise the server's "
+            f"`max_replay`, or pass a larger `catch_up_retries`.\n"
+            f"  * The server was RESTORED onto another machine. litelink "
+            f"fences offsets on a restore — 2**20 of them — so the range "
+            f"below its window was never issued and no archive will ever "
+            f"hold it. Only raising `max_replay` (or `None`) helps; syncing "
+            f"and retrying cannot. Restore a failed-over producer with "
+            f"`max_replay=None` if existing consumers must resume.\n"
+            f"\n"
+            f"Either way the rows that DO exist were delivered, so a consumer "
+            f"that has committed them can reconnect at offset={self.start} "
+            f"once the server will serve it."
         )
         raise CatchUpUnavailable(msg)
 

@@ -9,6 +9,37 @@ rather than what changed for users, since there is nothing to have changed
 from — and the design decisions it records are kept because they were arrived
 at expensively, not because anybody has to migrate across them.
 
+## 0.3.0 — unreleased
+
+### Added
+
+- **`Stream.restore(name, root=…, archive=…)`** — producer-side failover, the
+  counterpart to `connect(cursor=)` on the consumer side. Rebuilds the log
+  from the archive and the replicated WAL on a box that never held it, and
+  returns a stream ready to `serve` and `send` to. `hydrate=` re-registers
+  archived files into the local tier; it has no default because it costs
+  egress and the window is the caller's.
+
+  Offsets are **fenced, not reissued** — litelink burns 2**20 — so no offset a
+  consumer holds is ever handed out again carrying different data. The fence
+  is also a million wide, so existing cursors look a million behind: a
+  failover meant to be transparent restores with `max_replay=None` and
+  `replay_archive=True`. `catch_up` still recovers their data from the archive
+  but cannot rejoin the live stream across a range that was never issued.
+  Measured, and documented in SPEC §8b.
+- `CatchUpUnavailable` names both causes of a gap that will not close — an
+  archive falling behind, and a restore fence — because the fixes differ and
+  the message asserted the first.
+
+  ⚠️ Stop the old producer first. The fence prevents offset reuse; nothing
+  prevents two writers, and litelink cannot detect a live one on another host
+  — [litelink#75](https://github.com/nhobin219/litelink/issues/75).
+
+### Changed
+
+- Requires litelink **0.4.1**, where `restore(include_archive=)` reaches the
+  handle it builds. In 0.4.0 it was accepted and dropped.
+
 ## 0.2.0 — 2026-09-22
 
 ### Changed — breaking

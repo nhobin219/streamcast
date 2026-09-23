@@ -39,6 +39,7 @@ from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+    from datetime import timedelta
     from os import PathLike
 
     from litelink import Row, WriteHandle
@@ -263,6 +264,81 @@ class Stream:
                 s3=s3,
                 replay_archive=replay_archive,
             ),
+            owns_log=True,
+            max_backlog=max_backlog,
+            max_replay=max_replay,
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        archive: str,
+        s3: object | None = None,
+        binary: str | None = None,
+        hydrate: timedelta | None = None,
+        replay_archive: bool = False,
+        max_backlog: int = MAX_BACKLOG,
+        max_replay: int | None = MAX_REPLAY,
+    ) -> Stream:
+        """Stand a stream up on a box that never held its log.
+
+            stream = streamcast.Stream.restore(
+                "trades", root="data", archive="s3://market-data/prod"
+            )
+
+        Producer-side failover, and the counterpart to `connect(cursor=)` on
+        the consumer side. `Stream.new` needs the log to be here already;
+        this rebuilds it from the archive and the replicated WAL, then hands
+        back a stream ready to `serve` and `send` to.
+
+        **Offsets are fenced, not reissued, and that is what makes the move
+        invisible to consumers.** litelink burns 2**20 offsets, so the
+        restored stream resumes above anything the dead machine may have
+        served. A consumer reconnects with the cursor it already had, sees a
+        gap, and carries on — no offset it holds is ever reused for different
+        data, which is the one thing a resume cannot survive. `recv` allows a
+        forward jump for exactly this reason.
+
+        **Rows inside the replication lag are lost.** Anything appended after
+        the last WAL frame shipped was served to callers and never left the
+        box. A PLANNED cutover has none: stop the writer, let the sidecar ship
+        its last frames, then restore. Only unplanned failover loses rows, and
+        it loses the ones the old box never managed to replicate.
+
+        `hydrate` is a `timedelta` and has no default, because it costs S3
+        egress and the right window is the caller's to choose. Without it the
+        local table comes back EMPTY — the Parquet is on the dead machine —
+        so the stream serves from the buffer and the archive, and a local-only
+        read sees nothing. Pass `hydrate=timedelta(days=7)` to bring a week of
+        files back down, or `replay_archive=True` to serve from the archive
+        instead of copying it.
+
+        ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
+        being reused; nothing stops the machine you are failing over FROM if
+        it is still alive. litelink cannot detect a live writer on another
+        host — measured: a restore against a live primary succeeds, both
+        handles append, and both sync to the same archive. Stop the old
+        producer first. See `docs/SPEC.md`.
+        """
+        log = litelink.restore(
+            root,
+            name,
+            archive=archive,
+            s3=s3,  # ty: ignore[invalid-argument-type]
+            binary=binary,
+            include_archive=replay_archive,
+        )
+        if hydrate is not None:
+            # After the handle exists and before anyone serves from it, so a
+            # subscriber never sees the local tier fill underneath it.
+            log.hydrate(since=hydrate)
+
+        return cls(
+            name,
+            log=log,
             owns_log=True,
             max_backlog=max_backlog,
             max_replay=max_replay,
@@ -548,6 +624,20 @@ class Stream:
         # client in any language able to replay a stream from the beginning
         # with no litelink, no credentials and no dependency on this repo —
         # see `Stream.new` for what it costs.
+        if self._max_replay is not None and behind > self._max_replay:
+            # **The offset distance said too far. Ask what it actually costs.**
+            # `max_replay` bounds the work a replay does, and that work is
+            # rows — offset distance is a proxy, exact only while the offset
+            # space is dense. It is not: a `restore` fences 2**20 offsets
+            # that were never issued, so a consumer 150 rows behind a
+            # failed-over producer measures as a million and is refused a
+            # replay the server could serve instantly.
+            #
+            # Only reached when the free check has already failed, so an
+            # ordinary subscribe never pays for it — and a subscribe about to
+            # be REFUSED can afford 30 ms to find out whether it should be.
+            behind = await asyncio.to_thread(_log.rows_from, log, requested)
+
         if self._max_replay is not None and behind > self._max_replay:
             raise NotReplayable(
                 "too_old",

@@ -569,6 +569,27 @@ the 123-byte trim and a long bucket URI is what drops; the greeting has no such
 limit, and a client that did not get it from the refusal spends one throwaway
 connection asking.
 
+**The archive, not the WAL replica.** `snapshot(include_wal=False)`, which is
+the default, and the choice is load-bearing rather than incidental. A WAL
+replica carries the buffer — the unsealed tail and the range between
+`archived_through` and the frontier — and that band is exactly what the
+SERVER still holds and streams once the catch-up hands back to the socket.
+Restoring it here fetches a second copy of the next few seconds of the
+subscription.
+
+It would also fail on a log with no replica, and `wal_replication` is opt-in
+so most have none: litelink measures `include_wal=True` raising in 0.10 s
+where archive-only served 3,870 rows. And it needs the litestream binary on
+the CONSUMER, where today a catch-up needs S3 read access and nothing else —
+no subprocess, no scratch directory, nothing to provision on every box that
+might fall behind. A 1.9 MB buffer takes 7.2 s to restore at 60-75 ms RTT, of
+which ~0.2 s is transfer; the rest is a LIST plus ~20 serial GETs whose count
+grows with the log's AGE rather than its size.
+
+A consumer that wants the whole history with no server in the picture is not
+doing a catch-up — it wants `litelink.snapshot` directly, and the greeting
+publishes what it needs (`info.log`).
+
 **Credentials are the client's.** The server never sends any, and the client
 resolves them the way litelink does — the ordinary AWS chain, overridable with
 `S3Options`. An archive that cannot be read raises `CatchUpUnavailable` at
@@ -659,6 +680,76 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 | the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
 | a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the archive and then connects (§5) |
 | a catching-up consumer has no credentials | `CatchUpUnavailable` at `connect`, naming the endpoint, the credential source, and four ways out |
+
+---
+
+## 8b. Producer failover
+
+`Stream.restore(name, root=…, archive=…)` stands a stream up on a box that
+never held its log: litelink rebuilds it from the archive and the replicated
+WAL, and the result serves and appends like any other.
+
+**Offsets are fenced, not reissued**, and that is what makes the move safe for
+consumers. litelink burns 2**20 offsets, so the restored stream resumes above
+anything the dead machine may have served. No offset a consumer holds is ever
+handed out again carrying different data — the one thing a resume cannot
+survive. `recv` permits a forward jump for exactly this reason (I4).
+
+**The fence is a million offsets wide, and it does not strand anyone,
+because `max_replay` counts ROWS rather than offset distance.** A consumer
+150 rows behind a failed-over producer is 150 rows behind; measuring it as
+1,048,746 was a property of the proxy, not of the work.
+
+`max_replay` exists to bound what a replay costs, and that cost is rows.
+Offset distance is a proxy for it and an exact one only while the offset space
+is dense — which litelink's is not, by design: a `restore` fences 2**20
+offsets that were never issued, and I4 already says a forward jump is
+ordinary. So the distance check runs first, free, and only a subscribe it
+would REFUSE pays to find out what the replay actually costs:
+
+```
+behind = frontier - requested            # free
+if behind > max_replay:
+    behind = rows the log holds from `requested` on    # ~30 ms, in a thread
+    if behind > max_replay:  refuse
+```
+
+*Measured* at 30.8 ms over 1,000,000 rows in 59 files, and it scales with FILE
+COUNT — roughly 0.4 ms each, because the manifests are read per file rather
+than pruned. Affordable once per subscribe against a replay that costs 0.27 s
+for 100,000 rows, and never paid by a consumer near the frontier.
+
+An existing consumer therefore resumes from the cursor it already had, with a
+default server and a plain `connect` — no raised bound, no `catch_up`.
+
+| what is recovered | what is not |
+|---|---|
+| the archive in full, adopted via `version-hint.text` | the local table — rebuilt EMPTY; its Parquet was on the dead machine |
+| the unsealed tail and the band between `archived_through` and `end_offset`, from the replicated `buffer.db` | rows appended inside the replication lag — served to callers, never shipped |
+
+`hydrate=timedelta(...)` re-registers archived files into the local tier. It
+has no default because it costs egress and the window is the caller's; without
+it the local table stays empty and a local-only read sees nothing.
+
+**A planned cutover loses nothing**: stop the writer, let the sidecar ship its
+last frames, then restore. Only unplanned failover loses rows, and it loses
+the ones the old box never managed to replicate.
+
+### ⚠️ Two writers on one log corrupts it
+
+The fence stops offsets being REUSED. Nothing stops the machine you are
+failing over from, if it is still alive. litelink cannot detect a live writer
+on another host — there is no lock that spans machines — and `restore`
+succeeds against one.
+
+*Measured*: a restore against a live primary returned a handle fenced
+1,048,575 offsets above it. Both handles then appended (offset 202 on the
+primary, 1048777 on the revived one — no collision, because the fence works),
+and both synced to the same archive. Nothing refused, nothing warned.
+
+**Stop the old producer before restoring.** This is an operational
+requirement, not something either library enforces, and it is
+[tracked upstream](https://github.com/nhobin219/litelink/issues/75).
 
 ---
 
