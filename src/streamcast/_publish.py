@@ -28,11 +28,14 @@ here prevents it any more than the local path does.
 the way a local `await send(...)` is. If the connection drops before the reply
 arrives, the publisher cannot tell whether the append happened: retrying may
 duplicate a row and not retrying may lose one. Delivery here is therefore
-AT LEAST ONCE under retry, and the library does not resolve it — a publisher
-that cannot tolerate a duplicate carries its own key in the row and
-deduplicates downstream, which is the only place the ambiguity is decidable.
-`docs/SPEC.md` §6b has the reasoning, and the publisher-key pattern that
-makes recovery a query rather than a guess.
+AT LEAST ONCE under retry, and the library does not resolve it because it
+cannot: the ambiguity is in the publisher's knowledge, not in the log.
+
+Resolving it costs two columns and a replay. Carry a publisher key and a
+per-publisher sequence, and on reconnect subscribe from the offset `send` last
+returned — the offset bounds the window, the key picks your rows out of it,
+and `info.replay` says how many to read. `docs/SPEC.md` §6b has it, including
+the two ways the loop goes wrong silently.
 """
 
 from __future__ import annotations

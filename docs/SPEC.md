@@ -684,37 +684,53 @@ SCHEMA = {
 }
 ```
 
-On reconnect, ask the log what landed rather than guessing:
+On reconnect, replay the window you could not account for and filter it in
+memory. The offset `send` already returned is what bounds the read:
 
 ```python
-# The publisher remembers the offset of its last ACKNOWLEDGED row, and the
-# seq that went with it. Everything it cannot account for is above that.
 landed = last_acked_seq
 async with streamcast.connect(uri, offset=last_acked_offset + 1) as sub:
-    frontier = sub.info.end_offset
-    while frontier is not None and (offset := (await sub.recv())[0]) < frontier - 1:
-        ...   # track max(seq) where publisher == me
+    # The greeting says exactly what is about to be replayed, so this is a
+    # `for` over a known count rather than a loop working out when to stop.
+    lo, hi = sub.info.replay or (0, 0)
+    for _ in range(hi - lo):
+        _offset, row = await sub.recv()
+        if row["publisher"] == me:
+            landed = max(landed, int(row["seq"]))
 
 resume_at = landed + 1
 ```
 
-Three things make this work, and they are worth stating because each is a
-property of this design rather than a convention:
+That is the whole of it: an ordinary subscribe, and a comparison. Nothing
+queries the archive — it lags, so a row published a second ago is not in it —
+and nothing needs new server state.
 
-* **The log is a table.** "What did I last land" is a query, not new server
-  state — no producer registration, no dedup window, no protocol change.
-* **The window is bounded by what is outstanding**, not by the log's size.
-  The publisher knows its last acknowledged offset, so the scan covers only
-  the range it could not account for, which is however many rows were written
-  while one reply was in flight.
-* **Per-publisher keys isolate publishers.** Several writing to one stream do
-  not interfere: each asks only about its own key, so recovery is independent
-  of what anyone else wrote.
+**A publisher recovering this way needs no litelink**, which is the point of
+doing it over the socket rather than against the log. It needs streamcast and
+the ability to reach the server, exactly like a consumer; no Iceberg reader,
+no object-storage credentials, no second dependency on a box whose only job
+is to publish. The same argument as `catch_up` reading the archive rather than
+the WAL replica (§5), one layer out.
 
-**`landed` starts at the last acknowledged seq, not at zero.** The scan covers
-only the post-acknowledgement window, so finding nothing there means the last
-acknowledged row is still the last one that landed — reading that as "nothing
-landed" would resend everything.
+**The offset and the key do different jobs, and both are needed.** The offset
+bounds *where to look*: `send` already returned it, so the replay covers only
+the rows written while one reply was in flight, however large the log is. The
+key identifies *what to look for*: the window holds other publishers' rows
+too, and `(publisher, seq)` is what picks yours out of it. A row that already
+carries a natural unique key needs no extra columns — match on that instead.
+
+Per-publisher keys also mean several publishers on one stream do not
+interfere: each asks only about its own, so recovery is independent of what
+anyone else wrote.
+
+**Two ways to get the loop wrong, both silent.** Reading until some condition
+on the messages blocks for ever when the window is empty, which is the common
+case — a publisher that was acked for everything has nothing to replay, and
+`info.replay` is what says so without a message arriving. And `landed` starts
+at the last acknowledged seq rather than at zero: the replay covers only the
+post-acknowledgement window, so finding nothing in it means the last
+acknowledged row is still the last one that landed. Reading that as "nothing
+landed" resends everything.
 
 A ULID in place of the integer works and removes the need to persist a
 counter, since a restart naturally produces higher values; `max()` is still

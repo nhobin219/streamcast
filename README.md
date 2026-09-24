@@ -356,8 +356,9 @@ batch stays one commit even with publishers racing.
 > append happened — retrying may duplicate the row, not retrying may lose it. streamcast
 > does not resolve that ambiguity; a publisher that cannot tolerate a duplicate carries its
 > own key in the row and deduplicates downstream, which is the only place it is decidable.
-> [`SPEC.md`](docs/SPEC.md) §6b has the pattern: carry a publisher key and a per-publisher
-> sequence as columns, and recovery becomes a query against the log rather than a guess.
+> The fix is small: carry a publisher key and a per-publisher sequence as columns, and on
+> reconnect replay from the offset you were last acked for, filtering in memory. The offset
+> bounds the read; the key identifies your rows in it. [`SPEC.md`](docs/SPEC.md) §6b has it.
 
 ### Consumer
 
