@@ -1,7 +1,7 @@
 [project]
 name = "streamcast"
 version = "0.5.0"
-description = "A durable JSON WebSocket pubsub framework built on litelink. Every message lands in an Iceberg table: no ETL, no second copy."
+description = "A durable JSON WebSocket pubsub framework for structured data. Every message lands in an Iceberg table: no ETL, no second copy."
 readme = "README.md"
 authors = [
     { name = "Nico Bautista Hobin", email = "nico@penca.io" }

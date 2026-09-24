@@ -7,12 +7,14 @@
 [![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 
-# A durable JSON WebSocket pubsub framework built on litelink
+# A durable JSON WebSocket pubsub framework for structured data
 
 Publishers write, subscribers read, and every message is appended to a
-[litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. Each
-message carries the offset it was written at, so a subscriber that stops can reconnect and
-ask for the rest.
+[litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. A
+message is a **row** — with a log attached it is checked against a schema you declare,
+which is what lets the log be an Iceberg table rather than a pile of frames. Each message
+carries the offset it was written at, so a subscriber that stops can reconnect and ask for
+the rest.
 
 ```
 ws feed ─┐

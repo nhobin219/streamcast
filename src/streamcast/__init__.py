@@ -1,9 +1,11 @@
-"""A durable JSON WebSocket pubsub framework built on litelink.
+"""A durable JSON WebSocket pubsub framework for structured data.
 
 Publishers write, subscribers read, and every message is appended to a
 litelink log — an Iceberg table on disk — before any subscriber sees it. A
-server holds the upstream connection and every subscriber reads from it,
-receiving the same bytes in the same order from one `encode` call.
+message is a ROW: with a log attached it is checked against a schema the
+caller declares, which is what lets the log be a table rather than a pile of
+frames. A server holds the upstream connection and every subscriber reads
+from it, receiving the same bytes in the same order from one `encode` call.
 
 **The log is the analytical table**, which is why litelink is underneath this
 rather than an append-only file. The usual shape is a message log in one
