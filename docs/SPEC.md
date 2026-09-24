@@ -881,13 +881,6 @@ from its cursor again, which may be well below where it got to, because the
 cursor only advances as rows are handled. That is the safe direction and it
 costs a re-read; a consumer that cannot afford it should commit more often.
 
-**Remote publishers.** `Stream.send` runs in the server's process, so a client
-cannot publish into a stream. It was designed and deliberately not built: the
-chained topology (§6) is served by embedding a server in the publishing
-process, which is simpler and needs no new authority model. A
-`streamcast.publish(uri)` returning a write-only handle — a sibling of
-`Subscription`, not a method on it — is the shape if it is ever wanted.
-
 **Registered intent.** One designated publisher and many read-only nodes,
 coordinated through the server, so that exactly one process pushes to S3 and
 the rest are local-only. The registration would have to propagate to the
