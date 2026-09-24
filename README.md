@@ -268,10 +268,11 @@ replaying `max_replay` messages has to finish within `max_backlog` new ones or i
 dropped at the moment it catches up, having done all the work. Raise one and check the
 other; `just bench-replay` prints the arithmetic for your hardware.
 
-### Producer failover
+### Recovering a server
 
-A consumer moves boxes with `connect(cursor=)`. A producer moves with
-`Stream.restore`, which rebuilds the log from the archive and the replicated WAL:
+A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
+rebuilds the log itself from the archive and the replicated WAL on a machine that never
+held it:
 
 ```python
 stream = streamcast.Stream.restore(
@@ -363,8 +364,9 @@ batch stays one commit even with publishers racing.
 #### Recovering a producer
 
 `cursor=` records the offset this publisher was last acknowledged for, and `cursor_uri=`
-ships it to object storage so a producer can resume on another box — the same two keywords
-a consumer takes, doing the same job one layer out.
+ships it to object storage so a producer can resume on another box. The same two keywords
+a consumer takes, doing the same job at the other end of the stream — and distinct from
+[recovering a server](#recovering-a-server), which moves the log itself.
 
 ```python
 async with streamcast.publish(
@@ -440,7 +442,8 @@ caller's next move differs for each.
 #### Recovering a consumer
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
-is gone — the counterpart to [recovering a producer](#recovering-a-producer), one layer out.
+is gone — which is what `cursor_uri` is for, the mirror of
+[recovering a producer](#recovering-a-producer) at this end.
 
 ```python
 async with streamcast.connect(

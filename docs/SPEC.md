@@ -801,7 +801,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 
 ---
 
-## 8b. Producer failover
+## 8b. Recovering a server
 
 `Stream.restore(name, root=…, archive=…)` stands a stream up on a box that
 never held its log: litelink rebuilds it from the archive and the replicated

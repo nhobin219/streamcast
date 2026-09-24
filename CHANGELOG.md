@@ -65,7 +65,7 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- **`Stream.restore(name, root=…, archive=…)`** — producer-side failover, the
+- **`Stream.restore(name, root=…, archive=…)`** — server-side failover, the
   counterpart to `connect(cursor=)` on the consumer side. Rebuilds the log
   from the archive and the replicated WAL on a box that never held it, and
   returns a stream ready to `serve` and `send` to. `hydrate=` re-registers
