@@ -36,10 +36,10 @@ exported because they appear in what you catch and inspect.
 
 ## The API is `websockets`, with three deviations
 
-`serve`, `connect` and `publish` have the same shapes and pass every keyword through — `ssl`,
-`ping_interval`, `process_request`, `max_queue` and the rest behave exactly as they do
-there — and `serve` returns an object that proxies `websockets.Server` (`sockets`,
-`serve_forever`, `connections`, `is_serving`). Three things differ:
+`serve` and `connect` are `websockets`' own: same names, same shapes, every keyword passed
+through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest behave
+exactly as they do there — and `serve` returns an object that proxies `websockets.Server`
+(`sockets`, `serve_forever`, `connections`, `is_serving`). Three things differ:
 
 **Iterating a subscription yields `(offset, msg)`**, not `message`. The offset is the
 only thing that makes a reconnect a resume rather than a restart, and a subscriber that
@@ -320,7 +320,15 @@ producer.commit(offset=None) -> None            # save the cursor now
 await producer.close(code=1000, reason="") -> None
 ```
 
-Publishing from a process that is not the server's. The server appends with the same
+Publishing from a process that is not the server's.
+
+**This one is not a `websockets` function.** WebSocket has no publish — RFC 6455 defines
+frames, not verbs, and `websockets` exposes `serve`, `connect` and `broadcast`. Pub/sub
+protocols layered over WebSocket do define one (WAMP's `PUBLISH`, MQTT's), but streamcast
+implements none of them: this is shaped like `connect` — awaitable, async context manager,
+keywords passed through — so it reads the same way, and the request is a query parameter
+rather than a message type, exactly as `?offset=` is for a subscribe.
+ The server appends with the same
 `Stream.send` / `send_many` a local publisher calls, so `send` returns once the row is
 durable and `send_many` is the same throughput lever it is locally.
 

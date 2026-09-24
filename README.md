@@ -40,11 +40,14 @@ uv add streamcast
 
 ## API
 
-**It is the `websockets` API.** `serve`, `connect` and `publish` have the same shapes and pass every
-keyword through, so `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest
-behave exactly as they do there, and `serve` returns an object that proxies
-`websockets.Server` — `sockets`, `serve_forever`, `connections`, `is_serving`. If you know
-`websockets`, you know this.
+**`serve` and `connect` are the `websockets` API.** Same names, same shapes, and every
+keyword passed through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the
+rest behave exactly as they do there, and `serve` returns an object that proxies
+`websockets.Server` (`sockets`, `serve_forever`, `connections`, `is_serving`).
+
+**`publish` has no `websockets` counterpart**; it is streamcast's, shaped like `connect`
+so it reads the same way. WebSocket itself has no verbs — the protocol is frames, and
+both subscribing and publishing here are URL conventions on top of it.
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False,
