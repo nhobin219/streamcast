@@ -44,11 +44,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import msgspec
 
-from streamcast._errors import ProtocolError
+from streamcast._errors import ProtocolError, Rejected
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -85,6 +85,26 @@ default and nothing is ever assigned 0 — so it is a value the offset space
 already reserves, and it orders correctly against every real offset. A
 negative offset is refused rather than being given a second meaning.
 """
+
+
+class Publish:
+    """The sentinel `parse_subscribe` returns for `?publish`.
+
+    Its own TYPE rather than a string or a flag in the tuple, so a caller
+    that forgets to handle it gets a type error rather than treating a
+    publisher as a subscriber asking for offset `"publish"`. Named rather than
+    private because narrowing needs `isinstance`, and an identity check
+    against a `Final` instance narrows nothing.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — diagnostics only
+        return "PUBLISH"
+
+
+PUBLISH: Final = Publish()
+"""What a `?publish` request resolves to, where an offset would otherwise be."""
 
 
 def encode(
@@ -342,6 +362,91 @@ def parse_greeting(frame: str | bytes) -> Greeting:
     )
 
 
+def decode_publish(frame: str | bytes) -> dict[str, object] | list[dict[str, object]]:
+    """A publish frame: one row, or a list of rows.
+
+    The shape IS the request — an object means `send`, a list means
+    `send_many` — so a publisher chooses its durability granularity the way a
+    local one chooses between the two calls, with no verb to get wrong.
+    """
+    try:
+        payload = _DECODER.decode(frame)
+    except msgspec.DecodeError as exc:
+        msg = f"publish frame is not JSON: {exc}"
+        raise ProtocolError(msg) from None
+
+    if isinstance(payload, dict):
+        return payload
+
+    if isinstance(payload, list):
+        if not payload:
+            msg = "publish frame is an empty list; send a row or a list of rows"
+            raise ProtocolError(msg)
+
+        for row in payload:
+            if not isinstance(row, dict):
+                msg = f"publish frame holds a {type(row).__name__}, not a row"
+                raise ProtocolError(msg)
+
+        return payload
+
+    msg = f"publish frame is a {type(payload).__name__}, not a row or a list"
+    raise ProtocolError(msg)
+
+
+def encode_publish(
+    payload: dict[str, object] | list[dict[str, object]],
+) -> bytes:
+    """A publish frame: the row, or the list, as the publisher meant it."""
+    return _ENCODER.encode(payload)
+
+
+def publish_ack(offsets: list[int | None]) -> str:
+    """What the server says once the rows are durable.
+
+    The offsets assigned, in the order the rows were sent — a list even for a
+    single row, so a publisher parses one shape. `null` on a stream with no
+    log, for the same reason a message frame carries `null` there.
+    """
+    return _ENCODER.encode({"ok": offsets}).decode()
+
+
+def publish_error(error: str, **fields: object) -> str:
+    """A publish the server would not take, without ending the connection.
+
+    Not a close frame: `send` raising on one bad row leaves a local publisher
+    able to send the next, and a remote one should be no worse off. The 123
+    byte limit does not apply here either, so the detail arrives whole —
+    litelink names the offending column and what it found, which is the part
+    worth having.
+    """
+    return _ENCODER.encode({"error": error, **fields}).decode()
+
+
+def parse_publish_reply(frame: str | bytes) -> list[int | None]:
+    """The offsets, or the server's refusal as an exception."""
+    try:
+        payload = _DECODER.decode(frame)
+    except msgspec.DecodeError as exc:
+        msg = f"publish reply is not JSON: {exc}"
+        raise ProtocolError(msg) from None
+
+    if not isinstance(payload, dict):
+        msg = f"publish reply is a {type(payload).__name__}, not an object"
+        raise ProtocolError(msg)
+
+    if "error" in payload:
+        detail = payload.get("detail")
+        raise Rejected(str(detail) if detail else str(payload["error"]))
+
+    offsets = payload.get("ok")
+    if not isinstance(offsets, list):
+        msg = f"publish reply carries no offsets: {payload!r}"
+        raise ProtocolError(msg)
+
+    return [None if o is None else int(o) for o in offsets]
+
+
 CLOSE_REASON_LIMIT: Final = 123
 """What RFC 6455 allows a close reason to be, in bytes of UTF-8.
 
@@ -394,8 +499,12 @@ def parse_refusal(reason: str) -> tuple[str, dict[str, object]]:
     return (error if isinstance(error, str) else ""), fields
 
 
-def parse_subscribe(path: str) -> tuple[str, int | None]:
-    """A request path, as the stream name and the offset asked for.
+def parse_subscribe(path: str) -> tuple[str, int | None | Publish]:
+    """A request path, as the stream name and what it is asking for.
+
+    `PUBLISH` where an offset would be, for `?publish` — one parser, because
+    a publish and a subscribe are the same URL shape and routing them apart
+    twice is two places for the stream name to be read differently.
 
     `/trades?offset=1200` is the whole of a subscribe. The name is the path
     with its leading slash removed, so a server serving one unnamed stream
@@ -410,10 +519,20 @@ def parse_subscribe(path: str) -> tuple[str, int | None]:
     name = split.path.lstrip("/")
     query = dict(parse_qsl(split.query, keep_blank_values=True))
 
-    unknown = set(query) - {"offset"}
+    unknown = set(query) - {"offset", "publish"}
     if unknown:
         msg = f"unknown query parameter(s): {', '.join(sorted(unknown))}"
         raise ValueError(msg)
+
+    if "publish" in query:
+        # A publisher asks for nothing and is sent nothing but the greeting,
+        # so an offset alongside it is a request the server cannot honour —
+        # and the likeliest cause is a subscribe URL with `?publish` pasted on.
+        if "offset" in query:
+            msg = "publish and offset are different requests; pass one"
+            raise ValueError(msg)
+
+        return name, PUBLISH
 
     raw = query.get("offset")
     if raw is None:
@@ -436,6 +555,23 @@ def parse_subscribe(path: str) -> tuple[str, int | None]:
     return name, offset
 
 
+def publish_path(uri: str) -> str:
+    """The stream's URI, as the URL a publisher actually opens.
+
+    `?publish` is added here rather than asked of the caller, so one address
+    serves both ends: `publish(uri)` and `connect(uri)` take the same string.
+    """
+    split = urlsplit(uri)
+    if any(
+        key == "publish" for key, _ in parse_qsl(split.query, keep_blank_values=True)
+    ):
+        return uri
+
+    query = f"{split.query}&publish" if split.query else "publish"
+
+    return urlunsplit(split._replace(query=query))
+
+
 def subscribe_path(name: str, offset: int | None) -> str:
     """The inverse, for the client. Kept beside the parser so they cannot drift."""
     path = "/" + quote(name)
@@ -449,7 +585,15 @@ __all__ = [
     "CLOSE_REASON_LIMIT",
     "EARLIEST",
     "VERSION",
+    "PUBLISH",
+    "decode_publish",
+    "encode_publish",
+    "publish_ack",
+    "publish_error",
+    "publish_path",
+    "parse_publish_reply",
     "Greeting",
+    "Publish",
     "LogInfo",
     "decode",
     "encode",

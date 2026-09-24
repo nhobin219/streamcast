@@ -36,7 +36,7 @@ exported because they appear in what you catch and inspect.
 
 ## The API is `websockets`, with three deviations
 
-`serve` and `connect` have the same shapes and pass every keyword through — `ssl`,
+`serve`, `connect` and `publish` have the same shapes and pass every keyword through — `ssl`,
 `ping_interval`, `process_request`, `max_queue` and the rest behave exactly as they do
 there — and `serve` returns an object that proxies `websockets.Server` (`sockets`,
 `serve_forever`, `connections`, `is_serving`). Three things differ:
@@ -304,6 +304,47 @@ this needs setting.
 
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
+
+## `publish`
+
+```python
+streamcast.publish(uri, *, **websockets_kwargs) -> Publication
+
+await producer.send(row) -> int | None          # durable, then fanned out
+await producer.send_many(rows) -> list          # ONE transaction for the group
+producer.info -> Greeting                       # incl. the stream's schema
+producer.connection -> ClientConnection
+await producer.close(code=1000, reason="") -> None
+```
+
+Publishing from a process that is not the server's. The server appends with the same
+`Stream.send` / `send_many` a local publisher calls, so `send` returns once the row is
+durable and `send_many` is the same throughput lever it is locally.
+
+```python
+async with streamcast.publish("ws://localhost:8765/trades") as producer:
+    offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
+```
+
+**The server must allow it**: `serve(..., publish=True)`. Off by default, so an upgrade
+never makes a server writable on its own. A publisher meeting a server that does not
+allow it gets a `ProtocolError` naming the setting rather than a silent failure.
+
+The URI is the stream's, the same string `connect` takes — `?publish` is added by the
+client, so one address in a config file serves both ends.
+
+| | |
+|---|---|
+| **one writer** | any number of publishers, one `WriteHandle`, held by the server. Offsets stay contiguous and a batch stays one commit with publishers racing — I1 is what makes that free |
+| **`Rejected`** | a row the schema refuses, with litelink's message naming the column. Nothing committed; the connection stays open and the next row works |
+| **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
+| **serial per connection** | one frame outstanding at a time, so a reply needs no correlation id. More in flight means another connection |
+
+**Publishing is at-least-once under retry.** A row is durable when `send` returns, but if
+the connection drops before the reply arrives the publisher cannot tell whether the append
+happened. Carry a publisher key and a per-publisher sequence as columns and recovery
+becomes a query against the log — [`SPEC.md`](SPEC.md) §6b has the pattern and the
+arithmetic.
 
 ## `connect`
 

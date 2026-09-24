@@ -88,12 +88,14 @@ from streamcast._errors import (
     Close,
     NotReplayable,
     ProtocolError,
+    Rejected,
     StreamcastError,
     StreamNotFound,
     TooSlow,
 )
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting, LogInfo
+from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
@@ -116,6 +118,9 @@ __all__ = [
     "S3Options",
     "NotReplayable",
     "ProtocolError",
+    "publish",
+    "Rejected",
+    "Publication",
     "Stream",
     "StreamNotFound",
     "StreamcastError",

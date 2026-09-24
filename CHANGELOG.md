@@ -7,6 +7,37 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.5.0 — unreleased
+
+### Added
+
+- **`streamcast.publish(uri)`** — a producer that is not the server's process.
+  The server appends with the same `Stream.send` / `send_many` a local
+  publisher calls, so `send` returns once the row is durable and `send_many`
+  is the same one-transaction lever it is locally. A sibling of
+  `Subscription`, not a method on it: a connection is one end or the other.
+
+  **It adds no authority**, which is the argument for it. litelink allows one
+  writer per log and neither refuses a second nor detects one, so two
+  `WriteHandle`s on one log is a corruption path with no guard. Publishing to
+  the process that already holds the handle resolves the concurrency where it
+  can be resolved — any number of publishers, one writer. Offsets stay
+  contiguous and a batch stays one commit under racing publishers, which I1
+  gives for free.
+
+- **`serve(..., publish=True)`**, off by default, so an upgrade cannot make a
+  server writable on its own. A publisher meeting a server that does not allow
+  it is told which setting to change.
+
+- **`Rejected`** for a row the schema refuses, carrying litelink's message and
+  the column it names. Nothing is committed and the connection stays open, so
+  the next row works — what `Stream.send` raising does locally.
+
+  Publishing is **at-least-once under retry**: a dropped connection before the
+  reply leaves the publisher unable to say whether the append happened.
+  `docs/SPEC.md` §6b has the publisher-key pattern that turns recovery into a
+  query against the log.
+
 ## 0.4.0 — 2026-09-23
 
 ### Changed — breaking

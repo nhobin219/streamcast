@@ -105,7 +105,7 @@ def _refusal(
     if close is None or close.code in _ENDED:
         return None
 
-    _error, fields = parse_refusal(close.reason)
+    error, fields = parse_refusal(close.reason)
     if close.code == Close.NO_SUCH_STREAM:
         serves = fields.get("serves")
         listed = tuple(str(name) for name in serves) if isinstance(serves, list) else ()
@@ -123,6 +123,18 @@ def _refusal(
         return TooSlow(backlog if isinstance(backlog, int) else None, offset=offset)
 
     if close.code == Close.BAD_REQUEST:
+        if error == "publish_disabled":
+            # The sentence is built here for the same reason every other one
+            # is: 123 bytes is not room for it, and the wire carries the name
+            # so the English can be reworded without a protocol change.
+            msg = (
+                f"{stream!r} does not accept publishers. The server decides "
+                f"this, not the stream — start it with "
+                f"serve(..., publish=True) to allow remote publishing."
+            )
+
+            return ProtocolError(msg)
+
         detail = fields.get("detail", "the server could not parse this subscribe")
 
         return ProtocolError(str(detail))

@@ -40,7 +40,7 @@ uv add streamcast
 
 ## API
 
-**It is the `websockets` API.** `serve` and `connect` have the same shapes and pass every
+**It is the `websockets` API.** `serve`, `connect` and `publish` have the same shapes and pass every
 keyword through, so `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest
 behave exactly as they do there, and `serve` returns an object that proxies
 `websockets.Server` — `sockets`, `serve_forever`, `connections`, `is_serving`. If you know
@@ -56,9 +56,12 @@ streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
+streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
+                 publish=False, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
+streamcast.publish(uri, ...) -> Publication          # server needs publish=True
+    await producer.send(row) · await producer.send_many(rows)
 streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
 ```
 
@@ -322,6 +325,42 @@ arithmetic does not bite. Each replay also holds a worker from the `to_thread` p
 
 ## Client
 
+Two ends, and a connection is one or the other. A subscriber has no `send`; a publisher
+has no `recv`. Neither carries a method that raises.
+
+### Producer
+
+`Stream.send` publishes from the server's own process. `streamcast.publish` does it from
+anywhere else:
+
+```python
+async with streamcast.publish("ws://localhost:8765/trades") as producer:
+    offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
+```
+
+The server must allow it — `serve(..., publish=True)`, off by default so an upgrade never
+makes a server writable on its own. `send` returns once the row is durable, exactly as the
+local call does; `send_many` commits a group in one transaction and is the same throughput
+lever it is locally. A row the schema refuses raises `Rejected`, naming the column, and the
+connection stays open so the next row works.
+
+**The server remains the only writer**, which is why this exists rather than opening the
+log from another box. litelink allows one writer per log, and neither refuses a second nor
+detects one — so two `WriteHandle`s on one log is a corruption path with no guard. Handing
+rows to the process that already owns the handle resolves the concurrency where it can
+actually be resolved: any number of publishers, one writer. Offsets stay contiguous and a
+batch stays one commit even with publishers racing.
+
+> ⚠️ **Publishing is at-least-once under retry.** A row is durable when `send` returns. If
+> the connection drops before the reply arrives, the publisher cannot tell whether the
+> append happened — retrying may duplicate the row, not retrying may lose it. streamcast
+> does not resolve that ambiguity; a publisher that cannot tolerate a duplicate carries its
+> own key in the row and deduplicates downstream, which is the only place it is decidable.
+> [`SPEC.md`](docs/SPEC.md) §6b has the pattern: carry a publisher key and a per-publisher
+> sequence as columns, and recovery becomes a query against the log rather than a guess.
+
+### Consumer
+
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
     async for offset, msg in stream:
@@ -332,7 +371,7 @@ async with streamcast.connect("ws://localhost:8765/trades") as stream:
 be logged, forwarded, or appended to another stream whole. The parse happens once, at the
 publisher.
 
-### Resuming
+#### Resuming
 
 The server records its frontier when a subscriber attaches, replays `[requested, frontier)`
 from the log, then switches it to the live queue. Everything below the frontier is already
@@ -368,7 +407,7 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
 
-### Consumer failover
+#### Failing over
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
 is gone — the counterpart to [producer failover](#producer-failover), one layer out.
