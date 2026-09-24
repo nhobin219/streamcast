@@ -7,30 +7,71 @@
 [![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 
-# A replayable WebSocket multicaster
+# A durable WebSocket pubsub framework built on litelink
 
-One upstream stream in, appended to a
-[litelink](https://github.com/nhobin219/litelink) log — an Iceberg table — and
-broadcast to any number of downstream subscribers. Each message carries the offset it was
-written at, so a subscriber that stops can reconnect and ask for the rest.
+Publishers write, subscribers read, and every message is appended to a
+[litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. Each
+message carries the offset it was written at, so a subscriber that stops can reconnect and
+ask for the rest.
 
 ```
-upstream ws feed
-      │  one connection
-      ▼
-streamcast server ──► litelink log      durable BEFORE any subscriber sees it
-      │  fan-out
-      ├──► strategy          offset 1861
-      ├──► dashboard         offset 1861
-      └──► recorder          offset 1861
+ws feed ─┐
+publisher ├──► streamcast server ──► litelink log    durable BEFORE anyone sees it
+publisher ┘         │  fan-out
+                    ├──► strategy          offset 1861
+                    ├──► dashboard         offset 1861
+                    └──► recorder          offset 1861
 ```
 
-Every subscriber receives the same bytes in the same order, from one `encode` call.
-The API is `websockets` with a few deliberate differences, listed below.
-
-A streamcast server is a Python WebSocket
+Every subscriber receives the same bytes in the same order, from one `encode` call. The
+API is `websockets` with a few deliberate differences, listed below, and a streamcast
+server is a Python WebSocket
 [tickerplant](https://code.kx.com/q/architecture/): a process that captures a feed,
 optionally writes it to a log, and publishes it to registered subscribers.
+
+## The log is the analytical table
+
+The usual shape is a message log in one system and an analytical store in another, with a
+pipeline extracting between them — two copies of every row and a job that keeps them in
+step. There is no extraction step here and no second copy. A litelink log **is** an Iceberg
+table, so the Parquet your messages were appended to is the Parquet an analytical engine
+reads:
+
+```python
+import duckdb
+import litelink
+import streamcast
+
+# Published through streamcast, live.
+async with streamcast.publish(uri) as producer:
+    await producer.send({"event_ts": 1790038800123456, "price": 85565.0, "side": 1})
+
+# The same bytes as a table, on the box that holds the log.
+with litelink.open("data", "trades", read_only=True) as log:
+    log.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
+
+# Or from anywhere, over the archive — no local root, no catalog service.
+with litelink.snapshot("trades", archive="s3://bucket/prefix") as log:
+    log.scan(where="side = 1").read_all()
+
+# Or from any Iceberg engine, with neither streamcast nor litelink installed.
+duckdb.sql("""
+    SELECT count(*), max(price)
+    FROM iceberg_scan('s3://bucket/prefix/trades',
+                      version_name_format = '%s%s.metadata.json')
+""")
+```
+
+Rows land in a SQLite buffer first and seal into Parquet behind it, so the newest messages
+are in the buffer and the rest are columnar — `log.sql` reads across both and an external
+engine reads the sealed part. That is one store with tiers, not a transactional copy and an
+analytical copy that have to be reconciled.
+
+The tiering, the archive layout and what each read costs are
+[litelink](https://github.com/nhobin219/litelink)'s, and its README and
+[SPEC](https://github.com/nhobin219/litelink/blob/main/docs/SPEC.md) describe them in
+depth — including why `version_name_format` is spelled out above, and how an engine
+resolves the current metadata from `version-hint.text` with no catalog.
 
 ## Install
 

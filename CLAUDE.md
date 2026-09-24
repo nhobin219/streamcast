@@ -1,9 +1,13 @@
 # streamcast
 
-A replayable WebSocket multicaster. One upstream stream in, appended to a litelink log —
-an Iceberg table on disk — and broadcast to any number of downstream subscribers. Each
-message carries the offset it was written at, so a subscriber that stops can reconnect
-and ask for the rest.
+A durable WebSocket pubsub framework built on litelink. Publishers write, subscribers
+read, and every message is appended to a litelink log — an Iceberg table — before any
+subscriber sees it. Each message carries the offset it was written at, so a subscriber
+that stops can reconnect and ask for the rest.
+
+**The log is the analytical table**, which is the reason litelink is underneath rather
+than an append-only file: no export step and no second copy, so the Parquet a message was
+appended to is the Parquet an analytical engine reads.
 
 Read [`docs/SPEC.md`](docs/SPEC.md) before changing behaviour. It is short and it carries
 the reasoning — particularly §3 (the two atomicity invariants) and §4 (why a slow
