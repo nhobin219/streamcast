@@ -7,12 +7,14 @@
 [![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 
-# A durable WebSocket pubsub framework built on litelink
+# A durable JSON WebSocket pubsub framework for structured data
 
 Publishers write, subscribers read, and every message is appended to a
-[litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. Each
-message carries the offset it was written at, so a subscriber that stops can reconnect and
-ask for the rest.
+[litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. A
+message is a **row** — with a log attached it is checked against a schema you declare,
+which is what lets the log be an Iceberg table rather than a pile of frames. Each message
+carries the offset it was written at, so a subscriber that stops can reconnect and ask for
+the rest.
 
 ```
 ws feed ─┐
@@ -67,7 +69,7 @@ are in the buffer and the rest are columnar — `log.sql` reads across both and 
 engine reads the sealed part. That is one store with tiers, not a transactional copy and an
 analytical copy that have to be reconciled.
 
-The tiering, the archive layout and what each read costs are
+The tiering, the archive layout, consistency guarantees, and costs are
 [litelink](https://github.com/nhobin219/litelink)'s, and its README and
 [SPEC](https://github.com/nhobin219/litelink/blob/main/docs/SPEC.md) describe them in
 depth — including why `version_name_format` is spelled out above, and how an engine
@@ -567,9 +569,11 @@ Offsets are per server and are not translated between hops.
 
 ## What it is not
 
-- **Not a message broker.** No fan-in: nothing publishes into a stream over the wire. No
-  topics beyond a name, no consumer groups, no acknowledgements. A subscriber needing
-  at-least-once with acks wants a queue.
+- **Not a message broker.** No topics beyond a name, no consumer groups, and no consumer
+  acknowledgements — where a subscriber has got to is its own cursor, not state the server
+  keeps. A publisher does get an ack, the offset once the row is durable; nothing tracks
+  what a subscriber has consumed. A subscriber needing at-least-once with server-side acks
+  wants a queue.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
@@ -577,14 +581,6 @@ Offsets are per server and are not translated between hops.
   `max_replay`; querying history is litelink directly, or any Iceberg engine.
 - **Not a place for frames that are not rows.** A typed log has nowhere to put a
   subscription ack or a heartbeat; the feed handler drops them.
-
-## Not implemented yet
-
-**Remote publishers.** `Stream.send` runs in the server's process; a client cannot publish
-into a stream. **Registered intent** — one designated publisher and many read-only nodes —
-is designed and unbuilt. **Arrow IPC as a negotiated wire format** would make a bulk
-replay 492x cheaper to encode and 2.4x smaller, at the cost of the `wscat` affordance.
-See [`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Documentation
 
