@@ -234,7 +234,7 @@ class TestTheFenceIsNotDistance:
         would refuse is asked what it actually costs before being turned away.
 
         Falsify by deleting the `_log.rows_from` call in `_resolve`: this
-        raises `too_old` again, and producer failover needs `max_replay=None`
+        raises `too_old` again, and recovering a server needs `max_replay=None`
         to be usable.
         """
         stream, handle = produce(tmp_path / "box_a", bucket, s3)

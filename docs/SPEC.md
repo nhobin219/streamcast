@@ -612,7 +612,8 @@ market feed ─► streamcast A ─► live runner ─► streamcast B ─► da
 
 The live runner is a *subscriber* of A and *embeds* B in its own process — a
 `Stream` plus a `serve`, exactly as §1 shows. Nothing publishes into a server
-over the wire, which is why there is no remote publisher (§9).
+over the wire in this topology — each stage publishes into a `Stream` it
+holds. A stage that cannot hold one publishes remotely instead (§6b).
 
 The dashboard box runs a litelink capture with S3 publishing off, so it keeps a
 local window and drops what ages out. On restart it reads the maximum offset it
@@ -623,6 +624,123 @@ That is the whole recovery path, and it is the same two calls at every hop.
 in A's log and a different one in B's. They are not translated and must not be
 compared: a consumer's cursor is only meaningful against the server that issued
 it. A pipeline that needs end-to-end correlation puts its own id in the payload.
+
+---
+
+## 6b. Remote publishing
+
+`streamcast.publish(uri)` hands rows to a server, which appends them with the
+same `Stream.send` / `send_many` a local publisher calls. Opt-in on the server
+(`serve(..., publish=True)`), because a server that became writable on an
+upgrade would be a change nobody asked for.
+
+**It adds no authority, and that is the whole argument for it.** litelink
+allows one writer per log, refuses neither a second nor detects one, and has
+no lease that spans machines — so two `WriteHandle`s on one log is a
+corruption path with no guard (§8b). Publishing to the process that already
+owns the handle resolves the concurrency where it can actually be resolved:
+any number of publishers, one writer.
+
+**Concurrency is free because of I1.** `send` contains no `await`, so two
+handlers calling it cannot interleave — each assigns its offset, appends and
+fans out in one step. `send_many` stays one transaction, so a batch's offsets
+are adjacent even with another publisher racing it. Nothing coordinates the
+publishers and nothing needs to.
+
+**Granularity is the publisher's, exactly as it is locally.** A frame is a row
+or a list of rows, and the shape is the request: an object means `send`, a
+list means `send_many`. The consequences are the local ones too — §3's note
+about a publish loop that never yields applies to a remote publisher in the
+same way and for the same reason.
+
+A row the schema refuses is answered and the connection stays open, because
+that is what the local call does: `send` raises, the caller catches it, the
+next call works. Closing would make one bad row cost every good one behind it.
+
+### Publishing is at-least-once under retry
+
+A row is durable when `send` returns. If the connection drops before the reply
+arrives, the publisher cannot tell whether the append happened. Retrying may
+duplicate the row; not retrying may lose it. **streamcast does not resolve
+this**, and the reason is that it cannot: the ambiguity is in the publisher's
+knowledge, not in the log.
+
+It is worse than the consumer-side ambiguity §8 documents, and worth saying
+so. A re-delivered message is handled by an idempotent consumer; a duplicated
+row is in the log for ever, every consumer sees it, and no cursor undoes it.
+
+**The recommended shape is a publisher key and a per-publisher sequence.**
+Carry both as ordinary columns:
+
+```python
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "publisher": {"type": "string"},       # who wrote it
+        "seq":       {"type": "integer"},      # monotonic, per publisher
+        "price":     {"type": "number"},
+    },
+    "required": ["publisher", "seq", "price"],
+}
+```
+
+On reconnect, replay the window you could not account for and filter it in
+memory. The offset `send` already returned is what bounds the read:
+
+```python
+landed = last_acked_seq
+async with streamcast.connect(uri, offset=last_acked_offset + 1) as sub:
+    # The greeting says exactly what is about to be replayed, so this is a
+    # `for` over a known count rather than a loop working out when to stop.
+    lo, hi = sub.info.replay or (0, 0)
+    for _ in range(hi - lo):
+        _offset, row = await sub.recv()
+        if row["publisher"] == me:
+            landed = max(landed, int(row["seq"]))
+
+resume_at = landed + 1
+```
+
+That is the whole of it: an ordinary subscribe, and a comparison. Nothing
+queries the archive — it lags, so a row published a second ago is not in it —
+and nothing needs new server state.
+
+**A publisher recovering this way needs no litelink**, which is the point of
+doing it over the socket rather than against the log. It needs streamcast and
+the ability to reach the server, exactly like a consumer; no Iceberg reader,
+no object-storage credentials, no second dependency on a box whose only job
+is to publish. The same argument as `catch_up` reading the archive rather than
+the WAL replica (§5), one layer out.
+
+**The offset and the key do different jobs, and both are needed.** The offset
+bounds *where to look*: `send` already returned it, so the replay covers only
+the rows written while one reply was in flight, however large the log is. The
+key identifies *what to look for*: the window holds other publishers' rows
+too, and `(publisher, seq)` is what picks yours out of it. A row that already
+carries a natural unique key needs no extra columns — match on that instead.
+
+Per-publisher keys also mean several publishers on one stream do not
+interfere: each asks only about its own, so recovery is independent of what
+anyone else wrote.
+
+**Two ways to get the loop wrong, both silent.** Reading until some condition
+on the messages blocks for ever when the window is empty, which is the common
+case — a publisher that was acked for everything has nothing to replay, and
+`info.replay` is what says so without a message arriving. And `landed` starts
+at the last acknowledged seq rather than at zero: the replay covers only the
+post-acknowledgement window, so finding nothing in it means the last
+acknowledged row is still the last one that landed. Reading that as "nothing
+landed" resends everything.
+
+A ULID in place of the integer works and removes the need to persist a
+counter, since a restart naturally produces higher values; `max()` is still
+well defined over them. What no key removes is the need for the publisher to
+know what it was trying to send, which is its own durable outbox and outside
+this library either way.
+
+The cost is two columns. A publisher that can tolerate a duplicate — most
+market data, where the same trade twice is caught downstream or does not
+matter — pays nothing and skips all of it.
 
 ---
 
@@ -683,7 +801,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 
 ---
 
-## 8b. Producer failover
+## 8b. Recovering a server
 
 `Stream.restore(name, root=…, archive=…)` stands a stream up on a box that
 never held its log: litelink rebuilds it from the archive and the replicated

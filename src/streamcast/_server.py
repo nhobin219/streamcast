@@ -23,7 +23,7 @@ from websockets.exceptions import ConnectionClosed
 
 from streamcast._errors import Close, NotReplayable
 from streamcast._maintain import Maintain, Supervisor
-from streamcast._protocol import parse_subscribe, refusal
+from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stream import Stream
 
@@ -201,6 +201,7 @@ def serve(
     *,
     maintain: bool | Maintain = True,
     replicate: bool = True,
+    publish: bool = False,
     compression: str | None = None,
     **kwargs: Any,
 ) -> _Served:
@@ -286,6 +287,26 @@ def serve(
                 Close.NO_SUCH_STREAM,
                 refusal("no_such_stream", serves=sorted(routes)),
             )
+            return
+
+        if isinstance(requested, Publish):
+            # **Opt-in, because a server that silently became writable on an
+            # upgrade would be a security change nobody asked for.** Every
+            # other refusal here is about what a caller asked for; this one is
+            # about what the operator allowed, so it says so rather than
+            # pretending the stream does not exist.
+            if not publish:
+                await connection.close(
+                    Close.BAD_REQUEST,
+                    refusal("publish_disabled"),
+                )
+                return
+
+            try:
+                await stream.serve_publisher(connection)
+            except ConnectionClosed:
+                return
+
             return
 
         try:

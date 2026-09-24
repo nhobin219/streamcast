@@ -16,7 +16,7 @@ live, with no window in which a message is in neither place. Without one the
 fan-out is identical, offsets are `null`, and `?offset=` is refused.
 `docs/SPEC.md` §3 argues that partition; `Stream` enforces it.
 
-**The API is `websockets`, with three deviations.** `serve` and `connect`
+**`serve` and `connect` are the `websockets` API, with three deviations.** They
 have the same shapes and pass their keywords through, and `serve` returns an
 object that proxies `websockets.Server`. What differs: iterating a
 subscription yields `(offset, row)` rather than `message`, because the offset
@@ -24,6 +24,10 @@ is what makes a reconnect a resume; a subscription is read-only, with no
 `send` rather than a `send` that raises; and `compression` defaults to None
 here where `websockets` defaults to `"deflate"`, because permessage-deflate
 compresses once per subscriber a frame this encodes once.
+
+`publish` has no `websockets` counterpart — WebSocket defines frames, not
+verbs, so both publishing and subscribing here are URL conventions on top of
+it. It is shaped like `connect` so it reads the same way.
 
 **The schema is yours, declared in JSON Schema.** streamcast declares no
 columns — the log is an ordinary litelink table with whatever shape you gave
@@ -88,12 +92,14 @@ from streamcast._errors import (
     Close,
     NotReplayable,
     ProtocolError,
+    Rejected,
     StreamcastError,
     StreamNotFound,
     TooSlow,
 )
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting, LogInfo
+from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
@@ -116,6 +122,9 @@ __all__ = [
     "S3Options",
     "NotReplayable",
     "ProtocolError",
+    "publish",
+    "Rejected",
+    "Publication",
     "Stream",
     "StreamNotFound",
     "StreamcastError",

@@ -31,6 +31,7 @@ SCOPES = {
     "client",  # §5  connect, Subscription
     "log",  # §6  the litelink tier: columns, rows, replay
     "replay",  # §6  the resume path specifically
+    "publish",  # §6b remote publishing: the producer end
     "schema",  # JSON Schema <-> Arrow
     "cursor",  # where a consumer keeps its offset, local and remote
     "catchup",  # reading the gap from the archive

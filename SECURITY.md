@@ -43,7 +43,17 @@ decides who may read the archive, not this library. If the URI itself is
 sensitive, leave `archive=` off the log and give catching-up consumers the
 location out of band.
 
+**A server that allows publishing accepts writes from anyone who can reach
+it.** `serve(..., publish=True)` is opt-in for that reason, and off by default
+so an upgrade cannot make a server writable on its own. With it on, the
+authentication above stops being optional: a published row is durable, every
+subscriber sees it, and no consumer cursor undoes it. `process_request` is the
+hook — it sees the request before the WebSocket opens, including the
+`?publish` query that distinguishes a publisher from a subscriber, so a policy
+can allow reads and refuse writes on the same port.
+
 What IS in scope: anything that lets a subscriber see messages from a stream it
 did not subscribe to, receive a stream that silently differs from another
-subscriber's, or make the server exhaust memory through a path `max_backlog` is
-supposed to bound.
+subscriber's, make the server exhaust memory through a path `max_backlog` is
+supposed to bound, or publish into a stream on a server where `publish=True`
+was not set.

@@ -40,11 +40,14 @@ uv add streamcast
 
 ## API
 
-**It is the `websockets` API.** `serve` and `connect` have the same shapes and pass every
-keyword through, so `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest
-behave exactly as they do there, and `serve` returns an object that proxies
-`websockets.Server` — `sockets`, `serve_forever`, `connections`, `is_serving`. If you know
-`websockets`, you know this.
+**`serve` and `connect` are the `websockets` API.** Same names, same shapes, and every
+keyword passed through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the
+rest behave exactly as they do there, and `serve` returns an object that proxies
+`websockets.Server` (`sockets`, `serve_forever`, `connections`, `is_serving`).
+
+**`publish` has no `websockets` counterpart**; it is streamcast's, shaped like `connect`
+so it reads the same way. WebSocket itself has no verbs — the protocol is frames, and
+both subscribing and publishing here are URL conventions on top of it.
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False,
@@ -56,9 +59,12 @@ streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True, ...) -> Server
+streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
+                 publish=False, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
+streamcast.publish(uri, ...) -> Publication          # server needs publish=True
+    await producer.send(row) · await producer.send_many(rows)
 streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
 ```
 
@@ -234,6 +240,38 @@ example above reaches through `["data"]` — so a general extractor needs per-fi
 which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
 where it already knows the feed.
 
+### Handling multiple publishers
+
+Several publishers writing to one stream interleave in one log, so a row has to say who
+wrote it. Declare a publisher key and a per-publisher sequence alongside your own columns:
+
+```python
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "publisher": {"type": "string"},        # who wrote it
+        "seq": {"type": "integer"},             # monotonic, per publisher
+        "event_ts": {"type": "integer"},
+        "price": {"type": "number"},
+    },
+    "required": ["publisher", "seq", "event_ts", "price"],
+}
+```
+
+The server needs no configuration for this — it already serialises publishers, so offsets
+stay contiguous and a `send_many` stays one commit whoever else is writing. The columns are
+for the **publishers**, so each can find its own rows again after a restart. See
+[recovering a producer](#recovering-a-producer).
+
+**Declare them before anyone publishes.** `litelink.add_column` can add them later, but a
+late-added column is nullable for ever — older files read null — so a publisher that forgets
+to set it writes NULL silently, and a recovery scan cannot tell that apart from another
+publisher's row. Declared up front they are `required` and non-null, and a publisher that
+forgets fails loudly at `send`.
+
+A row that already carries a natural unique key needs none of this — match on that instead.
+And a single publisher needs no key at all: its own cursor is enough.
+
 ### Backpressure
 
 `Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
@@ -265,10 +303,11 @@ replaying `max_replay` messages has to finish within `max_backlog` new ones or i
 dropped at the moment it catches up, having done all the work. Raise one and check the
 other; `just bench-replay` prints the arithmetic for your hardware.
 
-### Producer failover
+### Recovering a server
 
-A consumer moves boxes with `connect(cursor=)`. A producer moves with
-`Stream.restore`, which rebuilds the log from the archive and the replicated WAL:
+A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
+rebuilds the log itself from the archive and the replicated WAL on a machine that never
+held it:
 
 ```python
 stream = streamcast.Stream.restore(
@@ -322,6 +361,73 @@ arithmetic does not bite. Each replay also holds a worker from the `to_thread` p
 
 ## Client
 
+Two ends, and a connection is one or the other. A subscriber has no `send`; a publisher
+has no `recv`. Neither carries a method that raises.
+
+### Producer
+
+`Stream.send` publishes from the server's own process. `streamcast.publish` does it from
+anywhere else:
+
+```python
+async with streamcast.publish("ws://localhost:8765/trades") as producer:
+    offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
+```
+
+The server must allow it — `serve(..., publish=True)`, off by default so an upgrade never
+makes a server writable on its own. `send` returns once the row is durable, exactly as the
+local call does; `send_many` commits a group in one transaction and is the same throughput
+lever it is locally. A row the schema refuses raises `Rejected`, naming the column, and the
+connection stays open so the next row works.
+
+**The server remains the only writer**, which is why this exists rather than opening the
+log from another box. litelink allows one writer per log, and neither refuses a second nor
+detects one — so two `WriteHandle`s on one log is a corruption path with no guard. Handing
+rows to the process that already owns the handle resolves the concurrency where it can
+actually be resolved: any number of publishers, one writer. Offsets stay contiguous and a
+batch stays one commit even with publishers racing.
+
+> ⚠️ **Publishing is at-least-once under retry.** A row is durable when `send` returns. If
+> the connection drops before the reply arrives, the publisher cannot tell whether the
+> append happened — retrying may duplicate the row, not retrying may lose it. streamcast
+> does not resolve that ambiguity; a publisher that cannot tolerate a duplicate carries its
+> own key in the row and deduplicates downstream, which is the only place it is decidable.
+> The fix is small: carry a publisher key and a per-publisher sequence as columns, and on
+> reconnect replay from the offset you were last acked for, filtering in memory. The offset
+> bounds the read; the key identifies your rows in it. [`SPEC.md`](docs/SPEC.md) §6b has it.
+
+#### Recovering a producer
+
+`cursor=` records the offset this publisher was last acknowledged for, and `cursor_uri=`
+ships it to object storage so a producer can resume on another box. The same two keywords
+a consumer takes, doing the same job at the other end of the stream — and distinct from
+[recovering a server](#recovering-a-server), which moves the log itself.
+
+```python
+async with streamcast.publish(
+    uri, cursor=".trades-producer.offset",
+    cursor_uri="s3://streamcast/producer1/cursor.offset",
+) as producer:
+    start = producer.resumed_from          # where this publisher got to, or None
+```
+
+**It does not resume by itself, and that is the difference from a consumer.** A consumer
+cursor is enough on its own: the server replays from it. A producer cursor says where this
+publisher got to, not what it should send next — that is its own outbox, or a position in
+whatever it reads from, and the library cannot know either. So it is reported and you act
+on it.
+
+Acting on it is the replay in [`SPEC.md`](docs/SPEC.md) §6b: subscribe from
+`resumed_from` **inclusive**, and the first row is this publisher's own last acknowledged
+one, so the sequence it carried comes back out of the log. That is why one integer on disk
+is enough.
+
+Saves are throttled to once a second and settled on a clean exit; `producer.commit()`
+forces one, or `commit(offset)` states what you consider settled. A cursor that lags only
+widens the replay — a cursor that leads would skip rows and duplicate them.
+
+### Consumer
+
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
     async for offset, msg in stream:
@@ -332,7 +438,7 @@ async with streamcast.connect("ws://localhost:8765/trades") as stream:
 be logged, forwarded, or appended to another stream whole. The parse happens once, at the
 publisher.
 
-### Resuming
+#### Resuming
 
 The server records its frontier when a subscriber attaches, replays `[requested, frontier)`
 from the log, then switches it to the live queue. Everything below the frontier is already
@@ -349,8 +455,8 @@ async with streamcast.connect(uri, cursor=".trades.offset") as stream:
 |---|---|
 | `offset=N` | resume from `N` inclusive; `streamcast.EARLIEST` for everything the log holds |
 | `cursor=path` | keep the resume point on disk — loaded at connect, saved as the loop runs |
-| `cursor_uri=s3://…` | ship that cursor to object storage — see [consumer failover](#consumer-failover) |
-| `catch_up=True` | read the gap from the archive — see [consumer failover](#consumer-failover) |
+| `cursor_uri=s3://…` | ship that cursor to object storage — see [recovering a consumer](#recovering-a-consumer) |
+| `catch_up=True` | read the gap from the archive — see [recovering a consumer](#recovering-a-consumer) |
 
 The cursor advances when you ask for the *next* message, and is not saved if the block
 exits with an exception — so a crash re-delivers rather than skips. `sub.commit()` forces
@@ -368,10 +474,11 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
 
-### Consumer failover
+#### Recovering a consumer
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
-is gone — the counterpart to [producer failover](#producer-failover), one layer out.
+is gone — which is what `cursor_uri` is for, the mirror of
+[recovering a producer](#recovering-a-producer) at this end.
 
 ```python
 async with streamcast.connect(

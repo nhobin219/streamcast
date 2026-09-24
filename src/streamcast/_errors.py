@@ -170,6 +170,21 @@ class NotReplayable(StreamcastError):
         super().__init__(detail)
 
 
+class Rejected(StreamcastError):
+    """The server would not take a published row, and why.
+
+    The remote counterpart of `Stream.send` raising: litelink validates a row
+    against the declared schema and names the column it objects to, and that
+    message arrives here whole rather than trimmed, because a publisher
+    debugging a schema mismatch needs the column name.
+
+    **The connection survives it.** A local publisher catches this and sends
+    the next row; a remote one is no worse off. What did NOT happen is the
+    append — nothing was committed and no offset was issued, so the row can be
+    corrected and sent again.
+    """
+
+
 class TooSlow(StreamcastError):
     """The server dropped this subscriber for falling too far behind.
 
@@ -196,6 +211,7 @@ __all__ = [
     "Close",
     "NotReplayable",
     "ProtocolError",
+    "Rejected",
     "StreamNotFound",
     "StreamcastError",
     "TooSlow",

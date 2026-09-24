@@ -33,8 +33,15 @@ import litelink
 from websockets.frames import CloseCode
 
 from streamcast import _log, _schema
-from streamcast._errors import NotReplayable
-from streamcast._protocol import EARLIEST, encode, greeting
+from streamcast._errors import NotReplayable, ProtocolError
+from streamcast._protocol import (
+    EARLIEST,
+    decode_publish,
+    encode,
+    greeting,
+    publish_ack,
+    publish_error,
+)
 from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
@@ -514,6 +521,68 @@ class Stream:
             self._owned = None
 
     # -- subscribe ---------------------------------------------------------
+
+    async def serve_publisher(self, connection: ServerConnection) -> None:
+        """Take rows from a remote publisher and commit them as this process.
+
+        **The whole point is that this adds no authority.** A publisher hands
+        over rows; `send` and `send_many` are the same calls a local publisher
+        makes, on the same handle, in the same process. litelink allows one
+        writer per log and that writer is still this server — which is what
+        makes remote publishing safe where a second `WriteHandle` on another
+        box is not (litelink refuses neither, and cannot detect one).
+
+        I1 is what makes concurrency free here. `send` contains no `await`, so
+        two handlers calling it cannot interleave: offsets are assigned in
+        one step each, and `send_many` stays one transaction, so a batch's
+        offsets are adjacent even with another publisher racing it.
+
+        **A frame is a row, or a list of rows**, and the publisher chooses
+        which — exactly the choice a local publisher makes between `send` and
+        `send_many`, with the same consequences. The reply is the offsets
+        assigned, so a publisher learns its rows are durable the way an
+        `await send(...)` does.
+
+        A row the schema refuses is answered and the connection stays open,
+        because that is what the local call does: `send` raises, the caller
+        catches it, and the next call works. Closing would make one bad row
+        cost every good one behind it.
+        """
+        await connection.send(
+            greeting(
+                stream=self._name,
+                end_offset=self._end_offset,
+                replay=None,
+                durable=self._log is not None,
+                schema=self._shape,
+                log=(
+                    None if self._log is None else (self._log.name, self._log.archive)
+                ),
+            )
+        )
+
+        async for frame in connection:
+            try:
+                rows = decode_publish(frame)
+            except ProtocolError as exc:
+                await connection.send(publish_error("bad_frame", detail=str(exc)))
+                continue
+
+            try:
+                if isinstance(rows, list):
+                    offsets = await self.send_many(rows)
+                else:
+                    offsets = [await self.send(rows)]
+
+            except (ValueError, TypeError) as exc:
+                # litelink names the column and what it found. Passed through
+                # rather than summarised: a publisher debugging a schema
+                # mismatch needs the column name more than it needs a tidy
+                # sentence.
+                await connection.send(publish_error("rejected", detail=str(exc)))
+                continue
+
+            await connection.send(publish_ack(offsets))
 
     async def serve_subscriber(
         self, connection: ServerConnection, requested: int | None
