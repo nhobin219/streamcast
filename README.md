@@ -237,6 +237,38 @@ example above reaches through `["data"]` — so a general extractor needs per-fi
 which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
 where it already knows the feed.
 
+### Handling multiple publishers
+
+Several publishers writing to one stream interleave in one log, so a row has to say who
+wrote it. Declare a publisher key and a per-publisher sequence alongside your own columns:
+
+```python
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "publisher": {"type": "string"},        # who wrote it
+        "seq": {"type": "integer"},             # monotonic, per publisher
+        "event_ts": {"type": "integer"},
+        "price": {"type": "number"},
+    },
+    "required": ["publisher", "seq", "event_ts", "price"],
+}
+```
+
+The server needs no configuration for this — it already serialises publishers, so offsets
+stay contiguous and a `send_many` stays one commit whoever else is writing. The columns are
+for the **publishers**, so each can find its own rows again after a restart. See
+[recovering a producer](#recovering-a-producer).
+
+**Declare them before anyone publishes.** `litelink.add_column` can add them later, but a
+late-added column is nullable for ever — older files read null — so a publisher that forgets
+to set it writes NULL silently, and a recovery scan cannot tell that apart from another
+publisher's row. Declared up front they are `required` and non-null, and a publisher that
+forgets fails loudly at `send`.
+
+A row that already carries a natural unique key needs none of this — match on that instead.
+And a single publisher needs no key at all: its own cursor is enough.
+
 ### Backpressure
 
 `Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
