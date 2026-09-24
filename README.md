@@ -38,19 +38,40 @@ table, so the Parquet your messages were appended to is the Parquet an analytica
 reads:
 
 ```python
-# through streamcast, live
+import duckdb
+import litelink
+import streamcast
+
+# Published through streamcast, live.
 async with streamcast.publish(uri) as producer:
     await producer.send({"event_ts": 1790038800123456, "price": 85565.0, "side": 1})
 
-# the same bytes, as a table — no export, no pipeline, no streamcast in the query
-log.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
-duckdb.sql("SELECT * FROM iceberg_scan('s3://bucket/prefix/trades')")
+# The same bytes as a table, on the box that holds the log.
+with litelink.open("data", "trades", read_only=True) as log:
+    log.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
+
+# Or from anywhere, over the archive — no local root, no catalog service.
+with litelink.snapshot("trades", archive="s3://bucket/prefix") as log:
+    log.scan(where="side = 1").read_all()
+
+# Or from any Iceberg engine, with neither streamcast nor litelink installed.
+duckdb.sql("""
+    SELECT count(*), max(price)
+    FROM iceberg_scan('s3://bucket/prefix/trades',
+                      version_name_format = '%s%s.metadata.json')
+""")
 ```
 
 Rows land in a SQLite buffer first and seal into Parquet behind it, so the newest messages
 are in the buffer and the rest are columnar — `log.sql` reads across both and an external
 engine reads the sealed part. That is one store with tiers, not a transactional copy and an
 analytical copy that have to be reconciled.
+
+The tiering, the archive layout and what each read costs are
+[litelink](https://github.com/nhobin219/litelink)'s, and its README and
+[SPEC](https://github.com/nhobin219/litelink/blob/main/docs/SPEC.md) describe them in
+depth — including why `version_name_format` is spelled out above, and how an engine
+resolves the current metadata from `version-hint.text` with no catalog.
 
 ## Install
 
