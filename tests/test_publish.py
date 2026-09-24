@@ -210,6 +210,99 @@ class TestWhatItRefuses:
                 await streamcast.publish(wrong)
 
 
+class TestTheProducerCursor:
+    async def test_it_records_the_last_acknowledged_offset(self, serve, log, tmp_path):
+        """After the ack, never before.
+
+        A producer cursor that LAGS makes the recovery window larger — more
+        to replay, still correct. One that LEADS names a row that may never
+        have landed, so the window misses it and the publisher resends what
+        it already wrote. Same asymmetry as a consumer cursor, mirrored.
+        """
+        cursor = tmp_path / "producer.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream, publish=True, maintain=False) as uri:
+            async with streamcast.publish(uri, cursor=cursor) as producer:
+                assert producer.resumed_from is None, "nothing to resume yet"
+                for i in range(5):
+                    await producer.send(trade(i))
+
+        # The clean exit settled it — no explicit commit needed.
+        assert cursor.read_text().strip() == "5"
+
+    async def test_a_restart_resumes_from_what_it_was_acked_for(
+        self, serve, log, tmp_path
+    ):
+        """The whole point: a new process knows where it got to."""
+        cursor = tmp_path / "producer.offset"
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream, publish=True, maintain=False) as uri:
+            async with streamcast.publish(uri, cursor=cursor) as first:
+                for i in range(5):
+                    await first.send(trade(i))
+
+            # A different process, same cursor file.
+            async with streamcast.publish(uri, cursor=cursor) as second:
+                assert second.resumed_from == 5
+
+    async def test_the_recovery_replay_recovers_the_sequence(self, serve, tmp_path):
+        """One integer on disk is enough, which is why `Cursor` is reused.
+
+        Scanning INCLUSIVE of the acknowledged offset makes the first row
+        delivered this publisher's own last one — so the sequence it carried
+        comes back out of the log and only the offset has to be persisted.
+        `docs/SPEC.md` §6b.
+        """
+        import litelink
+
+        keyed = {
+            "type": "object",
+            "properties": {
+                "publisher": {"type": "string"},
+                "seq": {"type": "integer"},
+            },
+            "required": ["publisher", "seq"],
+        }
+        handle = litelink.new(
+            tmp_path / "data", "trades", schema=streamcast.to_arrow(keyed)
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle)
+            cursor = tmp_path / "producer.offset"
+            async with serve(stream, publish=True, maintain=False) as uri:
+                async with streamcast.publish(uri, cursor=cursor) as producer:
+                    for seq in range(5):
+                        await producer.send({"publisher": "a", "seq": seq})
+
+                    # Someone else writes, and then we lose the ack for ours.
+                    await producer.send({"publisher": "b", "seq": 0})
+                    # Settle at OUR last row, not at the one after it: the
+                    # cursor names what this publisher was acked for.
+                    producer.commit(5)
+
+                async with streamcast.publish(uri, cursor=cursor) as revived:
+                    start = revived.resumed_from
+                    assert start == 5
+
+                # The replay, exactly as SPEC §6b documents it.
+                landed = None
+                async with streamcast.connect(uri, offset=start) as sub:
+                    lo, hi = sub.info.replay or (0, 0)
+                    for _ in range(hi - lo):
+                        _offset, row = await sub.recv()
+                        if row["publisher"] == "a":
+                            landed = max(landed or -1, int(row["seq"]))  # ty: ignore[invalid-argument-type]
+
+            assert landed == 4, "the sequence came back out of the log"
+
+    async def test_cursor_uri_needs_a_cursor(self):
+        """The same pairing rule `connect` has, for the same reason."""
+        with pytest.raises(ValueError, match="needs a cursor="):
+            streamcast.publish(
+                "ws://127.0.0.1:1/t", cursor_uri="s3://b/p/cursor.offset"
+            )
+
+
 class TestTheUrl:
     async def test_one_address_serves_both_ends(self, serve, log):
         """`publish(uri)` and `connect(uri)` take the same string.

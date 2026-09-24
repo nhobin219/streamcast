@@ -308,12 +308,15 @@ receive buffer, stops being able to send, and is closed by the keepalive.
 ## `publish`
 
 ```python
-streamcast.publish(uri, *, **websockets_kwargs) -> Publication
+streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3=None,
+                   upload_every=30.0, **websockets_kwargs) -> Publication
 
 await producer.send(row) -> int | None          # durable, then fanned out
 await producer.send_many(rows) -> list          # ONE transaction for the group
 producer.info -> Greeting                       # incl. the stream's schema
 producer.connection -> ClientConnection
+producer.resumed_from -> int | None              # the offset last acked, from `cursor`
+producer.commit(offset=None) -> None            # save the cursor now
 await producer.close(code=1000, reason="") -> None
 ```
 
@@ -339,6 +342,15 @@ client, so one address in a config file serves both ends.
 | **`Rejected`** | a row the schema refuses, with litelink's message naming the column. Nothing committed; the connection stays open and the next row works |
 | **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
 | **serial per connection** | one frame outstanding at a time, so a reply needs no correlation id. More in flight means another connection |
+
+**`cursor=` records the offset this publisher was last acknowledged for**, and
+`cursor_uri=` ships it to object storage so a producer can resume on another box — the
+same two keywords `connect` takes. It does not resume by itself: a producer cursor says
+where this publisher got to, not what it should send next, which is its own outbox.
+`resumed_from` reports it and you act on it. Saves are throttled to once a second and
+settled on a clean exit; `commit()` forces one, `commit(offset)` states what you consider
+settled. A cursor that lags only widens the recovery replay; one that leads would skip
+rows and duplicate them.
 
 **Publishing is at-least-once under retry.** A row is durable when `send` returns, but if
 the connection drops before the reply arrives the publisher cannot tell whether the append

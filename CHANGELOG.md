@@ -29,6 +29,15 @@ there was nothing to have changed from. Everything above it is ordinary.
   server writable on its own. A publisher meeting a server that does not allow
   it is told which setting to change.
 
+- **`publish(uri, cursor=…, cursor_uri=…)`** records the offset this
+  publisher was last acknowledged for and ships it to object storage, the same
+  two keywords `connect` takes. One integer is enough: the recovery replay
+  scans INCLUSIVE of it, so the first row delivered is this publisher's own
+  last one and the sequence it carried comes back out of the log. It does not
+  resume by itself — `resumed_from` reports it, `commit()` forces a save, and
+  the publisher acts on it, because a producer cursor says where it got to
+  and not what to send next.
+
 - **`Rejected`** for a row the schema refuses, carrying litelink's message and
   the column it names. Nothing is committed and the connection stays open, so
   the next row works — what `Stream.send` raising does locally.

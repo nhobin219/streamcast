@@ -360,6 +360,35 @@ batch stays one commit even with publishers racing.
 > reconnect replay from the offset you were last acked for, filtering in memory. The offset
 > bounds the read; the key identifies your rows in it. [`SPEC.md`](docs/SPEC.md) §6b has it.
 
+#### Recovering a producer
+
+`cursor=` records the offset this publisher was last acknowledged for, and `cursor_uri=`
+ships it to object storage so a producer can resume on another box — the same two keywords
+a consumer takes, doing the same job one layer out.
+
+```python
+async with streamcast.publish(
+    uri, cursor=".trades-producer.offset",
+    cursor_uri="s3://streamcast/producer1/cursor.offset",
+) as producer:
+    start = producer.resumed_from          # where this publisher got to, or None
+```
+
+**It does not resume by itself, and that is the difference from a consumer.** A consumer
+cursor is enough on its own: the server replays from it. A producer cursor says where this
+publisher got to, not what it should send next — that is its own outbox, or a position in
+whatever it reads from, and the library cannot know either. So it is reported and you act
+on it.
+
+Acting on it is the replay in [`SPEC.md`](docs/SPEC.md) §6b: subscribe from
+`resumed_from` **inclusive**, and the first row is this publisher's own last acknowledged
+one, so the sequence it carried comes back out of the log. That is why one integer on disk
+is enough.
+
+Saves are throttled to once a second and settled on a clean exit; `producer.commit()`
+forces one, or `commit(offset)` states what you consider settled. A cursor that lags only
+widens the replay — a cursor that leads would skip rows and duplicate them.
+
 ### Consumer
 
 ```python
@@ -389,8 +418,8 @@ async with streamcast.connect(uri, cursor=".trades.offset") as stream:
 |---|---|
 | `offset=N` | resume from `N` inclusive; `streamcast.EARLIEST` for everything the log holds |
 | `cursor=path` | keep the resume point on disk — loaded at connect, saved as the loop runs |
-| `cursor_uri=s3://…` | ship that cursor to object storage — see [consumer failover](#consumer-failover) |
-| `catch_up=True` | read the gap from the archive — see [consumer failover](#consumer-failover) |
+| `cursor_uri=s3://…` | ship that cursor to object storage — see [recovering a consumer](#recovering-a-consumer) |
+| `catch_up=True` | read the gap from the archive — see [recovering a consumer](#recovering-a-consumer) |
 
 The cursor advances when you ask for the *next* message, and is not saved if the block
 exits with an exception — so a crash re-delivers rather than skips. `sub.commit()` forces
@@ -408,10 +437,10 @@ offset=streamcast.EARLIEST to take what is left and accept the gap.
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
 caller's next move differs for each.
 
-#### Failing over
+#### Recovering a consumer
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
-is gone — the counterpart to [producer failover](#producer-failover), one layer out.
+is gone — the counterpart to [recovering a producer](#recovering-a-producer), one layer out.
 
 ```python
 async with streamcast.connect(
