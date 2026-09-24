@@ -1,9 +1,15 @@
-"""A replayable WebSocket multicaster.
+"""A durable WebSocket pubsub framework built on litelink.
 
-One upstream stream in, appended to a litelink log — an Iceberg table on disk
-— and broadcast to any number of downstream subscribers. One process holds the
-upstream connection; every consumer reads from it and receives the same bytes
-in the same order, from one `encode` call.
+Publishers write, subscribers read, and every message is appended to a
+litelink log — an Iceberg table on disk — before any subscriber sees it. A
+server holds the upstream connection and every subscriber reads from it,
+receiving the same bytes in the same order from one `encode` call.
+
+**The log is the analytical table**, which is why litelink is underneath this
+rather than an append-only file. The usual shape is a message log in one
+system and an analytical store in another with a pipeline between them; here
+there is no extraction step and no second copy, so the Parquet a message was
+appended to is the Parquet DuckDB or any other Iceberg engine reads.
 
 A streamcast server is a Python WebSocket tickerplant: a process that captures
 a feed, optionally writes it to a log, and publishes it to registered
