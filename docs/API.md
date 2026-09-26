@@ -212,14 +212,14 @@ TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECU
 
 ### `maintain`
 
-**`maintain=True` starts one maintainer subprocess per stream that has a log**, and stops
-it when the server closes. Without it, nothing in this library ever calls litelink's
+**`maintain=True` starts one maintainer subprocess covering every stream that has a log**,
+and stops it when the server closes. Without it, nothing in this library ever calls litelink's
 `seal_due()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
 held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
 growing. litelink says it plainly: *"A maintainer is not optional."*
 
 ```python
-streamcast.serve(stream, host, port)                           # a maintainer per log
+streamcast.serve(streams, host, port)                          # one maintainer, all logs
 streamcast.serve(stream, host, port, maintain=False)           # you run your own
 streamcast.serve(stream, host, port,
                  maintain=streamcast.Maintain(seal_every=0.1, maintain_every=30))

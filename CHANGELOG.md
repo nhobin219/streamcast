@@ -9,6 +9,28 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Changed
+
+- **One maintainer and one litestream per serving process**, not one of each
+  per served log. A maintainer is a full interpreter with litelink, pyarrow,
+  pyiceberg and duckdb loaded — 149 MB RSS measured — so four streams cost
+  596 MB one-per-log against 149 MB shared, and litestream added 40-170 MB per
+  process on top. The marginal cost was the worse half: a stream taking a row
+  a minute cost the same as the busiest one, which made "should this be its
+  own stream" a resource question it should not be.
+
+  The maintainer sweeps its logs in one loop with the `try` INSIDE it, so a
+  log whose recovery fails costs that log a pass and the others nothing, and
+  `maintain()` is staggered across logs so N of them do not come due together.
+  `Maintain(dedicated=("trades",))` gives a named log its own process.
+
+  litestream takes a merged `dbs` config. **The flock stays per log**, because
+  it protects the database rather than the replicator: the sidecar holds one
+  lock per log and replicates exactly the logs it holds, so two servers under
+  one root divide the databases between them instead of one replicating
+  nothing. A lock that frees up mid-run is taken and the process restarted,
+  since litestream reads its `dbs` once at startup.
+
 ### Added
 
 - **`Stream.stats`** and **`serve(stats=True)`** — the numbers needed to tell a
