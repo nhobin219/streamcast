@@ -1,7 +1,7 @@
 """A JSON WebSocket pubsub framework for structured data.
 
-Publishers write, subscribers read, and every message is appended to a
-litelink log — an Iceberg table on disk — before any subscriber sees it. A
+Publishers write, subscribers read, and every message is optionally appended
+to a litelink log — an Iceberg table on disk — before any subscriber sees it. A
 message is a ROW: with a log attached it is checked against a schema the
 caller declares, which is what lets the log be a table rather than a pile of
 frames. A server holds the upstream connection and every subscriber reads
@@ -13,9 +13,9 @@ system and an analytical store in another with a pipeline between them; here
 there is no extraction step and no second copy, so the Parquet a message was
 appended to is the Parquet DuckDB or any other Iceberg engine reads.
 
-A streamcast server is a Python WebSocket tickerplant: a process that captures
-a feed, optionally writes it to a log, and publishes it to registered
-subscribers (https://code.kx.com/q/architecture/).
+The API is a thin custom pubsub layer on top of standard `websockets`. For
+those familiar with kdb+, a streamcast server is effectively a Python
+WebSocket tickerplant (https://code.kx.com/q/architecture/).
 
 With a log attached, every message is durable *before* any subscriber sees it,
 so a consumer that falls behind, crashes or restarts reconnects with the last

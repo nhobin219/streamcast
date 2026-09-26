@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.6.0 — unreleased
 
 ### Changed
 
@@ -30,6 +30,11 @@ there was nothing to have changed from. Everything above it is ordinary.
   one root divide the databases between them instead of one replicating
   nothing. A lock that frees up mid-run is taken and the process restarted,
   since litestream reads its `dbs` once at startup.
+
+  **Breaking for the hand-run maintainer.** `python -m streamcast maintain`
+  took `--root PATH --name NAME` and now takes `--log PATH NAME`, repeatable.
+  Two values rather than one `root:name` string because a root is a path and
+  a path may contain a colon. `serve` is unaffected.
 
 ### Added
 

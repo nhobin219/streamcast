@@ -9,7 +9,7 @@
 
 # A JSON WebSocket pubsub framework for structured data
 
-Publishers write, subscribers read, and every message is appended to a
+Publishers write, subscribers read, and every message is optionally appended to a
 [litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. A
 message is a **row** — with a log attached it is checked against a schema you declare,
 which is what lets the log be an Iceberg table rather than a pile of frames. Each message
@@ -26,10 +26,9 @@ publisher ┘         │  fan-out
 ```
 
 Every subscriber receives the same bytes in the same order, from one `encode` call. The
-API is `websockets` with a few deliberate differences, listed below, and a streamcast
-server is a Python WebSocket
-[tickerplant](https://code.kx.com/q/architecture/): a process that captures a feed,
-optionally writes it to a log, and publishes it to registered subscribers.
+API is a thin custom pubsub layer on top of standard `websockets`. For those familiar with
+kdb+, a streamcast server is effectively a Python WebSocket
+[tickerplant](https://code.kx.com/q/architecture/).
 
 ## The log is the analytical table
 

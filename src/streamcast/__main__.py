@@ -26,12 +26,13 @@ def main(argv: list[str] | None = None) -> int:
         return _maintain(argv[1:])
 
     print(
-        "usage: python -m streamcast maintain --root PATH --name NAME\n"
+        "usage: python -m streamcast maintain --log PATH NAME [--log PATH NAME ...]\n"
         "\n"
-        "Sweeps a stream's litelink log: seals the buffer into Parquet, then\n"
-        "compacts, evicts and expires. `streamcast.serve(maintain=True)`\n"
-        "starts one of these per stream and stops it on close, so running it\n"
-        "by hand is for a deployment that passed `maintain=False`.",
+        "Sweeps streamcast's litelink logs: seals each buffer into Parquet,\n"
+        "then compacts, evicts and expires. `streamcast.serve(maintain=True)`\n"
+        "starts ONE of these covering every log it serves and stops it on\n"
+        "close, so running it by hand is for a deployment that passed\n"
+        "`maintain=False`. Repeat --log to sweep several.",
         file=sys.stderr,
     )
 

@@ -61,9 +61,10 @@ and the recovery that rests on them — a consumer's cursor, and reading the
 archive when a consumer has fallen past what the server will replay.
 
 Out: acknowledgements, consumer groups, delivery guarantees beyond "a
-contiguous prefix", authentication, and transport security. The last two are
-`websockets`' and are passed through rather than reimplemented
-([`SECURITY.md`](../SECURITY.md)).
+contiguous prefix", authentication, and transport security. The last two
+belong to whatever owns the socket — `websockets` under `serve`, the host
+application and its ASGI server under `streamcast.asgi` — and are passed
+through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ---
 
