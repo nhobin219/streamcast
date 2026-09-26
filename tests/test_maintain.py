@@ -130,6 +130,16 @@ class TestTheDefect:
         assert got[0][1]["event_ts"] == 0
 
 
+def _a_log(root, name):
+    """Another durable log, for the tests about covering more than one."""
+    import litelink
+    import pyarrow as pa
+
+    return litelink.new(
+        root, name, schema=pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    )
+
+
 class TestLifecycle:
     async def test_a_live_only_stream_starts_no_process(self, serve):
         # Nothing to sweep, so nothing is spawned — not a process with no work.
@@ -142,13 +152,134 @@ class TestLifecycle:
 
         assert _supervisors({"a": streamcast.Stream("a", log=log)}, False) == []
 
-    async def test_one_supervisor_per_stream_with_a_log(self, log):
+    async def test_one_supervisor_covers_every_log(self, log, tmp_path):
+        """**One process for the server, not one per log.**
+
+        Each maintainer is a full interpreter with litelink, pyarrow,
+        pyiceberg and duckdb loaded — ~207 MB RSS — so one per log made a
+        producer serving four small streams spend ~830 MB maintaining ~460 MB
+        of producer, and made adding a stream that takes a row a minute cost
+        the same as the busiest one.
+
+        Falsify by returning one `Supervisor` per log in `_supervisors`.
+        """
         from streamcast._server import _supervisors
 
-        made = _supervisors(
-            {"a": streamcast.Stream("a", log=log), "b": streamcast.Stream("b")}, True
-        )
-        assert len(made) == 1
+        others = [_a_log(tmp_path / f"extra{i}", f"s{i}") for i in range(3)]
+        try:
+            routes = {
+                "a": streamcast.Stream("a", log=log),
+                "live": streamcast.Stream("live"),
+            }
+            routes.update(
+                {
+                    handle.name: streamcast.Stream(handle.name, log=handle)
+                    for handle in others
+                }
+            )
+            made = _supervisors(routes, True)
+
+            assert len(made) == 1, "one maintainer per log is the defect"
+            # By the LOG's name, not the route key: the maintainer opens the
+            # log, and `serve` may route it under a different path.
+            assert {name for _root, name in made[0].targets} == {
+                "trades",
+                "s0",
+                "s1",
+                "s2",
+            }, "a log was left unmaintained"
+
+        finally:
+            for handle in others:
+                handle.close()
+
+    async def test_dedicated_names_a_log_that_gets_its_own(self, log, tmp_path):
+        """The opt-out, for a log large or hot enough that its `maintain()`
+        would hold up everyone else's `seal_due()`.
+
+        The shared loop sweeps in series, so that delay is real — it is just a
+        fine trade for the small streams sharing exists for.
+        """
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        busy = _a_log(tmp_path / "busy", "busy")
+        try:
+            routes = {
+                "a": streamcast.Stream("a", log=log),
+                "busy": streamcast.Stream("busy", log=busy),
+            }
+            made = _supervisors(routes, Maintain(dedicated=("busy",)))
+
+            covered = [{name for _root, name in sup.targets} for sup in made]
+            assert {"busy"} in covered, "the dedicated log did not get its own"
+            assert {"trades"} in covered, "the rest did not keep sharing"
+            assert len(made) == 2
+
+        finally:
+            busy.close()
+
+    async def test_dedicating_every_log_starts_no_empty_shared_process(
+        self, log, tmp_path
+    ):
+        """**No maintainer with nothing to maintain.**
+
+        `dedicated` naming every log leaves the shared set empty, and a
+        `Supervisor` over no logs would be a full interpreter — 149 MB RSS
+        measured — sweeping nothing for the life of the server. That is the
+        cost this whole change exists to remove, reappearing as a rounding
+        error in the opt-out.
+
+        Falsify by appending the shared `Supervisor` unconditionally.
+        """
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        other = _a_log(tmp_path / "other", "other")
+        try:
+            routes = {
+                "a": streamcast.Stream("a", log=log),
+                "b": streamcast.Stream("b", log=other),
+            }
+            made = _supervisors(routes, Maintain(dedicated=("trades", "other")))
+
+            assert len(made) == 2, "an empty shared maintainer was started"
+            assert sorted(sorted(n for _r, n in s.targets) for s in made) == [
+                ["other"],
+                ["trades"],
+            ]
+            assert all(sup.targets for sup in made), "a maintainer sweeps nothing"
+
+        finally:
+            other.close()
+
+    async def test_dedicating_a_name_nothing_serves_is_refused(self, log):
+        """A typo would otherwise put the log back in the shared loop.
+
+        Which is the one thing the caller named it to avoid, with the symptom
+        being a latency problem they believe they already fixed. `_routes`
+        refuses a name collision rather than resolving one, for the same
+        reason.
+        """
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        with pytest.raises(ValueError, match="does not serve with a log") as raised:
+            _supervisors(
+                {"a": streamcast.Stream("a", log=log)}, Maintain(dedicated=("trade",))
+            )
+
+        # It names what IS served, and that the name is the log's.
+        assert "'trades'" in str(raised.value)
+        assert "LOG's" in str(raised.value)
+
+    async def test_a_live_only_stream_cannot_be_dedicated(self):
+        """It has no log, so there is nothing for a maintainer to sweep."""
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        with pytest.raises(ValueError, match="does not serve with a log"):
+            _supervisors({"a": streamcast.Stream("a")}, Maintain(dedicated=("a",)))
 
     async def test_the_maintainer_stops_when_the_server_closes(self, log):
         stream = streamcast.Stream("trades", log=log)
@@ -231,7 +362,14 @@ def test_there_is_no_thread_mode_to_get_wrong():
 
     assert "thread" not in inspect.signature(Maintain.__init__).parameters
     assert "thread" not in inspect.signature(streamcast.serve).parameters
-    assert set(Maintain.__dataclass_fields__) == {"seal_every", "maintain_every"}
+    assert set(Maintain.__dataclass_fields__) == {
+        "seal_every",
+        "maintain_every",
+        # Names logs that get their own PROCESS, which is the opt-out from
+        # sharing one — still not a thread, and there is no way to ask for
+        # one.
+        "dedicated",
+    }
 
     # And the child is a real subprocess, not a thread pretending to be one.
     spawn = inspect.getsource(Supervisor._spawn)

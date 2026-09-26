@@ -158,28 +158,61 @@ class _Served:
 def _supervisors(
     routes: dict[str, Stream], maintain: bool | Maintain
 ) -> list[Supervisor]:
-    """One maintainer per stream that has a log, or none.
+    """ONE maintainer for every log this server serves, plus any dedicated.
 
-    A live-only stream has nothing to sweep, so `maintain=True` on a server of
-    them spawns nothing rather than a process with no work to do.
+    A live-only stream has nothing to sweep, so a server of them spawns
+    nothing rather than a process with no work to do.
+
+    **One process, not one per log**, which is what this built before. A
+    maintainer is a full interpreter with litelink, pyarrow, pyiceberg and
+    duckdb loaded — ~207 MB RSS each — so four small streams cost ~830 MB to
+    maintain a producer of ~460 MB, and each new stream cost the same again
+    whether it took a row a minute or a million. The work never needed the
+    isolation: `seal_due()` on an idle log is an indexed read of one row.
+
+    `Maintain.dedicated` names logs that still get their own, for one large
+    or hot enough that its `maintain()` would hold up everyone else's
+    `seal_due()`.
 
     WAL replication is a separate concern with its own argument — see
-    `_sidecars`, which runs litestream for a log that needs it.
+    `_sidecars`, which runs litestream for the logs that need it.
     """
     if maintain is False:
         return []
 
     plan = Maintain() if maintain is True else maintain
+    logs = [stream.log for stream in routes.values() if stream.log is not None]
 
-    return [
-        Supervisor(Path(stream.log.root), stream.log.name, plan)
-        for stream in routes.values()
-        if stream.log is not None
-    ]
+    # **A name that matches nothing is a raise, not a shrug.** Silently
+    # ignoring it puts the log back in the shared loop — the one thing the
+    # caller named it to avoid — and the symptom is a latency problem they
+    # believe they already fixed. `_routes` refuses a name collision rather
+    # than resolving one for the same reason.
+    served = {log.name for log in logs}
+    unknown = sorted(set(plan.dedicated) - served)
+    if unknown:
+        msg = (
+            f"maintain=Maintain(dedicated=...) names {', '.join(map(repr, unknown))}, "
+            f"which this server does not serve with a log. Served with a log: "
+            f"{', '.join(map(repr, sorted(served))) or 'nothing'}. "
+            f"Names are the LOG's, which need not be the route it is served at."
+        )
+        raise ValueError(msg)
+
+    alone = [log for log in logs if log.name in plan.dedicated]
+    shared = [log for log in logs if log.name not in plan.dedicated]
+
+    supervisors = [Supervisor([(Path(log.root), log.name)], plan) for log in alone]
+    if shared:
+        supervisors.append(
+            Supervisor([(Path(log.root), log.name) for log in shared], plan)
+        )
+
+    return supervisors
 
 
 def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
-    """One litestream sidecar per stream whose log replicates its WAL.
+    """ONE litestream for every log this server replicates, or none.
 
     `wal_replication` is opt-in on the log, so this is empty for almost every
     deployment and starts nothing. When it is on, the log's whole point is
@@ -187,15 +220,24 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     replicated nothing would leave that belief in place with none of the
     protection, which is why a missing binary raises here rather than at the
     first missed push.
+
+    **One process, not one per log.** litestream takes a `dbs` list, and each
+    process was 40-170 MB — so four small streams spent most of a gigabyte
+    replicating a producer of ~460 MB. The lock that keeps two litestreams off
+    one database stays PER LOG, because it protects the database rather than
+    the replicator; `Sidecar` holds one per log and replicates exactly the
+    ones it holds.
     """
     if not replicate:
         return []
 
-    return [
-        Sidecar.new(stream.log)
+    shipping = [
+        stream.log
         for stream in routes.values()
         if stream.log is not None and stream.log.config.wal_replication
     ]
+
+    return [Sidecar.new(shipping)] if shipping else []
 
 
 def _info_hook(streams: list[Stream], path: str, chained: Any) -> Any:
@@ -282,8 +324,15 @@ def serve(
     takeover, the variant that would let one compressed frame be shared across
     connections, the same frames compress 1.1x.
 
-    **`maintain=True` starts one maintainer subprocess per stream that has a
-    log**, and stops it when the server closes. That is a departure from
+    **`maintain=True` starts ONE maintainer subprocess covering every stream
+    that has a log**, and stops it when the server closes. One for the server
+    rather than one per log: a maintainer is a full interpreter with litelink,
+    pyarrow, pyiceberg and duckdb loaded — measured at 149 MB RSS on this box,
+    so four streams cost 596 MB one-per-log against 149 MB shared. The work
+    never needed the isolation; `seal_due()` on an idle log is an indexed read
+    of one row. `Maintain(dedicated=("trades",))` gives a named log its own,
+    for one busy enough that its `maintain()` would hold up the others'
+    `seal_due()`. That is a departure from
     litelink's "the library owns neither the thread nor the interval", and it
     is deliberate: a streamcast server already owns a socket, a task per
     subscriber and a queue per subscriber, so owning its own storage
