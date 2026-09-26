@@ -49,6 +49,12 @@ dependencies = [
     "msgspec>=0.18",
 ]
 
+[project.optional-dependencies]
+# Starlette ONLY. Not `fastapi`, which is a layer above what this needs, and
+# not `uvicorn`, which is the deployer's choice — mounting works in any ASGI
+# app and the adapter touches nothing above the WebSocket class.
+asgi = ["starlette>=0.40"]
+
 [project.urls]
 Source = "https://github.com/nhobin219/streamcast"
 Specification = "https://github.com/nhobin219/streamcast/blob/main/docs/SPEC.md"
@@ -90,6 +96,14 @@ dev = [
     # validator rather than against my reading of the spec.
     "jsonschema>=4.20",
     "ruff>=0.15.0",
+    # TEST dependencies for the ASGI transport. `starlette` is the adapter's
+    # own target; `uvicorn` is here because every claim `tests/test_asgi.py`
+    # makes — a refusal's reason surviving, a close landing 1000 not 1006,
+    # `max_backlog` still dropping a slow consumer — is a claim about what
+    # reaches the peer through a real server, and Starlette's own TestClient
+    # would prove none of them.
+    "starlette>=0.40",
+    "uvicorn>=0.30",
     "ty>=0.0.15",
 ]
 

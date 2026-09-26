@@ -28,6 +28,7 @@ SCOPES = {
     "stream",  # §3  offsets, fan-out, the subscribe partition
     "subscriber",  # §4  the per-subscriber queue and its backpressure
     "server",  # §5  serve, routing
+    "asgi",  # §5  the ASGI transport: mounting in someone else's app
     "client",  # §5  connect, Subscription
     "log",  # §6  the litelink tier: columns, rows, replay
     "replay",  # §6  the resume path specifically

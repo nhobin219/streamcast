@@ -50,7 +50,8 @@ if TYPE_CHECKING:
     from os import PathLike
 
     from litelink import Row, WriteHandle
-    from websockets.asyncio.server import ServerConnection
+
+    from streamcast._transport import Peer
 
 MAX_BACKLOG: Final = 8_192
 """Messages a subscriber may fall behind before it is dropped.
@@ -522,7 +523,7 @@ class Stream:
 
     # -- subscribe ---------------------------------------------------------
 
-    async def serve_publisher(self, connection: ServerConnection) -> None:
+    async def serve_publisher(self, connection: Peer) -> None:
         """Take rows from a remote publisher and commit them as this process.
 
         **The whole point is that this adds no authority.** A publisher hands
@@ -584,9 +585,7 @@ class Stream:
 
             await connection.send(publish_ack(offsets))
 
-    async def serve_subscriber(
-        self, connection: ServerConnection, requested: int | None
-    ) -> None:
+    async def serve_subscriber(self, connection: Peer, requested: int | None) -> None:
         """Attach one subscriber and serve it until the connection ends.
 
         Raises `NotReplayable` for an offset this stream cannot serve; `serve`

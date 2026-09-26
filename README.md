@@ -402,6 +402,48 @@ backlog on the way. Size the two together, or run it on a stream quiet enough th
 arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
 (`min(32, cpu + 4)`) for its whole scan.
 
+### Mounting in an existing app
+
+A service that is already an ASGI app — FastAPI, Starlette, anything — can serve a stream
+on the port it already has, instead of running `serve()` on a second one.
+
+```python
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from streamcast.asgi import asgi
+
+streams = asgi([trades, quotes], publish=True)
+
+@asynccontextmanager
+async def lifespan(app):
+    async with streams:            # starts the maintainers, stops them on exit
+        yield
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/streams", streams)
+```
+
+Subscribers then connect to `ws://host/streams/trades`, and nothing about the client
+changes — same URL shape, same frames, same refusals. `pip install 'streamcast[asgi]'`
+adds Starlette and nothing else.
+
+**`async with streams` is not optional.** Starlette does not run a mounted sub-app's
+lifespan, so an app that left the maintainers to `lifespan` events would start none of them
+once mounted — and a log with nothing sealing it buffers every row it ever receives.
+
+Two settings stop being this library's and become the ASGI server's, and their defaults
+differ from `serve`'s:
+
+| | `serve` | mounted |
+|---|---|---|
+| keepalive | `ping_interval=20`, so a dead peer surfaces in ~40s | uvicorn's `--ws-ping-interval` |
+| compression | off, because the encode is shared and deflate is per connection | the host app's |
+
+Compression is the one to watch: a host app that enables permessage-deflate globally pays
+4 µs of CPU per message at one subscriber and 691 µs at 200, and the symptom is a
+CPU-bound server dropping subscribers for falling behind.
+
 ## Client
 
 Two ends, and a connection is one or the other. A subscriber has no `send`; a publisher

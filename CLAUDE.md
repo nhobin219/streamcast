@@ -144,9 +144,12 @@ src/streamcast/
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
+    _transport.py   Peer — the four methods a transport must offer
     _server.py      serve — routing, close codes, maintainer lifetime
+    asgi.py         asgi — the same streams, mounted in an ASGI app
     _client.py      connect, Subscription, and close code → exception
 ```
 
-`_stream.py` is where the correctness lives and `_server.py`/`_client.py` are transport.
+`_stream.py` is where the correctness lives and `_server.py`/`asgi.py`/`_client.py` are
+transport.
 That split is deliberate: every guarantee in the spec is testable without a socket.
