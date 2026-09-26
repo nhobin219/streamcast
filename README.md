@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/badge/license-Apache%20v2-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 
-# A durable JSON WebSocket pubsub framework for structured data
+# A JSON WebSocket pubsub framework for structured data
 
 Publishers write, subscribers read, and every message is appended to a
 [litelink](https://github.com/nhobin219/litelink) log before any subscriber sees it. A
