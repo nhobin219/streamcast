@@ -97,9 +97,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan, title="a service that also serves a stream")
 
 
-@app.get("/info")
+@app.get("/stats")
 async def info() -> dict[str, Any]:
-    """The facts, unprocessed. `serve(info=True)` serves this same object.
+    """The facts, unprocessed. `serve(stats=True)` serves this same object.
 
     The offsets are on the `Stream`, not on the transport, so nothing here
     has to ask the websocket layer anything.

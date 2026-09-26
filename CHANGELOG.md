@@ -11,16 +11,16 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- **`Stream.stats`** and **`serve(info=True)`** — the numbers needed to tell a
+- **`Stream.stats`** and **`serve(stats=True)`** — the numbers needed to tell a
   quiet stream from a dead one, which a subscriber cannot do. `stats` is a
   property over counters already held; `serve` publishes every stream's on
-  the port it already has, at `/info` or a path you name, and a
+  the port it already has, at `/stats` or a path you name, and a
   `process_request` of your own composes with it rather than being replaced.
 
   **On by default, unlike `publish=`.** That grants writes; this discloses
   strictly less than the socket beside it — a wrong-path connect already names
   every stream served, the greeting already carries `end_offset`, and anyone
-  who can reach the port can subscribe and read every row. `info=False` turns
+  who can reach the port can subscribe and read every row. `stats=False` turns
   it off.
 
   It carries **no verdict** — no `status`, no threshold — because freshness is

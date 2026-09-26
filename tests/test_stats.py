@@ -17,7 +17,7 @@ import urllib.request
 import pytest
 
 import streamcast
-from streamcast._stats import INFO_PATH, Stats, payload
+from streamcast._stats import STATS_PATH, Stats, payload
 
 from .conftest import trade
 
@@ -158,9 +158,9 @@ class TestWhatItDeliberatelyDoesNotCarry:
 class TestTheEndpoint:
     async def test_it_answers_on_the_port_the_server_already_has(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False, info=True) as uri:
+        async with serve(stream, maintain=False, stats=True) as uri:
             await stream.send(trade(0))
-            url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
+            url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             status, body = await asyncio.to_thread(_get, url)
 
         assert status == 200
@@ -172,7 +172,7 @@ class TestTheEndpoint:
     async def test_subscribing_still_works_on_the_same_port(self, serve, log):
         """The hook must defer, not swallow — a WebSocket upgrade is not a GET."""
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False, info=True) as uri:
+        async with serve(stream, maintain=False, stats=True) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(trade(0))
                 assert (await sub.recv())[0] == 1
@@ -189,7 +189,7 @@ class TestTheEndpoint:
         """
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream, maintain=False) as uri:  # nothing passed
-            url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
+            url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             status, _body = await asyncio.to_thread(_get, url)
 
         assert status == 200
@@ -202,29 +202,29 @@ class TestTheEndpoint:
         be revisited. This is the tripwire for that.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False, info=False) as uri:
+        async with serve(stream, maintain=False, stats=False) as uri:
             with pytest.raises(streamcast.StreamNotFound) as raised:
                 await streamcast.connect(uri.replace("/trades", "/nope"))
 
         assert "trades" in str(raised.value), (
             "stream names are no longer public on a refusal; the reason "
-            "`info` defaults on has changed"
+            "`stats` defaults on has changed"
         )
 
     async def test_it_can_be_turned_off(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False, info=False) as uri:
-            url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
+        async with serve(stream, maintain=False, stats=False) as uri:
+            url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             status, _body = await asyncio.to_thread(_get, url)
 
         assert status != 200
 
     async def test_a_custom_path_is_honoured(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False, info="/_internal/streams") as uri:
+        async with serve(stream, maintain=False, stats="/_internal/streams") as uri:
             base = uri.replace("ws://", "http://").replace("/trades", "")
             status, _body = await asyncio.to_thread(_get, f"{base}/_internal/streams")
-            missing, _ = await asyncio.to_thread(_get, f"{base}{INFO_PATH}")
+            missing, _ = await asyncio.to_thread(_get, f"{base}{STATS_PATH}")
 
         assert status == 200
         assert missing != 200, "it does not also answer the default path"
@@ -249,11 +249,11 @@ class TestTheEndpoint:
 
         stream = streamcast.Stream("trades", log=log)
         async with serve(
-            stream, maintain=False, info=True, process_request=mine
+            stream, maintain=False, stats=True, process_request=mine
         ) as uri:
             base = uri.replace("ws://", "http://").replace("/trades", "")
             theirs, _ = await asyncio.to_thread(_get, f"{base}/mine")
-            ours, _ = await asyncio.to_thread(_get, f"{base}{INFO_PATH}")
+            ours, _ = await asyncio.to_thread(_get, f"{base}{STATS_PATH}")
             # And a subscribe still reaches the stream through both hooks.
             async with streamcast.connect(uri) as sub:
                 await stream.send(trade(0))
@@ -275,7 +275,7 @@ class TestTheEndpoint:
 
         stream = streamcast.Stream("trades", log=log)
         async with serve(
-            stream, maintain=False, info=True, process_request=mine
+            stream, maintain=False, stats=True, process_request=mine
         ) as uri:
             base = uri.replace("ws://", "http://").replace("/trades", "")
             theirs, _ = await asyncio.to_thread(_get, f"{base}/mine")
@@ -285,8 +285,8 @@ class TestTheEndpoint:
     async def test_every_served_stream_is_listed(self, serve, log, tmp_path):
         first = streamcast.Stream("trades", log=log)
         second = streamcast.Stream("quotes")
-        async with serve(first, second, maintain=False, info=True) as uri:
-            url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
+        async with serve(first, second, maintain=False, stats=True) as uri:
+            url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             _status, body = await asyncio.to_thread(_get, url)
 
         names = {s["name"] for s in json.loads(body)["streams"]}

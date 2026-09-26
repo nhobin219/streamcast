@@ -405,7 +405,7 @@ arithmetic does not bite. Each replay also holds a worker from the `to_thread` p
 ### Knowing a stream is alive
 
 A subscriber cannot tell a quiet stream from a dead one — both are a socket with nothing
-arriving. `serve(info=True)` answers `GET /info` on the port it already has:
+arriving. `serve(stats=True)` answers `GET /stats` on the port it already has:
 
 ```json
 {"served_at": 1758708123.9,
@@ -422,7 +422,7 @@ five-second socket is broken after thirty seconds of silence, while a stream tha
 publishes once a day at 00:20 UTC is healthy after twenty-three hours. A threshold chosen
 in here would be wrong for one of them and would look authoritative to whoever read it.
 So this reports numbers; your health check reads them and applies your rule.
-[`examples/fastapi_app.py`](examples/fastapi_app.py) shows both halves — `/info` funnels
+[`examples/fastapi_app.py`](examples/fastapi_app.py) shows both halves — `/stats` funnels
 the facts through, `/health` is the application deciding.
 
 **`last_send_age_s` is null until this process sends something**, which is why `uptime_s`
@@ -435,7 +435,7 @@ On by default, unlike `publish=`. That grants writes; this discloses strictly le
 the socket beside it — a wrong-path connect is already answered with the names of every
 stream it serves, the greeting already carries `end_offset`, and anyone who can reach the
 port can subscribe and read every row in full. A server that needs this private needs the
-port private. `info=False` turns it off, `info="/_internal/streams"` moves it, and a
+port private. `stats=False` turns it off, `stats="/_internal/streams"` moves it, and a
 `process_request` of your own still runs for every other path.
 
 ### Mounting in an existing app

@@ -344,10 +344,10 @@ actually care about. A window chosen here is the same mistake as a threshold.
 **No `maintain` / `replicate`.** A `Stream` does not own its children — `serve` does, and
 a mounted app's object does — so it would be answering for something it cannot see.
 
-### `serve(info=True)`
+### `serve(stats=True)`
 
 Serves the same payload for every stream on the port `serve` already listens on, at
-`/info`, or at a path of your own: `info="/_internal/streams"`. `served_at` is included so
+`/stats`, or at a path of your own: `stats="/_internal/streams"`. `served_at` is included so
 a caller can measure its own clock skew.
 
 **On by default, unlike `publish=`**, and the asymmetry is deliberate. `publish` grants
@@ -359,7 +359,7 @@ subscribing, so gating it would protect nothing while leaving a quiet stream
 undiagnosable by default — the failure it exists to fix.
 
 A server that needs this private needs the port private; one that needs the port public
-has already published the names. `info=False` turns it off.
+has already published the names. `stats=False` turns it off.
 
 A `process_request` of your own composes rather than being overwritten: yours is called
 for every path but this one, sync or async.

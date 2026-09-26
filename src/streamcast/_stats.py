@@ -33,11 +33,18 @@ if TYPE_CHECKING:
 
     from streamcast._stream import Stream
 
-INFO_PATH: Final = "/info"
-"""Where `serve(info=True)` answers.
+STATS_PATH: Final = "/stats"
+"""Where `serve(stats=True)` answers.
 
-`/info` rather than `/health`, because the payload carries no verdict and a
-name that implied one would be read as though it did.
+Not `/health`, because the payload carries no verdict and a name implying one
+would be read as though it did.
+
+Not `/info` either, which this was called first. Two reasons. **One name for
+one thing:** the module, the type, the property and the keyword are all
+`stats`, so a reader who knows `stream.stats` can guess the URL instead of
+learning a second word for it. And **`/info` means something else in the
+wild** — build and version metadata, fixed for the life of a process — where
+every field here is a counter that moves.
 """
 
 
@@ -47,7 +54,7 @@ class Stats:
 
     Reachable as `Stream.stats` without a socket, which is the point: the
     facts are the API and HTTP is one way to publish them. A mounted ASGI app
-    writes its own route over this; `serve` exposes `/info` because a
+    writes its own route over this; `serve` exposes `/stats` because a
     standalone server has no app to add a route to.
     """
 
@@ -98,7 +105,7 @@ class Stats:
 
 
 def payload(streams: Iterable[Stream]) -> bytes:
-    """Every stream's stats as a JSON object, for the `/info` response.
+    """Every stream's stats as a JSON object, for the `/stats` response.
 
     `served_at` is here so a caller can measure its own skew against this
     server rather than assume the two clocks agree — the ages are already
@@ -109,4 +116,4 @@ def payload(streams: Iterable[Stream]) -> bytes:
     )
 
 
-__all__ = ["INFO_PATH", "Stats", "payload"]
+__all__ = ["STATS_PATH", "Stats", "payload"]

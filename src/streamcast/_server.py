@@ -28,7 +28,7 @@ from streamcast._errors import Close, NotReplayable
 from streamcast._maintain import Maintain, Supervisor
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
-from streamcast._stats import INFO_PATH, payload
+from streamcast._stats import STATS_PATH, payload
 from streamcast._stream import Stream
 
 if TYPE_CHECKING:
@@ -245,7 +245,7 @@ def serve(
     maintain: bool | Maintain = True,
     replicate: bool = True,
     publish: bool = False,
-    info: bool | str = True,
+    stats: bool | str = True,
     compression: str | None = None,
     **kwargs: Any,
 ) -> _Served:
@@ -296,12 +296,12 @@ def serve(
     litelink's `examples/adsb/` does — four processes, one per storage role,
     which is the right shape once the costs justify it.
 
-    **`GET /info` answers on the same port** with every stream's `stats` —
+    **`GET /stats` answers on the same port** with every stream's `stats` —
     offsets, subscriber counts, and how long since each last took a row. It is
     for telling a quiet stream from a dead one without opening a subscription
     per stream to find out, and it carries no verdict: see `_stats` for why a
-    freshness threshold cannot live in a library. `info="/_internal/streams"`
-    moves it; `info=False` turns it off.
+    freshness threshold cannot live in a library. `stats="/_internal/streams"`
+    moves it; `stats=False` turns it off.
 
     **On by default, unlike `publish=`**, and the asymmetry is the point.
     `publish` grants writes, which nothing else on this port grants. This
@@ -328,10 +328,10 @@ def serve(
     # stream set fails at the call rather than inside a task nobody awaits.
     children = [*_supervisors(routes, maintain), *_sidecars(routes, replicate)]
 
-    if info:
+    if stats:
         kwargs["process_request"] = _info_hook(
             list(routes.values()),
-            INFO_PATH if info is True else info,
+            STATS_PATH if stats is True else stats,
             kwargs.get("process_request"),
         )
 
