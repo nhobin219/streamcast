@@ -177,11 +177,43 @@ class TestTheEndpoint:
                 await stream.send(trade(0))
                 assert (await sub.recv())[0] == 1
 
-    async def test_it_is_off_unless_asked_for(self, serve, log):
-        """An unauthenticated surface naming every stream should not appear
-        on an upgrade. Same shape of argument as `publish=`, if weaker."""
+    async def test_it_is_on_by_default(self, serve, log):
+        """**On, unlike `publish=`, and the asymmetry is the point.**
+
+        `publish` grants writes that nothing else on the port grants. This
+        discloses strictly LESS than the socket beside it: a wrong-path
+        connect is answered with `serves=` naming every stream, the greeting
+        carries `end_offset`, and anyone who can reach the port can subscribe
+        and read every row. Gating it would protect nothing while leaving a
+        quiet stream undiagnosable by default — the failure it exists to fix.
+        """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:  # nothing passed
+            url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
+            status, _body = await asyncio.to_thread(_get, url)
+
+        assert status == 200
+
+    async def test_the_names_it_reports_were_already_public(self, serve, log):
+        """The premise of defaulting it on, asserted rather than assumed.
+
+        If a wrong-path connect stopped naming what the server serves, the
+        disclosure argument above would no longer hold and the default should
+        be revisited. This is the tripwire for that.
+        """
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream, maintain=False, info=False) as uri:
+            with pytest.raises(streamcast.StreamNotFound) as raised:
+                await streamcast.connect(uri.replace("/trades", "/nope"))
+
+        assert "trades" in str(raised.value), (
+            "stream names are no longer public on a refusal; the reason "
+            "`info` defaults on has changed"
+        )
+
+    async def test_it_can_be_turned_off(self, serve, log):
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream, maintain=False, info=False) as uri:
             url = uri.replace("ws://", "http://").replace("/trades", INFO_PATH)
             status, _body = await asyncio.to_thread(_get, url)
 

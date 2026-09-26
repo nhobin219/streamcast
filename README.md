@@ -431,9 +431,12 @@ is published beside it. After a restart the log still holds every row ever writt
 stream that stopped. Nothing sent four seconds in is ordinary; nothing sent six hours in
 is not.
 
-Off by default: it is an unauthenticated surface naming every stream and its row counts.
-`info="/_internal/streams"` moves it, and a `process_request` of your own still runs for
-every other path.
+On by default, unlike `publish=`. That grants writes; this discloses strictly less than
+the socket beside it — a wrong-path connect is already answered with the names of every
+stream it serves, the greeting already carries `end_offset`, and anyone who can reach the
+port can subscribe and read every row in full. A server that needs this private needs the
+port private. `info=False` turns it off, `info="/_internal/streams"` moves it, and a
+`process_request` of your own still runs for every other path.
 
 ### Mounting in an existing app
 

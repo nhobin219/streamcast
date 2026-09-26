@@ -350,9 +350,16 @@ Serves the same payload for every stream on the port `serve` already listens on,
 `/info`, or at a path of your own: `info="/_internal/streams"`. `served_at` is included so
 a caller can measure its own clock skew.
 
-Off by default. It is an unauthenticated HTTP surface naming every stream and its row
-counts, and a server should not grow one on an upgrade — the same shape of argument as
-`publish=`, if weaker, since this only reads.
+**On by default, unlike `publish=`**, and the asymmetry is deliberate. `publish` grants
+writes that nothing else on the port grants. This discloses strictly *less* than the
+socket beside it: a wrong-path connect is answered with `serves=` naming every stream,
+the greeting carries `end_offset`, and anyone who can reach the port can subscribe and
+read every row in full. Everything here but the subscriber count is derivable by
+subscribing, so gating it would protect nothing while leaving a quiet stream
+undiagnosable by default — the failure it exists to fix.
+
+A server that needs this private needs the port private; one that needs the port public
+has already published the names. `info=False` turns it off.
 
 A `process_request` of your own composes rather than being overwritten: yours is called
 for every path but this one, sync or async.

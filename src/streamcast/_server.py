@@ -245,7 +245,7 @@ def serve(
     maintain: bool | Maintain = True,
     replicate: bool = True,
     publish: bool = False,
-    info: bool | str = False,
+    info: bool | str = True,
     compression: str | None = None,
     **kwargs: Any,
 ) -> _Served:
@@ -296,17 +296,25 @@ def serve(
     litelink's `examples/adsb/` does — four processes, one per storage role,
     which is the right shape once the costs justify it.
 
-    **`info=True` answers `GET /info` on the same port** with every stream's
-    `stats` — offsets, subscriber counts, and how long since each last took a
-    row. It is for monitoring a stream that has gone quiet without opening a
-    subscription per stream to find out, and it carries no verdict: see
-    `_stats` for why a freshness threshold cannot live in a library. Pass a
-    string to serve it somewhere else (`info="/_internal/streams"`).
+    **`GET /info` answers on the same port** with every stream's `stats` —
+    offsets, subscriber counts, and how long since each last took a row. It is
+    for telling a quiet stream from a dead one without opening a subscription
+    per stream to find out, and it carries no verdict: see `_stats` for why a
+    freshness threshold cannot live in a library. `info="/_internal/streams"`
+    moves it; `info=False` turns it off.
 
-    **Off by default**, because it is an unauthenticated HTTP surface naming
-    every stream and its row counts, and a server should not grow one on an
-    upgrade. The argument is the same shape as `publish=`'s, if weaker — this
-    only reads.
+    **On by default, unlike `publish=`**, and the asymmetry is the point.
+    `publish` grants writes, which nothing else on this port grants. This
+    discloses strictly LESS than the socket beside it already does: a
+    wrong-path connect is answered with `serves=` naming every stream, the
+    greeting carries `end_offset`, and anyone who can reach the port can
+    subscribe and read every row in full. Everything here except the
+    subscriber count is derivable by subscribing, so gating it would protect
+    nothing while leaving a stream that went quiet undiagnosable by default —
+    which is the failure it exists to fix.
+
+    A server that needs this private needs the port private, and one that
+    needs the port public has already published the names.
 
     A `process_request` of your own still works with it: yours is called for
     every path but this one, whether it is sync or async.
