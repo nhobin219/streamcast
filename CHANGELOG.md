@@ -7,6 +7,30 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`streamcast.asgi`** — the same streams as an ASGI app, mountable in an
+  existing FastAPI or Starlette service instead of running `serve()` on a
+  second port. `pip install 'streamcast[asgi]'` adds Starlette and nothing
+  else. `async with` the returned object from the host app's lifespan, which
+  is what owns the maintainers: Starlette does not run a mounted sub-app's
+  lifespan, so nothing else would start them.
+
+  Keepalive and compression become the ASGI server's settings, and their
+  defaults are not this library's — `docs/API.md` has the table and why
+  compression is the one that bites.
+
+  `examples/fastapi_app.py` is a complete service that runs: `just
+  demo-fastapi`, then point `just demo-consumer` at
+  `ws://127.0.0.1:8000/streams/trades`.
+
+- **`streamcast._transport.Peer`** — the connection surface the stream layer
+  uses, named so a second transport can satisfy it. `send`, `close`,
+  `wait_closed`, `async for`, and nothing else; `_stream` and `_subscriber`
+  are written against it and neither transport knows the other exists.
+
 ## 0.5.0 — 2026-09-24
 
 ### Added

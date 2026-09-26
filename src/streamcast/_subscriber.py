@@ -38,7 +38,7 @@ from streamcast._protocol import refusal
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from websockets.asyncio.server import ServerConnection
+    from streamcast._transport import Peer
 
 _OVERFLOW: Final = None
 """Queued in place of the message that would not fit.
@@ -62,7 +62,7 @@ class Subscriber:
 
     __slots__ = ("_backlog", "_connection", "_dropped", "_queue")
 
-    def __init__(self, connection: ServerConnection, *, max_backlog: int) -> None:
+    def __init__(self, connection: Peer, *, max_backlog: int) -> None:
         self._connection = connection
         self._backlog = max_backlog
         # One over, and the extra slot is reserved for `_OVERFLOW`. The

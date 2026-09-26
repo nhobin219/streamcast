@@ -99,3 +99,34 @@ with litelink.open("streamcast-data", "trades", read_only=True) as log:
     # and this prunes on Iceberg statistics rather than scanning payloads
     print(log.scan(columns=["event_ts", "price"], where="side = 1").read_all())
 ```
+
+
+## Mounted in a FastAPI service
+
+`fastapi_app.py` is the same stream served by an app you already have, instead of by
+`serve()` on a port of its own.
+
+```
+just demo-fastapi                                                  # terminal 1
+just demo-consumer --uri ws://127.0.0.1:8000/streams/trades        # terminal 2
+```
+
+**You do not call `serve()`.** `serve` and `asgi` are two transports for one `Stream`,
+and a mounted app uses one of them:
+
+| | owns a socket | you get |
+|---|---|---|
+| `serve(stream, host, port)` | yes | a standalone server |
+| `asgi(stream)` | no | an app to mount in yours |
+
+The `Stream` is the thing either way — it holds the offsets, the log and the fan-out,
+and the transport only carries frames. Which is why `/health` in that file reads
+`trades.end_offset` directly without asking the websocket layer anything.
+
+Three lines in the file are the whole of it: build the stream with `Stream.new`, wrap it
+with `asgi(...)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
+`async with streams` in the lifespan is **not** optional — Starlette does not run a
+mounted sub-app's lifespan, so that block is what starts the maintainer which seals the
+log, and what closes the log on the way out.
+
+Needs the extra: `pip install 'streamcast[asgi]'`.

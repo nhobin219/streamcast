@@ -37,6 +37,11 @@ compresses once per subscriber a frame this encodes once.
 verbs, so both publishing and subscribing here are URL conventions on top of
 it. It is shaped like `connect` so it reads the same way.
 
+`streamcast.asgi` serves the same streams as an ASGI app, for a service that
+already has one and would rather not run a second listener. It is a separate
+import rather than a name here because it needs Starlette:
+`pip install 'streamcast[asgi]'`.
+
 **The schema is yours, declared in JSON Schema.** streamcast declares no
 columns — the log is an ordinary litelink table with whatever shape you gave
 it, so every column prunes, compresses, and is queryable from any Iceberg

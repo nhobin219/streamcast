@@ -305,6 +305,81 @@ this needs setting.
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 
+## `asgi`
+
+```python
+from streamcast.asgi import asgi
+
+asgi(streams, *, maintain=True, replicate=True, publish=False)
+```
+
+The same streams behind an ASGI app, for a service that already has one. Needs the extra:
+`pip install 'streamcast[asgi]'`, which adds Starlette and nothing else — not FastAPI,
+which is a layer above what this uses, and not uvicorn, which is the deployer's choice.
+
+```python
+streams = asgi([trades, quotes])
+
+@asynccontextmanager
+async def lifespan(app):
+    async with streams:
+        yield
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/streams", streams)
+```
+
+`serve` and `asgi` are two transports for the same `Stream`; a mounted app calls one of
+them and never both. [`examples/fastapi_app.py`](../examples/fastapi_app.py) is a
+complete service that runs.
+
+Returns an object that is both an ASGI application and an async context manager. It takes
+the `serve` keywords that are about the streams, and none of the ones about a socket: no
+`host`, `port`, `ssl`, `compression` or `ping_interval`, because those belong to the server
+the host app is running and restating them here would be two places to set one thing.
+
+**`async with` is what starts the maintainers and closes the streams, and it is
+required.** It is the mounted twin of what `serve`'s `wait_closed` does: children
+stopped, then `aclose` on each stream, which closes a log `Stream.new` opened and leaves
+a handed-in handle alone. Starlette does not run
+a mounted sub-app's lifespan — documented behaviour, not a bug — so an app relying on
+lifespan events alone starts no maintainer once mounted, and a log with nothing sealing it
+buffers every row it ever receives. The app handles `lifespan` too, for the case where it is
+run directly rather than mounted; both routes are idempotent.
+
+Routing, refusals and close codes are identical to `serve`'s, including the 4400/4404/4416/
+4429 reasons, with one difference ASGI forces: the handshake is **accepted** before a
+refusal can be sent, because a close code only exists on an accepted connection.
+`websockets` refuses after its handshake too, so what a client sees is the same; rejecting
+the upgrade instead would turn every refusal into an HTTP 403 with the reason discarded.
+
+### What moves to the ASGI server
+
+| | `serve` | mounted |
+|---|---|---|
+| keepalive | `ping_interval=20` — a dead peer surfaces as a close in ~40s | uvicorn's `--ws-ping-interval` |
+| compression | off; the encode is shared across subscribers, deflate is per connection | the host app's setting |
+| TLS, binding, HTTP/2 | `serve`'s keywords | the host app's |
+
+Compression is the one that bites. `serve` turns permessage-deflate off because a frame is
+encoded once and handed to every subscriber, while deflate then compresses those identical
+bytes once per connection: 4 µs of CPU per message at one subscriber against 691 µs at 200.
+A host app that enables it globally pays that, and the symptom is a CPU-bound server
+dropping subscribers for falling behind — an outage that reads like a bug.
+
+### The transport boundary
+
+`_transport.Peer` names what the stream layer uses from a connection — `send`, `close`,
+`wait_closed`, and `async for` — and nothing else. `_stream` and `_subscriber` are written
+against that Protocol, so both transports are ordinary callers and neither knows the other
+exists.
+
+The adapter runs one reader task per connection, which `serve` does not need: `websockets`
+reads in the background, while ASGI delivers a disconnect as a message nobody sees until
+`receive()` is called. A subscription never reads, so without that task a subscriber who
+walked away from a quiet stream would never be noticed — the pump parks in `queue.get()`
+and the `Subscriber` stays in the fan-out set for ever.
+
 ## `publish`
 
 ```python
