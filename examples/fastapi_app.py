@@ -23,10 +23,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 import streamcast
 from streamcast.asgi import asgi
@@ -95,19 +97,47 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan, title="a service that also serves a stream")
 
 
-@app.get("/health")
-async def health() -> dict[str, Any]:
-    """An ordinary route, to make the point that this is an ordinary app.
+@app.get("/stats")
+async def info() -> dict[str, Any]:
+    """The facts, unprocessed. `serve(stats=True)` serves this same object.
 
-    It reads the stream's own state — the offsets are on the `Stream`, not on
-    the transport, so nothing here has to ask the websocket layer anything.
+    The offsets are on the `Stream`, not on the transport, so nothing here
+    has to ask the websocket layer anything.
     """
-    return {
-        "stream": trades.name,
-        "end_offset": trades.end_offset,
-        "subscribers": trades.subscribers,
-        "durable": trades.durable,
-    }
+    return asdict(trades.stats)
+
+
+# How long this application considers silence acceptable. A DOMAIN number: a
+# stream that publishes once a day would use 26 hours and be right to.
+STALE_AFTER_S = 10.0
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    """The verdict, which is **this application's** to make, not the library's.
+
+    This is the split worth copying. `stream.stats` reports numbers and never
+    classifies them, because a freshness threshold is domain knowledge — the
+    demo feed sends twice a second, so ten seconds of silence is broken; a
+    stream that publishes once a day at 00:20 UTC is healthy after 23 hours.
+    A threshold chosen inside the library would be wrong for one of them and
+    would look authoritative to whoever read it.
+
+    Note what `uptime_s` is doing: at startup nothing has been sent by this
+    process, so `last_send_age_s` is None while `end_offset` may be in the
+    millions. Without the uptime check a fresh restart would report unhealthy
+    until the first row arrived.
+    """
+    stats = trades.stats
+    if stats.last_send_age_s is None:
+        fresh = stats.uptime_s < STALE_AFTER_S  # just started, nothing yet
+    else:
+        fresh = stats.last_send_age_s < STALE_AFTER_S
+
+    return JSONResponse(
+        {"status": "ok" if fresh else "stale", **asdict(stats)},
+        status_code=200 if fresh else 503,
+    )
 
 
 # 4. Mounted. Subscribers now connect to ws://host/streams/trades, and the

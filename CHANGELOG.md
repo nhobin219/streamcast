@@ -11,6 +11,28 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Stream.stats`** and **`serve(stats=True)`** — the numbers needed to tell a
+  quiet stream from a dead one, which a subscriber cannot do. `stats` is a
+  property over counters already held; `serve` publishes every stream's on
+  the port it already has, at `/stats` or a path you name, and a
+  `process_request` of your own composes with it rather than being replaced.
+
+  **On by default, unlike `publish=`.** That grants writes; this discloses
+  strictly less than the socket beside it — a wrong-path connect already names
+  every stream served, the greeting already carries `end_offset`, and anyone
+  who can reach the port can subscribe and read every row. `stats=False` turns
+  it off.
+
+  It carries **no verdict** — no `status`, no threshold — because freshness is
+  domain knowledge: a five-second socket is broken after thirty seconds while
+  a daily publisher is healthy after twenty-three hours. Classification is the
+  application's, and `examples/fastapi_app.py` shows both halves.
+
+  `last_send_*` is None until the process sends something, which means *not in
+  this process* rather than *never*. `uptime_s` is published beside it because
+  a restart otherwise reads exactly like a stall: a large `end_offset` and
+  nothing sent.
+
 - **`streamcast.asgi`** — the same streams as an ASGI app, mountable in an
   existing FastAPI or Starlette service instead of running `serve()` on a
   second port. `pip install 'streamcast[asgi]'` adds Starlette and nothing

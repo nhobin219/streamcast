@@ -305,6 +305,68 @@ this needs setting.
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 
+## `Stream.stats`
+
+```python
+stream.stats        # -> Stats
+```
+
+Counters this object already holds — no log query, no socket, nothing that can block or
+fail. Poll it as often as you like.
+
+| field | |
+|---|---|
+| `name`, `durable` | which stream, and whether it has a log |
+| `end_offset` | the offset the next message gets, or None with no log |
+| `subscribers` | attached right now |
+| `started_ts`, `uptime_s` | when this `Stream` was constructed, and how long ago |
+| `last_send_ts`, `last_send_age_s` | the most recent `send`, or **None** |
+
+**Ages come from `time.monotonic`; timestamps are wall clock.** An age is therefore
+immune to an NTP step and means the same thing on a machine whose clock disagrees with
+yours, while the timestamps are what a human reads and what correlates with your own
+logs. A caller subtracting `last_send_ts` from its own `time.time()` would be measuring
+clock skew as much as staleness, which is why both are published.
+
+**`last_send_*` is None until this process sends**, and that means *not in this process*
+rather than *never*: the log may hold millions of rows from before the last restart.
+`uptime_s` is what disambiguates, and a health check needs both — see the `/health` route
+in `examples/fastapi_app.py`.
+
+### What it deliberately does not carry
+
+**No `status`.** Freshness is domain knowledge and a threshold here would be wrong for
+someone while looking authoritative. Classification belongs to the application.
+
+**No `rows_1m`.** Read `end_offset` twice and you have the rate over the window you
+actually care about. A window chosen here is the same mistake as a threshold.
+
+**No `maintain` / `replicate`.** A `Stream` does not own its children — `serve` does, and
+a mounted app's object does — so it would be answering for something it cannot see.
+
+### `serve(stats=True)`
+
+Serves the same payload for every stream on the port `serve` already listens on, at
+`/stats`, or at a path of your own: `stats="/_internal/streams"`. `served_at` is included so
+a caller can measure its own clock skew.
+
+**On by default, unlike `publish=`**, and the asymmetry is deliberate. `publish` grants
+writes that nothing else on the port grants. This discloses strictly *less* than the
+socket beside it: a wrong-path connect is answered with `serves=` naming every stream,
+the greeting carries `end_offset`, and anyone who can reach the port can subscribe and
+read every row in full. Everything here but the subscriber count is derivable by
+subscribing, so gating it would protect nothing while leaving a quiet stream
+undiagnosable by default — the failure it exists to fix.
+
+A server that needs this private needs the port private; one that needs the port public
+has already published the names. `stats=False` turns it off.
+
+A `process_request` of your own composes rather than being overwritten: yours is called
+for every path but this one, sync or async.
+
+A mounted ASGI app gets no equivalent and needs none — it has routes already, and
+`stream.stats` is the object to write one over.
+
 ## `asgi`
 
 ```python
