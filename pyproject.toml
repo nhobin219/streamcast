@@ -104,6 +104,11 @@ dev = [
     # would prove none of them.
     "starlette>=0.40",
     "uvicorn>=0.30",
+    # For `examples/fastapi_app.py` only. The library needs nothing from it —
+    # `streamcast[asgi]` is Starlette alone — but the example is the answer to
+    # "how do I run this in my service", so it is a real app that really runs
+    # rather than a snippet nobody executed.
+    "fastapi>=0.110",
     "ty>=0.0.15",
 ]
 

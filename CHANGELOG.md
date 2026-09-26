@@ -22,6 +22,10 @@ there was nothing to have changed from. Everything above it is ordinary.
   defaults are not this library's — `docs/API.md` has the table and why
   compression is the one that bites.
 
+  `examples/fastapi_app.py` is a complete service that runs: `just
+  demo-fastapi`, then point `just demo-consumer` at
+  `ws://127.0.0.1:8000/streams/trades`.
+
 - **`streamcast._transport.Peer`** — the connection surface the stream layer
   uses, named so a second transport can satisfy it. `send`, `close`,
   `wait_closed`, `async for`, and nothing else; `_stream` and `_subscriber`

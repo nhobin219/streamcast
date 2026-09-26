@@ -329,12 +329,19 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/streams", streams)
 ```
 
+`serve` and `asgi` are two transports for the same `Stream`; a mounted app calls one of
+them and never both. [`examples/fastapi_app.py`](../examples/fastapi_app.py) is a
+complete service that runs.
+
 Returns an object that is both an ASGI application and an async context manager. It takes
 the `serve` keywords that are about the streams, and none of the ones about a socket: no
 `host`, `port`, `ssl`, `compression` or `ping_interval`, because those belong to the server
 the host app is running and restating them here would be two places to set one thing.
 
-**`async with` is what starts the maintainers, and it is required.** Starlette does not run
+**`async with` is what starts the maintainers and closes the streams, and it is
+required.** It is the mounted twin of what `serve`'s `wait_closed` does: children
+stopped, then `aclose` on each stream, which closes a log `Stream.new` opened and leaves
+a handed-in handle alone. Starlette does not run
 a mounted sub-app's lifespan — documented behaviour, not a bug — so an app relying on
 lifespan events alone starts no maintainer once mounted, and a log with nothing sealing it
 buffers every row it ever receives. The app handles `lifespan` too, for the case where it is

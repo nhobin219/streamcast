@@ -407,6 +407,23 @@ class TestTheChildren:
         finally:
             await stream.aclose()
 
+    async def test_leaving_the_block_closes_a_log_it_opened(self, tmp_path):
+        """Symmetry with `serve`, which closes its streams on shutdown.
+
+        A stream built by `Stream.new` owns its log, so something has to close
+        it; `aclose` is a no-op for a handle the caller passed in. Without this
+        a mounted app would leak the log it opened, and the leak is invisible
+        until a second process tries to write.
+        """
+        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        async with asgi(stream, maintain=False, replicate=False):
+            await stream.send({"event_ts": 1.0, "price": 2.0})
+
+        # The consequence, not the private attribute: the handle is shut, so
+        # a write against it fails rather than silently reopening anything.
+        with pytest.raises(Exception, match="closed"):
+            await stream.send({"event_ts": 3.0, "price": 4.0})
+
     async def test_a_live_only_stream_needs_no_children(self):
         streams = asgi(streamcast.Stream("live"))
         assert streams._children == []

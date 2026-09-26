@@ -156,6 +156,10 @@ demo *args:
 demo-consumer *args:
     uv run python examples/consumer.py {{args}}
 
+# The same stream mounted in a FastAPI service, on the port it already has.
+demo-fastapi *args:
+    uv run uvicorn examples.fastapi_app:app --port 8000 {{args}}
+
 # A live-only server — no log, no litelink, no replay. The other end of the
 # range, and the shape to reach for when the stream is a cache nobody resumes.
 demo-live *args:

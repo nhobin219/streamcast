@@ -315,6 +315,14 @@ class _Mounted:
         for child in self._children:
             await child.wait_closed()
 
+        # LAST, and the order is the same one `_Served.wait_closed` keeps: a
+        # replay in flight is reading the log in a worker thread, so closing
+        # it first would pull the file out from under a scan. `aclose` is a
+        # no-op for a stream whose log was handed in — that one is the
+        # caller's — so this only closes what `Stream.new` opened.
+        for stream in self._streams.values():
+            await stream.aclose()
+
     async def __aenter__(self) -> _Mounted:
         self._start()
 
