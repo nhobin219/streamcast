@@ -24,7 +24,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
-from streamcast._errors import Close, NotReplayable
+from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._maintain import Maintain, Supervisor
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
@@ -396,7 +396,7 @@ def serve(
             return
 
         try:
-            name, requested = parse_subscribe(request.path)
+            name, requested, where = parse_subscribe(request.path)
         except ValueError as exc:
             await connection.close(
                 Close.BAD_REQUEST,
@@ -433,7 +433,16 @@ def serve(
             return
 
         try:
-            await stream.serve_subscriber(connection, requested)
+            await stream.serve_subscriber(connection, requested, where)
+        except ProtocolError as exc:
+            # A `where=` this stream cannot serve — a column it does not have,
+            # a value that is not a scalar. Refused rather than served as a
+            # subscription that silently never delivers, which looks exactly
+            # like a quiet stream.
+            await connection.close(
+                Close.BAD_REQUEST,
+                refusal("bad_request", detail=str(exc)[:_DETAIL_CHARS]),
+            )
         except NotReplayable as exc:
             await connection.close(
                 Close.NOT_REPLAYABLE,

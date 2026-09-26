@@ -571,7 +571,37 @@ async with streamcast.connect("ws://localhost:8765/trades") as stream:
 be logged, forwarded, or appended to another stream whole. The parse happens once, at the
 publisher.
 
-#### Resuming
+### Filtering a subscription
+
+A subscriber can name a predicate over the declared columns and be sent only matching rows:
+
+```python
+async with streamcast.connect(uri, where={"ticker": "AAPL"}) as sub: ...
+async with streamcast.connect(uri, where={"ticker": ["AAPL", "NVDA"]}) as sub:  ...  # membership
+async with streamcast.connect(uri, where={"ticker": "AAPL", "client_id": 1}) as sub: ...  # AND
+```
+
+Equality and membership over scalars, and nothing else — the predicate arrives from a
+client over a socket, so there is no expression language to parse and no `eval` to reach.
+A column the schema does not have is refused with a 4400 naming it, rather than served as
+a subscription that silently never delivers.
+
+**It costs the fan-out a dict lookup, not a second encode.** `send` encodes each message
+once and every subscriber gets those same bytes; a filter decides whether to *enqueue* the
+shared frame. Measured on a four-column row: 162 ns for a one-term predicate against
+961 ns for the encode already on the path.
+
+**The replay is filtered the same way**, through the same compiled predicate — a resume
+that delivered something the live connection would not is the one failure worth preventing
+here, and `offset + 1` with the same `where=` picks up exactly where it left off.
+
+One consequence worth knowing: `replay` in the greeting stops being a count. Unfiltered,
+`end - start` is exactly how many messages arrive before live begins; filtered, it is the
+offset window and the number delivered is at most that. A loop that must terminate on a
+count — the publisher recovery in [`docs/SPEC.md`](docs/SPEC.md) §6b — wants an unfiltered
+subscription.
+
+### Resuming
 
 The server records its frontier when a subscriber attaches, replays `[requested, frontier)`
 from the log, then switches it to the live queue. Everything below the frontier is already

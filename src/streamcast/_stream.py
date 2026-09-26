@@ -33,10 +33,11 @@ from typing import TYPE_CHECKING, Final
 import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _log, _schema
+from streamcast import _filter, _log, _schema
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
     EARLIEST,
+    decode,
     decode_publish,
     encode,
     greeting,
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 
     from litelink import Row, WriteHandle
 
+    from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
 
 MAX_BACKLOG: Final = 8_192
@@ -480,7 +482,7 @@ class Stream:
             self._end_offset = offset + 1
 
         self._stamp()
-        self._fan_out(encode(offset, row, self._columns))
+        self._fan_out(row, encode(offset, row, self._columns))
 
         return offset
 
@@ -511,7 +513,7 @@ class Stream:
         # imply a precision the commit does not have.
         self._stamp()
         for offset, row in zip(offsets, batch, strict=True):
-            self._fan_out(encode(offset, row, self._columns))
+            self._fan_out(row, encode(offset, row, self._columns))
 
         return offsets
 
@@ -547,15 +549,19 @@ class Stream:
             last_send_age_s=None if last is None else time.monotonic() - last,
         )
 
-    def _fan_out(self, frame: bytes) -> None:
-        """One encoded frame into every subscriber's queue.
+    def _fan_out(self, row: Row, frame: bytes) -> None:
+        """One encoded frame into every subscriber's queue that wants it.
 
         Encoded once by the caller and shared, so a queue entry is a pointer
-        rather than a copy. `offer` cannot block, raise, or detach anything,
-        which is what makes iterating the set here safe without a snapshot.
+        rather than a copy — which stays true with `where=` in play, because a
+        filter decides whether to enqueue the shared frame rather than what to
+        build. The row travels alongside it for the predicate to read.
+
+        `offer` cannot block, raise, or detach anything, which is what makes
+        iterating the set here safe without a snapshot.
         """
         for subscriber in self._subscribers:
-            subscriber.offer(frame)
+            subscriber.offer(row, frame)
 
     async def aclose(self, reason: str = "server shutting down") -> None:
         """Drop every subscriber with a 1001. Does not close the log.
@@ -642,20 +648,44 @@ class Stream:
 
             await connection.send(publish_ack(offsets))
 
-    async def serve_subscriber(self, connection: Peer, requested: int | None) -> None:
+    async def serve_subscriber(
+        self,
+        connection: Peer,
+        requested: int | None,
+        where: Where | None = None,
+    ) -> None:
         """Attach one subscriber and serve it until the connection ends.
 
-        Raises `NotReplayable` for an offset this stream cannot serve; `serve`
-        turns that into a 4416. Everything else — the greeting, the replay,
-        the live pump — happens here, and the order is load-bearing.
+        Raises `NotReplayable` for an offset this stream cannot serve, which
+        `serve` turns into a 4416, and `ValueError` for a `where=` it cannot,
+        which becomes a 4400. Everything else — the greeting, the replay, the
+        live pump — happens here, and the order is load-bearing.
+
+        **`where=` filters both halves through the same compiled predicate.**
+        The replay and the live queue are one stream to a subscriber, so a
+        filter applied to only one of them would make a resume deliver what
+        the live connection never would. `_log.rows` already yields dicts, so
+        there is no second implementation and nothing to diverge — and see
+        `_log.replay` for why the first replayed row is checked before it is
+        filtered.
         """
+        predicate = None
+        if where is not None:
+            # Validated and compiled BEFORE anything is sent, so a filter
+            # naming a column this stream does not have is a refusal at
+            # subscribe rather than a subscription that never delivers.
+            _filter.validate(where, self._columns)
+            predicate = _filter.compile_where(where)
+
         # `(log, start)` rather than `start`, so the handle a replay needs
         # travels with the decision that it is needed. The alternative is
         # re-narrowing `self._log` at the use site, which is an assertion
         # about a branch three statements away.
         resolved = await self._resolve(requested)
 
-        subscriber = Subscriber(connection, max_backlog=self._max_backlog)
+        subscriber = Subscriber(
+            connection, max_backlog=self._max_backlog, where=predicate
+        )
         # ── ATOMIC. Do not put an await between these two statements. ──
         # Joining the set first means nothing sent from here on is missed;
         # reading the frontier second means everything below it is already
@@ -677,7 +707,7 @@ class Stream:
                     raise RuntimeError(msg)
 
                 replaying = (resolved[1], frontier)
-                replay = await self._replay_from(*resolved, frontier)
+                replay = await self._replay_from(*resolved, frontier, predicate)
 
             await connection.send(
                 greeting(
@@ -696,6 +726,7 @@ class Stream:
                         if self._log is None
                         else (self._log.name, self._log.archive)
                     ),
+                    where=dict(where) if where is not None else None,
                 )
             )
             await subscriber.run(replay)
@@ -781,7 +812,11 @@ class Stream:
         return log, requested
 
     async def _replay_from(
-        self, log: WriteHandle, start: int, frontier: int
+        self,
+        log: WriteHandle,
+        start: int,
+        frontier: int,
+        where: Predicate | None = None,
     ) -> AsyncGenerator[tuple[int, bytes], None]:
         """The replay stream, with its first row checked against the request.
 
@@ -797,7 +832,7 @@ class Stream:
         resuming with nothing outstanding, and it is the common case for a
         reconnect that lost the connection rather than the race.
         """
-        stream = _log.replay(log, start, frontier)
+        stream = _log.replay(log, start, frontier, where)
         try:
             first = await anext(stream, None)
 
@@ -828,6 +863,17 @@ class Stream:
             raise NotReplayable(
                 "evicted", offset=start, earliest=offset, archive=log.archive
             )
+
+        if where is not None and not where(decode(first[1])[1]):
+            # `_log.replay` yields its first row whatever the filter says, so
+            # the check above measures the LOG's floor rather than the first
+            # match. Having used it for that, drop it — the subscriber asked
+            # not to be sent this row.
+            #
+            # Decoded rather than threaded back out of `_log.replay` as a
+            # dict: it is ONE row per subscribe, 386 ns, against a second
+            # return shape on the hot replay path.
+            return stream
 
         return _prepend(first, stream)
 

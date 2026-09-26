@@ -7,6 +7,29 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`connect(uri, where={...})`** — server-side subscription filtering. A
+  subscriber names equality or membership over the declared columns and is
+  sent only matching rows, carried as `?where=` so `wscat` can use it too.
+
+  The predicate runs against the dict `send` was called with, so the shared
+  encode is untouched: a filter decides whether to enqueue the one frame every
+  subscriber gets rather than building a second. 162 ns for one term against
+  961 ns for the encode already on the path, compiled once at subscribe and
+  specialised on arity.
+
+  **The replay is filtered through the same predicate**, because a resume that
+  delivered what the live connection would not is the failure worth preventing.
+  One consequence: `replay` in the greeting becomes an upper bound rather than
+  a count when a filter is set, so §6b's recovery loop wants an unfiltered
+  subscription. `Greeting.where` echoes what the server applied.
+
+  A column the schema does not have is a 4400 naming it, not a subscription
+  that silently never delivers.
+
 ## 0.6.0 — 2026-09-26
 
 ### Changed

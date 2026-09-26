@@ -38,6 +38,7 @@ from streamcast._protocol import refusal
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from streamcast._filter import Predicate, Row
     from streamcast._transport import Peer
 
 _OVERFLOW: Final = None
@@ -60,10 +61,15 @@ send path to say what the queue already guarantees.
 class Subscriber:
     """A connection, its backlog, and the offset it has actually been sent."""
 
-    __slots__ = ("_backlog", "_connection", "_dropped", "_queue")
+    __slots__ = ("_backlog", "_connection", "_dropped", "_queue", "_where")
 
-    def __init__(self, connection: Peer, *, max_backlog: int) -> None:
+    def __init__(
+        self, connection: Peer, *, max_backlog: int, where: Predicate | None = None
+    ) -> None:
         self._connection = connection
+        # Compiled at subscribe by `_stream`, not per message. See `_filter`
+        # for why the generic form costs more than the encode it rides on.
+        self._where = where
         self._backlog = max_backlog
         # One over, and the extra slot is reserved for `_OVERFLOW`. The
         # alternative — a queue of exactly `max_backlog` that evicts one
@@ -76,15 +82,29 @@ class Subscriber:
         )
         self._dropped = False
 
-    def offer(self, frame: bytes) -> None:
-        """Queue one frame. Never blocks, never awaits, never raises.
+    def offer(self, row: Row, frame: bytes) -> None:
+        """Queue one frame, if this subscriber asked for it.
 
-        Every one of those three matters and `Stream.send` depends on all of
-        them: it calls this in a loop over every subscriber, and the loop has
-        to be atomic against the event loop for messages to reach every
-        subscriber in the same order they were assigned offsets.
+        Never blocks, never awaits, never raises. Every one of those three
+        matters and `Stream.send` depends on all of them: it calls this in a
+        loop over every subscriber, and the loop has to be atomic against the
+        event loop for messages to reach every subscriber in the same order
+        they were assigned offsets.
+
+        **`row` and `frame` are the same message twice**, and both are needed:
+        the predicate reads the mapping, while what goes on the wire is the
+        bytes `Stream.send` encoded ONCE for every subscriber. Filtering
+        decides whether to enqueue that shared frame, so a filter costs a dict
+        lookup rather than a second encode.
+
+        The predicate cannot raise — `dict.get` is defined for a missing key
+        and `==`/`in` for any pair of types — which is what keeps the promise
+        above true with a filter attached. `_filter` says why.
         """
         if self._dropped:
+            return
+
+        if self._where is not None and not self._where(row):
             return
 
         if self._queue.qsize() >= self._backlog:

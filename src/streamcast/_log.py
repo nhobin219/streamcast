@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from litelink import LogHandle, WriteHandle
 
+    from streamcast._filter import Predicate
+
 
 def columns(log: LogHandle) -> tuple[str, ...]:
     """The stream's declared columns, in the order the wire uses.
@@ -225,7 +227,10 @@ def earliest(log: LogHandle) -> int | None:
 
 
 async def replay(
-    log: WriteHandle, start: int, stop: int
+    log: WriteHandle,
+    start: int,
+    stop: int,
+    where: Predicate | None = None,
 ) -> AsyncGenerator[tuple[int, bytes], None]:
     """`rows`, encoded — what a subscriber's pump sends.
 
@@ -233,9 +238,28 @@ async def replay(
     encode-then-decode round trip it would only undo: `_catchup` reads the
     archive the same way and hands the caller dicts directly, and 1.5 us a row
     through msgspec twice adds up over a catch-up of millions.
+
+    **`where` is applied before the encode**, so a filtered replay does not
+    pay msgspec for rows nobody asked for — 961 ns a row, against 2.11 us to
+    read one, so it is about a third of a selective replay's cost.
+
+    **The FIRST row is yielded whatever the filter says**, and that is not an
+    oversight. `_stream._replay_from` checks it against the offset that was
+    requested to catch a log whose retention has passed it — a hole at the
+    join, the one wrong answer a resume must never give. Filtering it away
+    would make the first MATCHING row stand in for the log's true floor, so a
+    selective filter over an intact log would report itself as evicted. The
+    caller drops it if it does not match; see `_prepend`.
     """
+    first = True
     async for offset, message in rows(log, start, stop):
-        yield offset, _encode_projected(offset, message)
+        if first:
+            first = False
+            yield offset, _encode_projected(offset, message)
+            continue
+
+        if where is None or where(message):
+            yield offset, _encode_projected(offset, message)
 
 
 __all__ = ["columns", "earliest", "replay", "rows", "rows_from"]

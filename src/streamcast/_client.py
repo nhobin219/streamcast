@@ -37,12 +37,13 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from litelink import S3Options
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from streamcast import _filter
 from streamcast._catchup import (
     CATCH_UP_RETRIES,
     RECOVERABLE,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
 
     from websockets.asyncio.client import ClientConnection
 
+    from streamcast._filter import Where
     from streamcast._protocol import Greeting
 
 _UNSET: Final = object()
@@ -143,6 +145,32 @@ def _refusal(
     # to surface as the `ConnectionClosed` it already is, rather than being
     # relabelled as a streamcast refusal it is not.
     return None
+
+
+def _with_where(uri: str, where: Where | None) -> str:
+    """The URI with `where=` on it, or unchanged.
+
+    Given in the URI as well as the argument, this raises rather than picking,
+    for the reason `_with_offset` does: the two disagreeing means the
+    subscription filters on something the caller did not ask for, and neither
+    value is more likely to be the intended one. A filter written into the URI
+    is what keeps `wscat` usable, so it cannot be forbidden.
+    """
+    if where is None:
+        return uri
+
+    split = urlsplit(uri)
+    if any(key == "where" for key, _ in parse_qsl(split.query, keep_blank_values=True)):
+        msg = (
+            f"where is given twice: as where={dict(where)!r} and in the URI "
+            f"({split.query!r}). Pass it once."
+        )
+        raise ValueError(msg)
+
+    encoded = urlencode({"where": _filter.encode(where)})
+    query = f"{split.query}&{encoded}" if split.query else encoded
+
+    return urlunsplit(split._replace(query=query))
 
 
 def _with_offset(uri: str, offset: int | None) -> str:
@@ -559,6 +587,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         "_stream",
         "_subscription",
         "_uri",
+        "_where",
     )
 
     def __init__(
@@ -570,6 +599,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         cursor_uri: str | None = None,
         s3: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
+        where: Where | None = None,
         catch_up: bool = False,
         catch_up_retries: int = CATCH_UP_RETRIES,
         archive: str | None = None,
@@ -581,6 +611,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         # `websockets.connect`'s very precise signature rather than against a
         # value type inferred from `compression`.
         self._kwargs: dict[str, Any] = {"compression": compression, **kwargs}
+        self._where = where
         self._catch_up = catch_up
         self._catch_up_retries = catch_up_retries
         self._archive = archive
@@ -611,13 +642,20 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             # the same function in `_handshake`.
             _with_offset(uri, offset)
 
+        # Same eager validation for the filter, and unconditional: unlike an
+        # offset there is no cursor that might supply it later, so a collision
+        # with the URI is knowable now and worth raising at the call rather
+        # than inside the first connect.
+        _with_where(uri, where)
+
         self._offset = offset
         self._resolved: int | None = None
         self._subscription: Subscription | None = None
 
     async def _handshake(self, offset: int | None) -> tuple[ClientConnection, Greeting]:
         """One connection, opened and greeted. Raises the refusal it was given."""
-        connection = await _ws_connect(_with_offset(self._uri, offset), **self._kwargs)
+        target = _with_where(_with_offset(self._uri, offset), self._where)
+        connection = await _ws_connect(target, **self._kwargs)
         try:
             return connection, parse_greeting(await connection.recv())
 
