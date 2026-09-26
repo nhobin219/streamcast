@@ -250,8 +250,9 @@ silently returns the server to never sealing.
 
 `maintain=False` is right when you run litelink's own four-process shape
 (`examples/adsb/`, one process per storage role), or when the log is shared with something
-else that sweeps it. `python -m streamcast maintain --root PATH --name NAME` is the same
-loop, runnable by hand.
+else that sweeps it. `python -m streamcast maintain --log PATH NAME` is the same
+loop, runnable by hand; repeat `--log` to sweep several from one process, which is what
+`serve` does.
 
 ### `replicate`
 

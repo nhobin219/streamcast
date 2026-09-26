@@ -1,8 +1,8 @@
 # streamcast
 
 A JSON WebSocket pubsub framework for structured data. Publishers write, subscribers
-read, and every message is appended to a litelink log — an Iceberg table — before any
-subscriber sees it. Each message carries the offset it was written at, so a subscriber
+read, and every message is optionally appended to a litelink log — an Iceberg table —
+before any subscriber sees it. Each message carries the offset it was written at, so a subscriber
 that stops can reconnect and ask for the rest.
 
 **The log is the analytical table**, which is the reason litelink is underneath rather
@@ -141,9 +141,11 @@ src/streamcast/
     _catchup.py     reading the gap from the archive when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
+    _publish.py     publish, Publication — the producer end, over a socket
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
+    _stats.py       Stats — what a stream reports about itself, and /stats
     _transport.py   Peer — the four methods a transport must offer
     _server.py      serve — routing, close codes, maintainer lifetime
     asgi.py         asgi — the same streams, mounted in an ASGI app
