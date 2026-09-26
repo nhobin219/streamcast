@@ -15,16 +15,20 @@ a second spelling of "no name".
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from websockets.asyncio.server import serve as _ws_serve
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable
 from streamcast._maintain import Maintain, Supervisor
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
+from streamcast._stats import INFO_PATH, payload
 from streamcast._stream import Stream
 
 if TYPE_CHECKING:
@@ -194,6 +198,45 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     ]
 
 
+def _info_hook(streams: list[Stream], path: str, chained: Any) -> Any:
+    """A `process_request` that answers `path` with the stats, or defers.
+
+    **Composed rather than assigned**, because `process_request` is a keyword
+    a caller may already be using — for auth, for a health check of their own,
+    for anything. Overwriting it would break that silently, so this answers
+    its own path and hands every other request to whatever was passed in.
+
+    Async, and the chained hook is awaited only if it returns an awaitable:
+    `websockets` accepts either shape, so a caller's synchronous hook must
+    keep working when it is wrapped by this one.
+    """
+
+    async def hook(connection: Any, request: Any) -> Any:
+        if request.path == path:
+            body = payload(streams)
+
+            return Response(
+                200,
+                "OK",
+                Headers(
+                    {
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                    }
+                ),
+                body,
+            )
+
+        if chained is None:
+            return None
+
+        answer = chained(connection, request)
+
+        return await answer if inspect.isawaitable(answer) else answer
+
+    return hook
+
+
 def serve(
     streams: Stream | Iterable[Stream],
     host: str | None = None,
@@ -202,6 +245,7 @@ def serve(
     maintain: bool | Maintain = True,
     replicate: bool = True,
     publish: bool = False,
+    info: bool | str = False,
     compression: str | None = None,
     **kwargs: Any,
 ) -> _Served:
@@ -252,6 +296,21 @@ def serve(
     litelink's `examples/adsb/` does — four processes, one per storage role,
     which is the right shape once the costs justify it.
 
+    **`info=True` answers `GET /info` on the same port** with every stream's
+    `stats` — offsets, subscriber counts, and how long since each last took a
+    row. It is for monitoring a stream that has gone quiet without opening a
+    subscription per stream to find out, and it carries no verdict: see
+    `_stats` for why a freshness threshold cannot live in a library. Pass a
+    string to serve it somewhere else (`info="/_internal/streams"`).
+
+    **Off by default**, because it is an unauthenticated HTTP surface naming
+    every stream and its row counts, and a server should not grow one on an
+    upgrade. The argument is the same shape as `publish=`'s, if weaker — this
+    only reads.
+
+    A `process_request` of your own still works with it: yours is called for
+    every path but this one, whether it is sync or async.
+
     A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to
     send, and is closed by the keepalive when its pongs stop arriving.
@@ -260,6 +319,13 @@ def serve(
     # Both resolved here, synchronously, so a missing litestream or a bad
     # stream set fails at the call rather than inside a task nobody awaits.
     children = [*_supervisors(routes, maintain), *_sidecars(routes, replicate)]
+
+    if info:
+        kwargs["process_request"] = _info_hook(
+            list(routes.values()),
+            INFO_PATH if info is True else info,
+            kwargs.get("process_request"),
+        )
 
     async def handler(connection: ServerConnection) -> None:
         # `request` is optional on the connection because a `ServerConnection`

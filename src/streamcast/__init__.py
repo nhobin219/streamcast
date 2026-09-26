@@ -115,6 +115,7 @@ from streamcast._protocol import EARLIEST, Greeting, LogInfo
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
+from streamcast._stats import Stats
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
 
 try:
@@ -138,6 +139,7 @@ __all__ = [
     "publish",
     "Rejected",
     "Publication",
+    "Stats",
     "Stream",
     "StreamNotFound",
     "StreamcastError",

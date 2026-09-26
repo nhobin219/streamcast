@@ -402,6 +402,39 @@ backlog on the way. Size the two together, or run it on a stream quiet enough th
 arithmetic does not bite. Each replay also holds a worker from the `to_thread` pool
 (`min(32, cpu + 4)`) for its whole scan.
 
+### Knowing a stream is alive
+
+A subscriber cannot tell a quiet stream from a dead one — both are a socket with nothing
+arriving. `serve(info=True)` answers `GET /info` on the port it already has:
+
+```json
+{"served_at": 1758708123.9,
+ "streams": [{"name": "trades", "durable": true, "end_offset": 123486128,
+              "subscribers": 2, "started_ts": 1758701900.1, "uptime_s": 6223.8,
+              "last_send_ts": 1758708122.7, "last_send_age_s": 1.2}]}
+```
+
+The same object is `stream.stats` in Python, so a mounted app writes whatever route it
+wants over it and nothing needs a socket to read the numbers.
+
+**There is no `status` field, and that is deliberate.** Freshness is domain knowledge: a
+five-second socket is broken after thirty seconds of silence, while a stream that
+publishes once a day at 00:20 UTC is healthy after twenty-three hours. A threshold chosen
+in here would be wrong for one of them and would look authoritative to whoever read it.
+So this reports numbers; your health check reads them and applies your rule.
+[`examples/fastapi_app.py`](examples/fastapi_app.py) shows both halves — `/info` funnels
+the facts through, `/health` is the application deciding.
+
+**`last_send_age_s` is null until this process sends something**, which is why `uptime_s`
+is published beside it. After a restart the log still holds every row ever written, so
+`end_offset` is large and nothing has been sent — indistinguishable, on its own, from a
+stream that stopped. Nothing sent four seconds in is ordinary; nothing sent six hours in
+is not.
+
+Off by default: it is an unauthenticated surface naming every stream and its row counts.
+`info="/_internal/streams"` moves it, and a `process_request` of your own still runs for
+every other path.
+
 ### Mounting in an existing app
 
 A service that is already an ASGI app — FastAPI, Starlette, anything — can serve a stream

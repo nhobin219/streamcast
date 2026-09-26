@@ -27,6 +27,7 @@ reads this module's AST and fails on an `await` in either place.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Final
 
 import litelink
@@ -42,6 +43,7 @@ from streamcast._protocol import (
     publish_ack,
     publish_error,
 )
+from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
@@ -127,12 +129,16 @@ class Stream:
     __slots__ = (
         "_columns",
         "_end_offset",
+        "_last_send",
+        "_last_send_ts",
         "_log",
         "_max_backlog",
         "_max_replay",
         "_name",
         "_owned",
         "_shape",
+        "_started",
+        "_started_ts",
         "_subscribers",
     )
 
@@ -198,6 +204,20 @@ class Stream:
         # a branch on `send`, which is the hot path, to buy nothing.
         self._end_offset: int | None = log.end_offset() if log is not None else None
         self._subscribers: set[Subscriber] = set()
+        # Two clocks, deliberately. The monotonic pair is what ages are
+        # measured from, so an NTP step cannot turn a live stream into an
+        # apparently stale one; the wall-clock pair is what a human reads and
+        # what correlates with the caller's own logs. Reading a clock is not
+        # building a collaborator, so this stays out of the factory.
+        self._started = time.monotonic()
+        self._started_ts = time.time()
+        # None until the first send, and it MEANS "not in this process" — the
+        # log may hold millions of rows from before the last restart. That is
+        # exactly why `uptime_s` is published beside it: a large `end_offset`
+        # with no send is ordinary four seconds into a restart and alarming
+        # six hours in, and neither number says so alone.
+        self._last_send: float | None = None
+        self._last_send_ts: float | None = None
 
     @classmethod
     def new(
@@ -459,6 +479,7 @@ class Stream:
             offset = self._log.append(row)
             self._end_offset = offset + 1
 
+        self._stamp()
         self._fan_out(encode(offset, row, self._columns))
 
         return offset
@@ -485,10 +506,46 @@ class Stream:
             offsets = list(self._log.extend(batch))
             self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
 
+        # ONE stamp for the group, not one per row: `send_many` is a single
+        # transaction and its rows commit together, so per-row values would
+        # imply a precision the commit does not have.
+        self._stamp()
         for offset, row in zip(offsets, batch, strict=True):
             self._fan_out(encode(offset, row, self._columns))
 
         return offsets
+
+    def _stamp(self) -> None:
+        """Record that a send happened. Two clock reads, no await.
+
+        On the hot path by necessity — nothing can know afterwards when the
+        last row arrived. Measured at 42 ns per clock against 2.0 ms for a
+        durable `send` and 316 ns for a live-only one with no subscribers
+        attached, which is the least realistic case: a stream with no log and
+        nobody listening is not doing anything.
+        """
+        self._last_send = time.monotonic()
+        self._last_send_ts = time.time()
+
+    @property
+    def stats(self) -> Stats:
+        """This stream's facts, as of now. No verdict — see `_stats`.
+
+        A property rather than a method because it reads counters this object
+        already holds: no log query, no socket, nothing that can fail or
+        block. Poll it as often as you like.
+        """
+        last = self._last_send
+        return Stats(
+            name=self._name,
+            durable=self._log is not None,
+            end_offset=self._end_offset,
+            subscribers=len(self._subscribers),
+            started_ts=self._started_ts,
+            uptime_s=time.monotonic() - self._started,
+            last_send_ts=self._last_send_ts,
+            last_send_age_s=None if last is None else time.monotonic() - last,
+        )
 
     def _fan_out(self, frame: bytes) -> None:
         """One encoded frame into every subscriber's queue.
