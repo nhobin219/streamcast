@@ -213,7 +213,14 @@ TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECU
 ### `maintain`
 
 **`maintain=True` starts one maintainer subprocess covering every stream that has a log**,
-and stops it when the server closes. Without it, nothing in this library ever calls litelink's
+and stops it when the server closes. One process for the server, not one per log: a
+maintainer is a full interpreter with litelink, pyarrow, pyiceberg and duckdb loaded —
+149 MB RSS measured — so four streams cost 596 MB one-per-log against 149 MB shared.
+
+`Maintain(dedicated=("trades",))` gives a named log its own, for one busy enough that its
+`maintain()` would hold up the others' `seal_due()`. Names are the **log's**, not the
+route; a name this server does not serve with a log raises at `serve` rather than being
+ignored, and naming every log starts no shared maintainer at all. Without it, nothing in this library ever calls litelink's
 `seal_due()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
 held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
 growing. litelink says it plainly: *"A maintainer is not optional."*

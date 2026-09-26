@@ -219,6 +219,68 @@ class TestLifecycle:
         finally:
             busy.close()
 
+    async def test_dedicating_every_log_starts_no_empty_shared_process(
+        self, log, tmp_path
+    ):
+        """**No maintainer with nothing to maintain.**
+
+        `dedicated` naming every log leaves the shared set empty, and a
+        `Supervisor` over no logs would be a full interpreter — 149 MB RSS
+        measured — sweeping nothing for the life of the server. That is the
+        cost this whole change exists to remove, reappearing as a rounding
+        error in the opt-out.
+
+        Falsify by appending the shared `Supervisor` unconditionally.
+        """
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        other = _a_log(tmp_path / "other", "other")
+        try:
+            routes = {
+                "a": streamcast.Stream("a", log=log),
+                "b": streamcast.Stream("b", log=other),
+            }
+            made = _supervisors(routes, Maintain(dedicated=("trades", "other")))
+
+            assert len(made) == 2, "an empty shared maintainer was started"
+            assert sorted(sorted(n for _r, n in s.targets) for s in made) == [
+                ["other"],
+                ["trades"],
+            ]
+            assert all(sup.targets for sup in made), "a maintainer sweeps nothing"
+
+        finally:
+            other.close()
+
+    async def test_dedicating_a_name_nothing_serves_is_refused(self, log):
+        """A typo would otherwise put the log back in the shared loop.
+
+        Which is the one thing the caller named it to avoid, with the symptom
+        being a latency problem they believe they already fixed. `_routes`
+        refuses a name collision rather than resolving one, for the same
+        reason.
+        """
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        with pytest.raises(ValueError, match="does not serve with a log") as raised:
+            _supervisors(
+                {"a": streamcast.Stream("a", log=log)}, Maintain(dedicated=("trade",))
+            )
+
+        # It names what IS served, and that the name is the log's.
+        assert "'trades'" in str(raised.value)
+        assert "LOG's" in str(raised.value)
+
+    async def test_a_live_only_stream_cannot_be_dedicated(self):
+        """It has no log, so there is nothing for a maintainer to sweep."""
+        from streamcast._maintain import Maintain
+        from streamcast._server import _supervisors
+
+        with pytest.raises(ValueError, match="does not serve with a log"):
+            _supervisors({"a": streamcast.Stream("a")}, Maintain(dedicated=("a",)))
+
     async def test_the_maintainer_stops_when_the_server_closes(self, log):
         stream = streamcast.Stream("trades", log=log)
         server = await streamcast.serve(stream, "127.0.0.1", 0)

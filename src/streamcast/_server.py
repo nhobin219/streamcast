@@ -183,6 +183,22 @@ def _supervisors(
     plan = Maintain() if maintain is True else maintain
     logs = [stream.log for stream in routes.values() if stream.log is not None]
 
+    # **A name that matches nothing is a raise, not a shrug.** Silently
+    # ignoring it puts the log back in the shared loop — the one thing the
+    # caller named it to avoid — and the symptom is a latency problem they
+    # believe they already fixed. `_routes` refuses a name collision rather
+    # than resolving one for the same reason.
+    served = {log.name for log in logs}
+    unknown = sorted(set(plan.dedicated) - served)
+    if unknown:
+        msg = (
+            f"maintain=Maintain(dedicated=...) names {', '.join(map(repr, unknown))}, "
+            f"which this server does not serve with a log. Served with a log: "
+            f"{', '.join(map(repr, sorted(served))) or 'nothing'}. "
+            f"Names are the LOG's, which need not be the route it is served at."
+        )
+        raise ValueError(msg)
+
     alone = [log for log in logs if log.name in plan.dedicated]
     shared = [log for log in logs if log.name not in plan.dedicated]
 

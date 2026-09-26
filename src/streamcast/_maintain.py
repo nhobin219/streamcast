@@ -84,12 +84,21 @@ class Maintain:
     maintain_every: float = MAINTAIN_EVERY
 
     dedicated: tuple[str, ...] = field(default=())
-    """Streams that get a maintainer to themselves rather than sharing one.
+    """Logs that get a maintainer to themselves rather than sharing one.
 
     The shared loop sweeps its logs in series, so one log whose `maintain()`
     takes seconds delays every other log's `seal_due()` by that much. That is
     a fine trade for the small streams this sharing exists for and a bad one
     for a very large or very hot log, which is what this names.
+
+    By the LOG's name, which need not be the route it is served at. A name
+    this server does not serve with a log is a `ValueError` at `serve` rather
+    than a no-op: ignored, a typo puts the log straight back into the shared
+    loop — the one thing it was named to avoid — and the symptom is a latency
+    problem the caller believes they already fixed.
+
+    Naming every log starts no shared maintainer at all, rather than an
+    interpreter sweeping nothing.
     """
 
 
