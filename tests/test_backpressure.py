@@ -193,14 +193,14 @@ class TestDropping:
 
         for i in range(4):
             frame = f"{i}".encode()
-            stalled.offer(frame)
-            healthy.offer(frame)
+            stalled.offer({}, frame)
+            healthy.offer({}, frame)
             # The healthy one is read as it goes; the stalled one is not.
             assert healthy._queue.get_nowait() == frame  # noqa: SLF001
 
         # One more is what overflows the stalled queue and drops it.
-        stalled.offer(b"4")
-        healthy.offer(b"4")
+        stalled.offer({}, b"4")
+        healthy.offer({}, b"4")
 
         assert stalled._dropped is True  # noqa: SLF001
         assert healthy._dropped is False, (  # noqa: SLF001

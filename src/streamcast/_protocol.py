@@ -48,6 +48,7 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import msgspec
 
+from streamcast import _filter
 from streamcast._errors import ProtocolError, Rejected
 
 if TYPE_CHECKING:
@@ -248,7 +249,15 @@ class Greeting:
     """
 
     replay: tuple[int, int] | None
-    """The `[start, end)` about to be replayed, or None for a live-only subscribe."""
+    """The `[start, end)` about to be replayed, or None for a live-only subscribe.
+
+    **With `where` set this is the offset WINDOW, not a count.** Unfiltered,
+    `end - start` is exactly how many messages arrive before the live queue
+    begins, and `docs/SPEC.md` §6b's recovery loop reads precisely that many.
+    Filtered, the server cannot know the count without scanning first, so the
+    window bounds what it will read and the number delivered is at most that.
+    A loop that must terminate on a count wants an unfiltered subscription.
+    """
 
     log: LogInfo | None
     """The log behind this stream, or None if it has none.
@@ -266,6 +275,14 @@ class Greeting:
     terms rather than as a `pa.schema`. It is the greeting's only unbounded
     field, and a schema large enough to matter is a stream with hundreds of
     columns, which litelink would be the wrong store for anyway.
+    """
+
+    where: dict[str, object] | None
+    """The filter the server is applying, or None.
+
+    Echoed so a subscriber can check that the predicate arrived as it meant
+    it — a filter is the one request whose failure mode is silence, and a
+    server that understood it differently looks identical to a quiet stream.
     """
 
     durable: bool
@@ -287,6 +304,7 @@ def greeting(
     durable: bool,
     schema: dict[str, object] | None = None,
     log: tuple[str, str | None] | None = None,
+    where: dict[str, object] | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
@@ -294,6 +312,11 @@ def greeting(
     nested object rather than flat keys, so the things a subscriber needs to
     open the log arrive together and `null` says plainly that there is
     nothing to open.
+
+    `where` is the filter the server is applying, echoed back. It is what lets
+    a subscriber confirm the server understood the predicate rather than
+    assume it, and it is the field that says `replay` is an UPPER BOUND on
+    this subscription rather than a count — see `Greeting.where`.
     """
     return _ENCODER.encode(
         {
@@ -304,6 +327,7 @@ def greeting(
             "durable": durable,
             "schema": schema,
             "log": None if log is None else {"name": log[0], "archive": log[1]},
+            "where": where,
         }
     ).decode()
 
@@ -358,6 +382,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
         schema=schema if isinstance(schema, dict) else None,
         log=log,
+        where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
     )
 
@@ -499,7 +524,9 @@ def parse_refusal(reason: str) -> tuple[str, dict[str, object]]:
     return (error if isinstance(error, str) else ""), fields
 
 
-def parse_subscribe(path: str) -> tuple[str, int | None | Publish]:
+def parse_subscribe(
+    path: str,
+) -> tuple[str, int | None | Publish, dict[str, object] | None]:
     """A request path, as the stream name and what it is asking for.
 
     `PUBLISH` where an offset would be, for `?publish` — one parser, because
@@ -519,10 +546,16 @@ def parse_subscribe(path: str) -> tuple[str, int | None | Publish]:
     name = split.path.lstrip("/")
     query = dict(parse_qsl(split.query, keep_blank_values=True))
 
-    unknown = set(query) - {"offset", "publish"}
+    unknown = set(query) - {"offset", "publish", "where"}
     if unknown:
         msg = f"unknown query parameter(s): {', '.join(sorted(unknown))}"
         raise ValueError(msg)
+
+    where = None
+    if "where" in query:
+        # Decoded here so a malformed filter is a 4400 at subscribe rather
+        # than a predicate built later from something that is not a mapping.
+        where = _filter.decode(query["where"])
 
     if "publish" in query:
         # A publisher asks for nothing and is sent nothing but the greeting,
@@ -532,11 +565,17 @@ def parse_subscribe(path: str) -> tuple[str, int | None | Publish]:
             msg = "publish and offset are different requests; pass one"
             raise ValueError(msg)
 
-        return name, PUBLISH
+        if where is not None:
+            # A publisher receives nothing, so a filter over what it receives
+            # is a request with no meaning rather than one worth honouring.
+            msg = "publish takes no where=; a publisher receives nothing"
+            raise ValueError(msg)
+
+        return name, PUBLISH, None
 
     raw = query.get("offset")
     if raw is None:
-        return name, None
+        return name, None, where
 
     try:
         offset = int(raw)
@@ -552,7 +591,7 @@ def parse_subscribe(path: str) -> tuple[str, int | None | Publish]:
         msg = f"offset={offset} is negative; {EARLIEST} means everything"
         raise ValueError(msg)
 
-    return name, offset
+    return name, offset, where
 
 
 def publish_path(uri: str) -> str:

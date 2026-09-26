@@ -59,7 +59,7 @@ import asyncio
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from websockets.frames import Close as _CloseFrame
 
-from streamcast._errors import Close, NotReplayable
+from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._server import _DETAIL_CHARS, _routes, _sidecars, _supervisors
 
@@ -400,7 +400,7 @@ class _Mounted:
 
     async def _dispatch(self, peer: _Peer, target: str) -> None:
         try:
-            name, requested = parse_subscribe(target)
+            name, requested, where = parse_subscribe(target)
 
         except ValueError as exc:
             await peer.close(
@@ -426,7 +426,13 @@ class _Mounted:
             return
 
         try:
-            await stream.serve_subscriber(peer, requested)
+            await stream.serve_subscriber(peer, requested, where)
+
+        except ProtocolError as exc:
+            await peer.close(
+                Close.BAD_REQUEST,
+                refusal("bad_request", detail=str(exc)[:_DETAIL_CHARS]),
+            )
 
         except NotReplayable as exc:
             await peer.close(

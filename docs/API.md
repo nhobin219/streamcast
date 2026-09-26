@@ -588,6 +588,55 @@ stream serves at its own name and its log has its own, and `Stream(log=handle)` 
 the caller named. Credentials are never published — they are the reader's own, resolved
 from its environment the way litelink resolves them.
 
+### `where=` — filtering a subscription
+
+```python
+connect(uri, where={"ticker": "AAPL"})              # equality
+connect(uri, where={"ticker": ["AAPL", "NVDA"]})    # membership
+connect(uri, where={"ticker": "AAPL", "qty": 100})  # AND
+connect(uri, where={})                              # no restriction
+```
+
+A JSON object of column to value, carried as `?where=` so `wscat` can use it too. Scalars
+compare by equality; a list means membership, unambiguously, because `_schema` refuses
+array columns outright — a column can never hold one. Terms combine with AND.
+
+There is no expression language and no `eval`: the predicate comes from a client over a
+socket. Refused with a 4400, naming the problem:
+
+| | |
+|---|---|
+| a column the schema does not have | `where names column 'tikcer', which this stream does not have` |
+| a value that is not a scalar or list of them | `where['ticker'] is {...}; a filter value is a scalar` |
+| an empty list | `where['ticker'] is an empty list, which matches nothing` |
+| `?publish&where=` | `publish takes no where=; a publisher receives nothing` |
+
+Refused rather than accepted-and-silent, because a filter is the one request whose failure
+mode is indistinguishable from a quiet stream.
+
+**Cost.** The predicate is compiled once at subscribe and specialised on its arity, then
+runs per message per filtered subscriber against the dict `send` was called with. Measured
+on a four-column row: 162 ns for one term, 260 ns for two, against 961 ns for the
+`msgspec` encode already on the path. The encode stays shared — a filter decides whether
+to enqueue the frame, not what to build — so filtering never costs a second serialisation.
+
+**The replay is filtered identically**, through the same predicate. `_log.rows` already
+yields dicts, so there is one implementation and nothing to diverge; pushing the predicate
+into the scan's SQL would prune more but Python and SQL disagree about coercion and NULL,
+and that disagreement would surface as a resume delivering what the live stream did not.
+
+**`replay` in the greeting becomes an upper bound.** Unfiltered, `end - start` is exactly
+what arrives before live; filtered, the count is unknown until the scan runs, so the window
+bounds it. The recovery loop in [`SPEC.md`](SPEC.md) §6b reads a count and therefore wants
+an unfiltered subscription.
+
+`Greeting.where` echoes the applied filter, so a subscriber can confirm the server
+understood the predicate rather than assume it.
+
+On a **live-only** stream there are no declared columns, so no name can be checked and any
+is accepted. A typo silently matches nothing there — a property of having no schema rather
+than of the filter.
+
 ## Resuming
 
 **`cursor=path` is the whole of it.** The file holds the last offset finished with; the

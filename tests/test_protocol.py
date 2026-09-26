@@ -198,10 +198,14 @@ class TestSubscribePath:
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
-            ("/", ("", None)),
-            ("/trades", ("trades", None)),
-            ("/trades?offset=1200", ("trades", 1200)),
-            ("/trades?offset=0", ("trades", EARLIEST)),
+            ("/", ("", None, None)),
+            ("/trades", ("trades", None, None)),
+            ("/trades?offset=1200", ("trades", 1200, None)),
+            ("/trades?offset=0", ("trades", EARLIEST, None)),
+            # `where=` is the third element; `tests/test_filter.py` owns what
+            # it means, this owns that the parse reads it.
+            ('/trades?where={"ticker":"AAPL"}', ("trades", None, {"ticker": "AAPL"})),
+            ('/trades?offset=7&where={"a":1}', ("trades", 7, {"a": 1})),
         ],
     )
     def test_it_reads_a_subscribe(self, path, expected):
@@ -224,4 +228,4 @@ class TestSubscribePath:
         [("", None), ("trades", None), ("trades", 1200), ("t", 0)],
     )
     def test_the_builder_and_the_parser_are_inverses(self, name, offset):
-        assert parse_subscribe(subscribe_path(name, offset)) == (name, offset)
+        assert parse_subscribe(subscribe_path(name, offset)) == (name, offset, None)
