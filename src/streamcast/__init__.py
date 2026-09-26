@@ -1,4 +1,4 @@
-"""A durable JSON WebSocket pubsub framework for structured data.
+"""A JSON WebSocket pubsub framework for structured data.
 
 Publishers write, subscribers read, and every message is appended to a
 litelink log — an Iceberg table on disk — before any subscriber sees it. A
