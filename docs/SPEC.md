@@ -10,8 +10,14 @@ Numbers marked *measured* were taken on the machine this was developed on with
 
 ## 1. Architecture
 
-One process holds the upstream subscription. Everything else on the box reads
-from it.
+**A log-backed pub/sub broker.** One process owns the log and the fan-out;
+publishers and subscribers are both its clients. A publisher is the server's
+own feed handler calling `Stream.send`, or `streamcast.publish` from another
+machine — either way the server is litelink's single writer, which is what
+makes the offsets one sequence.
+
+The common shape is one process holding the upstream subscription, with
+everything else on the box reading from it.
 
 **Any websocket feed.** Nothing in this section is specific to market data —
 that is only the case it was built against, and the one the examples use. A
@@ -60,8 +66,12 @@ In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
 archive when a consumer has fallen past what the server will replay.
 
-Out: acknowledgements, consumer groups, delivery guarantees beyond "a
-contiguous prefix", authentication, and transport security. The last two
+Out: acknowledgements, consumer groups, topic hierarchies and wildcard
+subscriptions, delivery guarantees beyond "a contiguous prefix",
+authentication, and transport security. Wildcards are out for a reason worth
+stating, since "broker" invites them: a subscriber resumes by offset and an
+offset belongs to one log, so a subscription spanning streams would need a
+cursor per stream rather than the single integer §3 rests on. The last two
 belong to whatever owns the socket — `websockets` under `serve`, the host
 application and its ASGI server under `streamcast.asgi` — and are passed
 through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).

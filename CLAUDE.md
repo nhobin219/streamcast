@@ -1,9 +1,10 @@
 # streamcast
 
-A JSON WebSocket pubsub framework for structured data. Publishers write, subscribers
-read, and every message is optionally appended to a litelink log — an Iceberg table —
-before any subscriber sees it. Each message carries the offset it was written at, so a subscriber
-that stops can reconnect and ask for the rest.
+A JSON WebSocket pubsub framework for structured data. A server is a log-backed pub/sub
+broker: publishers and subscribers are both its clients, and every message is optionally
+appended to a litelink log — an Iceberg table — before any subscriber sees it. Each
+message carries the offset it was written at, so a subscriber that stops can reconnect
+and ask for the rest.
 
 **The log is the analytical table**, which is the reason litelink is underneath rather
 than an append-only file: no export step and no second copy, so the Parquet a message was
