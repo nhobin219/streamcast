@@ -30,7 +30,13 @@ there was nothing to have changed from. Everything above it is ordinary.
 ### Changed
 
 - `Stream.new` and `Stream.restore` open the log a stream's metadata names as
-  current. A stream that has never migrated has no metadata file and is unchanged.
+  live.
+- **`serve` writes every durable stream's `metadata.json`** before it listens
+  (the ASGI app at lifespan start), uploads it when there is an archive, and
+  **refuses to start if it cannot**. It holds `stream_id`, `sealed_logs`,
+  `live_log` and a `manifest` pointer for #27. A stream from an earlier
+  release gains its file at its first `serve`. A `Stream(log=…)` handed a
+  sealed log is refused.
 - A migrated stream's server replays only its current log. A subscribe below
   the seam is refused `evicted` with `earliest` at the seam, rather than being
   served an empty replay. Reading across the seam is #32.

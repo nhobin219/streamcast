@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from os import PathLike
 
     import pyarrow as pa
-    from litelink import Row, WriteHandle
+    from litelink import Row, S3Options, WriteHandle
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
@@ -143,6 +143,7 @@ class Stream:
         "_name",
         "_owned",
         "_retired",
+        "_s3",
         "_shape",
         "_stamped",
         "_started",
@@ -160,6 +161,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         floor: int | None = None,
         retired: Sequence[tuple[Path, str]] = (),
+        s3: S3Options | None = None,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -179,6 +181,10 @@ class Stream:
         this server does not replay from. `retired` is the `(root, name)` of
         each retired log still on this disk, which `serve`'s maintainer keeps
         maintaining so their retention and eviction carry on.
+
+        `s3` is what `serve` uploads the stream's metadata file with, when the
+        log has an archive. None resolves from the environment, as litelink
+        does. It is kept, not used here: this initialiser does no I/O.
         """
         # The declared column order, read once. It fixes the key order of
         # every frame, and a replayed row must encode to the same bytes as the
@@ -201,6 +207,7 @@ class Stream:
         self._stamped = log is not None and _log.stamped(log)
         self._floor = floor
         self._retired = tuple(retired)
+        self._s3 = s3
         # Closed by `aclose` only when this object owns it. A log the caller
         # opened stays the caller's — they may be sharing it, and a library
         # that closes a handle it was lent is a library you cannot lend one
@@ -325,6 +332,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
+            s3=s3,  # ty: ignore[invalid-argument-type]
         )
 
     @classmethod
@@ -405,21 +413,9 @@ class Stream:
 
         try:
             if metadata is None:
-                metadata = _metadata.Metadata(
-                    name,
-                    (
-                        _metadata.describe(
-                            current,
-                            # The lowest offset it holds, since litelink does
-                            # not publish the one it was created at. Exact for
-                            # any log not evicted dry, and a retired log's
-                            # start is a description rather than a bound.
-                            _log.lowest(old) or old.end_offset(),
-                            None,
-                            old.schema,
-                        ),
-                    ),
-                )
+                # Never served under this version, so no metadata file yet:
+                # one log at the stream's name, described now.
+                metadata = _metadata.single(name, old)
 
             _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
 
@@ -428,12 +424,10 @@ class Stream:
                 and _log.is_current(old)
                 and (sort_by is None or tuple(sort_by) == old.sort_by)
             ):
-                # Already this shape. Published again because a migration
-                # that died between saving the metadata and publishing it
-                # reaches here on the retry, and the archive's copy is the one
-                # `Stream.restore` believes.
-                if len(metadata.logs) > 1 and old.archive:
-                    _metadata.publish(metadata, old.archive, s3)  # ty: ignore[invalid-argument-type]
+                # Already this shape: opened, not migrated again. Nothing is
+                # written here — `serve` saves and syncs the metadata of every
+                # stream it starts, which also finishes a migration that died
+                # between saving it and uploading it.
 
                 opened = old
                 old = None
@@ -443,10 +437,9 @@ class Stream:
                     owns_log=True,
                     max_backlog=max_backlog,
                     max_replay=max_replay,
-                    floor=_floor(metadata if len(metadata.logs) > 1 else None),
-                    retired=_retired(
-                        root, metadata if len(metadata.logs) > 1 else None
-                    ),
+                    floor=_floor(metadata),
+                    retired=_retired(root, metadata),
+                    s3=s3,  # ty: ignore[invalid-argument-type]
                 )
 
             new_log = _seal_and_succeed(
@@ -464,20 +457,8 @@ class Stream:
                 old.close()
 
         start = new_log.end_offset()
-        head = metadata.current
-        metadata = _metadata.Metadata(
-            name,
-            (
-                *metadata.retired,
-                _metadata.Entry(
-                    head.name,
-                    head.start_offset,
-                    start,
-                    head.schema,
-                    head.system_schema,
-                ),
-                _metadata.describe(new_log.name, start, None, new_log.schema),
-            ),
+        metadata = metadata.advance(
+            start, _metadata.describe(new_log.name, start, None, new_log.schema)
         )
         try:
             _metadata.save(root, metadata)
@@ -496,6 +477,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
+            s3=s3,  # ty: ignore[invalid-argument-type]
         )
 
     @classmethod
@@ -580,6 +562,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
+            s3=s3,  # ty: ignore[invalid-argument-type]
         )
 
     def __repr__(self) -> str:
@@ -631,6 +614,25 @@ class Stream:
         from "no rows yet" and should not be confused with 0 or 1.
         """
         return self._end_offset
+
+    def ensure_metadata(self) -> None:
+        """Write this stream's metadata file if it has none, and sync its archive.
+
+        What `serve` calls for every stream before it listens; a failure is a
+        failure to start. See `_metadata.ensure`. A stream with no log has no
+        metadata and this does nothing.
+
+        Also where a `Stream(log=…)` learns it is part of a migrated stream:
+        its initialiser does no I/O, so the seam and the retired logs are read
+        off the metadata here, before the first subscriber can ask below it.
+        """
+        log = self._log
+        if log is None:
+            return
+
+        metadata = _metadata.ensure(self._name or log.name, log, self._s3)
+        self._floor = _floor(metadata)
+        self._retired = _retired(log.root, metadata)
 
     @property
     def retired(self) -> tuple[tuple[Path, str], ...]:
@@ -1179,7 +1181,8 @@ def _open_or_create(
     """
     declared = _declaration(schema)
     # A migrated stream is written to its metadata's CURRENT log, whose name
-    # is not the stream's. No metadata file means it has never migrated.
+    # is not the stream's. No metadata file means it has not been served by
+    # this version yet, and so has never migrated: one log, at its name.
     metadata = _metadata.load(root, name)
     current = name if metadata is None else metadata.current.name
     try:
@@ -1245,8 +1248,16 @@ def _declaration(schema: Mapping[str, object]) -> pa.Schema:
 
 
 def _floor(metadata: _metadata.Metadata | None) -> int | None:
-    """Where a migrated stream's current log starts; None if it never migrated."""
-    return None if metadata is None else metadata.current.start_offset
+    """Where a migrated stream's live log starts; None if it never migrated.
+
+    None for a stream with no sealed log even though its metadata knows a
+    start: below it there is nothing to point a subscriber at, and an empty
+    log's `EARLIEST` stays `empty`.
+    """
+    if metadata is None or not metadata.sealed_logs:
+        return None
+
+    return metadata.live_log.start_offset
 
 
 def _retired(

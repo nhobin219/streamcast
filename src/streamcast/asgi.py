@@ -270,7 +270,14 @@ class _Mounted:
     run directly. Both routes are idempotent, so doing both is harmless.
     """
 
-    __slots__ = ("_children", "_publish", "_started", "_streams")
+    __slots__ = (
+        "_children",
+        "_maintain",
+        "_publish",
+        "_sidecars",
+        "_started",
+        "_streams",
+    )
 
     def __init__(
         self,
@@ -284,10 +291,14 @@ class _Mounted:
         # collision or a missing litestream should fail at the call rather
         # than inside a lifespan event whose traceback names the framework.
         self._streams = _routes(streams)
-        self._children: list[_Child] = [
-            *_supervisors(self._streams, maintain),
-            *_sidecars(self._streams, replicate),
-        ]
+        self._maintain = maintain
+        # The sidecar resolves litestream here, so a missing binary fails at
+        # the call. The maintainer waits for `_start`: it is handed the
+        # retired logs, which a `Stream(log=…)` learns from its metadata, and
+        # writing that is network I/O this constructor — often run at import,
+        # as `app = asgi(...)` — should not do.
+        self._sidecars: list[_Child] = [*_sidecars(self._streams, replicate)]
+        self._children: list[_Child] = []
         self._publish = publish
         self._started = False
 
@@ -300,6 +311,15 @@ class _Mounted:
         if self._started:
             return
 
+        # Every stream's metadata file first, and a failure fails the
+        # lifespan startup — see `serve`.
+        for stream in self._streams.values():
+            stream.ensure_metadata()
+
+        self._children = [
+            *_supervisors(self._streams, self._maintain),
+            *self._sidecars,
+        ]
         self._started = True
         for child in self._children:
             child.start()

@@ -449,11 +449,10 @@ class TestTheArchive:
 
 def test_the_metadata_round_trips():
     metadata = _metadata.Metadata(
-        "trades",
-        (
-            _metadata.Entry("trades", 1, 6, V1, NO_SYSTEM),
-            _metadata.Entry("trades-v2", 6, None, V2, SYSTEM_NOW),
-        ),
+        stream="trades",
+        stream_id="6f1c0b8e-0000-4000-8000-000000000000",
+        sealed_logs=(_metadata.Entry("trades", 1, 6, V1, NO_SYSTEM),),
+        live_log=_metadata.Entry("trades-v2", 6, None, V2, SYSTEM_NOW),
     )
     assert _metadata.Metadata.from_json(metadata.to_json()) == metadata
     assert json.loads(metadata.to_json())["streamcast_metadata"] == 1

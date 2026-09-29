@@ -210,6 +210,25 @@ wanted it would get somebody else's messages — which looks like working softwa
 server that should only serve its own box, which is the case this library is built for.
 TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECURITY.md).
 
+### The metadata file
+
+Before it listens, `serve` writes `root/<stream>.metadata.json` for every stream with a log
+that doesn't have one yet, and, when the log has an archive, makes sure
+`<archive>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
+something changed. **If either fails, `serve` raises instead of starting.** The file is
+what lets anything other than this server read the stream (#32), so a broken one is found
+at deploy. The ASGI app does the same when its lifespan starts.
+
+```json
+{"streamcast_metadata": 1, "stream": "trades", "stream_id": "6f1c…",
+ "sealed_logs": [], "live_log": {"name": "trades", "start_offset": 1, …}, "manifest": null}
+```
+
+The upload uses the `s3=` the stream was created with (`Stream.new`, `Stream.migrate`,
+`Stream.restore`, or `Stream(log=…, s3=…)`), and otherwise the environment. A stream from
+an earlier release gets its file on its first `serve`. A `Stream(log=…)` handed a log the
+file says is sealed is refused.
+
 ### `maintain`
 
 **`maintain=True` starts one maintainer subprocess covering every stream that has a log**,
@@ -1016,8 +1035,8 @@ server stopped resumes at the seam with nothing lost. One further behind is refu
 whole migrated stream is `Stream.snapshot` (#32). `offset=EARLIEST` means the start of the
 current log.
 
-`sort_by` and `config` default to the current log's. `s3=` is needed only to publish the
-metadata to the archive.
+`sort_by` and `config` default to the current log's. `s3=` is what the metadata file is
+uploaded to the archive with, both here and at `serve`.
 
 ### Or bring your own litelink log
 
