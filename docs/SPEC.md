@@ -543,6 +543,82 @@ disagreed would be silently ignored and every send validated against columns
 the caller never wrote down. It is compared and refused instead, which is the
 one failure this convenience would otherwise introduce.
 
+To change the schema, a stream is **migrated** instead.
+
+### Migration: a stream becomes a sequence of logs
+
+litelink fixes a log's shape at creation, so a new schema means a new log.
+`Stream.migrate` makes the stream a sequence of them, with the server
+stopped:
+
+1. **The current log is sealed for good**: every buffered row goes to
+   Parquet, and with an archive the whole log is pushed, including the trailing
+   run a plain `sync` holds back for compaction that will now never come.
+2. **The next log is created**, `trades-v2` and so on, starting at exactly the
+   old log's `end_offset`.
+3. **The manifest records both**, the new one as current, at
+   `root/<stream>.manifest.json` and `<archive>/<stream>.manifest.json`.
+
+**Offline, so dense.** A live rotation would have to create the next log
+(100–300 ms, measured) while `send` kept writing the old one, and so could not
+know where the next should start without fencing a gap. Nothing is migrated
+live. A migration is a deploy, because publishers have to change shape at the
+same time. With nothing sending, the seam is exact and the offsets are one
+sequence with no gap.
+
+**The manifest is written last, by atomic rename**, so a crash never leaves it
+naming a log that does not exist. A crash before it leaves an orphan log that
+the manifest doesn't name. The next `migrate` adopts the orphan if it is empty,
+starts at the seam and has the requested shape. Otherwise it refuses, because
+adopting a log holding rows the manifest cannot account for is not a decision to
+make silently. No manifest means one log named for the stream, which is every
+stream that has never migrated, and those need no file.
+
+**Idempotent**, so `Stream.migrate(...)` can sit in a server's startup: a
+current log that already has the requested shape (and `streamcast_ts`) is
+opened, not migrated. Migrating to the SAME schema is how a log from before
+`streamcast_ts` gains it.
+
+**The type rule.** A stream's logs are read together with `UNION ALL BY NAME`.
+There a changed type fails nothing, which is the problem. Measured in DuckDB:
+
+| one log | the next | union |
+|---|---|---|
+| `int32` | `int64` | `BIGINT`, exact |
+| `int64` | `float64` | `DOUBLE`, loses integers past 2^53 |
+| `int64` | `string` | `VARCHAR`, a different column under the old name |
+
+So **a column's type is fixed for the life of the stream**, with no exception
+for widening: one rule a reader never has to look up. It covers removed
+columns too. The manifest records every log's schema, and a re-added name must
+take the type it had. Adding columns, removing them and changing nullability
+are free.
+
+**A rename is the change this cannot refuse**, because it cannot be seen: it
+arrives as a removal and an addition. Under the union the two names become two
+columns, each null wherever the other applies. Every row is intact, and every
+query that spans the seam is silently wrong.
+
+**This server replays only the current log.** A subscribe below the seam is
+refused `evicted`, naming where the current log starts. It is refused because
+the scan cannot see the problem: the current log holds nothing below its
+start, so a replay of the range would come back empty and read as "nothing
+outstanding". That is the hole at the join invariant 4 forbids. A consumer
+that was caught up when the server stopped resumes exactly at the seam and
+loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
+the server's replay. `EARLIEST` on a freshly migrated stream is where the
+current log begins.
+
+Retired logs stay on disk and in the archive. `serve`'s maintainer keeps
+maintaining the ones on this disk, so their local retention still runs.
+litestream replicates only the current log, since nothing writes to a retired
+one.
+
+**Not built: rollback.** Undoing a migration would be a manifest update that
+makes the previous log current again. That log would also have to be fenced
+above everything the abandoned one issued, the way `restore` fences, so that no
+offset is reused.
+
 ### The five refusals
 
 | `why` | when | the caller's next move |

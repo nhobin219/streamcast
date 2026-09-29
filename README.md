@@ -228,6 +228,19 @@ The table has two columns you did not declare. `litelink_offset` is the offset e
 carries, and `streamcast_ts` is when the server took the row, in UTC microseconds. The
 second is stored and never sent.
 
+### Changing the schema
+
+A log's columns are fixed when it is created. To change them, stop the server and
+migrate:
+
+```python
+stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
+```
+
+That seals the current log, starts `trades-v2` at the next offset, and records both in a
+manifest. Columns can be added and removed. A column's type can never change. It is safe
+to leave in your startup: a stream already of that shape is just opened.
+
 ### Surviving a feed that changes
 
 `send` validates the row against the schema, so a feed that changes shape breaks capture —

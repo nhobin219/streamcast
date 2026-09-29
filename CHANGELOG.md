@@ -7,6 +7,30 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`Stream.migrate`** — change a stream's schema. With the server stopped, it
+  seals the current log for good and creates the next (`trades-v2`, …) with
+  the new schema. The new log starts at exactly the old one's end offset, so
+  offsets stay one dense sequence. A manifest records the logs, locally and
+  in the archive. It is idempotent, so it can sit in a server's startup, and
+  migrating to the same schema is how a log from before `streamcast_ts`
+  gains the column.
+
+  Columns may be added and removed. **A column's type is fixed for the life of
+  the stream**, including after removal, because the logs are read together
+  with `UNION ALL BY NAME`, where a changed type coerces silently.
+
+### Changed
+
+- `Stream.new` and `Stream.restore` open the log a stream's manifest names as
+  current. A stream that has never migrated has no manifest and is unchanged.
+- A migrated stream's server replays only its current log. A subscribe below
+  the seam is refused `evicted` with `earliest` at the seam, rather than being
+  served an empty replay. Reading across the seam is #32.
+
 ## 0.8.0 — 2026-09-29
 
 ### Added

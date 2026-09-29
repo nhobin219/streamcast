@@ -200,13 +200,18 @@ def _supervisors(
         raise ValueError(msg)
 
     alone = [log for log in logs if log.name in plan.dedicated]
-    shared = [log for log in logs if log.name not in plan.dedicated]
+    shared = [
+        (Path(log.root), log.name) for log in logs if log.name not in plan.dedicated
+    ]
+    # **A migrated stream's retired logs are maintained too**, in the shared
+    # process. Nothing writes to them again, so there is nothing to seal —
+    # but their local retention and eviction still run on the maintainer's
+    # cadence, and a retired log nothing maintains keeps every file for ever.
+    shared += [target for stream in routes.values() for target in stream.retired]
 
     supervisors = [Supervisor([(Path(log.root), log.name)], plan) for log in alone]
     if shared:
-        supervisors.append(
-            Supervisor([(Path(log.root), log.name) for log in shared], plan)
-        )
+        supervisors.append(Supervisor(shared, plan))
 
     return supervisors
 

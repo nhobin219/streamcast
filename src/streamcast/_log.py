@@ -308,6 +308,20 @@ def earliest(log: LogHandle) -> int | None:
     return min(lows)
 
 
+def lowest(log: LogHandle) -> int | None:
+    """The lowest offset `log` holds in ANY tier, or None if it holds nothing.
+
+    Unlike `earliest`, which answers for the tiers this handle reads, this
+    counts the archive whether or not the handle reads it: it describes the
+    log, for a manifest, rather than what a replay from it can reach.
+    """
+    coverage = log.coverage()
+    tiers = [log.table_extent(), coverage.buffered, coverage.archive]
+    lows = [extent[0] for extent in tiers if extent is not None]
+
+    return min(lows) if lows else None
+
+
 async def replay(
     log: WriteHandle,
     start: int,
@@ -349,6 +363,7 @@ __all__ = [
     "columns",
     "declared",
     "earliest",
+    "lowest",
     "replay",
     "rows",
     "rows_from",

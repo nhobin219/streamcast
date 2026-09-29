@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _filter, _log, _schema
+from streamcast import _filter, _log, _manifest, _schema
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
     EARLIEST,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from os import PathLike
 
+    import pyarrow as pa
     from litelink import Row, WriteHandle
 
     from streamcast._filter import Predicate, Where
@@ -132,6 +134,7 @@ class Stream:
     __slots__ = (
         "_columns",
         "_end_offset",
+        "_floor",
         "_last_send",
         "_last_send_ts",
         "_log",
@@ -139,6 +142,7 @@ class Stream:
         "_max_replay",
         "_name",
         "_owned",
+        "_retired",
         "_shape",
         "_stamped",
         "_started",
@@ -154,6 +158,8 @@ class Stream:
         owns_log: bool = False,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
+        floor: int | None = None,
+        retired: Sequence[tuple[Path, str]] = (),
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -166,6 +172,13 @@ class Stream:
         closes a log it owns and never one it was merely lent. `new` sets it;
         a caller passing `log=` can set it too, to hand over the lifetime of
         a handle they opened.
+
+        `floor` and `retired` describe a MIGRATED stream, and `new`, `migrate`
+        and `restore` read both off its manifest. `floor` is the offset the
+        current log starts at: below it the rows are in a retired log, which
+        this server does not replay from. `retired` is the `(root, name)` of
+        each retired log still on this disk, which `serve`'s maintainer keeps
+        maintaining so their retention and eviction carry on.
         """
         # The declared column order, read once. It fixes the key order of
         # every frame, and a replayed row must encode to the same bytes as the
@@ -186,6 +199,8 @@ class Stream:
         # created before the column existed, or one a caller opened and passed
         # in, may not have it, and its shape is not this library's to change.
         self._stamped = log is not None and _log.stamped(log)
+        self._floor = floor
+        self._retired = tuple(retired)
         # Closed by `aclose` only when this object owns it. A log the caller
         # opened stays the caller's — they may be sharing it, and a library
         # that closes a handle it was lent is a library you cannot lend one
@@ -291,21 +306,190 @@ class Stream:
         replay holds a worker from the `to_thread` pool for its whole scan,
         and that pool is `min(32, cpu + 4)`.
         """
+        log, manifest = _open_or_create(
+            root,
+            name,
+            schema=schema,
+            sort_by=sort_by,
+            config=config,
+            archive=archive,
+            s3=s3,
+            replay_archive=replay_archive,
+        )
+
         return cls(
             name,
-            log=_open_or_create(
-                root,
-                name,
-                schema=schema,
-                sort_by=sort_by,
-                config=config,
-                archive=archive,
-                s3=s3,
-                replay_archive=replay_archive,
-            ),
+            log=log,
             owns_log=True,
             max_backlog=max_backlog,
             max_replay=max_replay,
+            floor=_floor(manifest),
+            retired=_retired(root, manifest),
+        )
+
+    @classmethod
+    def migrate(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        schema: Mapping[str, object],
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
+        s3: object | None = None,
+        max_backlog: int = MAX_BACKLOG,
+        max_replay: int | None = MAX_REPLAY,
+        replay_archive: bool = False,
+    ) -> Stream:
+        """Move a stream onto a new log with a new schema, and return it.
+
+            stream = streamcast.Stream.migrate("trades", root="data", schema=V2)
+            async with streamcast.serve(stream, "localhost", 8765):
+                ...
+
+        **With the server stopped.** Nothing is migrated live: publishers are
+        sending the old shape until they are changed too, so a migration is a
+        deploy — stop the server, migrate, serve the result.
+
+        Three steps, in this order:
+
+        1. **The current log is sealed for good.** Every buffered row goes to
+           Parquet and, if the log has an archive, the whole log is pushed to
+           it. Nothing writes to it again.
+        2. **The next log is created** — `trades-v2`, then `-v3` — with the new
+           schema, starting at EXACTLY the offset the old one ended at. The
+           offsets stay one dense sequence across the seam: no fence, because
+           with the server stopped nothing can send in between.
+        3. **The manifest records both**, the new one as current, locally and
+           in the archive. See `_manifest`.
+
+        **Idempotent**, so it can sit in a server's startup: a stream whose
+        current log already has this shape is opened, not migrated again. That
+        includes a log from before `streamcast_ts` existed — migrating it with
+        the same schema is how it gains the column.
+
+        **What may change: columns added, columns removed, and nullability.**
+        A column's TYPE is fixed for the life of the stream, including after
+        it is removed — re-adding a name takes the type it had. A stream's
+        logs are read together with `UNION ALL BY NAME`, where a changed type
+        coerces silently rather than failing; see `_manifest.check_types`.
+
+        ⚠️ **A rename cannot be refused, because it cannot be seen.** It
+        arrives as one column removed and another added, and under the union
+        they become two columns, each null wherever the other applies: every
+        row intact and every query over both silently wrong. Add the new name
+        and keep writing the old one, or keep the old name.
+
+        `config` and `sort_by` default to the current log's, and the archive
+        is always the current log's — the manifest lives beside it.
+
+        **This server replays only the current log.** A subscriber resuming
+        from below the seam is refused `evicted`, naming where the current log
+        starts; reading a whole migrated stream is `Stream.snapshot` (#32). A
+        consumer that was caught up when the server stopped resumes exactly at
+        the seam and loses nothing.
+        """
+        declared = _declaration(schema)
+        manifest = _manifest.load(root, name)
+        current = name if manifest is None else manifest.current.name
+        try:
+            old = litelink.open(root, current, include_archive=replay_archive)
+        except FileNotFoundError:
+            msg = (
+                f"there is no stream {name!r} at {root} to migrate. "
+                f"Stream.new creates one."
+            )
+            raise FileNotFoundError(msg) from None
+
+        try:
+            if manifest is None:
+                manifest = _manifest.Manifest(
+                    name,
+                    (
+                        _manifest.Entry(
+                            current,
+                            # The lowest offset it holds, since litelink does
+                            # not publish the one it was created at. Exact for
+                            # any log not evicted dry, and a retired log's
+                            # start is a description rather than a bound.
+                            _log.lowest(old) or old.end_offset(),
+                            None,
+                            _schema.from_arrow(_log.declared(old.schema)),
+                        ),
+                    ),
+                )
+
+            _manifest.check_types(manifest.logs, _schema.from_arrow(declared))
+
+            if (
+                list(_log.declared(old.schema)) == list(declared)
+                and _log.stamped(old)
+                and (sort_by is None or tuple(sort_by) == old.sort_by)
+            ):
+                # Already this shape. Published again because a migration
+                # that died between saving the manifest and publishing it
+                # reaches here on the retry, and the archive's copy is the one
+                # `Stream.restore` believes.
+                if len(manifest.logs) > 1 and old.archive:
+                    _manifest.publish(manifest, old.archive, s3)  # ty: ignore[invalid-argument-type]
+
+                opened = old
+                old = None
+                return cls(
+                    name,
+                    log=opened,
+                    owns_log=True,
+                    max_backlog=max_backlog,
+                    max_replay=max_replay,
+                    floor=_floor(manifest if len(manifest.logs) > 1 else None),
+                    retired=_retired(
+                        root, manifest if len(manifest.logs) > 1 else None
+                    ),
+                )
+
+            new_log = _seal_and_succeed(
+                old,
+                root,
+                manifest.next_name(),
+                declared=declared,
+                sort_by=sort_by,
+                config=config,
+                s3=s3,
+                replay_archive=replay_archive,
+            )
+        finally:
+            if old is not None:
+                old.close()
+
+        start = new_log.end_offset()
+        head = manifest.current
+        manifest = _manifest.Manifest(
+            name,
+            (
+                *manifest.retired,
+                _manifest.Entry(head.name, head.start_offset, start, head.schema),
+                _manifest.Entry(
+                    new_log.name, start, None, _schema.from_arrow(declared)
+                ),
+            ),
+        )
+        try:
+            _manifest.save(root, manifest)
+            if new_log.archive:
+                _manifest.publish(manifest, new_log.archive, s3)  # ty: ignore[invalid-argument-type]
+
+        except BaseException:
+            new_log.close()
+            raise
+
+        return cls(
+            name,
+            log=new_log,
+            owns_log=True,
+            max_backlog=max_backlog,
+            max_replay=max_replay,
+            floor=_floor(manifest),
+            retired=_retired(root, manifest),
         )
 
     @classmethod
@@ -362,9 +546,13 @@ class Stream:
         handles append, and both sync to the same archive. Stop the old
         producer first. See `docs/SPEC.md`.
         """
+        # **The manifest first**, because it says which log is current. Without
+        # it this would rebuild a migrated stream's FIRST log and serve that as
+        # though nothing had happened since.
+        manifest = _manifest.fetch(archive, name, s3)  # ty: ignore[invalid-argument-type]
         log = litelink.restore(
             root,
-            name,
+            name if manifest is None else manifest.current.name,
             archive=archive,
             s3=s3,  # ty: ignore[invalid-argument-type]
             binary=binary,
@@ -375,12 +563,17 @@ class Stream:
             # subscriber never sees the local tier fill underneath it.
             log.hydrate(since=hydrate)
 
+        if manifest is not None:
+            _manifest.save(root, manifest)
+
         return cls(
             name,
             log=log,
             owns_log=True,
             max_backlog=max_backlog,
             max_replay=max_replay,
+            floor=_floor(manifest),
+            retired=_retired(root, manifest),
         )
 
     def __repr__(self) -> str:
@@ -432,6 +625,16 @@ class Stream:
         from "no rows yet" and should not be confused with 0 or 1.
         """
         return self._end_offset
+
+    @property
+    def retired(self) -> tuple[tuple[Path, str], ...]:
+        """The `(root, name)` of each retired log still on this disk.
+
+        Empty for a stream that has never migrated. `serve` maintains these
+        beside the current log, so their local retention keeps running; it
+        never writes to them.
+        """
+        return self._retired
 
     @property
     def subscribers(self) -> int:
@@ -813,9 +1016,27 @@ class Stream:
             # has been evicted to its archive.
             first = await asyncio.to_thread(_log.earliest, log)
             if first is None:
-                raise NotReplayable("empty")
+                # A migrated stream's new log is empty until its first send,
+                # and the stream is not: its history is in the retired logs.
+                # The earliest THIS server serves is where the current log
+                # begins, so that is what EARLIEST means here.
+                if self._floor is None:
+                    raise NotReplayable("empty")
+
+                first = self._floor
 
             requested = first
+
+        if self._floor is not None and requested < self._floor:
+            # **Below the seam is a retired log, which this server does not
+            # read.** Refused here rather than left to the scan, because the
+            # scan cannot see it: the current log holds nothing below its
+            # start, so an empty replay would pass for "nothing outstanding"
+            # and the subscriber would receive a stream with the old log's
+            # tail silently missing — invariant 4's hole at the join.
+            raise NotReplayable(
+                "evicted", offset=requested, earliest=self._floor, archive=log.archive
+            )
 
         if requested > frontier:
             raise NotReplayable("ahead", offset=requested, end_offset=frontier)
@@ -936,8 +1157,8 @@ def _open_or_create(
     archive: str | None,
     s3: object | None,
     replay_archive: bool = False,
-) -> WriteHandle:
-    """The log for this stream, created if it is not there yet.
+) -> tuple[WriteHandle, _manifest.Manifest | None]:
+    """The log for this stream, created if it is not there yet, and its manifest.
 
     The try/except every caller writes identically: a server has to `new` the
     first time and `open` every time after, and `new` raises rather than
@@ -950,21 +1171,25 @@ def _open_or_create(
     against columns the caller did not write down. That is the failure this
     convenience would otherwise introduce.
     """
-    declared = _schema.to_arrow(schema)
-    if _log.STAMP in declared.names:
-        msg = (
-            f"{_log.STAMP!r} is the column streamcast stamps each row with; "
-            f"declare the stream's own timestamp under another name"
-        )
-        raise ValueError(msg)
-
+    declared = _declaration(schema)
+    # A migrated stream is written to its manifest's CURRENT log, whose name
+    # is not the stream's. No manifest is a stream that has never migrated.
+    manifest = _manifest.load(root, name)
+    current = name if manifest is None else manifest.current.name
     try:
         # litelink's spelling on the way in. It is `include_archive` there
         # because it governs which tiers any READ includes; here it governs
         # what a replay may reach, which is the only read this opens a log
         # for — and `archive=` next to it already means "where".
-        log = litelink.open(root, name, include_archive=replay_archive)
+        log = litelink.open(root, current, include_archive=replay_archive)
     except FileNotFoundError:
+        if manifest is not None:
+            msg = (
+                f"the manifest at {_manifest.path(root, name)} names {current!r} "
+                f"as the current log, and there is no log at {root}/{current}"
+            )
+            raise FileNotFoundError(msg) from None
+
         return litelink.new(
             root,
             name,
@@ -974,7 +1199,7 @@ def _open_or_create(
             archive=archive,
             s3=s3,  # ty: ignore[invalid-argument-type]
             include_archive=replay_archive,
-        )
+        ), None
 
     # Compared WITHOUT `streamcast_ts`, so a log created before the column
     # existed still opens: it keeps its shape and is simply never stamped.
@@ -988,14 +1213,117 @@ def _open_or_create(
         found = list(_log.columns(log))
         log.close()
         msg = (
-            f"the log at {root}/{name} has columns {found}, and this "
+            f"the log at {root}/{current} has columns {found}, and this "
             f"stream declares {declared.names}. litelink fixes a log's shape at "
-            f"creation, so an existing one cannot be re-declared — open it "
-            f"yourself and pass `log=`, or point `root=` somewhere else."
+            f"creation, so an existing one cannot be re-declared. To change the "
+            f"schema, stop the server and use Stream.migrate; to keep it, "
+            f"declare the columns the log has."
         )
         raise ValueError(msg)
 
-    return log
+    return log, manifest
+
+
+def _declaration(schema: Mapping[str, object]) -> pa.Schema:
+    """A declaration as Arrow, refusing the one name streamcast owns."""
+    declared = _schema.to_arrow(schema)
+    if _log.STAMP in declared.names:
+        msg = (
+            f"{_log.STAMP!r} is the column streamcast stamps each row with; "
+            f"declare the stream's own timestamp under another name"
+        )
+        raise ValueError(msg)
+
+    return declared
+
+
+def _floor(manifest: _manifest.Manifest | None) -> int | None:
+    """Where a migrated stream's current log starts; None if it never migrated."""
+    return None if manifest is None else manifest.current.start_offset
+
+
+def _retired(
+    root: str | PathLike[str], manifest: _manifest.Manifest | None
+) -> tuple[tuple[Path, str], ...]:
+    """The retired logs still on THIS disk, as `(root, name)`.
+
+    Only those present: a restored stream has its current log and nothing
+    else, and a maintainer asked to open a log that is not there would fail
+    every pass.
+    """
+    if manifest is None:
+        return ()
+
+    return tuple(
+        (Path(root), entry.name)
+        for entry in manifest.retired
+        if (Path(root) / entry.name).is_dir()
+    )
+
+
+def _seal_and_succeed(
+    old: WriteHandle,
+    root: str | PathLike[str],
+    name: str,
+    *,
+    declared: pa.Schema,
+    sort_by: Sequence[str] | None,
+    config: object | None,
+    s3: object | None,
+    replay_archive: bool,
+) -> WriteHandle:
+    """Seal `old` for good, then create the log that follows it.
+
+    The seal comes FIRST and entirely: a failure there — an archive that is
+    unreachable — leaves the stream exactly as it was, one log, current, with
+    its rows merely sealed earlier than the maintainer would have.
+    """
+    while old.seal() is not None:
+        pass
+
+    if old.archive:
+        # Compacted, then pushed IN FULL. A plain `sync` holds back the
+        # trailing run for later compaction, and there is no later for a log
+        # nothing writes to again.
+        old.maintain()
+        old.sync(push_unsettled=True)
+
+    start = old.end_offset()
+    try:
+        return litelink.new(
+            root,
+            name,
+            schema=_log.with_stamp(declared),
+            sort_by=old.sort_by if sort_by is None else sort_by,
+            config=old.config if config is None else config,  # ty: ignore[invalid-argument-type]
+            archive=old.archive,
+            s3=s3,  # ty: ignore[invalid-argument-type]
+            include_archive=replay_archive,
+            start_offset=start,
+        )
+    except FileExistsError:
+        # **An orphan from a migration that died before its manifest was
+        # saved.** Adopted only if it is exactly what this call would have
+        # made and nothing has written to it; anything else is a log with
+        # rows the manifest does not account for, which is not a decision to
+        # make on the caller's behalf.
+        orphan = litelink.open(root, name, include_archive=replay_archive)
+        if (
+            orphan.end_offset() == start
+            and _log.lowest(orphan) is None
+            and list(_log.declared(orphan.schema)) == list(declared)
+            and _log.stamped(orphan)
+        ):
+            return orphan
+
+        orphan.close()
+        msg = (
+            f"a log already exists at {root}/{name} and the manifest does not "
+            f"name it. It is not an empty log of the requested shape starting "
+            f"at {start}, so it was not adopted — inspect it, and remove it if "
+            f"it is the remains of an abandoned migration."
+        )
+        raise FileExistsError(msg) from None
 
 
 async def _empty() -> AsyncGenerator[tuple[int, bytes], None]:

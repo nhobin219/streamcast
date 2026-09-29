@@ -975,6 +975,46 @@ column actually is.
 msgspec carry int64 exactly; a JavaScript subscriber silently rounds. A nanosecond
 `event_ts` is past it — microseconds, which the examples use, are not.
 
+### Changing the schema: `Stream.migrate`
+
+A log's shape is fixed when it is created, so a new schema means a new log. With the
+server stopped:
+
+```python
+stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
+async with streamcast.serve(stream, "localhost", 8765):
+    ...
+```
+
+The current log is sealed for good (and pushed in full to its archive, if it has one).
+Then `trades-v2` is created with the new schema, starting at exactly the offset the old log
+ended at. `root/trades.manifest.json` (and a copy in the archive) records the sequence.
+Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
+log the manifest names as current.
+
+It is **idempotent**: a stream already of that shape is opened rather than migrated
+again, so the call can live in your startup. Migrating to the *same* schema is how a log
+created before `streamcast_ts` existed gains the column.
+
+**What may change:** columns added, columns removed, nullability. **What may not:** a
+column's type, ever, including after it has been removed. Re-adding a name takes the type
+it had. A stream's logs are read together with `UNION ALL BY NAME`, where a changed type
+coerces silently (`int64` beside `string` becomes a string column) rather than failing.
+Widening is refused too.
+
+⚠️ **Don't rename a column.** It can't be refused, because it looks like one column
+removed and another added. Across the seam the two names become two half-null columns
+and every query spanning both is quietly wrong. Add the new name and keep the old one.
+
+**The server replays only the current log.** A consumer that was caught up when the
+server stopped resumes at the seam with nothing lost. One further behind is refused
+`evicted`, with `earliest` at the seam, and `catch_up` can't bridge it yet: reading a
+whole migrated stream is `Stream.snapshot` (#32). `offset=EARLIEST` means the start of the
+current log.
+
+`sort_by` and `config` default to the current log's. `s3=` is needed only to publish the
+manifest to the archive.
+
 ### Or bring your own litelink log
 
 ```python
