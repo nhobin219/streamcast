@@ -701,9 +701,11 @@ with no symptom. So:
   `read_parquet` and litelink's `sql` alike. A pruner has to agree with the
   most inclusive answer, a native table that reads every row. **pyiceberg
   records no NaN count** (`nan_value_count` is None), and an unknown count
-  counts as "might", so today no float column prunes. litelink's `append`
-  refuses NaN (SQLite would store it as NULL) and only `ingest` admits it,
-  which is the lever for changing that (litelink#85).
+  counts as "might", so today no float column prunes. **litelink bans NaN on
+  every write path** (litelink#87), and no live log holds one, so its
+  `column_statistics()` (litelink#85) reports a NaN count of 0 and float
+  columns become prunable with no change here. The rule stays: it costs
+  nothing, and its failure would be silent.
 - **Only numeric and boolean columns.** Iceberg truncates string bounds, and
   binary and nested columns have no useful order.
 

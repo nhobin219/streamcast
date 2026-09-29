@@ -245,6 +245,10 @@ def _may_match(
         # `sql` alike. A log holding a NaN can therefore match `> v` whatever
         # its max says, so a float column with NaNs — or an unknown NaN count,
         # which is what pyiceberg records — does not prune at all.
+        #
+        # litelink bans NaN on every write path (litelink#87), so its own
+        # statistics (litelink#85) report 0 and this never fires in practice.
+        # Kept because it costs nothing and its failure would be silent.
         nans = stats.get("nan_count")
         if nans is None or nans > 0:
             return True
