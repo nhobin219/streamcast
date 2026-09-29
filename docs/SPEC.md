@@ -692,12 +692,18 @@ with no symptom. So:
 - **Missing statistics never prune.** That covers a sealed log with no row, a
   column the log lacks, an all-null column (no bounds), and a count the log
   did not record.
-- **A float column holding NaN never prunes.** Iceberg's bounds exclude NaN,
-  and DuckDB's answer for a NaN row depends on how it scans. Measured on
-  1.5.5: `NaN > 5` and `NaN = NaN` match in a native table, and do not match
-  through `read_parquet` (row-group statistics skip it) or a registered Arrow
-  table (the filter is pushed into Arrow). A pruner has to agree with the most
-  inclusive answer.
+- **A float column that might hold NaN never prunes.** DuckDB compares NaN
+  above every float in any row it reads, so `NaN > 5` and `NaN = NaN` are
+  true. But Iceberg's file bounds and Parquet's row-group statistics both
+  leave NaN out, so whether a NaN row is read at all depends on the values
+  stored beside it. Measured on 1.5.5: a file holding `[10.0, NaN]` returns
+  the NaN for `x > 5` and not for `x > 50`, through `iceberg_scan`,
+  `read_parquet` and litelink's `sql` alike. A pruner has to agree with the
+  most inclusive answer, a native table that reads every row. **pyiceberg
+  records no NaN count** (`nan_value_count` is None), and an unknown count
+  counts as "might", so today no float column prunes. litelink's `append`
+  refuses NaN (SQLite would store it as NULL) and only `ingest` admits it,
+  which is the lever for changing that (litelink#85).
 - **Only numeric and boolean columns.** Iceberg truncates string bounds, and
   binary and nested columns have no useful order.
 

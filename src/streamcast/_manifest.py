@@ -236,13 +236,15 @@ def _may_match(
 
     if pa.types.is_floating(kind):
         # **Iceberg's bounds exclude NaN, and DuckDB sorts NaN above every
-        # float** — measured: `'nan'::DOUBLE > 5` is true, and so is
-        # `NaN = NaN`, in a native table. Not everywhere: through
-        # `read_parquet` or a registered Arrow table the same row does not
-        # match, because the scan skips on NaN-free statistics or pushes the
-        # filter into Arrow. A log holding a NaN can match `> v` whatever its
-        # max says on at least one path, so a float column with NaNs (or an
-        # unknown NaN count) does not prune at all.
+        # float.** Any row DuckDB reads compares that way — `NaN > 5` and
+        # `NaN = NaN` are true — but whether a NaN row is READ depends on the
+        # values stored beside it, because Iceberg's file bounds and Parquet's
+        # row-group statistics both leave NaN out. Measured on 1.5.5: a file
+        # holding [10.0, NaN] returns the NaN for `x > 5` and not for
+        # `x > 50`, through `iceberg_scan`, `read_parquet` and litelink's
+        # `sql` alike. A log holding a NaN can therefore match `> v` whatever
+        # its max says, so a float column with NaNs — or an unknown NaN count,
+        # which is what pyiceberg records — does not prune at all.
         nans = stats.get("nan_count")
         if nans is None or nans > 0:
             return True

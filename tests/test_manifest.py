@@ -112,12 +112,13 @@ def matching(table: pa.Table, terms: list[_manifest.Term]) -> int:
             sql = "<>" if operator == "!=" else operator.replace("==", "=")
             clauses.append(f"{reference} {sql} {literal(value)}")
 
-    # **A native table, not the registered Arrow.** DuckDB's answer for NaN
-    # depends on how it scans: measured on 1.5.5, `NaN > 5` matches in a
-    # native table and does NOT through a registered Arrow table (the filter
-    # is pushed into Arrow) or `read_parquet` (row-group statistics exclude
-    # NaN, as Iceberg's bounds do). The native answer is the most inclusive,
-    # so it is the one a sound pruner has to agree with.
+    # **A native table, which reads every row.** DuckDB compares NaN above
+    # every float in any row it reads, but a scan that skips on statistics —
+    # a registered Arrow table, `read_parquet`, `iceberg_scan` — may never
+    # read a NaN row, because those statistics leave NaN out. Measured on
+    # 1.5.5: whether `x > 50` returns a stored NaN depends on what else is in
+    # its file. The native answer is the most inclusive, so it is the one a
+    # sound pruner has to agree with.
     connection = duckdb.connect()
     connection.register("arrow_log", table)
     connection.execute("CREATE TABLE log AS SELECT * FROM arrow_log")
@@ -291,6 +292,21 @@ class TestItIncludesWhatItCannotDecide:
 
         assert matching(table, [("x", ">", 5.0)]) == 1
         assert prune(manifest, ["log0"], [("x", ">", 5.0)]) == ["log0"]
+
+    def test_an_unknown_nan_count_is_a_maybe(self):
+        """What every pyiceberg-written file reports: `nan_value_count` None.
+
+        Its bounds say [1, 2], which would exclude `x > 50` — but a NaN
+        beside those values would match, and nothing says there is none.
+        """
+        stats = LogStatistics(
+            record_count=2,
+            columns={"x": ColumnStatistics(1.0, 2.0, 0, 2, nan_count=None)},
+        )
+        table = pa.table({"x": pa.array([1.0, 2.0])})
+        manifest = build([(entry("log0", 1, table), stats)])
+
+        assert prune(manifest, ["log0"], [("x", ">", 50.0)]) == ["log0"]
 
     def test_an_all_null_column_has_no_bounds_to_prune_on(self):
         table = pa.table({"x": pa.array([None, None], type=pa.int64())})
