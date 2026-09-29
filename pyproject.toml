@@ -110,6 +110,12 @@ dev = [
     # rather than a snippet nobody executed.
     "fastapi>=0.110",
     "ty>=0.0.15",
+    # A TEST dependency. Manifest pruning must never exclude a log that holds
+    # a match, and the cases that break that — NULLs, NaNs, all-null columns,
+    # a log missing a column — are the ones a fixed table of examples forgets.
+    # `test_manifest.py` generates them and checks every exclusion against
+    # DuckDB, the engine a reader actually queries with.
+    "hypothesis>=6.100",
 ]
 
 [tool.ruff]

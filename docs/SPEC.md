@@ -671,6 +671,51 @@ makes the previous log current again. That log would also have to be fenced
 above everything the abandoned one issued, the way `restore` fences, so that no
 offset is reused.
 
+### The manifest: skipping whole logs
+
+Iceberg's manifests hold per-file bounds and prune files within one table.
+Nothing in Iceberg says which *tables* a query can skip, and a migrated stream
+is several. `<stream>.manifest.parquet` is that summary, one level up: one row
+per **sealed** log, with a struct per column (`min`, `max`, `null_count`,
+`value_count`, and `nan_count` for floats), rolled up from the log's own
+Iceberg statistics (litelink#85). The live log has no row and is never pruned.
+
+**Pruning fails towards include, in every rule.** Including a log with no
+match is a wasted scan. Excluding one that holds a match is a wrong answer
+with no symptom. So:
+
+- **A predicate is rewritten against the bounds**, never evaluated against a
+  statistics row. `x > v` becomes "`max > v`", and `x == v` becomes
+  "`min <= v <= max`". Terms are ANDed. Anything else cannot decide: an
+  operator outside `==, <, <=, >, >=, in`, a column not in the manifest, a
+  `None` or NaN literal, or a value the column's type does not compare with.
+- **Missing statistics never prune.** That covers a sealed log with no row, a
+  column the log lacks, an all-null column (no bounds), and a count the log
+  did not record.
+- **A float column holding NaN never prunes.** Iceberg's bounds exclude NaN,
+  and DuckDB's answer for a NaN row depends on how it scans. Measured on
+  1.5.5: `NaN > 5` and `NaN = NaN` match in a native table, and do not match
+  through `read_parquet` (row-group statistics skip it) or a registered Arrow
+  table (the filter is pushed into Arrow). A pruner has to agree with the most
+  inclusive answer.
+- **Only numeric and boolean columns.** Iceberg truncates string bounds, and
+  binary and nested columns have no useful order.
+
+**It is evaluated in Python, not as a PyArrow expression.** A vectorised
+filter drops rows whose expression is NULL, and NULL here means "no
+statistics". The natural default of the filter would be to exclude exactly
+the logs it knows nothing about. The manifest has one row per sealed log, so
+there is nothing to vectorise.
+
+**The reader's `sealed_logs` are the authority.** A manifest row for a log the
+reader's `metadata.json` does not list is ignored, so a migration landing
+between the two reads adds nothing.
+
+`tests/test_manifest.py` checks every exclusion against DuckDB, using a
+native table as the most inclusive answer, over generated logs: NULLs, NaNs,
+infinities, all-null columns, logs missing a column, and predicates over
+several terms.
+
 ### The five refusals
 
 | `why` | when | the caller's next move |
