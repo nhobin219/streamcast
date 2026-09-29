@@ -408,9 +408,10 @@ The rest is decided, not incidental:
 * **Wall clock**, because a stored time has to mean something on another
   machine. A clock step on the server shows in it; it is monotonic in offset
   only while the server's clock is.
-* **Microseconds, as int64**, because that is Iceberg's `timestamptz`
-  resolution and the unit `event_ts` already uses. litelink has no timestamp
-  type yet (litelink#79), which is why it is an integer.
+* **An int64 epoch, in microseconds.** That is how litelink stores every
+  timestamp — the same value in the table, in a JSON frame and in a
+  subtraction, with no conversion between them — and microseconds is the unit
+  `event_ts` already uses.
 * **Per log, not per server.** A log created before the column existed opens
   unchanged and is never stamped — adding a column is not a side effect an
   `open` should have (litelink#29). A handle passed as `Stream(log=)` is

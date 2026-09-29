@@ -72,10 +72,11 @@ the sensor read. What no application column carries is when THIS server
 received it, and the difference is what you want when something looks wrong:
 `streamcast_ts - event_ts` is feed latency per row over the whole archive.
 
-**Microseconds since the epoch, as int64**, because that is Iceberg's
-`timestamptz` resolution and the unit the examples' own `event_ts` uses, so the
-two subtract without a conversion. litelink has no timestamp type yet
-(litelink#79), which is why it is an integer and not a time column.
+**An int64 epoch, in microseconds**, which is how litelink stores every
+timestamp: an integer is the same value in the table, in a JSON frame and in a
+subtraction, with no type conversion and no silent truncation between them.
+Microseconds because it is the unit the examples' own `event_ts` uses, so the
+two subtract directly.
 
 **Wall clock, so a clock step on the server shows up in it.** A stored time has
 to mean something to a reader on another machine, and a monotonic clock does
