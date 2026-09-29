@@ -179,8 +179,10 @@ class TestWebsocketsCompatibility:
             assert info["streamcast"] == streamcast._protocol.VERSION
             assert info["stream"] == "trades"
             # Enough to open the log without this library: `litelink.snapshot`
-            # takes exactly these two.
-            assert set(info["log"]) == {"name", "archive"}
+            # takes the first two, and `owned` names the table's columns that
+            # the schema leaves out.
+            assert set(info["log"]) == {"name", "archive", "owned"}
+            assert info["log"]["owned"] == ["litelink_offset"]
             assert info["log"]["name"] == log.name
 
             # And every frame after it is a readable JSON row. No header to

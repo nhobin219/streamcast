@@ -13,6 +13,7 @@ import litelink
 import pytest
 
 import streamcast
+from streamcast import _log
 from streamcast._catchup import CatchUp
 
 pytestmark = pytest.mark.replication
@@ -46,7 +47,9 @@ def archived(tmp_path, s3, bucket):
     handle = litelink.new(
         tmp_path / "data",
         "trades",
-        schema=streamcast.to_arrow(SCHEMA),
+        # Stamped, because that is the shape `Stream.new` creates and so the
+        # shape an archive a consumer catches up from actually has.
+        schema=_log.with_stamp(streamcast.to_arrow(SCHEMA)),
         archive=bucket,
         s3=s3,
         config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
@@ -120,6 +123,9 @@ class TestItClosesTheGap:
         # And the values crossed the join intact.
         assert got[0][1]["i"] == 2_999
         assert got[-1][1]["i"] == 2_999 + want - 1
+        # And the archived rows carry exactly the keys the live ones do: the
+        # archive holds `streamcast_ts`, and a catch-up must not surface it.
+        assert {tuple(row) for _offset, row in got} == {("i", "pad")}
 
     @pytest.mark.slow
     async def test_a_long_catch_up_is_not_dropped_for_falling_behind(

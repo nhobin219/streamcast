@@ -75,7 +75,8 @@ message:
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "log":{"name":"trades","archive":"s3://market-data/prod"},"durable":true}
+ "log":{"name":"trades","archive":"s3://market-data/prod",
+        "owned":["litelink_offset","streamcast_ts"]},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
@@ -331,9 +332,8 @@ something.
 
 ## 5. The durable tier
 
-**The schema is the caller's, per stream.** streamcast declares no columns. The
-log is an ordinary litelink table with whatever shape the application gave it,
-which is litelink's own model — *"the library owns exactly one column,
+**The schema is the caller's, per stream.** The log is an ordinary litelink
+table with whatever shape the application gave it, which is litelink's own model — *"the library owns exactly one column,
 `litelink_offset`; everything else is the caller's schema"* — and the whole
 reason to put litelink underneath this rather than an append-only file.
 
@@ -375,6 +375,47 @@ Subscription acks, heartbeats and reconnect notices are dropped by the feed
 handler. That is the same division of labour a kdb tickerplant has — the feed
 handler parses, the plant stores typed rows — and it forces the decision to be
 made once, by the publisher, instead of independently by every consumer.
+
+### The one column streamcast owns
+
+`Stream.new` creates every log with a column of streamcast's own beside the
+application's, alongside litelink's `litelink_offset`: `streamcast_ts`, int64 microseconds since the epoch, stamped by the
+server at append. It answers "when did this server have it", which no
+application column carries — a row's own timestamps are the publisher's — and
+`streamcast_ts - event_ts` is feed latency per row, over the whole archive.
+
+It is owned on exactly the terms litelink owns its offset:
+
+* **Never on the wire.** `_log.columns` leaves it out, and that tuple fixes the
+  key order of every frame, live and replayed — so invariant 10 holds on a log
+  that holds a column the wire does not.
+* **Never in the greeting's `schema`**, which is filtered by the same rule. The
+  greeting's `log.owned` names it instead, beside `litelink_offset`.
+* **The server's to fill.** A row that carries it is refused rather than
+  overwritten, and a declaration that names it is refused at `Stream.new`.
+
+**This is not owning the shape, and the line is worth drawing precisely.** The
+design this section argues against owned the ROW — a fixed schema with the
+frame stored whole — and so gave up pruning, compression and a readable
+archive. One scalar beside the application's own columns gives up none of
+those: every declared column is still a real column.
+
+The rest is decided, not incidental:
+
+* **One value per commit.** `send_many` is one transaction; its rows share a
+  stamp, because distinct values would claim an order in time the commit does
+  not have.
+* **Wall clock**, because a stored time has to mean something on another
+  machine. A clock step on the server shows in it; it is monotonic in offset
+  only while the server's clock is.
+* **An int64 epoch, in microseconds.** That is how litelink stores every
+  timestamp — the same value in the table, in a JSON frame and in a
+  subtraction, with no conversion between them — and microseconds is the unit
+  `event_ts` already uses.
+* **Per log, not per server.** A log created before the column existed opens
+  unchanged and is never stamped — adding a column is not a side effect an
+  `open` should have (litelink#29). A handle passed as `Stream(log=)` is
+  stamped only if its own schema has the column. `log.owned` says which.
 
 ### The counter
 
