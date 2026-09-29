@@ -53,7 +53,7 @@ from streamcast import _remote, _schema
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from litelink import S3Options
+    from litelink import S3Options, TierStatistics
 
     from streamcast._metadata import Entry
 
@@ -185,6 +185,52 @@ def build(sealed: Sequence[tuple[Entry, LogStatistics]]) -> pa.Table:
         rows.append(row)
 
     return pa.Table.from_pylist(rows, schema=schema)
+
+
+def from_litelink(statistics: TierStatistics) -> LogStatistics:
+    """litelink's `column_statistics()` result, as this module's types.
+
+    The fields are the same by design (litelink#85); converting keeps a
+    litelink type out of the manifest's signatures and its tests.
+    """
+    return LogStatistics(
+        record_count=statistics.record_count,
+        columns={
+            name: ColumnStatistics(
+                min=column.min,
+                max=column.max,
+                null_count=column.null_count,
+                value_count=column.value_count,
+                nan_count=column.nan_count,
+            )
+            for name, column in statistics.columns.items()
+        },
+    )
+
+
+def extend(
+    previous: pa.Table | None, entry: Entry, statistics: LogStatistics
+) -> pa.Table:
+    """`previous` with a row for `entry`, replacing any row it already had.
+
+    Replacing rather than appending because a migration that died after
+    writing the manifest and before `metadata.json` is retried from the top:
+    the log it sealed gets its row again, and two rows for one log would say
+    two things about it.
+
+    The new row's columns are unioned with the old ones; a column one side
+    lacks is NULL there — no statistics, which never prunes. A column's type
+    is fixed for the life of the stream (#35), so the union never conflicts.
+    """
+    row = build([(entry, statistics)])
+    if previous is None:
+        return row
+
+    kept = previous.filter(
+        pa.array([name != entry.name for name in previous["log"].to_pylist()])
+    )
+
+    return pa.concat_tables([kept, row], promote_options="default")
 
 
 # -- pruning -------------------------------------------------------------------
@@ -339,6 +385,8 @@ __all__ = [
     "Term",
     "build",
     "columns",
+    "extend",
+    "from_litelink",
     "load",
     "name",
     "prune",

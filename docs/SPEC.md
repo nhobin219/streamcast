@@ -680,6 +680,16 @@ per **sealed** log, with a struct per column (`min`, `max`, `null_count`,
 `value_count`, and `nan_count` for floats), rolled up from the log's own
 Iceberg statistics (litelink#85). The live log has no row and is never pruned.
 
+**`Stream.migrate` writes it.** After the retired log is sealed and pushed,
+and before the next log exists, `migrate` reads the retired log's
+`column_statistics()` across every tier. A failure at that point leaves the
+stream exactly as it was. The retired log's row is added to the manifest
+(replacing any earlier row of the same name, so a retried migration does
+not duplicate it), and the manifest is saved and published **before**
+`metadata.json`, which is the commit and then points to it by its name,
+relative to itself. If writing the manifest fails, nothing is committed: the
+next `migrate` adopts the empty log the failed one created, and writes both.
+
 **Pruning fails towards include, in every rule.** Including a log with no
 match is a wasted scan. Excluding one that holds a match is a wrong answer
 with no symptom. So:

@@ -27,6 +27,7 @@ reads this module's AST and fails on an `await` in either place.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -34,7 +35,7 @@ from typing import TYPE_CHECKING, Final
 import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _filter, _log, _metadata, _schema
+from streamcast import _filter, _log, _manifest, _metadata, _schema
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
     EARLIEST,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from os import PathLike
 
     import pyarrow as pa
-    from litelink import Row, S3Options, WriteHandle
+    from litelink import Row, S3Options, TierStatistics, WriteHandle
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
@@ -442,7 +443,7 @@ class Stream:
                     s3=s3,  # ty: ignore[invalid-argument-type]
                 )
 
-            new_log = _seal_and_succeed(
+            new_log, sealed = _seal_and_succeed(
                 old,
                 root,
                 metadata.next_name(),
@@ -460,7 +461,20 @@ class Stream:
         metadata = metadata.advance(
             start, _metadata.describe(new_log.name, start, None, new_log.schema)
         )
+        # The retired log's statistics join the manifest, which is written
+        # BEFORE `metadata.json`: the metadata is the commit, and it must
+        # never point at a manifest that does not exist yet (#27).
+        manifest = _manifest.extend(
+            _manifest.load(root, name),
+            metadata.sealed_logs[-1],
+            _manifest.from_litelink(sealed),
+        )
+        metadata = dataclasses.replace(metadata, manifest=_manifest.name(name))
         try:
+            _manifest.save(root, name, manifest)
+            if new_log.archive:
+                _manifest.publish(new_log.archive, name, manifest, s3)  # ty: ignore[invalid-argument-type]
+
             _metadata.save(root, metadata)
             if new_log.archive:
                 _metadata.publish(metadata, new_log.archive, s3)  # ty: ignore[invalid-argument-type]
@@ -1289,8 +1303,12 @@ def _seal_and_succeed(
     config: object | None,
     s3: object | None,
     replay_archive: bool,
-) -> WriteHandle:
+) -> tuple[WriteHandle, TierStatistics]:
     """Seal `old` for good, then create the log that follows it.
+
+    Returns the new log and `old`'s statistics (`column_statistics()`, the
+    whole log). Read here — after the seal and the push, before anything new
+    exists — so a failure to read them leaves the stream exactly as it was.
 
     The seal comes FIRST and entirely: a failure there — an archive that is
     unreachable — leaves the stream exactly as it was, one log, current, with
@@ -1306,9 +1324,13 @@ def _seal_and_succeed(
         old.maintain()
         old.sync(push_unsettled=True)
 
+    # The whole log, every tier: a sealed log's rows may be local, archived
+    # beyond the local table, or both, and the manifest describes all of them.
+    statistics = old.column_statistics()
+
     start = old.end_offset()
     try:
-        return litelink.new(
+        created = litelink.new(
             root,
             name,
             schema=_log.with_system(declared),
@@ -1332,7 +1354,7 @@ def _seal_and_succeed(
             and list(_log.declared(orphan.schema)) == list(declared)
             and _log.is_current(orphan)
         ):
-            return orphan
+            return orphan, statistics
 
         orphan.close()
         msg = (
@@ -1342,6 +1364,8 @@ def _seal_and_succeed(
             f"it is the remains of an abandoned migration."
         )
         raise FileExistsError(msg) from None
+
+    return created, statistics
 
 
 async def _empty() -> AsyncGenerator[tuple[int, bytes], None]:
