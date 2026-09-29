@@ -215,9 +215,9 @@ def check_types(history: tuple[Entry, ...], declared: dict[str, object]) -> None
     reader never has to look up.
 
     Removed columns are in the history as well, so re-adding a name takes the
-    type it had. Adding and removing are otherwise free. **A rename cannot be
-    detected** — it arrives as a removal and an addition — and is the one
-    change this cannot stop; see `Stream.migrate`.
+    type it had. Adding and removing are otherwise free. There is no rename
+    at this layer: a new name is a removal and an addition, and a read across
+    the seam returns both columns. See `Stream.migrate`.
     """
     wanted = _schema.to_arrow(declared)
     for entry in history:

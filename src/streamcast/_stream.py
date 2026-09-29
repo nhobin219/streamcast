@@ -374,11 +374,11 @@ class Stream:
         logs are read together with `UNION ALL BY NAME`, where a changed type
         coerces silently rather than failing; see `_metadata.check_types`.
 
-        ⚠️ **A rename cannot be refused, because it cannot be seen.** It
-        arrives as one column removed and another added, and under the union
-        they become two columns, each null wherever the other applies: every
-        row intact and every query over both silently wrong. Add the new name
-        and keep writing the old one, or keep the old name.
+        **There is no rename.** A column under a new name is one column
+        removed and another added, and nothing is backfilled or merged: a
+        read across the seam returns both, each null in the logs that did not
+        have it. Treating them as one — `coalesce(px, price)` — is the
+        application's decision, made on the table it reads back.
 
         `config` and `sort_by` default to the current log's, and the archive
         is always the current log's — the metadata lives beside it.

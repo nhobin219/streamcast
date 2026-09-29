@@ -1002,9 +1002,10 @@ it had. A stream's logs are read together with `UNION ALL BY NAME`, where a chan
 coerces silently (`int64` beside `string` becomes a string column) rather than failing.
 Widening is refused too.
 
-⚠️ **Don't rename a column.** It can't be refused, because it looks like one column
-removed and another added. Across the seam the two names become two half-null columns
-and every query spanning both is quietly wrong. Add the new name and keep the old one.
+**There is no rename.** Changing `price` to `px` removes one column and adds another.
+Nothing is backfilled or merged, so a read across the seam returns both, each null in the
+logs that did not have it. Combining them (`coalesce(px, price)`) is up to your
+application.
 
 **The server replays only the current log.** A consumer that was caught up when the
 server stopped resumes at the seam with nothing lost. One further behind is refused

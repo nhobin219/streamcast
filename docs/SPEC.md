@@ -594,10 +594,13 @@ columns too. The metadata records every log's schema, and a re-added name must
 take the type it had. Adding columns, removing them and changing nullability
 are free.
 
-**A rename is the change this cannot refuse**, because it cannot be seen: it
-arrives as a removal and an addition. Under the union the two names become two
-columns, each null wherever the other applies. Every row is intact, and every
-query that spans the seam is silently wrong.
+**There is no rename at the storage layer.** A rename is an application
+concept. Here it is a removal and an addition, which is exactly what is
+stored: nothing is backfilled and no two columns are merged. A read across the
+seam returns both, each null in the logs that did not have it, and treating
+them as one is the application's job on the table it reads back. The type
+rule is what keeps that honest: a name can only ever mean one type, so a
+column that comes back is the same column.
 
 **This server replays only the current log.** A subscribe below the seam is
 refused `evicted`, naming where the current log starts. It is refused because
