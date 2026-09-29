@@ -221,7 +221,11 @@ What it captures is a table, queryable without streamcast:
 ```python
 log.sql("SELECT count(*), max(price), sum(amount) FROM log").read_all()
 log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on statistics
+log.sql("SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
 ```
+
+`streamcast_ts` is the one column the table has that you did not declare: when the server
+took the row, in UTC microseconds. It is stored, never sent.
 
 ### Surviving a feed that changes
 

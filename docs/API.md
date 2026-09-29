@@ -577,7 +577,8 @@ a server restart), `schema` (the stream's columns as JSON Schema), `log`, `strea
 `version`.
 
 **`info.log` is enough to open the log yourself** — `name` and `archive`, which is what
-`litelink.snapshot` takes:
+`litelink.snapshot` takes, and `owned`, the table's columns that `schema` leaves out
+(`litelink_offset`, and `streamcast_ts` on a log that has it):
 
 ```python
 reader = litelink.snapshot(sub.info.log.name, archive=sub.info.log.archive)
@@ -857,8 +858,8 @@ StreamcastError
 
 ## The schema is yours
 
-streamcast declares no columns — you do, in **JSON Schema**, because the wire is JSON and
-this is a library about JSON websockets:
+You declare the columns, in **JSON Schema**, because the wire is JSON and this is a
+library about JSON websockets:
 
 ```python
 SCHEMA = {
@@ -884,6 +885,18 @@ is refused.
 An existing log whose columns disagree with the declaration is **refused, not adopted**:
 litelink fixes a log's shape at creation and `open` takes none of it, so a disagreement
 would otherwise be ignored and every send validated against columns you never wrote down.
+
+**The table carries one column you did not declare: `streamcast_ts`**, the time the server
+took the row, in UTC microseconds — so `streamcast_ts - event_ts` is feed latency per row,
+queryable over the whole archive. It is stored and never sent: no frame carries it and the
+greeting's `schema` leaves it out. `send_many` gives its whole group one value, because the
+group commits as one transaction. It is wall clock, so a clock step on the server shows in
+it.
+
+The name is reserved. A declaration that uses it is refused, and so is a row that
+supplies it. A log created before the column existed opens unchanged and is not stamped,
+and a log you pass as `log=` is stamped only if its schema has the column — `info.log.owned`
+says which.
 
 | JSON | `format` | Arrow |
 |---|---|---|
@@ -1008,7 +1021,8 @@ offset, then the row:
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "log":{"name":"trades","archive":"s3://market-data/prod"},"schema":{...},"durable":true}
+ "log":{"name":"trades","archive":"s3://market-data/prod",
+        "owned":["litelink_offset","streamcast_ts"]},"schema":{...},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 

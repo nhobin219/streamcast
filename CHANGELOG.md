@@ -7,6 +7,27 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`streamcast_ts`** — every row a server stores carries the time the server
+  took it, in UTC microseconds, so `streamcast_ts - event_ts` is feed latency
+  per row over the whole archive. `Stream.new` creates every log with the
+  column. It is stored and never sent: no frame carries it, the greeting's
+  `schema` leaves it out, and invariant 10 holds. `send_many` stamps its group
+  with one value, because the group commits as one transaction.
+- **`Greeting.log.owned`** — the table's columns that `schema` leaves out:
+  `litelink_offset`, and `streamcast_ts` on a log that has it. Additive, so
+  the protocol version is unchanged.
+
+### Changed
+
+- The name `streamcast_ts` is reserved. `Stream.new` refuses a declaration
+  that uses it, and `send` refuses a row that supplies it. A log created
+  before this release opens unchanged and is not stamped; a handle passed as
+  `Stream(log=)` is stamped only if its schema has the column.
+
 ## 0.7.0 — 2026-09-26
 
 ### Added

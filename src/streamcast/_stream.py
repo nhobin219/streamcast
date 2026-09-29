@@ -101,11 +101,12 @@ class Stream:
             async for frame in upstream:
                 await stream.send(parse(frame))      # a row, not a blob
 
-    **The schema is yours, and declared in JSON Schema.** streamcast declares
-    no columns; the log is an ordinary litelink table with whatever shape you
-    gave it, so every column prunes, compresses and is queryable from any
-    Iceberg engine. A row goes in and the same row comes back out, live or
-    replayed. `_schema` converts the declaration to Arrow, so a durable stream
+    **The schema is yours, and declared in JSON Schema.** The log is an
+    ordinary litelink table with whatever shape you gave it, so every column
+    prunes, compresses and is queryable from any Iceberg engine. A row goes in
+    and the same row comes back out, live or replayed. The table also carries
+    `streamcast_ts`, the time the server took each row — stored, never sent;
+    see `_log.STAMP`. `_schema` converts the declaration to Arrow, so a durable stream
     needs no import but this one.
 
     **Who closes the log depends on who opened it.** `root=`+`schema=` creates
@@ -139,6 +140,7 @@ class Stream:
         "_name",
         "_owned",
         "_shape",
+        "_stamped",
         "_started",
         "_started_ts",
         "_subscribers",
@@ -175,8 +177,15 @@ class Stream:
         # nothing replays from it, so there is no second encoding to match.
         self._columns = None if log is None else _log.columns(log)
         # The shape a subscriber is told at subscribe, built once. None for a
-        # stream with no log: there are no declared columns to publish.
-        self._shape = None if log is None else _schema.from_arrow(log.schema)
+        # stream with no log: there are no declared columns to publish. Without
+        # `streamcast_ts`, which no frame carries — see `_log.declared`.
+        self._shape = (
+            None if log is None else _schema.from_arrow(_log.declared(log.schema))
+        )
+        # Whether `send` fills `streamcast_ts`. Decided once, per log: a log
+        # created before the column existed, or one a caller opened and passed
+        # in, may not have it, and its shape is not this library's to change.
+        self._stamped = log is not None and _log.stamped(log)
         # Closed by `aclose` only when this object owns it. A log the caller
         # opened stays the caller's — they may be sharing it, and a library
         # that closes a handle it was lent is a library you cannot lend one
@@ -476,12 +485,15 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
+        now = time.time_ns()
         offset = None
         if self._log is not None:
-            offset = self._log.append(row)
+            offset = self._log.append(
+                self._stamp_row(row, now) if self._stamped else row
+            )
             self._end_offset = offset + 1
 
-        self._stamp()
+        self._stamp(now)
         self._fan_out(row, encode(offset, row, self._columns))
 
         return offset
@@ -503,22 +515,30 @@ class Stream:
         if not batch:
             return []
 
-        offsets: list[int | None] = [None] * len(batch)
-        if self._log is not None:
-            offsets = list(self._log.extend(batch))
-            self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
-
         # ONE stamp for the group, not one per row: `send_many` is a single
         # transaction and its rows commit together, so per-row values would
         # imply a precision the commit does not have.
-        self._stamp()
+        now = time.time_ns()
+        offsets: list[int | None] = [None] * len(batch)
+        if self._log is not None:
+            stored = (
+                [self._stamp_row(row, now) for row in batch] if self._stamped else batch
+            )
+            offsets = list(self._log.extend(stored))
+            self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
+
+        self._stamp(now)
         for offset, row in zip(offsets, batch, strict=True):
             self._fan_out(row, encode(offset, row, self._columns))
 
         return offsets
 
-    def _stamp(self) -> None:
-        """Record that a send happened. Two clock reads, no await.
+    def _stamp(self, now: int) -> None:
+        """Record that a send happened at `now`, in epoch nanoseconds. No await.
+
+        `now` is the same wall-clock reading `_stamp_row` stored, so the
+        stats' `last_send_ts` and the log's last `streamcast_ts` agree rather
+        than differing by the length of the append.
 
         On the hot path by necessity — nothing can know afterwards when the
         last row arrived. Measured at 42 ns per clock against 2.0 ms for a
@@ -527,7 +547,26 @@ class Stream:
         nobody listening is not doing anything.
         """
         self._last_send = time.monotonic()
-        self._last_send_ts = time.time()
+        self._last_send_ts = now / 1e9
+
+    @staticmethod
+    def _stamp_row(row: Row, now: int) -> Row:
+        """`row` with `streamcast_ts` added, for the log. A copy, never `row`.
+
+        A copy because the caller's dict is theirs, and because the fan-out
+        and the `where=` predicate read the original: the stamp is stored and
+        never sent (I6).
+
+        **A row that already carries the column is refused**, not overwritten.
+        It is the server's to fill, and a publisher that sent one would
+        otherwise learn nothing about why its value never appeared — the same
+        answer litelink gives for `litelink_offset`.
+        """
+        if _log.STAMP in row:
+            msg = f"{_log.STAMP!r} is stamped by the server; a row cannot supply it"
+            raise ValueError(msg)
+
+        return {**row, _log.STAMP: now // 1_000}
 
     @property
     def stats(self) -> Stats:
@@ -619,9 +658,7 @@ class Stream:
                 replay=None,
                 durable=self._log is not None,
                 schema=self._shape,
-                log=(
-                    None if self._log is None else (self._log.name, self._log.archive)
-                ),
+                log=self._log_info(),
             )
         )
 
@@ -721,11 +758,7 @@ class Stream:
                     # a caller passed `log=` a handle they opened, and a
                     # subscriber that guessed asks the archive for a table
                     # that is not there.
-                    log=(
-                        None
-                        if self._log is None
-                        else (self._log.name, self._log.archive)
-                    ),
+                    log=self._log_info(),
                     where=dict(where) if where is not None else None,
                 )
             )
@@ -738,6 +771,21 @@ class Stream:
                 # otherwise, and under a reconnect storm that is an unbounded
                 # number of live scans against one log.
                 await replay.aclose()
+
+    def _log_info(self) -> tuple[str, str | None, tuple[str, ...]] | None:
+        """The greeting's `log`: name, archive, and the columns it owns.
+
+        The owned columns are named because the greeting's `schema` leaves them
+        out on purpose, and a reader of the table — `Stream.snapshot`, or any
+        Iceberg engine — needs to know which of its columns the server fills.
+        Per log, from the handle: a log older than `streamcast_ts` lacks it.
+        """
+        log = self._log
+        if log is None:
+            return None
+
+        owned = (_log.COLUMN, _log.STAMP) if self._stamped else (_log.COLUMN,)
+        return log.name, log.archive, owned
 
     async def _resolve(self, requested: int | None) -> tuple[WriteHandle, int] | None:
         """The log and offset a replay should start at, or None for live-only.
@@ -903,6 +951,13 @@ def _open_or_create(
     convenience would otherwise introduce.
     """
     declared = _schema.to_arrow(schema)
+    if _log.STAMP in declared.names:
+        msg = (
+            f"{_log.STAMP!r} is the column streamcast stamps each row with; "
+            f"declare the stream's own timestamp under another name"
+        )
+        raise ValueError(msg)
+
     try:
         # litelink's spelling on the way in. It is `include_archive` there
         # because it governs which tiers any READ includes; here it governs
@@ -913,7 +968,7 @@ def _open_or_create(
         return litelink.new(
             root,
             name,
-            schema=declared,
+            schema=_log.with_stamp(declared),
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
             archive=archive,
@@ -921,11 +976,16 @@ def _open_or_create(
             include_archive=replay_archive,
         )
 
-    if list(log.schema) != list(declared):
+    # Compared WITHOUT `streamcast_ts`, so a log created before the column
+    # existed still opens: it keeps its shape and is simply never stamped.
+    # Adding the column to it is not done here — litelink's `add_column` is
+    # one-way across a detach (litelink#29), which is not a side effect an
+    # `open` should have.
+    if list(_log.declared(log.schema)) != list(declared):
         # Read BEFORE closing. `log.schema` goes to the buffer's `meta` table,
         # so building this message after `close()` raises "Cannot operate on a
         # closed database" and buries the real complaint.
-        found = log.schema.names
+        found = list(_log.columns(log))
         log.close()
         msg = (
             f"the log at {root}/{name} has columns {found}, and this "

@@ -80,6 +80,27 @@ def log(tmp_path: Path) -> Iterator[WriteHandle]:
 
 
 @pytest.fixture
+def stamped(tmp_path: Path) -> Iterator[WriteHandle]:
+    """`log`, with the `streamcast_ts` column `Stream.new` creates every log with.
+
+    `log` is kept WITHOUT it on purpose: that is a log from before the column
+    existed, or one a caller opened and passed in, and both must keep working.
+    This is the shape a log made by this library actually has.
+    """
+    from streamcast import _log
+
+    handle = litelink.new(
+        tmp_path / "data",
+        "trades",
+        schema=_log.with_stamp(SCHEMA),
+        sort_by=("event_ts",),
+        config=litelink.LogConfig(target_seal_size=4 * 1024, compact_min_files=2),
+    )
+    with handle:
+        yield handle
+
+
+@pytest.fixture
 def serve() -> Callable[..., contextlib.AbstractAsyncContextManager[str]]:
     """`async with serve(stream) as uri:` — a server on an ephemeral port.
 

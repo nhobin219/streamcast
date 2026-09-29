@@ -225,6 +225,19 @@ class LogInfo:
     it too, last, so the numbers win when something has to go.
     """
 
+    owned: tuple[str, ...] = ()
+    """The table's columns that neither `schema` nor a frame will show.
+
+    `litelink_offset`, which a frame carries as its offset instead, and
+    `streamcast_ts` on a log that has it. Named here because `schema` is the
+    APPLICATION's shape and leaves them out on purpose, so a subscriber reading
+    the table directly would otherwise learn about them only by opening it.
+
+    Per log, not per server: a log created before streamcast owned a column
+    does not have it, and this says so rather than the server's version.
+    Empty from a server that predates the field.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Greeting:
@@ -303,12 +316,12 @@ def greeting(
     replay: tuple[int, int] | None,
     durable: bool,
     schema: dict[str, object] | None = None,
-    log: tuple[str, str | None] | None = None,
+    log: tuple[str, str | None, tuple[str, ...]] | None = None,
     where: dict[str, object] | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
-    `log` is the log's `(name, archive)`, or None for a stream with none. A
+    `log` is the log's `(name, archive, owned)`, or None for a stream with none. A
     nested object rather than flat keys, so the things a subscriber needs to
     open the log arrive together and `null` says plainly that there is
     nothing to open.
@@ -326,7 +339,11 @@ def greeting(
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
             "schema": schema,
-            "log": None if log is None else {"name": log[0], "archive": log[1]},
+            "log": (
+                None
+                if log is None
+                else {"name": log[0], "archive": log[1], "owned": list(log[2])}
+            ),
             "where": where,
         }
     ).decode()
@@ -370,9 +387,15 @@ def parse_greeting(frame: str | bytes) -> Greeting:
     log = None
     if isinstance(raw, dict) and isinstance(raw.get("name"), str):
         archive = raw.get("archive")
+        owned = raw.get("owned")
         log = LogInfo(
             name=raw["name"],
             archive=archive if isinstance(archive, str) else None,
+            owned=(
+                tuple(c for c in owned if isinstance(c, str))
+                if isinstance(owned, list)
+                else ()
+            ),
         )
 
     return Greeting(

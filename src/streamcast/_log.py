@@ -6,10 +6,15 @@ subscribers (https://code.kx.com/q/architecture/). The log is what turns an
 offset from a number that orders messages into a number a subscriber can
 *resume from*, and everything here serves that one sentence.
 
-**The schema is the caller's, per stream, and streamcast declares none of it.**
-That is litelink's own model — "the library owns exactly one column,
-`litelink_offset`; everything else is the caller's schema" — and it is the
-whole reason to put litelink underneath this rather than an append-only file.
+**The schema is the caller's, per stream.** That is litelink's own model —
+"the library owns exactly one column, `litelink_offset`; everything else is the
+caller's schema" — and it is the whole reason to put litelink underneath this
+rather than an append-only file.
+
+streamcast adds exactly one column of its own, `streamcast_ts`, on the same
+terms litelink owns its offset: stamped by the writer, never a key on the wire,
+and absent from the shape a subscriber is told. It is one scalar beside the
+application's columns, not a shape — see `STAMP`.
 
 An earlier version of this module owned a fixed three-column schema and stored
 each upstream frame whole, as text, in a `payload` column. It is worth saying
@@ -39,7 +44,9 @@ the premise disappears.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+
+import pyarrow as pa
 
 # litelink's own column name, imported rather than spelled again: a copy here
 # would be a second home for the fact, and its failure mode is a scan for a
@@ -52,10 +59,36 @@ from streamcast._protocol import encode_projected as _encode_projected
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    import pyarrow as pa
     from litelink import LogHandle, WriteHandle
 
     from streamcast._filter import Predicate
+
+
+STAMP: Final = "streamcast_ts"
+"""The column streamcast owns: when the server took the row, in UTC microseconds.
+
+A row's own timestamps are the publisher's — when the exchange matched, when
+the sensor read. What no application column carries is when THIS server
+received it, and the difference is what you want when something looks wrong:
+`streamcast_ts - event_ts` is feed latency per row over the whole archive.
+
+**Microseconds since the epoch, as int64**, because that is Iceberg's
+`timestamptz` resolution and the unit the examples' own `event_ts` uses, so the
+two subtract without a conversion. litelink has no timestamp type yet
+(litelink#79), which is why it is an integer and not a time column.
+
+**Wall clock, so a clock step on the server shows up in it.** A stored time has
+to mean something to a reader on another machine, and a monotonic clock does
+not. It is monotonic in offset only while the server's clock is.
+
+**One value per commit, not per row.** `send_many` is one transaction and its
+rows become durable together; distinct values would claim an ordering in time
+the commit does not have.
+
+Stamped only on a log that has the column. `Stream.new` creates every log with
+it, but a log from before it existed, or a handle a caller opened and passed in,
+may not — and that log's shape is not this library's to change.
+"""
 
 
 def columns(log: LogHandle) -> tuple[str, ...]:
@@ -67,8 +100,56 @@ def columns(log: LogHandle) -> tuple[str, ...]:
     the offset is element 0 of the pair `encode` writes, never a key in the
     message, so there is one statement of "the offset comes first" instead of
     two — and none of them is a column name a subscriber has to know.
+
+    `STAMP` is not among them either, for the same reason: it is the server's
+    column, not the application's, and a replayed frame must carry exactly the
+    keys the live one did (I6).
     """
-    return tuple(log.schema.names)
+    return tuple(name for name in log.schema.names if name != STAMP)
+
+
+def declared(schema: pa.Schema) -> pa.Schema:
+    """The application's columns: `schema` without the one streamcast owns.
+
+    What a subscriber is told in the greeting, and what `Stream.new` compares a
+    declaration against. Filtered here as well as in `columns` because the two
+    are read from the same `log.schema` by different expressions, and filtering
+    only one tells a subscriber about a column no frame will ever carry.
+    """
+    index = schema.get_field_index(STAMP)
+    return schema if index < 0 else schema.remove(index)
+
+
+def with_stamp(schema: pa.Schema) -> pa.Schema:
+    """`schema` with streamcast's column appended, for creating a log.
+
+    Last rather than first so a `SELECT *` reads the application's columns in
+    the order they were declared. Not nullable: every row this library writes
+    carries one, and a log that says so is one a reader can rely on.
+    """
+    return schema.append(pa.field(STAMP, pa.int64(), nullable=False))
+
+
+def stamped(log: LogHandle) -> bool:
+    """Whether `log` has streamcast's column, and so whether `send` fills it.
+
+    A column by that name of any other type is refused rather than skipped: it
+    is someone else's column wearing this library's name, and filling it — or
+    silently not — would both be wrong about what it holds.
+    """
+    index = log.schema.get_field_index(STAMP)
+    if index < 0:
+        return False
+
+    found = log.schema.field(index).type
+    if found != pa.int64():
+        msg = (
+            f"the log's {STAMP!r} column is {found}; streamcast owns that name "
+            f"and stores int64 microseconds in it"
+        )
+        raise ValueError(msg)
+
+    return True
 
 
 def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
@@ -262,4 +343,14 @@ async def replay(
             yield offset, _encode_projected(offset, message)
 
 
-__all__ = ["columns", "earliest", "replay", "rows", "rows_from"]
+__all__ = [
+    "STAMP",
+    "columns",
+    "declared",
+    "earliest",
+    "replay",
+    "rows",
+    "rows_from",
+    "stamped",
+    "with_stamp",
+]

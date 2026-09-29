@@ -117,10 +117,10 @@ class TestTheLogIsATable:
 
 
 class TestTheSchemaIsTheCallers:
-    def test_streamcast_declares_no_columns_of_its_own(self):
-        # It used to export a SCHEMA and own three columns. litelink's own
-        # example says the opposite in as many words: declare a schema rather
-        # than store the frame whole.
+    def test_there_is_no_fixed_schema(self):
+        # litelink's own example says it in as many words: declare a schema
+        # rather than store the frame whole. The one column streamcast does own
+        # sits beside the caller's; see `tests/test_stamp.py`.
         assert not hasattr(streamcast, "SCHEMA")
 
     async def test_any_shape_of_log_works(self, tmp_path):

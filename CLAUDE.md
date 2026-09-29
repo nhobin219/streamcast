@@ -32,8 +32,13 @@ is checked. `just rustfs` then `just check-all` is the honest local gate.
 
 ## The schema is the caller's, in JSON Schema
 
-streamcast declares no columns. The log is an ordinary litelink table with
-whatever shape the application gave it, and `send` takes a **row**.
+The log is an ordinary litelink table with whatever shape the application gave
+it, and `send` takes a **row**. streamcast adds exactly one column of its own,
+`streamcast_ts` — the time the server took the row, stamped at append — on the
+terms litelink owns `litelink_offset`: never a key on the wire, never in the
+greeting's `schema`, and listed in the greeting's `log.owned` instead. One owned
+scalar beside the application's columns is not owning the shape; see
+`docs/SPEC.md` §5 for where that line is.
 
 The schema is declared in **JSON Schema** and converted here (`_schema.py`),
 not in litelink: litelink speaks Arrow and is deliberately general about what
