@@ -21,6 +21,7 @@ import litelink
 import pytest
 
 import streamcast
+from streamcast import _metadata
 
 pytestmark = pytest.mark.replication
 
@@ -438,5 +439,61 @@ class TestTheServerStartsWhatItNeeds:
                 "next failover has nothing to restore from"
             )
             assert revived.log.archive == bucket
+        finally:
+            await revived.aclose()
+
+
+class TestAMigratedStream:
+    async def test_restore_rebuilds_the_current_log_not_the_first(
+        self, tmp_path, s3, bucket, litestream
+    ):
+        """The metadata in the archive is what says which log is current.
+
+        Without it, a restore of `trades` rebuilds the stream's FIRST log and
+        serves it as though no migration had happened.
+        """
+        stream = streamcast.Stream.new(
+            "trades",
+            root=tmp_path / "box_a",
+            schema=SCHEMA,
+            archive=bucket,
+            s3=s3,
+            config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
+        )
+        await stream.send_many([row(i) for i in range(20)])
+        await stream.aclose()
+
+        v2 = {
+            **SCHEMA,
+            "properties": {
+                **SCHEMA["properties"],  # ty: ignore[invalid-argument-type]
+                "venue": {"type": ["string", "null"]},
+            },
+        }
+        migrated = streamcast.Stream.migrate(
+            "trades", root=tmp_path / "box_a", schema=v2, s3=s3
+        )
+        assert migrated.log is not None
+        await migrated.send_many([{**row(i), "venue": "x"} for i in range(20, 30)])
+        ship(str(migrated.log.write_replication_config()), s3, litestream)
+        await migrated.aclose()
+
+        revived = streamcast.Stream.restore(
+            "trades",
+            root=tmp_path / "box_b",
+            archive=bucket,
+            s3=s3,
+            binary=str(litestream),
+        )
+        try:
+            assert revived.log is not None
+            assert revived.log.name == "trades-v2"
+            assert revived.schema is not None
+            assert "venue" in revived.schema["properties"]  # ty: ignore[unsupported-operator]
+            # The metadata came down with it, so the next `Stream.new` on
+            # this box opens the same log.
+            assert _metadata.load(tmp_path / "box_b", "trades") is not None
+            # And the first log is not on this box, so nothing maintains it.
+            assert revived.retired == ()
         finally:
             await revived.aclose()

@@ -49,7 +49,7 @@ def archived(tmp_path, s3, bucket):
         "trades",
         # Stamped, because that is the shape `Stream.new` creates and so the
         # shape an archive a consumer catches up from actually has.
-        schema=_log.with_stamp(streamcast.to_arrow(SCHEMA)),
+        schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         archive=bucket,
         s3=s3,
         config=litelink.LogConfig(target_seal_size=SEAL_SIZE),

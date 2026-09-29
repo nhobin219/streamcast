@@ -129,6 +129,23 @@ class TestItIsNeverSent:
                 await streamcast.connect(uri, where={_log.STAMP: 1})
 
 
+def test_a_system_columns_type_never_changes():
+    """Pinned, because a change here breaks every stream that spans it.
+
+    A stream's logs are read with `UNION ALL BY NAME`, where a column that
+    changed type across a seam coerces silently. So an entry already here is
+    FROZEN: a column that needs a different type is a new name beside it
+    (`streamcast_ts_v2`). Adding a system column is fine and needs no change
+    to this test.
+    """
+    frozen = {_log.STAMP: {"type": "integer", "format": "int64"}}
+    for name, spec in frozen.items():
+        assert dict(_log.SYSTEM[name]) == spec, (
+            f"{name!r} changed type. System column types never change; add a "
+            f"new column under a new name instead."
+        )
+
+
 class TestItIsTheServersToFill:
     async def test_a_row_that_supplies_it_is_refused(self, stamped):
         stream = streamcast.Stream("trades", log=stamped)
@@ -172,7 +189,7 @@ class TestItIsTheServersToFill:
                 [pa.field("n", pa.int64()), pa.field(_log.STAMP, pa.string())]
             ),
         )
-        with handle, pytest.raises(ValueError, match="int64 microseconds"):
+        with handle, pytest.raises(ValueError, match="streamcast owns that name"):
             streamcast.Stream("trades", log=handle)
 
 
