@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.8.0 — 2026-09-29
 
 ### Added
 
