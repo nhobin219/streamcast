@@ -378,8 +378,8 @@ made once, by the publisher, instead of independently by every consumer.
 
 ### The one column streamcast owns
 
-`Stream.new` creates every log with one more column than the application
-declared: `streamcast_ts`, int64 microseconds since the epoch, stamped by the
+`Stream.new` creates every log with a column of streamcast's own beside the
+application's, alongside litelink's `litelink_offset`: `streamcast_ts`, int64 microseconds since the epoch, stamped by the
 server at append. It answers "when did this server have it", which no
 application column carries — a row's own timestamps are the publisher's — and
 `streamcast_ts - event_ts` is feed latency per row, over the whole archive.

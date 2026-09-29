@@ -224,8 +224,9 @@ log.scan(columns=["litelink_offset", "price"], where="side = 1")   # prunes on s
 log.sql("SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
 ```
 
-`streamcast_ts` is the one column the table has that you did not declare: when the server
-took the row, in UTC microseconds. It is stored, never sent.
+The table has two columns you did not declare. `litelink_offset` is the offset every frame
+carries, and `streamcast_ts` is when the server took the row, in UTC microseconds. The
+second is stored and never sent.
 
 ### Surviving a feed that changes
 

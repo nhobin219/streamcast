@@ -886,7 +886,8 @@ An existing log whose columns disagree with the declaration is **refused, not ad
 litelink fixes a log's shape at creation and `open` takes none of it, so a disagreement
 would otherwise be ignored and every send validated against columns you never wrote down.
 
-**The table carries one column you did not declare: `streamcast_ts`**, the time the server
+**The table carries two columns you did not declare.** `litelink_offset` is litelink's, and
+every frame carries it as its offset. **`streamcast_ts`** is streamcast's: the time the server
 took the row, in UTC microseconds — so `streamcast_ts - event_ts` is feed latency per row,
 queryable over the whole archive. It is stored and never sent: no frame carries it and the
 greeting's `schema` leaves it out. `send_many` gives its whole group one value, because the
