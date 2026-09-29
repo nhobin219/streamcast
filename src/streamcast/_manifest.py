@@ -27,7 +27,14 @@ the archive's.
 match is a wasted scan; excluding one that holds a match is a wrong answer
 with no symptom. So every rule below fails towards include, and
 `tests/test_manifest.py` checks every exclusion against DuckDB over generated
-data — NULLs, NaNs, all-null columns, logs missing a column.
+data — NULLs, all-null columns, logs missing a column.
+
+**litelink stores only finite floats** — NaN and ±inf are refused on every
+write path (litelink#87) — so a log's statistics report no NaN and every
+float column is prunable. The rule for a NaN count that is non-zero or
+unknown is kept anyway, as a defence rather than a case: it costs nothing,
+and the failure it prevents would be silent. The tests generate NaN and
+infinity on purpose, for the same reason.
 """
 
 from __future__ import annotations
@@ -86,7 +93,11 @@ class ColumnStatistics:
     null_count: int | None
     value_count: int | None
     nan_count: int | None = None
-    """Floats only. Iceberg's bounds EXCLUDE NaN, so this is what says one is there."""
+    """Floats only. Iceberg's bounds exclude NaN, so this is what says one is there.
+
+    0 for every log litelink writes, which refuses NaN (litelink#87). None —
+    what pyiceberg records on its own — means unknown, and does not prune.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,20 +246,14 @@ def _may_match(
         return True
 
     if pa.types.is_floating(kind):
-        # **Iceberg's bounds exclude NaN, and DuckDB sorts NaN above every
-        # float.** Any row DuckDB reads compares that way — `NaN > 5` and
-        # `NaN = NaN` are true — but whether a NaN row is READ depends on the
-        # values stored beside it, because Iceberg's file bounds and Parquet's
-        # row-group statistics both leave NaN out. Measured on 1.5.5: a file
-        # holding [10.0, NaN] returns the NaN for `x > 5` and not for
-        # `x > 50`, through `iceberg_scan`, `read_parquet` and litelink's
-        # `sql` alike. A log holding a NaN can therefore match `> v` whatever
-        # its max says, so a float column with NaNs — or an unknown NaN count,
-        # which is what pyiceberg records — does not prune at all.
-        #
-        # litelink bans NaN on every write path (litelink#87), so its own
-        # statistics (litelink#85) report 0 and this never fires in practice.
-        # Kept because it costs nothing and its failure would be silent.
+        # **A defence, not a case.** litelink refuses NaN on every write path
+        # (litelink#87), so its statistics (litelink#85) report 0 here and
+        # this never fires. It stays because a NaN count that is non-zero or
+        # unknown — which is what pyiceberg records by itself — really would
+        # make the bounds unsafe to prune on: they exclude NaN, and DuckDB
+        # sorts NaN above every float. Measured on 1.5.5, a file holding
+        # [10.0, NaN] returns the NaN for `x > 5` and not for `x > 50`,
+        # through `iceberg_scan`, `read_parquet` and litelink's `sql` alike.
         nans = stats.get("nan_count")
         if nans is None or nans > 0:
             return True

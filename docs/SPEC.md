@@ -692,20 +692,16 @@ with no symptom. So:
 - **Missing statistics never prune.** That covers a sealed log with no row, a
   column the log lacks, an all-null column (no bounds), and a count the log
   did not record.
-- **A float column that might hold NaN never prunes.** DuckDB compares NaN
-  above every float in any row it reads, so `NaN > 5` and `NaN = NaN` are
-  true. But Iceberg's file bounds and Parquet's row-group statistics both
-  leave NaN out, so whether a NaN row is read at all depends on the values
-  stored beside it. Measured on 1.5.5: a file holding `[10.0, NaN]` returns
-  the NaN for `x > 5` and not for `x > 50`, through `iceberg_scan`,
-  `read_parquet` and litelink's `sql` alike. A pruner has to agree with the
-  most inclusive answer, a native table that reads every row. **pyiceberg
-  records no NaN count** (`nan_value_count` is None), and an unknown count
-  counts as "might", so today no float column prunes. **litelink bans NaN on
-  every write path** (litelink#87), and no live log holds one, so its
-  `column_statistics()` (litelink#85) reports a NaN count of 0 and float
-  columns become prunable with no change here. The rule stays: it costs
-  nothing, and its failure would be silent.
+- **Floats are finite, and a NaN count that says otherwise stops pruning.**
+  litelink refuses NaN and ±inf on every write path (litelink#87), so its
+  `column_statistics()` (litelink#85) reports a NaN count of 0 and every
+  float column is prunable. The rule for a count that is non-zero or
+  *unknown* (which is what pyiceberg records by itself) stays as a defence.
+  It costs nothing, and without it the bounds would be unsafe: they exclude
+  NaN, and DuckDB sorts NaN above every float. Measured on 1.5.5, a file
+  holding `[10.0, NaN]` returns the NaN for `x > 5` and not for `x > 50`,
+  through `iceberg_scan`, `read_parquet` and litelink's `sql` alike. That
+  layout-dependent answer is why litelink bans NaN rather than stores it.
 - **Only numeric and boolean columns.** Iceberg truncates string bounds, and
   binary and nested columns have no useful order.
 
@@ -720,8 +716,10 @@ reader's `metadata.json` does not list is ignored, so a migration landing
 between the two reads adds nothing.
 
 `tests/test_manifest.py` checks every exclusion against DuckDB, using a
-native table as the most inclusive answer, over generated logs: NULLs, NaNs,
-infinities, all-null columns, logs missing a column, and predicates over
+native table as the most inclusive answer, over generated logs: NULLs,
+all-null columns, logs missing a column, NaN and infinity (on purpose, since
+no real log holds one and a defence nothing exercises can break unnoticed),
+and predicates over
 several terms.
 
 ### The five refusals

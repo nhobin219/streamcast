@@ -4,8 +4,12 @@ The one property that matters is checked against DuckDB, the engine a reader
 queries with: **every log `prune` excludes holds no row matching the
 predicate.** Including a log that holds nothing is a wasted scan and passes;
 excluding one that holds a match is a wrong answer with no symptom and fails.
-The generator covers what a fixed table of cases forgets — NULLs, NaNs,
-infinities, all-null columns, and logs that lack a column entirely.
+The generator covers what a fixed table of cases forgets — NULLs, all-null
+columns, and logs that lack a column entirely.
+
+**It generates NaN and infinity on purpose.** litelink refuses both
+(litelink#87), so no real log holds one; the pruner's NaN rule is a defence,
+and a defence nothing exercises is one nobody would notice breaking.
 """
 
 from __future__ import annotations
