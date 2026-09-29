@@ -485,6 +485,25 @@ class TestTheManifest:
             _manifest.load(tmp_path, "trades"), sealed, [("event_ts", "<", late)]
         ) == ["trades"]
 
+    async def test_a_float_column_prunes_now_litelink_holds_only_finite_floats(
+        self, tmp_path
+    ):
+        """litelink refuses NaN and ±inf (0.5.0), so it reports a NaN count of 0.
+
+        Before that its count was unknown, and an unknown count never prunes a
+        float column. This is the case that release switched on.
+        """
+        await seeded(tmp_path)  # price in [100.0, 104.0]
+        (await _migrated(tmp_path, V2)).close()
+
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        assert manifest["price"].to_pylist()[0]["nan_count"] == 0
+        assert _manifest.prune(manifest, ["trades"], [("price", ">", 500.0)]) == []
+        assert _manifest.prune(manifest, ["trades"], [("price", ">", 103.0)]) == [
+            "trades"
+        ]
+
     async def test_reading_statistics_failing_leaves_the_stream_as_it_was(
         self, tmp_path, monkeypatch
     ):
