@@ -11,6 +11,14 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`<stream>.manifest.parquet`**, the sealed logs' per-column statistics. Each
+  `Stream.migrate` adds the retired log's bounds and counts, read from its
+  Iceberg manifests through litelink's `column_statistics()`, and writes the
+  file before `metadata.json`, which points to it. A reader of the whole
+  stream prunes on it (#32). Pruning fails towards including a log in every
+  case it cannot decide. Requires a litelink release that provides
+  `column_statistics`.
+
 - **`Stream.migrate`** — change a stream's schema. With the server stopped, it
   seals the current log for good and creates the next (`trades-v2`, …) with
   the new schema. The new log starts at exactly the old one's end offset, so

@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import _log, _metadata
+from streamcast import _log, _manifest, _metadata
 from streamcast._server import _supervisors
 
 V1: dict[str, Any] = {
@@ -415,6 +415,167 @@ class TestServingAMigratedStream:
             await stream.aclose()
 
 
+class TestTheManifest:
+    """Each migration adds the retired log's statistics, before metadata.json."""
+
+    async def test_the_retired_log_gets_a_row_with_its_bounds(self, tmp_path):
+        await seeded(tmp_path)
+        (await _migrated(tmp_path, V2)).close()
+
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        [found] = manifest.to_pylist()
+        assert (found["log"], found["start_offset"], found["end_offset"]) == (
+            "trades",
+            1,
+            6,
+        )
+        assert found["record_count"] == 5
+        assert (found["event_ts"]["min"], found["event_ts"]["max"]) == (
+            row(0)["event_ts"],
+            row(4)["event_ts"],
+        )
+        assert (found["side"]["min"], found["side"]["max"]) == (0, 1)
+        assert found["side"]["null_count"] == 0
+
+    async def test_the_metadata_points_at_it(self, tmp_path):
+        await seeded(tmp_path)
+        (await _migrated(tmp_path, V2)).close()
+
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        assert metadata.manifest == "trades.manifest.parquet"
+        assert (tmp_path / metadata.manifest).exists(), (
+            "relative to the metadata file, so the same pointer serves the archive"
+        )
+
+    async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
+        await seeded(tmp_path)
+        (await _migrated(tmp_path, V2)).close()
+        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V2)
+        await stream.send(row(5, venue="x"))
+        await stream.aclose()
+        (await _migrated(tmp_path, evolve(V2, side=None))).close()
+
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        assert manifest["log"].to_pylist() == ["trades", "trades-v2"]
+        # `venue` is a string, and string bounds are truncated, so it has no
+        # statistics column at all: it can never prune.
+        assert "venue" not in manifest.column_names
+
+    async def test_a_snapshot_can_skip_the_log_that_cannot_match(self, tmp_path):
+        """End to end: statistics from litelink, pruned against a predicate."""
+        await seeded(tmp_path)  # event_ts in [base, base + 4]
+        (await _migrated(tmp_path, V2)).close()
+        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V2)
+        await stream.send_many([row(i, venue=None) for i in range(100, 105)])
+        await stream.aclose()
+        (await _migrated(tmp_path, evolve(V2, side=None))).close()
+
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        sealed = [entry.name for entry in metadata.sealed_logs]
+        late = row(100)["event_ts"]
+
+        assert _manifest.prune(
+            _manifest.load(tmp_path, "trades"), sealed, [("event_ts", ">=", late)]
+        ) == ["trades-v2"]
+        assert _manifest.prune(
+            _manifest.load(tmp_path, "trades"), sealed, [("event_ts", "<", late)]
+        ) == ["trades"]
+
+    async def test_a_float_column_prunes_now_litelink_holds_only_finite_floats(
+        self, tmp_path
+    ):
+        """litelink refuses NaN and ±inf (0.5.0), so it reports a NaN count of 0.
+
+        Before that its count was unknown, and an unknown count never prunes a
+        float column. This is the case that release switched on.
+        """
+        await seeded(tmp_path)  # price in [100.0, 104.0]
+        (await _migrated(tmp_path, V2)).close()
+
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        assert manifest["price"].to_pylist()[0]["nan_count"] == 0
+        assert _manifest.prune(manifest, ["trades"], [("price", ">", 500.0)]) == []
+        assert _manifest.prune(manifest, ["trades"], [("price", ">", 103.0)]) == [
+            "trades"
+        ]
+
+    async def test_reading_statistics_failing_leaves_the_stream_as_it_was(
+        self, tmp_path, monkeypatch
+    ):
+        await seeded(tmp_path)
+
+        def refuse(self, **_):
+            raise OSError("the archive is unreachable")
+
+        monkeypatch.setattr(litelink.WriteHandle, "column_statistics", refuse)
+        with pytest.raises(OSError, match="unreachable"):
+            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+
+        assert not (tmp_path / "trades-v2").exists()
+        assert _manifest.load(tmp_path, "trades") is None
+        assert _metadata.load(tmp_path, "trades") is None
+
+    async def test_a_manifest_that_cannot_be_written_commits_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """The manifest comes before metadata.json, so a failure there is retried.
+
+        The new log exists by then — an orphan the metadata does not name —
+        and the retry adopts it, because it is empty and of the right shape.
+        """
+        await seeded(tmp_path)
+        original = _manifest.save
+
+        def refuse(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_manifest, "save", refuse)
+        with pytest.raises(OSError, match="disk full"):
+            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+
+        assert _metadata.load(tmp_path, "trades") is None, "nothing committed"
+
+        monkeypatch.setattr(_manifest, "save", original)
+        (await _migrated(tmp_path, V2)).close()
+
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        assert metadata.live_log.name == "trades-v2"
+        assert _manifest.load(tmp_path, "trades")["log"].to_pylist() == ["trades"]  # ty: ignore[not-subscriptable]
+
+    async def test_migrating_to_the_same_shape_leaves_it_alone(self, tmp_path):
+        await seeded(tmp_path)
+        (await _migrated(tmp_path, V2)).close()
+        before = (tmp_path / "trades.manifest.parquet").stat().st_mtime_ns
+
+        again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        await again.aclose()
+
+        assert (tmp_path / "trades.manifest.parquet").stat().st_mtime_ns == before
+
+
+def test_extending_replaces_a_row_rather_than_duplicating_it():
+    """A migration retried after dying between the manifest and metadata.json."""
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": {"x": {"type": "integer"}},
+        "required": ["x"],
+    }
+    entry = _metadata.Entry("trades", 1, 3, schema, NO_SYSTEM)
+    stats = _manifest.LogStatistics(2, {"x": _manifest.ColumnStatistics(1, 2, 0, 2)})
+
+    once = _manifest.extend(None, entry, stats)
+    twice = _manifest.extend(once, entry, stats)
+
+    assert twice["log"].to_pylist() == ["trades"]
+    assert twice == once
+
+
 @pytest.mark.replication
 class TestTheArchive:
     async def test_the_metadata_is_published_beside_the_logs(
@@ -435,6 +596,15 @@ class TestTheArchive:
 
         published = _metadata.fetch(bucket, "trades", s3)
         assert published == _metadata.load(tmp_path, "trades")
+
+        # And the manifest beside it, written before the metadata named it.
+        import pyarrow.parquet as pq
+
+        from streamcast import _remote
+
+        filesystem, key = _remote._filesystem(f"{bucket}/trades.manifest.parquet", s3)
+        with filesystem.open_input_file(key) as source:
+            assert pq.read_table(source) == _manifest.load(tmp_path, "trades")
 
         # And the retired log is in the archive whole, not just its settled
         # prefix: nothing will push its tail later.

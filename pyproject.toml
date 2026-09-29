@@ -39,7 +39,10 @@ dependencies = [
     # an extra that gates it would put the difference between a multicaster
     # and a tickerplant behind a dependency marker nobody reads until the
     # first consumer restart.
-    "litelink>=0.4.1",
+    #
+    # 0.5.0 for `column_statistics`, which the manifest is built from, and
+    # for finite-only floats, which is what makes a float column prunable.
+    "litelink>=0.5.0",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

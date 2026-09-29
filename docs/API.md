@@ -1038,6 +1038,11 @@ current log.
 `sort_by` and `config` default to the current log's. `s3=` is what the metadata file is
 uploaded to the archive with, both here and at `serve`.
 
+Each migration also adds the retired log to `<stream>.manifest.parquet`: per-column bounds
+and counts, read from the log's own Iceberg statistics without opening a data file. It is
+what lets a reader of the whole stream skip logs that can't match (#32). The metadata file
+points to it.
+
 ### Or bring your own litelink log
 
 ```python
