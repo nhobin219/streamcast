@@ -144,6 +144,7 @@ src/streamcast/
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
     _metadata.py    a migrated stream's logs, in order, and which one is current
+    _manifest.py    per-log statistics, and pruning whole logs on them — soundly
     _catchup.py     reading the gap from the archive when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
