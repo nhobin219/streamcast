@@ -8,9 +8,9 @@ becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
     root/trades.metadata.json
     {"streamcast_metadata": 1, "stream": "trades",
      "logs": [{"name": "trades",    "start_offset": 1,    "end_offset": 1001,
-               "schema": {...}},
+               "schema": {...}, "system_schema": {...}},
               {"name": "trades-v2", "start_offset": 1001, "end_offset": null,
-               "schema": {...}}]}
+               "schema": {...}, "system_schema": {...}}]}
 
 **Named after Iceberg's `metadata.json`**, which plays the same part for a
 table: the JSON that says what it currently is. "Manifest" is Iceberg's word
@@ -44,9 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from streamcast import _remote, _schema
+from streamcast import _log, _remote, _schema
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     from litelink import S3Options
 
 VERSION: Final = 1
@@ -62,7 +63,14 @@ class Entry:
     """Exclusive, and None for the log being written — its end is still moving."""
     schema: dict[str, object]
     """The APPLICATION's columns as JSON Schema, as `Stream.schema` publishes
-    them. Without `streamcast_ts`, which is owned rather than declared."""
+    them. Without the system columns, which are owned rather than declared."""
+    system_schema: dict[str, object]
+    """The SYSTEM columns this log has, as JSON Schema (`_log.SYSTEM`).
+
+    Per log, because it differs between them: a log from before a system
+    column existed lacks it, and the one a migration created has all of them.
+    Recorded so that is readable at a glance rather than by opening each log.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +107,7 @@ class Metadata:
                         "start_offset": entry.start_offset,
                         "end_offset": entry.end_offset,
                         "schema": entry.schema,
+                        "system_schema": entry.system_schema,
                     }
                     for entry in self.logs
                 ],
@@ -126,10 +135,22 @@ class Metadata:
                         else int(entry["end_offset"])
                     ),
                     schema=entry["schema"],
+                    system_schema=entry["system_schema"],
                 )
                 for entry in fields["logs"]
             ),
         )
+
+
+def describe(name: str, start: int, end: int | None, schema: pa.Schema) -> Entry:
+    """An entry for a log whose table schema is `schema`: both halves of it."""
+    return Entry(
+        name,
+        start,
+        end,
+        _schema.from_arrow(_log.declared(schema)),
+        _schema.from_arrow(_log.system(schema)),
+    )
 
 
 def path(root: str | os.PathLike[str], stream: str) -> Path:
@@ -244,6 +265,7 @@ __all__ = [
     "Entry",
     "Metadata",
     "check_types",
+    "describe",
     "fetch",
     "load",
     "path",

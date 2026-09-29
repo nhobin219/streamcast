@@ -92,7 +92,7 @@ def stamped(tmp_path: Path) -> Iterator[WriteHandle]:
     handle = litelink.new(
         tmp_path / "data",
         "trades",
-        schema=_log.with_stamp(SCHEMA),
+        schema=_log.with_system(SCHEMA),
         sort_by=("event_ts",),
         config=litelink.LogConfig(target_seal_size=4 * 1024, compact_min_files=2),
     )

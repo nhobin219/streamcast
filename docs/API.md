@@ -992,9 +992,12 @@ ended at. `root/trades.metadata.json` (and a copy in the archive) records the se
 Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
 log the metadata names as current.
 
-It is **idempotent**: a stream already of that shape is opened rather than migrated
-again, so the call can live in your startup. Migrating to the *same* schema is how a log
-created before `streamcast_ts` existed gains the column.
+It is **idempotent**: a stream whose current log already has that schema and every
+system column streamcast defines today is opened rather than migrated again, so the call
+can live in your startup. Migrating with an *unchanged* schema is therefore the upgrade: a
+log created before a system column existed (`streamcast_ts`, or one added in a later
+release) moves onto a log that has it. `metadata.json` records each log's
+`system_schema` beside its `schema`, so which logs have which is readable at a glance.
 
 **What may change:** columns added, columns removed, nullability. **What may not:** a
 column's type, ever, including after it has been removed. Re-adding a name takes the type

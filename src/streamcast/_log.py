@@ -44,6 +44,7 @@ the premise disappears.
 from __future__ import annotations
 
 import asyncio
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
@@ -54,10 +55,11 @@ import pyarrow as pa
 # `_protocol.OFFSET`, which this module aliases it to.
 from litelink.log import OFFSET as COLUMN
 
+from streamcast import _schema
 from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Mapping
 
     from litelink import LogHandle, WriteHandle
 
@@ -92,6 +94,37 @@ may not — and that log's shape is not this library's to change.
 """
 
 
+SYSTEM: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
+    {STAMP: MappingProxyType({"type": "integer", "format": "int64"})}
+)
+"""Every column streamcast owns, as JSON Schema properties. The one definition.
+
+Everything that needs to know which columns are the server's reads this: what
+a new log is created with (`with_system`), which names a declaration may not
+use, which columns the wire and the greeting leave out, whether a log is
+current enough that `Stream.migrate` can leave it alone (`is_current`), and
+what the stream's metadata file records per log.
+
+**Adding a column here is an upgrade**: logs created afterwards have it, and
+`Stream.migrate` with an unchanged schema moves an older stream onto a log
+that does. Every entry is required — the server fills it on every row.
+
+**A type here never changes.** A stream's logs are read together with `UNION
+ALL BY NAME`, and a system column that changed type across a seam coerces
+silently, exactly as a user column would. A column that needs a different
+type is a NEW name — `streamcast_ts_v2` — beside the old one.
+`tests/test_stamp.py` pins every existing entry for that reason.
+"""
+
+_SYSTEM_ARROW: Final = _schema.to_arrow(
+    {
+        "type": "object",
+        "properties": {name: dict(spec) for name, spec in SYSTEM.items()},
+        "required": list(SYSTEM),
+    }
+)
+
+
 def columns(log: LogHandle) -> tuple[str, ...]:
     """The stream's declared columns, in the order the wire uses.
 
@@ -102,55 +135,69 @@ def columns(log: LogHandle) -> tuple[str, ...]:
     message, so there is one statement of "the offset comes first" instead of
     two — and none of them is a column name a subscriber has to know.
 
-    `STAMP` is not among them either, for the same reason: it is the server's
-    column, not the application's, and a replayed frame must carry exactly the
-    keys the live one did (I6).
+    The `SYSTEM` columns are not among them either, for the same reason: they
+    are the server's, not the application's, and a replayed frame must carry
+    exactly the keys the live one did (I6).
     """
-    return tuple(name for name in log.schema.names if name != STAMP)
+    return tuple(name for name in log.schema.names if name not in SYSTEM)
 
 
 def declared(schema: pa.Schema) -> pa.Schema:
-    """The application's columns: `schema` without the one streamcast owns.
+    """The application's columns: `schema` without the ones streamcast owns.
 
     What a subscriber is told in the greeting, and what `Stream.new` compares a
     declaration against. Filtered here as well as in `columns` because the two
     are read from the same `log.schema` by different expressions, and filtering
     only one tells a subscriber about a column no frame will ever carry.
     """
-    index = schema.get_field_index(STAMP)
-    return schema if index < 0 else schema.remove(index)
+    return pa.schema([field for field in schema if field.name not in SYSTEM])
 
 
-def with_stamp(schema: pa.Schema) -> pa.Schema:
-    """`schema` with streamcast's column appended, for creating a log.
+def system(schema: pa.Schema) -> pa.Schema:
+    """The `SYSTEM` columns `schema` has, in its order.
+
+    A column by one of those names of any other type is refused rather than
+    skipped: it is someone else's column wearing this library's name, and
+    filling it — or silently not — would both be wrong about what it holds.
+    """
+    owned = [field for field in schema if field.name in SYSTEM]
+    for field in owned:
+        wanted = _SYSTEM_ARROW.field(field.name).type
+        if field.type != wanted:
+            msg = (
+                f"the log's {field.name!r} column is {field.type}; streamcast "
+                f"owns that name and stores {wanted} in it"
+            )
+            raise ValueError(msg)
+
+    return pa.schema(owned)
+
+
+def with_system(schema: pa.Schema) -> pa.Schema:
+    """`schema` with every `SYSTEM` column appended, for creating a log.
 
     Last rather than first so a `SELECT *` reads the application's columns in
     the order they were declared. Not nullable: every row this library writes
-    carries one, and a log that says so is one a reader can rely on.
+    carries them, and a log that says so is one a reader can rely on.
     """
-    return schema.append(pa.field(STAMP, pa.int64(), nullable=False))
+    for field in _SYSTEM_ARROW:
+        schema = schema.append(field)
+
+    return schema
+
+
+def is_current(log: LogHandle) -> bool:
+    """Whether `log` has exactly today's `SYSTEM` columns.
+
+    False for a log created before one of them existed, which is what makes
+    `Stream.migrate` with an unchanged schema an upgrade rather than a no-op.
+    """
+    return list(system(log.schema)) == list(_SYSTEM_ARROW)
 
 
 def stamped(log: LogHandle) -> bool:
-    """Whether `log` has streamcast's column, and so whether `send` fills it.
-
-    A column by that name of any other type is refused rather than skipped: it
-    is someone else's column wearing this library's name, and filling it — or
-    silently not — would both be wrong about what it holds.
-    """
-    index = log.schema.get_field_index(STAMP)
-    if index < 0:
-        return False
-
-    found = log.schema.field(index).type
-    if found != pa.int64():
-        msg = (
-            f"the log's {STAMP!r} column is {found}; streamcast owns that name "
-            f"and stores int64 microseconds in it"
-        )
-        raise ValueError(msg)
-
-    return True
+    """Whether `log` has `streamcast_ts`, and so whether `send` fills it."""
+    return STAMP in system(log.schema).names
 
 
 def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
@@ -360,13 +407,16 @@ async def replay(
 
 __all__ = [
     "STAMP",
+    "SYSTEM",
     "columns",
     "declared",
     "earliest",
+    "is_current",
     "lowest",
     "replay",
     "rows",
     "rows_from",
     "stamped",
-    "with_stamp",
+    "system",
+    "with_system",
 ]

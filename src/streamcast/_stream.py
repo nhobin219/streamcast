@@ -364,9 +364,11 @@ class Stream:
            in the archive. See `_metadata`.
 
         **Idempotent**, so it can sit in a server's startup: a stream whose
-        current log already has this shape is opened, not migrated again. That
-        includes a log from before `streamcast_ts` existed — migrating it with
-        the same schema is how it gains the column.
+        current log already has this schema AND every system column there is
+        today (`_log.SYSTEM`) is opened, not migrated again. So migrating with
+        an unchanged schema is the upgrade: a log from before a system column
+        existed — `streamcast_ts`, or any added later — moves onto one that
+        has it.
 
         **What may change: columns added, columns removed, and nullability.**
         A column's TYPE is fixed for the life of the stream, including after
@@ -406,7 +408,7 @@ class Stream:
                 metadata = _metadata.Metadata(
                     name,
                     (
-                        _metadata.Entry(
+                        _metadata.describe(
                             current,
                             # The lowest offset it holds, since litelink does
                             # not publish the one it was created at. Exact for
@@ -414,7 +416,7 @@ class Stream:
                             # start is a description rather than a bound.
                             _log.lowest(old) or old.end_offset(),
                             None,
-                            _schema.from_arrow(_log.declared(old.schema)),
+                            old.schema,
                         ),
                     ),
                 )
@@ -423,7 +425,7 @@ class Stream:
 
             if (
                 list(_log.declared(old.schema)) == list(declared)
-                and _log.stamped(old)
+                and _log.is_current(old)
                 and (sort_by is None or tuple(sort_by) == old.sort_by)
             ):
                 # Already this shape. Published again because a migration
@@ -467,10 +469,14 @@ class Stream:
             name,
             (
                 *metadata.retired,
-                _metadata.Entry(head.name, head.start_offset, start, head.schema),
                 _metadata.Entry(
-                    new_log.name, start, None, _schema.from_arrow(declared)
+                    head.name,
+                    head.start_offset,
+                    start,
+                    head.schema,
+                    head.system_schema,
                 ),
+                _metadata.describe(new_log.name, start, None, new_log.schema),
             ),
         )
         try:
@@ -987,7 +993,7 @@ class Stream:
         if log is None:
             return None
 
-        owned = (_log.COLUMN, _log.STAMP) if self._stamped else (_log.COLUMN,)
+        owned = (_log.COLUMN, *_log.system(log.schema).names)
         return log.name, log.archive, owned
 
     async def _resolve(self, requested: int | None) -> tuple[WriteHandle, int] | None:
@@ -1193,7 +1199,7 @@ def _open_or_create(
         return litelink.new(
             root,
             name,
-            schema=_log.with_stamp(declared),
+            schema=_log.with_system(declared),
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
             archive=archive,
@@ -1227,10 +1233,11 @@ def _open_or_create(
 def _declaration(schema: Mapping[str, object]) -> pa.Schema:
     """A declaration as Arrow, refusing the one name streamcast owns."""
     declared = _schema.to_arrow(schema)
-    if _log.STAMP in declared.names:
+    reserved = [name for name in declared.names if name in _log.SYSTEM]
+    if reserved:
         msg = (
-            f"{_log.STAMP!r} is the column streamcast stamps each row with; "
-            f"declare the stream's own timestamp under another name"
+            f"{', '.join(map(repr, reserved))} is a column streamcast owns and "
+            f"fills itself; declare the stream's own under another name"
         )
         raise ValueError(msg)
 
@@ -1293,7 +1300,7 @@ def _seal_and_succeed(
         return litelink.new(
             root,
             name,
-            schema=_log.with_stamp(declared),
+            schema=_log.with_system(declared),
             sort_by=old.sort_by if sort_by is None else sort_by,
             config=old.config if config is None else config,  # ty: ignore[invalid-argument-type]
             archive=old.archive,
@@ -1312,7 +1319,7 @@ def _seal_and_succeed(
             orphan.end_offset() == start
             and _log.lowest(orphan) is None
             and list(_log.declared(orphan.schema)) == list(declared)
-            and _log.stamped(orphan)
+            and _log.is_current(orphan)
         ):
             return orphan
 

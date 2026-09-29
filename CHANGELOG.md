@@ -15,9 +15,13 @@ there was nothing to have changed from. Everything above it is ordinary.
   seals the current log for good and creates the next (`trades-v2`, …) with
   the new schema. The new log starts at exactly the old one's end offset, so
   offsets stay one dense sequence. A metadata file records the logs, locally and
-  in the archive. It is idempotent, so it can sit in a server's startup, and
-  migrating to the same schema is how a log from before `streamcast_ts`
-  gains the column.
+  in the archive, each with its user `schema` and its `system_schema`. It is
+  idempotent, so it can sit in a server's startup, and migrating with an
+  unchanged schema is the upgrade onto today's system columns — how a log
+  from before `streamcast_ts` gains it.
+- **`_log.SYSTEM`** — the one definition of the columns streamcast owns, as
+  JSON Schema. A system column's type never changes; one that needs a new
+  type gets a new name.
 
   Columns may be added and removed. **A column's type is fixed for the life of
   the stream**, including after removal, because the logs are read together

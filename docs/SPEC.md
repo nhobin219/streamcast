@@ -376,11 +376,23 @@ handler. That is the same division of labour a kdb tickerplant has — the feed
 handler parses, the plant stores typed rows — and it forces the decision to be
 made once, by the publisher, instead of independently by every consumer.
 
-### The one column streamcast owns
+### The system columns
 
-`Stream.new` creates every log with a column of streamcast's own beside the
-application's, alongside litelink's `litelink_offset`: `streamcast_ts`, int64 microseconds since the epoch, stamped by the
-server at append. It answers "when did this server have it", which no
+**`_log.SYSTEM` defines them, as JSON Schema, in one place.** It is what a new
+log is created with, which names a declaration may not use, which columns the
+wire and the greeting leave out, and whether a log is current enough that
+`Stream.migrate` leaves it alone. Each log's entry in `metadata.json` records
+its `system_schema` beside its user `schema`, because the two differ between
+logs: one from before a system column existed lacks it.
+
+**A system column's type never changes**, for the same reason a user column's
+does not: the logs are read together with `UNION ALL BY NAME`. One that needs
+a different type is a new name beside the old, `streamcast_ts_v2`. A test pins
+every existing entry.
+
+Today there is one, `streamcast_ts`: int64 microseconds since the epoch,
+stamped by the server at append, beside the application's columns and
+litelink's `litelink_offset`. It answers "when did this server have it", which no
 application column carries — a row's own timestamps are the publisher's — and
 `streamcast_ts - event_ts` is feed latency per row, over the whole archive.
 
@@ -575,9 +587,10 @@ make silently. No metadata file means one log named for the stream, which is eve
 stream that has never migrated, and those need no file.
 
 **Idempotent**, so `Stream.migrate(...)` can sit in a server's startup: a
-current log that already has the requested shape (and `streamcast_ts`) is
-opened, not migrated. Migrating to the SAME schema is how a log from before
-`streamcast_ts` gains it.
+current log that already has the requested schema and every system column is
+opened, not migrated. Migrating with an UNCHANGED schema is therefore the
+upgrade onto today's system columns — how a log from before `streamcast_ts`
+gains it, and how one will gain any column a later release adds.
 
 **The type rule.** A stream's logs are read together with `UNION ALL BY NAME`.
 There a changed type fails nothing, which is the problem. Measured in DuckDB:

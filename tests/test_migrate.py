@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 import litelink
+import pyarrow as pa
 import pytest
 
 import streamcast
@@ -43,6 +44,13 @@ def evolve(base: dict[str, Any], **columns: Any) -> dict[str, Any]:
 
 
 V2 = evolve(V1, venue={"type": ["string", "null"]})
+
+NO_SYSTEM: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+SYSTEM_NOW: dict[str, Any] = {
+    "type": "object",
+    "properties": {_log.STAMP: {"type": "integer", "format": "int64"}},
+    "required": [_log.STAMP],
+}
 
 
 def row(i: int, **extra: object) -> dict[str, object]:
@@ -169,6 +177,67 @@ class TestItIsSafeAtEveryStart:
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
 
 
+class TestSystemColumns:
+    async def test_the_metadata_records_each_logs_system_columns(self, tmp_path):
+        # Per log, because they differ: the legacy log has none, and the log
+        # the migration created has every one there is today.
+        litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(V1)).close()
+        (await _migrated(tmp_path, V1)).close()
+
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        assert [e.system_schema for e in metadata.logs] == [NO_SYSTEM, SYSTEM_NOW]
+
+    async def test_a_new_system_column_is_an_upgrade_by_migrate(
+        self, tmp_path, monkeypatch
+    ):
+        """What a future release adding a system column does to a stream.
+
+        The log is current for today's columns, so migrating to the same
+        schema changes nothing — until there is a column it lacks.
+        """
+        await seeded(tmp_path)
+        again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        assert again.log is not None
+        assert again.log.name == "trades"
+        await again.aclose()
+
+        extra = "streamcast_future"
+        monkeypatch.setattr(
+            _log,
+            "SYSTEM",
+            {**_log.SYSTEM, extra: {"type": "integer", "format": "int64"}},
+        )
+        monkeypatch.setattr(
+            _log,
+            "_SYSTEM_ARROW",
+            _log._SYSTEM_ARROW.append(pa.field(extra, pa.int64(), nullable=False)),
+        )
+
+        upgraded = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        try:
+            assert upgraded.log is not None
+            assert upgraded.log.name == "trades-v2"
+            assert extra in upgraded.log.schema.names
+            # Owned, so neither declared nor sent: not in the greeting's
+            # schema, and not among the columns that fix a frame's keys. (A
+            # real one would also need `send` to fill it — that is the code
+            # change a release adding one makes.)
+            assert extra not in _log.columns(upgraded.log)
+            assert upgraded.schema is not None
+            assert extra not in upgraded.schema["properties"]  # ty: ignore[unsupported-operator]
+        finally:
+            await upgraded.aclose()
+
+    async def test_no_system_column_can_be_declared(self, tmp_path):
+        with pytest.raises(ValueError, match="streamcast owns"):
+            streamcast.Stream.new(
+                "trades",
+                root=tmp_path,
+                schema=evolve(V1, streamcast_ts={"type": ["integer", "null"]}),
+            )
+
+
 class TestATypeIsForLife:
     async def test_a_kept_column_cannot_change_type(self, tmp_path):
         await seeded(tmp_path)
@@ -235,7 +304,7 @@ class TestAnInterruptedMigration:
         litelink.new(
             tmp_path,
             "trades-v2",
-            schema=_log.with_stamp(streamcast.to_arrow(V2)),
+            schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=6,
         ).close()
 
@@ -252,7 +321,7 @@ class TestAnInterruptedMigration:
         with litelink.new(
             tmp_path,
             "trades-v2",
-            schema=_log.with_stamp(streamcast.to_arrow(V2)),
+            schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=6,
         ) as orphan:
             orphan.append({**row(9), "venue": None, _log.STAMP: 0})
@@ -269,7 +338,7 @@ class TestAnInterruptedMigration:
         with litelink.new(
             tmp_path,
             "trades-v2",
-            schema=_log.with_stamp(streamcast.to_arrow(V2)),
+            schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=2,
         ) as orphan:
             orphan.extend([{**row(i), "venue": None, _log.STAMP: 0} for i in range(4)])
@@ -382,8 +451,8 @@ def test_the_metadata_round_trips():
     metadata = _metadata.Metadata(
         "trades",
         (
-            _metadata.Entry("trades", 1, 6, V1),
-            _metadata.Entry("trades-v2", 6, None, V2),
+            _metadata.Entry("trades", 1, 6, V1, NO_SYSTEM),
+            _metadata.Entry("trades-v2", 6, None, V2, SYSTEM_NOW),
         ),
     )
     assert _metadata.Metadata.from_json(metadata.to_json()) == metadata
