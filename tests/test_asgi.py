@@ -398,9 +398,12 @@ class TestTheChildren:
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
         try:
             streams = asgi(stream, replicate=False)
-            assert streams._children, "a stream with a log needs a maintainer"
             async with streams:
                 assert streams._started is True
+                # Built at start rather than construction: the maintainer is
+                # handed the retired logs, which the metadata written at start
+                # names.
+                assert streams._children, "a stream with a log needs a maintainer"
 
             assert streams._started is False
 

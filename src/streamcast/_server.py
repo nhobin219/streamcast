@@ -378,6 +378,14 @@ def serve(
     send, and is closed by the keepalive when its pongs stop arriving.
     """
     routes = _routes(streams)
+    # **Every stream's metadata file, before anything else.** Written if it is
+    # not there and synced to the archive, and a failure is a failure to
+    # start: a stream nothing else can read is found out here rather than at
+    # the first remote read. First, too, because it is where a `Stream(log=…)`
+    # learns its retired logs, which the maintainer below is handed.
+    for stream in routes.values():
+        stream.ensure_metadata()
+
     # Both resolved here, synchronously, so a missing litestream or a bad
     # stream set fails at the call rather than inside a task nobody awaits.
     children = [*_supervisors(routes, maintain), *_sidecars(routes, replicate)]

@@ -1,24 +1,36 @@
 """The logs a stream is made of, in order, and which one is being written.
 
 A stream is one litelink log until it is migrated. `Stream.migrate` seals the
-current log for good, creates the next one with the new schema starting at
+live log for good, creates the next one with the new schema starting at
 exactly the offset the last one ended at, and records both here — so a stream
 becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
 
     root/trades.metadata.json
-    {"streamcast_metadata": 1, "stream": "trades",
-     "logs": [{"name": "trades",    "start_offset": 1,    "end_offset": 1001,
-               "schema": {...}, "system_schema": {...}},
-              {"name": "trades-v2", "start_offset": 1001, "end_offset": null,
-               "schema": {...}, "system_schema": {...}}]}
+    {"streamcast_metadata": 1, "stream": "trades", "stream_id": "6f1c…",
+     "sealed_logs": [{"name": "trades", "start_offset": 1, "end_offset": 1001,
+                      "schema": {...}, "system_schema": {...}}],
+     "live_log": {"name": "trades-v2", "start_offset": 1001,
+                  "schema": {...}, "system_schema": {...}},
+     "manifest": null}
 
 **Named after Iceberg's `metadata.json`**, which plays the same part for a
 table: the JSON that says what it currently is. "Manifest" is Iceberg's word
-for the per-file statistics, and those are #27's, in SQLite.
+for per-file statistics; the stream's per-log statistics are #27's, and
+`manifest` is the pointer to them — null until there is a sealed log to
+describe.
 
-**No metadata file means one log**, named for the stream. That is every stream
-created before migration existed, and it keeps working without a file being
-written for it: the metadata appears at the first migration, and not before.
+**Sealed and live are separate keys** because only sealed logs have
+statistics and only they can be pruned: the structure says so, rather than
+leaving a reader to remember that the last entry is special.
+
+**Every durable stream has one, from its first `serve`** — see `ensure`. A
+stream without a readable metadata file cannot be read by anything but its
+own server, so `serve` writes it (and uploads it) or refuses to start.
+
+**`stream_id` is minted once**, when the file is first written, and never
+changes. Iceberg's `table-uuid` for the same reason: a `file://` path that
+exists on two machines names two different streams, and the id is how a
+reader tells them apart.
 
 **Beside the logs, not inside one.** `root/trades` IS the first log's
 directory, so a file in it would be a file inside a litelink log. And a copy
@@ -40,15 +52,18 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
+
+import pyarrow.fs as pafs
 
 from streamcast import _log, _remote, _schema
 
 if TYPE_CHECKING:
     import pyarrow as pa
-    from litelink import S3Options
+    from litelink import LogHandle, S3Options
 
 VERSION: Final = 1
 
@@ -75,18 +90,39 @@ class Entry:
 
 @dataclass(frozen=True, slots=True)
 class Metadata:
-    """A stream's logs, oldest first. The last is the one being written."""
+    """A stream's logs: the sealed ones, oldest first, and the live one."""
 
     stream: str
-    logs: tuple[Entry, ...]
+    stream_id: str
+    sealed_logs: tuple[Entry, ...]
+    live_log: Entry
+    """The log being written. Its `end_offset` is None: its end is moving."""
+    manifest: str | None = None
+    """Where the sealed logs' statistics are (#27), or None until there are any."""
+
+    @property
+    def logs(self) -> tuple[Entry, ...]:
+        """Every log, oldest first, the live one last."""
+        return (*self.sealed_logs, self.live_log)
 
     @property
     def current(self) -> Entry:
-        return self.logs[-1]
+        return self.live_log
 
     @property
     def retired(self) -> tuple[Entry, ...]:
-        return self.logs[:-1]
+        return self.sealed_logs
+
+    def advance(self, end: int, successor: Entry) -> Metadata:
+        """The live log sealed at `end`, and `successor` live after it."""
+        head = self.live_log
+        sealed = Entry(
+            head.name, head.start_offset, end, head.schema, head.system_schema
+        )
+
+        return replace(
+            self, sealed_logs=(*self.sealed_logs, sealed), live_log=successor
+        )
 
     def next_name(self) -> str:
         """`trades-v2`, `trades-v3`, … — named for its place in the sequence.
@@ -97,11 +133,13 @@ class Metadata:
         return f"{self.stream}-v{len(self.logs) + 1}"
 
     def to_json(self) -> str:
+        live = self.live_log
         return json.dumps(
             {
                 "streamcast_metadata": VERSION,
                 "stream": self.stream,
-                "logs": [
+                "stream_id": self.stream_id,
+                "sealed_logs": [
                     {
                         "name": entry.name,
                         "start_offset": entry.start_offset,
@@ -109,8 +147,15 @@ class Metadata:
                         "schema": entry.schema,
                         "system_schema": entry.system_schema,
                     }
-                    for entry in self.logs
+                    for entry in self.sealed_logs
                 ],
+                "live_log": {
+                    "name": live.name,
+                    "start_offset": live.start_offset,
+                    "schema": live.schema,
+                    "system_schema": live.system_schema,
+                },
+                "manifest": self.manifest,
             },
             indent=2,
         )
@@ -123,22 +168,28 @@ class Metadata:
             msg = f"stream metadata version {version!r}; this build reads {VERSION}"
             raise ValueError(msg)
 
+        live = fields["live_log"]
         return cls(
             stream=fields["stream"],
-            logs=tuple(
+            stream_id=fields["stream_id"],
+            sealed_logs=tuple(
                 Entry(
                     name=entry["name"],
                     start_offset=int(entry["start_offset"]),
-                    end_offset=(
-                        None
-                        if entry["end_offset"] is None
-                        else int(entry["end_offset"])
-                    ),
+                    end_offset=int(entry["end_offset"]),
                     schema=entry["schema"],
                     system_schema=entry["system_schema"],
                 )
-                for entry in fields["logs"]
+                for entry in fields["sealed_logs"]
             ),
+            live_log=Entry(
+                name=live["name"],
+                start_offset=int(live["start_offset"]),
+                end_offset=None,
+                schema=live["schema"],
+                system_schema=live["system_schema"],
+            ),
+            manifest=fields.get("manifest"),
         )
 
 
@@ -153,13 +204,35 @@ def describe(name: str, start: int, end: int | None, schema: pa.Schema) -> Entry
     )
 
 
+def single(stream: str, log: LogHandle) -> Metadata:
+    """The metadata of a stream that is one log — `log`, live — with a new id.
+
+    What every stream gets at its first `serve`, including one whose log
+    predates metadata files: writing this is how it gains one, and nothing
+    about the log changes.
+
+    The start is the lowest offset the log holds, since litelink does not
+    publish the one it was created at: exact for any log not evicted dry, and
+    the end offset of one that holds nothing yet.
+    """
+    start = _log.lowest(log)
+    return Metadata(
+        stream=stream,
+        stream_id=str(uuid.uuid4()),
+        sealed_logs=(),
+        live_log=describe(
+            log.name, log.end_offset() if start is None else start, None, log.schema
+        ),
+    )
+
+
 def path(root: str | os.PathLike[str], stream: str) -> Path:
     """Where a stream's metadata lives locally: beside its logs."""
     return Path(root) / f"{stream}.metadata.json"
 
 
 def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
-    """The stream's metadata, or None for a stream that has never migrated."""
+    """The stream's local metadata, or None if it has none yet."""
     try:
         text = path(root, stream).read_text()
     except FileNotFoundError:
@@ -206,8 +279,52 @@ def publish(metadata: Metadata, archive: str, s3: S3Options | None) -> None:
         stream.write(metadata.to_json().encode())
 
 
+def sync(metadata: Metadata, archive: str, s3: S3Options | None) -> None:
+    """Make the archive's copy match `metadata`, uploading only if it differs.
+
+    Run at every `serve`, so an upload that failed is repaired by the next
+    start rather than by whoever notices, and a stream that has not changed
+    costs one GET. Raises on any failure but absence — see `fetch`.
+    """
+    if fetch(archive, metadata.stream, s3) != metadata:
+        publish(metadata, archive, s3)
+
+
+def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
+    """The stream's metadata, written if it is not there and synced to the archive.
+
+    **`serve` calls this for every durable stream before it listens**, and a
+    failure is a failure to start: a stream whose metadata cannot be written,
+    or cannot reach its archive, is one nothing else can read, and finding
+    that out at the first remote read is finding it out too late.
+
+    `log` must be the stream's LIVE log. A handle to any other — a retired log
+    passed as `Stream(log=…)` — is refused, because serving it would append to
+    a log the metadata says is sealed.
+    """
+    root = log.root
+    found = load(root, stream)
+    if found is None:
+        found = single(stream, log)
+        save(root, found)
+
+    elif found.live_log.name != log.name:
+        msg = (
+            f"stream {stream!r} is being served from log {log.name!r}, and its "
+            f"metadata at {path(root, stream)} says the live log is "
+            f"{found.live_log.name!r}. A sealed log is never written to again; "
+            f"open the live one, or use Stream.new, which does."
+        )
+        raise ValueError(msg)
+
+    if log.archive:
+        sync(found, log.archive, s3)
+
+    return found
+
+
 def fetch(archive: str, stream: str, s3: S3Options | None) -> Metadata | None:
-    """The archive's copy, or None if this stream has never migrated.
+    """The archive's copy, or None if there is none there.
 
     Only a MISSING object is None. Anything else — bad credentials, an
     unreachable endpoint — raises, because treating it as "one log" would
@@ -219,6 +336,15 @@ def fetch(archive: str, stream: str, s3: S3Options | None) -> Metadata | None:
         with filesystem.open_input_stream(key) as source:
             text = source.read().decode()
     except FileNotFoundError:
+        # **pyarrow says "not found" for a missing BUCKET too**, in exactly
+        # the words it uses for a missing key — measured against rustfs. A
+        # mistyped bucket would otherwise read as "no copy yet", and a restore
+        # would go on to rebuild the stream's first log as though it were live.
+        bucket = key.split("/", 1)[0]
+        if filesystem.get_file_info(bucket).type == pafs.FileType.NotFound:
+            msg = f"the archive's bucket {bucket!r} does not exist ({archive})"
+            raise FileNotFoundError(msg) from None
+
         return None
 
     return Metadata.from_json(text)
@@ -266,9 +392,12 @@ __all__ = [
     "Metadata",
     "check_types",
     "describe",
+    "ensure",
     "fetch",
     "load",
     "path",
     "publish",
     "save",
+    "single",
+    "sync",
 ]

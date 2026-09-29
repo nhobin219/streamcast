@@ -568,7 +568,7 @@ stopped:
    run a plain `sync` holds back for compaction that will now never come.
 2. **The next log is created**, `trades-v2` and so on, starting at exactly the
    old log's `end_offset`.
-3. **The metadata records both**, the new one as current, at
+3. **The metadata records both**, the new one live, at
    `root/<stream>.metadata.json` and `<archive>/<stream>.metadata.json`.
 
 **Offline, so dense.** A live rotation would have to create the next log
@@ -583,8 +583,44 @@ naming a log that does not exist. A crash before it leaves an orphan log that
 the metadata doesn't name. The next `migrate` adopts the orphan if it is empty,
 starts at the seam and has the requested shape. Otherwise it refuses, because
 adopting a log holding rows the metadata cannot account for is not a decision to
-make silently. No metadata file means one log named for the stream, which is every
-stream that has never migrated, and those need no file.
+make silently.
+
+### The metadata file
+
+```json
+{"streamcast_metadata": 1, "stream": "trades", "stream_id": "6f1c…",
+ "sealed_logs": [{"name": "trades", "start_offset": 1, "end_offset": 1001,
+                  "schema": {…}, "system_schema": {…}}],
+ "live_log": {"name": "trades-v2", "start_offset": 1001,
+              "schema": {…}, "system_schema": {…}},
+ "manifest": null}
+```
+
+**Every durable stream has one, written by `serve`.** Before it listens,
+`serve` writes the file for any stream that has none, and with an archive
+compares it with the archive's copy and uploads it if they differ. **A failure
+is a failure to start.** The file is what a reader on another machine starts
+from, so a stream without one can only be read through its own server, and
+that is better found out at deploy than at the first remote read. It is
+`serve`'s job rather than `Stream.new`'s so that a `Stream(log=…)` gets one
+too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
+`serve` and nothing about the log changes.
+
+- **`sealed_logs` and `live_log` are separate keys.** Only sealed logs have
+  statistics (#27), so only they can be pruned, and the structure says so.
+- **`stream_id` is minted once**, when the file is first written, as
+  Iceberg's `table-uuid` is. A `file://` path can exist on two machines for
+  two different streams, and the id is how a reader tells them apart.
+- **`manifest` points to the sealed logs' statistics**, and is null until
+  there is a sealed log to describe.
+- **The live log it names is the only one `serve` will serve.** A
+  `Stream(log=…)` handed a sealed log is refused at start, because serving
+  it would write to a log the file says is finished. Handed the live one, it
+  reads its seam and its retired logs from the file at `serve`.
+
+**A missing bucket is not a missing file.** pyarrow reports both as "not
+found", and a restore that read a mistyped bucket as "no copy" would rebuild
+the stream's first log as though it were live. So the bucket is checked.
 
 **Idempotent**, so `Stream.migrate(...)` can sit in a server's startup: a
 current log that already has the requested schema and every system column is
