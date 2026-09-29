@@ -5,20 +5,24 @@ current log for good, creates the next one with the new schema starting at
 exactly the offset the last one ended at, and records both here — so a stream
 becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
 
-    root/trades.manifest.json
-    {"streamcast_manifest": 1, "stream": "trades",
+    root/trades.metadata.json
+    {"streamcast_metadata": 1, "stream": "trades",
      "logs": [{"name": "trades",    "start_offset": 1,    "end_offset": 1001,
                "schema": {...}},
               {"name": "trades-v2", "start_offset": 1001, "end_offset": null,
                "schema": {...}}]}
 
-**No manifest means one log**, named for the stream. That is every stream
+**Named after Iceberg's `metadata.json`**, which plays the same part for a
+table: the JSON that says what it currently is. "Manifest" is Iceberg's word
+for the per-file statistics, and those are #27's, in SQLite.
+
+**No metadata file means one log**, named for the stream. That is every stream
 created before migration existed, and it keeps working without a file being
-written for it: the manifest appears at the first migration, and not before.
+written for it: the metadata appears at the first migration, and not before.
 
 **Beside the logs, not inside one.** `root/trades` IS the first log's
 directory, so a file in it would be a file inside a litelink log. And a copy
-goes to `<archive>/trades.manifest.json`, because `Stream.restore` and a
+goes to `<archive>/trades.metadata.json`, because `Stream.restore` and a
 remote reader have the archive and not this disk.
 
 **Each entry records the schema its log was created with**, which is the
@@ -27,9 +31,9 @@ life of the stream, including across its removal and re-addition, so the check
 needs every schema the stream has had rather than only the current one.
 
 **Written last, by atomic rename.** A migration that dies before this leaves
-a new log directory the manifest does not name — an orphan that the next
+a new log directory the metadata does not name — an orphan that the next
 `migrate` adopts if it is empty and has the requested shape, and refuses
-otherwise. It never leaves a manifest naming a log that does not exist.
+otherwise. It never leaves a metadata file naming a log that does not exist.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ class Entry:
 
 
 @dataclass(frozen=True, slots=True)
-class Manifest:
+class Metadata:
     """A stream's logs, oldest first. The last is the one being written."""
 
     stream: str
@@ -87,7 +91,7 @@ class Manifest:
     def to_json(self) -> str:
         return json.dumps(
             {
-                "streamcast_manifest": VERSION,
+                "streamcast_metadata": VERSION,
                 "stream": self.stream,
                 "logs": [
                     {
@@ -103,11 +107,11 @@ class Manifest:
         )
 
     @classmethod
-    def from_json(cls, text: str) -> Manifest:
+    def from_json(cls, text: str) -> Metadata:
         fields = json.loads(text)
-        version = fields.get("streamcast_manifest")
+        version = fields.get("streamcast_metadata")
         if version != VERSION:
-            msg = f"stream manifest version {version!r}; this build reads {VERSION}"
+            msg = f"stream metadata version {version!r}; this build reads {VERSION}"
             raise ValueError(msg)
 
         return cls(
@@ -129,31 +133,31 @@ class Manifest:
 
 
 def path(root: str | os.PathLike[str], stream: str) -> Path:
-    """Where a stream's manifest lives locally: beside its logs."""
-    return Path(root) / f"{stream}.manifest.json"
+    """Where a stream's metadata lives locally: beside its logs."""
+    return Path(root) / f"{stream}.metadata.json"
 
 
-def load(root: str | os.PathLike[str], stream: str) -> Manifest | None:
-    """The stream's manifest, or None for a stream that has never migrated."""
+def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
+    """The stream's metadata, or None for a stream that has never migrated."""
     try:
         text = path(root, stream).read_text()
     except FileNotFoundError:
         return None
 
-    return Manifest.from_json(text)
+    return Metadata.from_json(text)
 
 
-def save(root: str | os.PathLike[str], manifest: Manifest) -> None:
-    """Write it atomically: a reader sees the old manifest or the new, never half.
+def save(root: str | os.PathLike[str], metadata: Metadata) -> None:
+    """Write it atomically: a reader sees the old metadata or the new, never half.
 
     fsynced before the rename and the directory after it, because the rename
-    is what commits a migration — a manifest that survived the crash as an
+    is what commits a migration — a metadata file that survived the crash as an
     empty file would name no current log at all.
     """
-    target = path(root, manifest.stream)
+    target = path(root, metadata.stream)
     staging = target.with_suffix(".json.tmp")
     with staging.open("w") as file:
-        file.write(manifest.to_json())
+        file.write(metadata.to_json())
         file.flush()
         os.fsync(file.fileno())
 
@@ -166,22 +170,22 @@ def save(root: str | os.PathLike[str], manifest: Manifest) -> None:
 
 
 def _uri(archive: str, stream: str) -> str:
-    return f"{archive.rstrip('/')}/{stream}.manifest.json"
+    return f"{archive.rstrip('/')}/{stream}.metadata.json"
 
 
-def publish(manifest: Manifest, archive: str, s3: S3Options | None) -> None:
-    """Copy the manifest to the archive, beside the logs' own prefixes.
+def publish(metadata: Metadata, archive: str, s3: S3Options | None) -> None:
+    """Copy the metadata to the archive, beside the logs' own prefixes.
 
     Raises rather than logging: a stream whose archive does not name its
     current log is one `Stream.restore` would rebuild as the wrong log.
     """
-    uri = _uri(archive, manifest.stream)
+    uri = _uri(archive, metadata.stream)
     filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
     with filesystem.open_output_stream(key) as stream:
-        stream.write(manifest.to_json().encode())
+        stream.write(metadata.to_json().encode())
 
 
-def fetch(archive: str, stream: str, s3: S3Options | None) -> Manifest | None:
+def fetch(archive: str, stream: str, s3: S3Options | None) -> Metadata | None:
     """The archive's copy, or None if this stream has never migrated.
 
     Only a MISSING object is None. Anything else — bad credentials, an
@@ -196,7 +200,7 @@ def fetch(archive: str, stream: str, s3: S3Options | None) -> Manifest | None:
     except FileNotFoundError:
         return None
 
-    return Manifest.from_json(text)
+    return Metadata.from_json(text)
 
 
 def check_types(history: tuple[Entry, ...], declared: dict[str, object]) -> None:
@@ -238,7 +242,7 @@ def check_types(history: tuple[Entry, ...], declared: dict[str, object]) -> None
 
 __all__ = [
     "Entry",
-    "Manifest",
+    "Metadata",
     "check_types",
     "fetch",
     "load",

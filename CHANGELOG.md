@@ -14,7 +14,7 @@ there was nothing to have changed from. Everything above it is ordinary.
 - **`Stream.migrate`** — change a stream's schema. With the server stopped, it
   seals the current log for good and creates the next (`trades-v2`, …) with
   the new schema. The new log starts at exactly the old one's end offset, so
-  offsets stay one dense sequence. A manifest records the logs, locally and
+  offsets stay one dense sequence. A metadata file records the logs, locally and
   in the archive. It is idempotent, so it can sit in a server's startup, and
   migrating to the same schema is how a log from before `streamcast_ts`
   gains the column.
@@ -25,8 +25,8 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
-- `Stream.new` and `Stream.restore` open the log a stream's manifest names as
-  current. A stream that has never migrated has no manifest and is unchanged.
+- `Stream.new` and `Stream.restore` open the log a stream's metadata names as
+  current. A stream that has never migrated has no metadata file and is unchanged.
 - A migrated stream's server replays only its current log. A subscribe below
   the seam is refused `evicted` with `earliest` at the seam, rather than being
   served an empty replay. Reading across the seam is #32.

@@ -988,9 +988,9 @@ async with streamcast.serve(stream, "localhost", 8765):
 
 The current log is sealed for good (and pushed in full to its archive, if it has one).
 Then `trades-v2` is created with the new schema, starting at exactly the offset the old log
-ended at. `root/trades.manifest.json` (and a copy in the archive) records the sequence.
+ended at. `root/trades.metadata.json` (and a copy in the archive) records the sequence.
 Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
-log the manifest names as current.
+log the metadata names as current.
 
 It is **idempotent**: a stream already of that shape is opened rather than migrated
 again, so the call can live in your startup. Migrating to the *same* schema is how a log
@@ -1013,7 +1013,7 @@ whole migrated stream is `Stream.snapshot` (#32). `offset=EARLIEST` means the st
 current log.
 
 `sort_by` and `config` default to the current log's. `s3=` is needed only to publish the
-manifest to the archive.
+metadata to the archive.
 
 ### Or bring your own litelink log
 

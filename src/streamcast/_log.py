@@ -313,7 +313,7 @@ def lowest(log: LogHandle) -> int | None:
 
     Unlike `earliest`, which answers for the tiers this handle reads, this
     counts the archive whether or not the handle reads it: it describes the
-    log, for a manifest, rather than what a replay from it can reach.
+    log, for the stream's metadata file, rather than what a replay from it can reach.
     """
     coverage = log.coverage()
     tiers = [log.table_extent(), coverage.buffered, coverage.archive]

@@ -556,8 +556,8 @@ stopped:
    run a plain `sync` holds back for compaction that will now never come.
 2. **The next log is created**, `trades-v2` and so on, starting at exactly the
    old log's `end_offset`.
-3. **The manifest records both**, the new one as current, at
-   `root/<stream>.manifest.json` and `<archive>/<stream>.manifest.json`.
+3. **The metadata records both**, the new one as current, at
+   `root/<stream>.metadata.json` and `<archive>/<stream>.metadata.json`.
 
 **Offline, so dense.** A live rotation would have to create the next log
 (100–300 ms, measured) while `send` kept writing the old one, and so could not
@@ -566,12 +566,12 @@ live. A migration is a deploy, because publishers have to change shape at the
 same time. With nothing sending, the seam is exact and the offsets are one
 sequence with no gap.
 
-**The manifest is written last, by atomic rename**, so a crash never leaves it
+**The metadata is written last, by atomic rename**, so a crash never leaves it
 naming a log that does not exist. A crash before it leaves an orphan log that
-the manifest doesn't name. The next `migrate` adopts the orphan if it is empty,
+the metadata doesn't name. The next `migrate` adopts the orphan if it is empty,
 starts at the seam and has the requested shape. Otherwise it refuses, because
-adopting a log holding rows the manifest cannot account for is not a decision to
-make silently. No manifest means one log named for the stream, which is every
+adopting a log holding rows the metadata cannot account for is not a decision to
+make silently. No metadata file means one log named for the stream, which is every
 stream that has never migrated, and those need no file.
 
 **Idempotent**, so `Stream.migrate(...)` can sit in a server's startup: a
@@ -590,7 +590,7 @@ There a changed type fails nothing, which is the problem. Measured in DuckDB:
 
 So **a column's type is fixed for the life of the stream**, with no exception
 for widening: one rule a reader never has to look up. It covers removed
-columns too. The manifest records every log's schema, and a re-added name must
+columns too. The metadata records every log's schema, and a re-added name must
 take the type it had. Adding columns, removing them and changing nullability
 are free.
 
@@ -614,7 +614,7 @@ maintaining the ones on this disk, so their local retention still runs.
 litestream replicates only the current log, since nothing writes to a retired
 one.
 
-**Not built: rollback.** Undoing a migration would be a manifest update that
+**Not built: rollback.** Undoing a migration would be an update to the metadata file that
 makes the previous log current again. That log would also have to be fenced
 above everything the abandoned one issued, the way `restore` fences, so that no
 offset is reused.

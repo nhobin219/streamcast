@@ -15,7 +15,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _log, _manifest
+from streamcast import _log, _metadata
 from streamcast._server import _supervisors
 
 V1: dict[str, Any] = {
@@ -84,20 +84,20 @@ class TestTheSeam:
             assert old.coverage().buffered is None, "rows left in the buffer"
             assert old.table_extent() == (1, 5)
 
-    async def test_the_manifest_records_both_logs(self, tmp_path):
+    async def test_the_metadata_records_both_logs(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        manifest = _manifest.load(tmp_path, "trades")
-        assert manifest is not None
-        assert [(e.name, e.start_offset, e.end_offset) for e in manifest.logs] == [
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        assert [(e.name, e.start_offset, e.end_offset) for e in metadata.logs] == [
             ("trades", 1, 6),
             ("trades-v2", 6, None),
         ]
-        assert "venue" in manifest.current.schema["properties"]  # ty: ignore[unsupported-operator]
-        assert "venue" not in manifest.logs[0].schema["properties"]  # ty: ignore[unsupported-operator]
+        assert "venue" in metadata.current.schema["properties"]  # ty: ignore[unsupported-operator]
+        assert "venue" not in metadata.logs[0].schema["properties"]  # ty: ignore[unsupported-operator]
         # Owned columns are not declared ones.
-        assert _log.STAMP not in manifest.current.schema["properties"]  # ty: ignore[unsupported-operator]
+        assert _log.STAMP not in metadata.current.schema["properties"]  # ty: ignore[unsupported-operator]
 
     async def test_a_second_migration_continues_the_sequence(self, tmp_path):
         await seeded(tmp_path)
@@ -112,10 +112,10 @@ class TestTheSeam:
         finally:
             await stream.aclose()
 
-        manifest = _manifest.load(tmp_path, "trades")
-        assert manifest is not None
-        assert [e.name for e in manifest.logs] == ["trades", "trades-v2", "trades-v3"]
-        assert manifest.logs[1].end_offset == 6
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        assert [e.name for e in metadata.logs] == ["trades", "trades-v2", "trades-v3"]
+        assert metadata.logs[1].end_offset == 6
 
 
 class TestItIsSafeAtEveryStart:
@@ -178,7 +178,7 @@ class TestATypeIsForLife:
             streamcast.Stream.migrate("trades", root=tmp_path, schema=narrowed)
 
         # Refused before anything changed: still one log, still current.
-        assert _manifest.load(tmp_path, "trades") is None
+        assert _metadata.load(tmp_path, "trades") is None
         assert not (tmp_path / "trades-v2").exists()
 
     async def test_widening_is_refused_too(self, tmp_path):
@@ -230,7 +230,7 @@ class TestATypeIsForLife:
 
 class TestAnInterruptedMigration:
     async def test_an_empty_orphan_of_the_right_shape_is_adopted(self, tmp_path):
-        # Died after creating the log and before saving the manifest.
+        # Died after creating the log and before saving the metadata.
         await seeded(tmp_path)
         litelink.new(
             tmp_path,
@@ -260,7 +260,7 @@ class TestAnInterruptedMigration:
         with pytest.raises(FileExistsError, match="does not name it"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
-        assert _manifest.load(tmp_path, "trades") is None
+        assert _metadata.load(tmp_path, "trades") is None
 
     async def test_an_orphan_whose_rows_end_at_the_seam_is_refused(self, tmp_path):
         # Its `end_offset` matches where the new log should start, so only
@@ -348,7 +348,7 @@ class TestServingAMigratedStream:
 
 @pytest.mark.replication
 class TestTheArchive:
-    async def test_the_manifest_is_published_beside_the_logs(
+    async def test_the_metadata_is_published_beside_the_logs(
         self, tmp_path, s3, bucket
     ):
         stream = streamcast.Stream.new(
@@ -364,36 +364,36 @@ class TestTheArchive:
         finally:
             await migrated.aclose()
 
-        published = _manifest.fetch(bucket, "trades", s3)
-        assert published == _manifest.load(tmp_path, "trades")
+        published = _metadata.fetch(bucket, "trades", s3)
+        assert published == _metadata.load(tmp_path, "trades")
 
         # And the retired log is in the archive whole, not just its settled
         # prefix: nothing will push its tail later.
         with litelink.open(tmp_path, "trades") as old:
             assert old.archived_through() == 5
 
-    async def test_a_stream_that_never_migrated_has_no_manifest_there(
+    async def test_a_stream_that_never_migrated_has_no_metadata_there(
         self, tmp_path, s3, bucket
     ):
-        assert _manifest.fetch(bucket, "trades", s3) is None
+        assert _metadata.fetch(bucket, "trades", s3) is None
 
 
-def test_the_manifest_round_trips():
-    manifest = _manifest.Manifest(
+def test_the_metadata_round_trips():
+    metadata = _metadata.Metadata(
         "trades",
         (
-            _manifest.Entry("trades", 1, 6, V1),
-            _manifest.Entry("trades-v2", 6, None, V2),
+            _metadata.Entry("trades", 1, 6, V1),
+            _metadata.Entry("trades-v2", 6, None, V2),
         ),
     )
-    assert _manifest.Manifest.from_json(manifest.to_json()) == manifest
-    assert json.loads(manifest.to_json())["streamcast_manifest"] == 1
+    assert _metadata.Metadata.from_json(metadata.to_json()) == metadata
+    assert json.loads(metadata.to_json())["streamcast_metadata"] == 1
 
 
-def test_an_unknown_manifest_version_is_refused():
+def test_an_unknown_metadata_version_is_refused():
     with pytest.raises(ValueError, match="version"):
-        _manifest.Manifest.from_json(
-            json.dumps({"streamcast_manifest": 99, "stream": "t", "logs": []})
+        _metadata.Metadata.from_json(
+            json.dumps({"streamcast_metadata": 99, "stream": "t", "logs": []})
         )
 
 

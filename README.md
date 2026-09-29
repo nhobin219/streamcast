@@ -238,7 +238,7 @@ stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
 ```
 
 That seals the current log, starts `trades-v2` at the next offset, and records both in a
-manifest. Columns can be added and removed. A column's type can never change. It is safe
+metadata file. Columns can be added and removed. A column's type can never change. It is safe
 to leave in your startup: a stream already of that shape is just opened.
 
 ### Surviving a feed that changes

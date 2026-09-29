@@ -21,7 +21,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _manifest
+from streamcast import _metadata
 
 pytestmark = pytest.mark.replication
 
@@ -447,7 +447,7 @@ class TestAMigratedStream:
     async def test_restore_rebuilds_the_current_log_not_the_first(
         self, tmp_path, s3, bucket, litestream
     ):
-        """The manifest in the archive is what says which log is current.
+        """The metadata in the archive is what says which log is current.
 
         Without it, a restore of `trades` rebuilds the stream's FIRST log and
         serves it as though no migration had happened.
@@ -490,9 +490,9 @@ class TestAMigratedStream:
             assert revived.log.name == "trades-v2"
             assert revived.schema is not None
             assert "venue" in revived.schema["properties"]  # ty: ignore[unsupported-operator]
-            # The manifest came down with it, so the next `Stream.new` on
+            # The metadata came down with it, so the next `Stream.new` on
             # this box opens the same log.
-            assert _manifest.load(tmp_path / "box_b", "trades") is not None
+            assert _metadata.load(tmp_path / "box_b", "trades") is not None
             # And the first log is not on this box, so nothing maintains it.
             assert revived.retired == ()
         finally:
