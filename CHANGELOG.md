@@ -11,11 +11,11 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- **`examples/otel/logs.py`** and **`just demo-otel`**: OpenTelemetry logs
-  from two simulated services, published to a stream, and re-exported as
-  OTLP by `examples/otel/export.py` (OpenTelemetry's own exporter) to
-  otel-gui's local dashboard. The OTel schema and conversion live in the
-  examples; OTel is a dev dependency only.
+- **`examples/otel/`** and **`just demo-otel`**: OpenTelemetry logs and
+  traces from two simulated services, published to two streams, and
+  re-exported as OTLP by `examples/otel/export.py` (OpenTelemetry's own
+  exporters) to otel-gui's local dashboard. The OTel schemas and conversions
+  live in the example; OTel is a dev dependency only.
 
 - **`Stream(name, schema=...)`** — a stream without a log can declare a
   schema, and then accepts exactly the rows a stream with a log would: every
