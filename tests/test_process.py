@@ -10,6 +10,7 @@ Linux only: `PR_SET_PDEATHSIG` has no portable equivalent (see `_process`).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -51,16 +52,20 @@ def children(pid: int) -> set[int]:
     """`pid`'s direct children, from every one of its threads."""
     found: set[int] = set()
     for task in Path(f"/proc/{pid}/task").iterdir():
-        found.update(int(child) for child in (task / "children").read_text().split())
+        # A thread can exit between the listing and the read.
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError):
+            found.update(int(c) for c in (task / "children").read_text().split())
 
     return found
 
 
 def gone(pid: int) -> bool:
     """Exited, or a zombie awaiting a reaper: either way, doing nothing."""
+    # Reaped before the open, or between the open and the read: the second
+    # is ESRCH, which Python raises as ProcessLookupError.
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
 
     return stat.rsplit(")", 1)[1].split()[0] == "Z"
@@ -103,13 +108,17 @@ def kill_the_server(root: Path, bucket: str = "-") -> tuple[set[int], list[str]]
     survivors = [pid for pid in spawned if not gone(pid)]
     running = [command(pid) for pid in survivors]
     for pid in survivors:  # leave nothing behind, whatever the assertion says
-        os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
 
     return spawned, running
 
 
 def command(pid: int) -> str:
-    return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    except (FileNotFoundError, ProcessLookupError):
+        return f"pid {pid}, exited while being named"
 
 
 def test_the_maintainer_dies_with_a_killed_server(tmp_path):
