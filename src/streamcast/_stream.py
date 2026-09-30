@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -153,6 +154,7 @@ class Stream:
         "_started",
         "_started_ts",
         "_subscribers",
+        "_validate",
     )
 
     def __init__(
@@ -166,6 +168,7 @@ class Stream:
         floor: int | None = None,
         retired: Sequence[tuple[Path, str]] = (),
         s3: S3Options | None = None,
+        schema: Mapping[str, object] | None = None,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -189,7 +192,24 @@ class Stream:
         `s3` is what `serve` uploads the stream's metadata file with, when the
         log has an archive. None resolves from the environment, as litelink
         does. It is kept, not used here: this initialiser does no I/O.
+
+        `schema` is for a stream WITHOUT a log: declared in JSON Schema, as
+        `Stream.new` takes it, and held to exactly the rule a log would hold
+        it to — see `send`. A stream with a log carries its own shape, so
+        passing both is refused: two declarations, one of which would be
+        silently ignored.
         """
+        if log is not None and schema is not None:
+            msg = (
+                "a stream with a log takes its schema from the log; pass log= "
+                "or schema=, not both"
+            )
+            raise ValueError(msg)
+
+        # A live-only stream's declared columns, if it has any. Converted
+        # here, not deferred: it is a pure transformation, and a declaration
+        # that cannot be a stream should fail at construction.
+        declared_live = None if schema is None else _declaration(schema)
         # The declared column order, read once. It fixes the key order of
         # every frame, and a replayed row must encode to the same bytes as the
         # live one it repeats (I6) — so this cannot be re-derived per message
@@ -198,17 +218,34 @@ class Stream:
         # None for a stream with no log: there is no declared schema, so a
         # frame takes the row's own order. Such a stream is a multicaster and
         # nothing replays from it, so there is no second encoding to match.
-        self._columns = None if log is None else _log.columns(log)
+        self._columns = (
+            _log.columns(log)
+            if log is not None
+            else None
+            if declared_live is None
+            else tuple(declared_live.names)
+        )
         # The declared columns as Arrow — what `where=` and the codec read —
         # and the wire conversions they need, compiled once. A stream of
         # scalars gets `NONE`, and pays for none of it on the hot path.
-        self._declared = None if log is None else _log.declared(log.schema)
+        self._declared = _log.declared(log.schema) if log is not None else declared_live
         self._codec = compile_codec(self._declared)
+        # **The same check a log would make, with no log.** litelink's own
+        # `validate_row` — the DDL and helpers `append` uses — so a live-only
+        # stream accepts exactly the rows a durable one would, and attaching
+        # a log later changes nothing about what is accepted. None when there
+        # is nothing to check against: a stream with a log, whose `append`
+        # checks, or one with no schema, which is shape-agnostic on purpose.
+        self._validate = (
+            None
+            if declared_live is None
+            else partial(litelink.validate_row, declared_live)
+        )
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish. Without
         # `streamcast_ts`, which no frame carries — see `_log.declared`.
         self._shape = (
-            None if log is None else _schema.from_arrow(_log.declared(log.schema))
+            None if self._declared is None else _schema.from_arrow(self._declared)
         )
         # Whether `send` fills `streamcast_ts`. Decided once, per log: a log
         # created before the column existed, or one a caller opened and passed
@@ -684,7 +721,13 @@ class Stream:
         `row` is a mapping over the log's declared columns — litelink's `Row`,
         the same thing `litelink.append` takes. litelink validates it against
         the schema, so a wrong type or an unknown column raises here with a
-        message naming the column, and nothing is broadcast.
+        message naming the column, and nothing is broadcast. A live-only
+        stream declared with `schema=` is held to the same rule, through
+        litelink's `validate_row`.
+
+        **A live-only stream with no schema checks nothing**, on purpose. JSON
+        has no NaN or infinity, so a non-finite float sent on one reaches
+        subscribers as `null` — declare a schema to have it refused.
 
         **Durable first.** With a log attached this returns only once the row
         is committed — one SQLite transaction at `synchronous=FULL`, which
@@ -724,6 +767,11 @@ class Stream:
             # Before the append, where refusing costs nothing: a map sent as
             # pairs would be stored, and then replayed as a different frame.
             codec.check(row)
+
+        if self._validate is not None:
+            # A live-only stream with a schema: refused as `append` would,
+            # before anything is fanned out.
+            self._validate(row)
 
         offset = None
         if self._log is not None:
@@ -765,6 +813,12 @@ class Stream:
             # group, as one bad row does inside litelink.
             for row in batch:
                 codec.check(row)
+
+        if self._validate is not None:
+            # Every row before any is fanned out: one bad row refuses the
+            # group, as it would inside litelink's one transaction.
+            for row in batch:
+                self._validate(row)
 
         offsets: list[int | None] = [None] * len(batch)
         if self._log is not None:

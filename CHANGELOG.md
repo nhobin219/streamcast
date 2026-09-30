@@ -11,6 +11,14 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Stream(name, schema=...)`** — a stream without a log can declare a
+  schema, and then accepts exactly the rows a stream with a log would: every
+  row goes through litelink's `validate_row`, so a wrong type, an unknown or
+  missing column, or a non-finite float is refused with the same message and
+  sent to no one. The greeting publishes the schema, frames follow its column
+  order, and `where=` is checked against it. Without a schema, nothing is
+  checked, as before, and a non-finite float reaches subscribers as `null`.
+
 - **Binary and nested columns.** A stream can declare `binary` and
   `fixed_size_binary(N)` columns (`{"type": "string", "contentEncoding":
   "base16" | "base64"}`, with `format: "bytesN"`), and structs, lists and

@@ -75,7 +75,7 @@ would let one compressed frame be shared across connections — the same frames 
 ## `Stream`
 
 ```python
-streamcast.Stream(name="", *, log=None, owns_log=False,
+streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
                   max_backlog=8192, max_replay=100_000)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
@@ -106,6 +106,25 @@ implementations omit it. Without one nothing assigns
 offsets at all — `send` returns None and every frame carries `null` — so `?offset=` is
 refused outright rather than appearing to work until the day a subscriber needs it. With
 it, every row is durable *before* any subscriber sees it.
+
+**A stream without a log can still declare a schema**, and then it accepts exactly the rows a
+stream with a log would:
+
+```python
+stream = streamcast.Stream("trades", schema=SCHEMA)   # no log, still checked
+```
+
+Every row goes through litelink's own `validate_row` — the same checks `append` makes — so a
+wrong type, an unknown or missing column, or a NaN or infinity raises with the message a log
+would give, and nothing is sent to anyone. The greeting publishes the schema, frames follow
+its column order, `where=` is checked against it, and binary and map columns work as they do
+with a log. Attaching a log later changes nothing about what is accepted. The check costs
+~4–14 µs a row (it depends on the machine), which a stream that declares nothing doesn't pay.
+Passing `schema=` with `log=` is refused: a log carries its own.
+
+**Without a schema a stream checks nothing**, on purpose: it is a shape-agnostic relay. One
+consequence: JSON has no NaN or infinity, so a non-finite float sent on such a stream reaches
+subscribers as `null`. Declare a schema to have it refused instead.
 
 ```python
 stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
@@ -653,7 +672,7 @@ an unfiltered subscription.
 `Greeting.where` echoes the applied filter, so a subscriber can confirm the server
 understood the predicate rather than assume it.
 
-On a **live-only** stream there are no declared columns, so no name can be checked and any
+On a **live-only** stream with no `schema=`, there are no declared columns, so no name can be checked and any
 is accepted. A typo silently matches nothing there — a property of having no schema rather
 than of the filter.
 
