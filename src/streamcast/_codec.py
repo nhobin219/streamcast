@@ -73,7 +73,8 @@ def compile_codec(schema: pa.Schema | None) -> Codec:
     # closures cost about 4x what msgspec takes to encode the whole row, and
     # this costs about the same as that encode, level with a hand-written
     # version. msgspec has no hex option for bytes (only `uuid_format`), and
-    # `enc_hook` never fires for a type it already knows, so this is the floor.
+    # `enc_hook` never fires for a type it already knows, so this is the floor
+    # until msgspec grows one: msgspec/msgspec#964 asks for `bytes_format`.
     leaves = [f for f in schema if _is_binary(f.type)]
     hexed = tuple(f.name for f in leaves if _schema.encoding(f) == "base16")
     decoders = tuple((f.name, _decoder(_schema.encoding(f), f.name)) for f in leaves)
