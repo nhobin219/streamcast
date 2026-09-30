@@ -23,12 +23,17 @@ just bench              # fan-out and publish throughput
 just bench-replay       # replay cost, and which layer it is spent in
 just demo               # a live public feed through a server
 just rustfs             # an S3 endpoint, so the replication tier runs
-just check-all          # every gate with replication REQUIRED, as CI runs it
+just check-all          # every gate with replication and Node REQUIRED, as CI runs it
 ```
 
 The replication tier SKIPS without an endpoint, and a skip is not a pass — it is
 where litestream is actually run and where "never two instances on one database"
 is checked. `just rustfs` then `just check-all` is the honest local gate.
+
+The JavaScript client test (`tests/test_node.py`) skips without Node 22+ in the same
+way, and `check-all` requires it: put `node` on PATH or set `STREAMCAST_NODE`. It runs
+the SPEC's reader in the browser's `WebSocket` API, so it is what says a front end can
+read a stream.
 
 ## The schema is the caller's, in JSON Schema
 
@@ -150,6 +155,7 @@ src/streamcast/
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
     _publish.py     publish, Publication — the producer end, over a socket
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
+    _codec.py       what JSON needs done to binary and map values, in and out
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
     _stats.py       Stats — what a stream reports about itself, and /stats

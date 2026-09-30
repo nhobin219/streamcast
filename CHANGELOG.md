@@ -11,6 +11,16 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **Binary and nested columns.** A stream can declare `binary` and
+  `fixed_size_binary(N)` columns (`{"type": "string", "contentEncoding":
+  "base16" | "base64"}`, with `format: "bytesN"`), and structs, lists and
+  maps (`object` + `properties`, `array` + `items`, `object` +
+  `additionalProperties`), nested at any depth. Binary is `bytes` in Python
+  and text on the wire in the column's encoding, both ways: a remote publisher
+  sends text, a `Subscription` hands back `bytes`. Replayed frames stay
+  byte-identical to live ones, maps included. `where=` filters binary columns
+  by their text and refuses nested ones. Requires litelink 0.5.
+
 - **`<stream>.manifest.parquet`**, the sealed logs' per-column statistics. Each
   `Stream.migrate` adds the retired log's bounds and counts, read from its
   Iceberg manifests through litelink's `column_statistics()`, and writes the

@@ -135,8 +135,12 @@ rustfs-stop:
 
 # Every gate, with the replication tier REQUIRED rather than skipped. Needs
 # `just rustfs` first. This is what CI runs.
+#
+# It requires Node 22+ as well: `tests/test_node.py` runs a browser-style
+# JavaScript client against a real server, and skips without Node. Put `node`
+# on PATH, or point STREAMCAST_NODE at a binary.
 check-all: lint format-check typecheck
-    STREAMCAST_REQUIRE_S3=1 uv run pytest
+    STREAMCAST_REQUIRE_S3=1 STREAMCAST_REQUIRE_NODE=1 uv run pytest
 
 # START HERE. A live public feed through a server, in one process: Bitstamp
 # publishes BTC/USD trades over an unauthenticated websocket, so there is

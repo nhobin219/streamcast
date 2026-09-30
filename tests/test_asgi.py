@@ -142,16 +142,16 @@ class TestItServes:
 class TestTheWireIsUnchanged:
     """The two properties a transport swap is most likely to break silently."""
 
-    async def test_the_greeting_is_text_and_data_frames_are_binary(self, log):
-        """**The opcode split is the contract, not an encoder detail.**
+    async def test_every_frame_is_text(self, log):
+        """**The opcode is the contract, not an encoder detail.**
 
-        `encode` returns `bytes` and `greeting` returns `str`, so `websockets`
-        sends one BINARY and the other TEXT. An adapter that called
-        `send_text` for both — or `send_bytes` for both — would keep every
-        test that decodes payloads passing while changing the wire for every
-        existing client. So this asserts the types rather than the contents.
+        `encode` returns `bytes`, shared by every subscriber, and the pump
+        sends them with `text=True`. An adapter that ignored `text` and called
+        `send_bytes` would keep every test that decodes payloads passing while
+        handing a browser a `Blob` instead of a string. So this asserts the
+        types rather than the contents.
 
-        Falsify by collapsing `_Peer.send`'s branch onto either method.
+        Falsify by dropping `_Peer.send`'s `text` branch.
         """
         websockets = pytest.importorskip("websockets")
         stream = streamcast.Stream("trades", log=log)
@@ -162,8 +162,8 @@ class TestTheWireIsUnchanged:
                 await stream.send(trade(0))
                 data = await raw.recv()
 
-        assert isinstance(greeting, str), "the greeting must stay a TEXT frame"
-        assert isinstance(data, bytes), "a data frame must stay BINARY"
+        assert isinstance(greeting, str), "the greeting must be a TEXT frame"
+        assert isinstance(data, str), "a data frame must be a TEXT frame"
 
     async def test_a_replayed_frame_is_byte_identical_to_the_live_one(self, log):
         """Invariant 10, across the transport rather than across the tier.

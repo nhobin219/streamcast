@@ -82,6 +82,13 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync
+      # For tests/test_node.py: a JavaScript client on the browser's WebSocket
+      # API, which Node has had as a global since 22. The oldest line with it,
+      # so a client relying on anything newer fails here rather than in a user's
+      # browser.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       # Any HTTP answer means it is listening. NOT `curl -f`: an
       # unauthenticated S3 root answers 403, which is a healthy server
       # refusing an anonymous request, and -f reads that as a failure.
@@ -104,9 +111,12 @@ jobs:
       # STREAMCAST_REQUIRE_S3 turns a skipped replication tier into a
       # failure. Without it, a dead endpoint would look exactly like an
       # absent one and eight tests would vanish green.
+      #
+      # STREAMCAST_REQUIRE_NODE does the same for the JavaScript client test.
       - run: uv run pytest -q
         env:
           STREAMCAST_REQUIRE_S3: "1"
+          STREAMCAST_REQUIRE_NODE: "1"
 
   packaging:
     name: The wheel imports and serves

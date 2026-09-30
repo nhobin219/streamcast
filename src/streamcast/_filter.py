@@ -19,9 +19,9 @@ anybody writes, become a dict lookup and a compare.
 **Equality and membership, and nothing else.** The predicate arrives from a
 client over a socket, so there is no expression language to parse and no
 `eval` to reach: a JSON object of column to value. A list value means
-membership, unambiguously, because `_schema` refuses array columns outright
-("arrays are not a column; flatten it, or send it as a JSON string"), so a
-column can never hold one.
+membership, unambiguously, because a filter compares scalar and binary
+columns only — `prepare` refuses a struct, list or map column — so the column
+a list value names can never hold a list itself.
 
 **Total, and raise-free.** `offer` promises never to raise, and it is where
 this is called. `dict.get` is defined for a missing key and `==`/`in` are
@@ -35,7 +35,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import msgspec
+import pyarrow as pa
 
+from streamcast._codec import decode_value
 from streamcast._errors import ProtocolError
 
 if TYPE_CHECKING:
@@ -45,7 +47,7 @@ if TYPE_CHECKING:
     Where = Mapping[str, object]
     Predicate = Callable[[Row], bool]
 
-_SCALARS = (str, int, float, bool, type(None))
+_SCALARS = (str, int, float, bool, bytes, type(None))
 
 _MATCH_ALL: Predicate = lambda _row: True  # noqa: E731
 """No terms is no restriction, which keeps `where={}` from meaning `where` at all."""
@@ -141,6 +143,52 @@ def validate(where: Where, columns: tuple[str, ...] | None) -> None:
             raise ProtocolError(msg)
 
 
+def prepare(where: Where, schema: pa.Schema | None) -> dict[str, object]:
+    """`where` with each value in the form the column's rows hold. Raises `ProtocolError`.
+
+    Run after `validate`, for a stream whose columns are typed.
+
+    - **A binary column** is compared as bytes, because that is what a live row
+      and a replayed one both carry. The filter arrives as JSON, so its value
+      is text in the column's encoding — hex for `base16`, as a trace id is
+      written — and is decoded here, once, at subscribe.
+    - **A struct, list or map column is refused.** Equality on one compares
+      whole nested values per row, which is not a filter anyone means, and a
+      list value here already means membership.
+    """
+    if schema is None:
+        return dict(where)
+
+    out: dict[str, object] = {}
+    for name, value in where.items():
+        index = schema.get_field_index(name)
+        field = schema.field(index) if index >= 0 else None
+        kind = None if field is None else field.type
+        if kind is not None and (
+            pa.types.is_struct(kind) or pa.types.is_list(kind) or pa.types.is_map(kind)
+        ):
+            msg = (
+                f"where names column {name!r}, which is {kind}; a filter compares "
+                f"scalar and binary columns only"
+            )
+            raise ProtocolError(msg)
+
+        if field is not None and (
+            pa.types.is_binary(kind) or pa.types.is_fixed_size_binary(kind)
+        ):
+            try:
+                if isinstance(value, (list, tuple)):
+                    value = [decode_value(field, item) for item in value]
+                else:
+                    value = decode_value(field, value)
+            except ValueError as exc:
+                raise ProtocolError(str(exc)) from exc
+
+        out[name] = value
+
+    return out
+
+
 def decode(raw: str) -> dict[str, object]:
     """`where=` off a query string. Raises `ValueError` for anything malformed.
 
@@ -167,4 +215,4 @@ def encode(where: Where) -> str:
     return msgspec.json.encode(dict(where)).decode()
 
 
-__all__ = ["compile_where", "decode", "encode", "validate"]
+__all__ = ["compile_where", "decode", "encode", "prepare", "validate"]
