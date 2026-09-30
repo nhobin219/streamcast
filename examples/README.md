@@ -138,21 +138,21 @@ just demo-otel         # the broker, an OTLP exporter, and otel-gui's dashboard
 just demo-otel-once    # the same pipeline once, printing what each part saw
 ```
 
-`otel_logs.py` runs two simulated services (checkout and payments) that log
+`otel/logs.py` runs two simulated services (checkout and payments) that log
 through Python's `logging` and the OpenTelemetry SDK. A small exporter
-publishes each log record to a stream as a row. `otel_export.py` subscribes to
+publishes each log record to a stream as a row. `otel/export.py` subscribes to
 the stream and re-exports every row as OTLP to [otel-gui](https://github.com/metafab/otel-gui),
 a local dashboard for traces, logs and metrics, where the logs arrive live.
 Failed orders show up as a `card declined` error and an `order failed`
 warning, sharing one trace id.
 
 **None of this is in streamcast.** The OTel record's schema and the
-record-to-row conversion live in `otel_logs.py`, built from the column types
+record-to-row conversion live in `otel/logs.py`, built from the column types
 any stream can declare: trace and span ids as hex binary, attributes as a
 map, and OTel's `AnyValue` as a struct. The OTel packages are dev
 dependencies, for this example only.
 
-**`otel_export.py` is an ordinary OTLP exporter.** OTel viewers are
+**`otel/export.py` is an ordinary OTLP exporter.** OTel viewers are
 *receivers*: telemetry is pushed to them, and none subscribes to a WebSocket.
 So this subscribes to the stream, turns each row back into an SDK log record,
 and hands it to OpenTelemetry's own `BatchLogRecordProcessor` and

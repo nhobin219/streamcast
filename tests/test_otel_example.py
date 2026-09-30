@@ -1,4 +1,4 @@
-"""`examples/otel_logs.py` and `examples/otel_export.py`, run rather than read.
+"""`examples/otel/logs.py` and `examples/otel/export.py`, run rather than read.
 
 An example that is only read is one that rots: an SDK renames a class, a
 record grows a field, and nobody notices until a reader copies it. So the
@@ -17,12 +17,12 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
-from examples import otel_export, otel_logs  # noqa: E402
+from examples.otel import export, logs  # noqa: E402
 
 
 class TestTheDemo:
     async def test_it_runs_start_to_finish(self, tmp_path):
-        seen = await otel_logs.main(tmp_path)
+        seen = await logs.main(tmp_path)
 
         # Two services, three orders, one of them declined: 3 received + 3
         # outcomes from checkout, 3 from payments.
@@ -71,7 +71,7 @@ class TestAnyValue:
         ],
     )
     def test_each_kind(self, value, stored):
-        assert otel_logs.any_value(value) == stored
+        assert logs.any_value(value) == stored
 
 
 def emitted() -> list:
@@ -112,7 +112,7 @@ class TestTheExporter:
 
     def test_a_record_survives_the_round_trip_through_a_row(self):
         [original] = emitted()
-        again = otel_export.record(otel_logs.row(original))
+        again = export.record(logs.row(original))
 
         was, now = original.log_record, again.log_record
         assert now.trace_id == was.trace_id != 0
@@ -165,7 +165,7 @@ class TestTheExporter:
             endpoint = f"http://127.0.0.1:{server.server_port}/v1/logs"
             processor = BatchLogRecordProcessor(OTLPLogExporter(endpoint=endpoint))
             [original] = emitted()
-            processor.on_emit(otel_export.record(otel_logs.row(original)))
+            processor.on_emit(export.record(logs.row(original)))
             assert processor.force_flush(timeout_millis=10_000)
             processor.shutdown()
         finally:

@@ -3,7 +3,7 @@
     just demo-otel        # the broker, this exporter and otel-gui's dashboard
 
 A streamcast subscriber on one side and OpenTelemetry's own OTLP exporter on
-the other. It turns each row of `examples/otel_logs.py`'s schema back into an
+the other. It turns each row of `examples/otel/logs.py`'s schema back into an
 SDK log record and hands it to the SDK's `BatchLogRecordProcessor` and
 `OTLPLogExporter` — so the batching, the protobuf encoding and the retries are
 OpenTelemetry's, and the receiver can be anything that speaks OTLP/HTTP: a
@@ -79,7 +79,7 @@ def attributes(values: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def record(row: Mapping[str, Any]) -> ReadWriteLogRecord:
-    """One stored row as the SDK's log record: the inverse of `otel_logs.row`."""
+    """One stored row as the SDK's log record: the inverse of `logs.row`."""
     severity = row["severity_number"]
     scope = row["scope"] or {}
     log = LogRecord(

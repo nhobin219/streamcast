@@ -1,6 +1,6 @@
 """OpenTelemetry logs, through a stream, into a table you can query.
 
-    uv run python examples/otel_logs.py
+    uv run python examples/otel/logs.py
 
 Nothing here is part of streamcast. The OTel log record's schema and the
 record-to-row conversion live in this file: streamcast carries binary ids,
@@ -323,7 +323,7 @@ def orders_forever(exporter: StreamExporter, stop: threading.Event) -> None:
 async def serve_forever(port: int) -> None:
     """The broker on `port`, with the two services placing orders until Ctrl-C.
 
-    What `just demo-otel` runs: `examples/otel_export.py` subscribes to
+    What `just demo-otel` runs: `examples/otel/export.py` subscribes to
     `ws://127.0.0.1:<port>/logs` and re-exports each row as OTLP to otel-gui.
     """
     with tempfile.TemporaryDirectory() as directory:
