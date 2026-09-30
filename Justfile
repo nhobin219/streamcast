@@ -204,9 +204,12 @@ demo-otel host="127.0.0.1" port="4318":
         tar -xzf "$cache/$asset.tar.gz" -C "$cache"
     fi
     log="$(mktemp -t streamcast-otel-XXXXXX.log)"
-    # HOST is not in otel-gui's README, but its server honours it (SvelteKit's
-    # node adapter): 127.0.0.1 keeps the dashboard off the network.
-    HOST="{{host}}" PORT="{{port}}" "$gui" >"$log" 2>&1 &
+    # HOST and SHUTDOWN_TIMEOUT are not in otel-gui's README, but its server
+    # honours both (SvelteKit's node adapter). 127.0.0.1 keeps the dashboard
+    # off the network. On a signal it waits SHUTDOWN_TIMEOUT seconds (30 by
+    # default) for open connections to close, and an open dashboard's live
+    # stream never does: 1 lets Ctrl-C return at once.
+    HOST="{{host}}" PORT="{{port}}" SHUTDOWN_TIMEOUT=1 "$gui" >"$log" 2>&1 &
     gui_pid=$!
     uv run python -m examples.otel.demo --serve >>"$log" 2>&1 &
     broker=$!
