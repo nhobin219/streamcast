@@ -1,4 +1,4 @@
-"""`examples/otel/logs.py` and `examples/otel/export.py`, run rather than read.
+"""`examples/otel/`, run rather than read.
 
 An example that is only read is one that rots: an SDK renames a class, a
 record grows a field, and nobody notices until a reader copies it. So the
@@ -17,16 +17,16 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
-from examples.otel import export, logs  # noqa: E402
+from examples.otel import common, demo, export, logs  # noqa: E402
 
 
 class TestTheDemo:
     async def test_it_runs_start_to_finish(self, tmp_path):
-        seen = await logs.main(tmp_path)
+        seen = await demo.main(tmp_path)
 
         # Two services, three orders, one of them declined: 3 received + 3
         # outcomes from checkout, 3 from payments.
-        assert seen["stored"] == 9
+        assert seen["logs"] == 9
 
         # The live tail saw exactly the problems, as they happened.
         assert sorted(m["severity_text"] for m in seen["live"]) == ["ERROR", "WARN"]
@@ -36,13 +36,13 @@ class TestTheDemo:
         # As a set: each service's batch processor exports on its own
         # schedule, so the two services' records interleave either way.
         assert sorted(
-            (m["service"], m["body"]["string_value"]) for m in seen["one_request"]
+            (m["service"], m["body"]["string_value"]) for m in seen["failed_logs"]
         ) == [
             ("checkout", "order failed"),
             ("checkout", "order received"),
             ("payments", "card declined"),
         ]
-        assert all(m["trace_id"].hex() == seen["failed"] for m in seen["one_request"])
+        assert all(m["trace_id"].hex() == seen["failed"] for m in seen["failed_logs"])
 
         # And the table answers a log search's questions.
         assert seen["errors"] == [{"service": "payments", "errors": 1}]
@@ -71,7 +71,7 @@ class TestAnyValue:
         ],
     )
     def test_each_kind(self, value, stored):
-        assert logs.any_value(value) == stored
+        assert common.any_value(value) == stored
 
 
 def emitted() -> list:

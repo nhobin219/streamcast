@@ -169,13 +169,14 @@ demo-fastapi *args:
 demo-live *args:
     uv run python examples/server.py --no-log {{args}}
 
-# Two simulated services log through the OTel SDK; the logs are published to a
-# stream; `examples/otel/export.py` subscribes and re-exports them as OTLP to
+# Two simulated services log and trace through the OTel SDK; the records and
+# spans are published to two streams; `examples/otel/export.py` follows both
+# and re-exports them as OTLP to
 # otel-gui (https://github.com/metafab/otel-gui), a local dashboard. The first
 # run downloads otel-gui's release for this platform, checks its SHA-256, and
 # caches it. Everything stays on this machine; Ctrl-C stops all three.
 #
-# OpenTelemetry logs through a stream, live in otel-gui's dashboard.
+# OpenTelemetry logs and traces through streams, live in otel-gui's dashboard.
 demo-otel host="127.0.0.1" port="4318":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -207,9 +208,9 @@ demo-otel host="127.0.0.1" port="4318":
     # node adapter): 127.0.0.1 keeps the dashboard off the network.
     HOST="{{host}}" PORT="{{port}}" "$gui" >"$log" 2>&1 &
     gui_pid=$!
-    uv run python examples/otel/logs.py --serve >>"$log" 2>&1 &
+    uv run python -m examples.otel.demo --serve >>"$log" 2>&1 &
     broker=$!
-    uv run python examples/otel/export.py --receiver "http://127.0.0.1:{{port}}/v1/logs" >>"$log" 2>&1 &
+    uv run python -m examples.otel.export --receiver "http://127.0.0.1:{{port}}" >>"$log" 2>&1 &
     exporter=$!
     # SIGTERM, not SIGINT: bash starts background jobs with SIGINT ignored, so
     # Ctrl-C reaches only this script. Both Python pieces unwind on SIGTERM as
@@ -220,7 +221,7 @@ demo-otel host="127.0.0.1" port="4318":
 
 # The OTel example once, start to finish, printing what each part saw.
 demo-otel-once:
-    uv run python examples/otel/logs.py
+    uv run python -m examples.otel.demo
 
 # Delete what the demo captured.
 demo-clean root="streamcast-data":
