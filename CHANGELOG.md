@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.9.0 — 2026-09-30
 
 ### Added
 
@@ -72,6 +72,9 @@ there was nothing to have changed from. Everything above it is ordinary.
 - A migrated stream's server replays only its current log. A subscribe below
   the seam is refused `evicted` with `earliest` at the seam, rather than being
   served an empty replay. Reading across the seam is #32.
+- **litelink is capped at `>=0.5.1,<0.6`.** Under 0.x a minor is litelink's
+  breaking release, so a streamcast release now resolves only the litelink
+  line it was tested against, and each release moves the cap.
 
 ### Fixed
 
