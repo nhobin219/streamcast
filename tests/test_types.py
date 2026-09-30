@@ -199,6 +199,45 @@ def test_a_map_nested_in_a_list_is_checked_too():
         codec.check({"groups": [{"a": "b"}, [("k", "v")]]})
 
 
+@pytest.mark.parametrize("count", [1, 2, 3, 4])
+@pytest.mark.parametrize("encoding", ["base16", "base64"])
+def test_every_unrolled_arity_converts_every_column(count, encoding):
+    """The codec is unrolled for one to three top-level binary columns.
+
+    Each arity is its own function, so each is its own chance to skip a
+    column; four covers the general loop.
+    """
+    import base64
+
+    import pyarrow as pa
+
+    from streamcast._codec import compile_codec
+
+    meta = {_schema.ENCODING: encoding.encode()}
+    schema = pa.schema(
+        [pa.field("x", pa.int64())]
+        + [pa.field(f"b{i}", pa.binary(), metadata=meta) for i in range(count)]
+    )
+    codec = compile_codec(schema)
+    stored = {"x": 1, **{f"b{i}": bytes([i, 255]) for i in range(count)}}
+    text = {
+        f"b{i}": (
+            bytes([i, 255]).hex()
+            if encoding == "base16"
+            else base64.b64encode(bytes([i, 255])).decode()
+        )
+        for i in range(count)
+    }
+
+    assert codec.inbound is not None
+    assert codec.inbound({"x": 1, **text}) == stored
+    if encoding == "base16":
+        assert codec.outbound is not None
+        assert codec.outbound(stored) == {"x": 1, **text}
+    else:
+        assert codec.outbound is None, "msgspec writes base64 itself"
+
+
 class TestRemotePublishers:
     async def test_binary_arrives_as_text_and_is_stored_as_bytes(self, tmp_path, serve):
         stream = stream_at(tmp_path)

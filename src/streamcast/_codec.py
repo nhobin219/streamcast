@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     Convert = Callable[[object], object]
     Check = Callable[[object], None]
+    Leaves = Callable[[Mapping[str, object]], dict[str, object]]
 
 _BYTES = (bytes, bytearray, memoryview)
 
@@ -65,33 +66,175 @@ def compile_codec(schema: pa.Schema | None) -> Codec:
     if schema is None:
         return NONE
 
-    inbound = {f.name: fn for f in schema if (fn := _in(f, f.name)) is not None}
-    outbound = {f.name: fn for f in schema if (fn := _out(f)) is not None}
+    # **Top-level binary columns are special-cased**, because they are the
+    # common case — an OTel row's trace and span ids — and the per-row cost is
+    # all plumbing: `bytes.hex()` itself is C, ~60 ns. Measured in one process
+    # on a six-column row with two hex ids: a generic loop of per-column
+    # closures cost about 4x what msgspec takes to encode the whole row, and
+    # this costs about the same as that encode, level with a hand-written
+    # version. msgspec has no hex option for bytes (only `uuid_format`), and
+    # `enc_hook` never fires for a type it already knows, so this is the floor.
+    leaves = [f for f in schema if _is_binary(f.type)]
+    hexed = tuple(f.name for f in leaves if _schema.encoding(f) == "base16")
+    decoders = tuple((f.name, _decoder(_schema.encoding(f), f.name)) for f in leaves)
+    branches = [f for f in schema if not _is_binary(f.type)]
+    out_nested = {f.name: fn for f in branches if (fn := _out(f)) is not None}
+    in_nested = {f.name: fn for f in branches if (fn := _in(f, f.name)) is not None}
     checks = {f.name: fn for f in schema if (fn := _check(f, f.name)) is not None}
 
     return Codec(
-        inbound=_row(inbound) if inbound else None,
-        outbound=_row(outbound) if outbound else None,
+        inbound=(
+            _row(_decode_leaves(decoders), in_nested) if decoders or in_nested else None
+        ),
+        outbound=_row(_hex_leaves(hexed), out_nested) if hexed or out_nested else None,
         check=_row_check(checks) if checks else None,
     )
 
 
-def _row(fns: dict[str, Convert]) -> Callable[[Mapping[str, object]], dict]:
-    """Apply per-column conversions to a row, leaving every other key alone.
+def _row(leaves: Leaves | None, nested: dict[str, Convert]) -> Leaves:
+    """The top-level conversions, then the nested ones, on a copy of a row.
 
     A copy, never the caller's dict: the row was theirs, and the fan-out and
-    `where=` still read the original.
+    `where=` still read the original. With nothing nested, the unrolled
+    top-level function IS the conversion — one call per row, no wrapper.
     """
+    if not nested and leaves is not None:
+        return leaves
+
+    items = tuple(nested.items())
 
     def convert(row: Mapping[str, object]) -> dict[str, object]:
-        out = dict(row)
-        for name, fn in fns.items():
+        out = dict(row) if leaves is None else leaves(row)
+        for name, fn in items:
             if name in out:
                 out[name] = fn(out[name])
 
         return out
 
     return convert
+
+
+def _hex_leaves(names: tuple[str, ...]) -> Leaves | None:
+    """Copy a row with the named top-level columns hexed, specialised on how many.
+
+    Unrolled for one to three, like `_filter.compile_where`: a loop over a
+    tuple of names measured at twice the cost of the unrolled form.
+    """
+    if not names:
+        return None
+
+    if len(names) == 1:
+        (a,) = names
+
+        def one(row: Mapping[str, object]) -> dict[str, object]:
+            out = dict(row)
+            v = out.get(a)
+            if isinstance(v, _BYTES):
+                out[a] = v.hex()
+
+            return out
+
+        return one
+
+    if len(names) == 2:
+        a, b = names
+
+        def two(row: Mapping[str, object]) -> dict[str, object]:
+            out = dict(row)
+            v = out.get(a)
+            if isinstance(v, _BYTES):
+                out[a] = v.hex()
+
+            v = out.get(b)
+            if isinstance(v, _BYTES):
+                out[b] = v.hex()
+
+            return out
+
+        return two
+
+    if len(names) == 3:
+        a, b, c = names
+
+        def three(row: Mapping[str, object]) -> dict[str, object]:
+            out = dict(row)
+            v = out.get(a)
+            if isinstance(v, _BYTES):
+                out[a] = v.hex()
+
+            v = out.get(b)
+            if isinstance(v, _BYTES):
+                out[b] = v.hex()
+
+            v = out.get(c)
+            if isinstance(v, _BYTES):
+                out[c] = v.hex()
+
+            return out
+
+        return three
+
+    def many(row: Mapping[str, object]) -> dict[str, object]:
+        out = dict(row)
+        for name in names:
+            v = out.get(name)
+            if isinstance(v, _BYTES):
+                out[name] = v.hex()
+
+        return out
+
+    return many
+
+
+def _decode_leaves(decoders: tuple[tuple[str, Convert], ...]) -> Leaves | None:
+    """Copy a row with the named top-level columns' text decoded, by arity.
+
+    Only a `str` is decoded; bytes (a local caller's own) and None pass
+    without a call.
+    """
+    if not decoders:
+        return None
+
+    if len(decoders) == 1:
+        ((a, da),) = decoders
+
+        def one(row: Mapping[str, object]) -> dict[str, object]:
+            out = dict(row)
+            v = out.get(a)
+            if isinstance(v, str):
+                out[a] = da(v)
+
+            return out
+
+        return one
+
+    if len(decoders) == 2:
+        (a, da), (b, db) = decoders
+
+        def two(row: Mapping[str, object]) -> dict[str, object]:
+            out = dict(row)
+            v = out.get(a)
+            if isinstance(v, str):
+                out[a] = da(v)
+
+            v = out.get(b)
+            if isinstance(v, str):
+                out[b] = db(v)
+
+            return out
+
+        return two
+
+    def many(row: Mapping[str, object]) -> dict[str, object]:
+        out = dict(row)
+        for name, decode in decoders:
+            v = out.get(name)
+            if isinstance(v, str):
+                out[name] = decode(v)
+
+        return out
+
+    return many
 
 
 def _row_check(fns: dict[str, Check]) -> Callable[[Mapping[str, object]], None]:
@@ -253,7 +396,9 @@ def _nested_check(kind: pa.DataType, fns: list[Check | None]) -> Check | None:
 
 
 def _to_hex(value: object) -> object:
-    return bytes(value).hex() if isinstance(value, _BYTES) else value
+    # `.hex()` directly: bytes, bytearray and memoryview all have it, and a
+    # `bytes(value)` first would copy the value only to throw the copy away.
+    return value.hex() if isinstance(value, _BYTES) else value
 
 
 def _decoder(encoding: str, path: str) -> Convert:
