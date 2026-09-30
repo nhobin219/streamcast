@@ -51,6 +51,7 @@ from streamcast._catchup import (
     from_refusal,
     nowhere_to_read,
 )
+from streamcast._codec import compile_codec
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
@@ -62,8 +63,10 @@ from streamcast._errors import (
 )
 from streamcast._protocol import decode, parse_greeting, parse_refusal
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
+from streamcast._schema import to_arrow
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from os import PathLike
     from types import TracebackType
     from typing import Self
@@ -87,6 +90,26 @@ at the call site.
 # and going-away both mean the server finished with this connection on
 # purpose, which is what `async for` should stop on and not raise for.
 _ENDED = frozenset({1000, 1001})
+
+
+def _inbound(
+    info: Greeting,
+) -> Callable[[Mapping[str, object]], dict[str, object]] | None:
+    """How to turn a frame's binary text back into bytes, from the greeting.
+
+    None for a stream with nothing to decode — no schema, or no binary column
+    — which is what keeps a scalar stream's `recv` exactly as it was. A schema
+    this build cannot read (a newer server's spelling) also gets None: its
+    rows arrive with binary left as text rather than the subscription failing
+    over a column the consumer may never look at.
+    """
+    if info.schema is None:
+        return None
+
+    try:
+        return compile_codec(to_arrow(info.schema)).inbound
+    except TypeError:
+        return None
 
 
 def _refusal(
@@ -211,6 +234,7 @@ class Subscription:
         "_catcher",
         "_connection",
         "_cursor",
+        "_inbound",
         "_info",
         "_offset",
         "_prelude",
@@ -228,6 +252,7 @@ class Subscription:
     ) -> None:
         self._connection = connection
         self._info = info
+        self._inbound = _inbound(info)
         self._stream = stream
         self._offset: int | None = None
         self._cursor = cursor
@@ -335,6 +360,7 @@ class Subscription:
             if catcher is not None and catcher.connection is not None:
                 self._connection = catcher.connection
                 self._info = catcher.info
+                self._inbound = _inbound(catcher.info)
 
         try:
             frame = await self._live().recv()
@@ -346,6 +372,12 @@ class Subscription:
             raise refusal from None
 
         offset, row = decode(frame)
+        # Binary columns arrive as text in their encoding, and a row that
+        # came out of the archive by catch-up carries bytes: decoded here so
+        # the consumer cannot tell which source a row came from.
+        if self._inbound is not None:
+            row = self._inbound(row)
+
         # **This is not a guard against the network.** TCP delivers a byte
         # stream in order, so frames on ONE connection cannot overtake each
         # other, and this comparison will never fire because of reordering

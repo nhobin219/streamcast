@@ -52,9 +52,21 @@ plain type, or nullable through its type.** And every schema this publishes is
 one it would accept, because `from_arrow` emits the null union.
 
 **It refuses up front what litelink would refuse at the first append.** A
-schema with a `date-time` or a nested object is rejected here, where the
-message can name JSON Schema's own vocabulary, rather than inside `litelink.new`
-where it names Arrow's.
+schema with a `date-time`, an unsigned or narrow integer, or a union is
+rejected here, where the message can name JSON Schema's own vocabulary, rather
+than inside `litelink.new` where it names Arrow's.
+
+**Nested and binary columns follow the same rules at every depth:**
+
+    object + properties             struct   (fields follow every rule above)
+    object + additionalProperties   map      (string keys; JSON has no others)
+    array  + items                  list
+    string + contentEncoding        binary   ("base16" or "base64"; see ENCODINGS)
+      + format "bytesN"             fixed_size_binary(N)
+
+A binary column's encoding is how its value is written on the JSON wire, and
+it is kept in the Arrow field's metadata so a reopened log still knows it —
+see `_codec`, which does the converting.
 
 One caveat this module cannot fix, only document: **JSON integers beyond 2^53
 do not survive every parser.** msgspec and Python carry int64 exactly, but a
@@ -107,8 +119,6 @@ _FROM_ARROW: Final[list[tuple[object, dict[str, str]]]] = [
 # something a JSON Schema may legitimately say and this stream cannot store,
 # so the message names what litelink would have said one layer down.
 _REASONS: Final[dict[str, str]] = {
-    "object": "nested objects are not a column; flatten it, or send it as a JSON string",
-    "array": "arrays are not a column; flatten it, or send it as a JSON string",
     "null": "a null-only column carries nothing; give it a type and leave it out of `required`",
 }
 
@@ -117,9 +127,25 @@ _FORMATS: Final[dict[str, str]] = {
     '{"type": "integer"} and say microseconds in your own docs',
     "date": "litelink stores epoch integers, not temporal types",
     "time": "litelink stores epoch integers, not temporal types",
-    "byte": 'litelink refuses binary columns; use {"type": "string"}',
-    "binary": 'litelink refuses binary columns; use {"type": "string"}',
+    "byte": 'binary is {"type": "string", "contentEncoding": "base64"} (or "base16")',
+    "binary": 'binary is {"type": "string", "contentEncoding": "base64"} (or "base16")',
 }
+
+ENCODING: Final = b"streamcast.encoding"
+"""The Arrow field-metadata key a binary column's wire encoding is kept under.
+
+In the field rather than beside the schema because litelink keeps field
+metadata through `new` and `open`, at every depth — measured — so a log
+reopened by a later process still knows which of its columns go out as hex.
+"""
+
+ENCODINGS: Final = ("base16", "base64")
+"""How a binary value is written as JSON text, per column.
+
+JSON has no bytes, so a binary column declares which: `base16` (hex) is what
+OTLP/JSON uses for trace and span ids and what every trace tool shows, and
+`base64` is JSON Schema's convention and a third smaller, for payloads.
+"""
 
 
 def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field:
@@ -150,6 +176,13 @@ def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field
         msg = f"column {name!r}: {_REASONS[declared]}"
         raise TypeError(msg)
 
+    arrow, metadata = _nested_or_binary(name, declared, spec)
+    if arrow is not None:
+        _refuse_optional_non_null(
+            name, declared, required=required, nullable=accepts_null
+        )
+        return pa.field(name, arrow, nullable=accepts_null, metadata=metadata)
+
     fmt = spec.get("format")
     if isinstance(fmt, str) and fmt in _FORMATS:
         msg = f"column {name!r}: format {fmt!r} — {_FORMATS[fmt]}"
@@ -166,24 +199,136 @@ def _field(name: str, spec: Mapping[str, object], *, required: bool) -> pa.Field
         )
         raise TypeError(msg) from None
 
-    if not required and not accepts_null:
-        # "May be absent, but never null when present" — which this cannot
-        # express, because an absent key IS a null here. Refused rather than
-        # widened, so streamcast never accepts a row its own declared schema
-        # would reject. See the module docstring's table.
-        #
-        # Checked LAST, after the type is known good: a `{"type": "array"}`
-        # that is also optional should be told arrays are not a column, which
-        # is the more specific complaint and the one worth fixing first.
+    _refuse_optional_non_null(name, declared, required=required, nullable=accepts_null)
+
+    return pa.field(name, arrow, nullable=accepts_null)
+
+
+def _refuse_optional_non_null(
+    name: str, declared: str, *, required: bool, nullable: bool
+) -> None:
+    """ "May be absent, but never null when present" — which this cannot express.
+
+    An absent key IS a null here, so it is refused rather than widened, and
+    streamcast never accepts a row its own declared schema would reject. See
+    the module docstring's table. The same rule at every depth: a struct's
+    fields are columns in miniature.
+
+    Checked LAST, after the type is known good: a bad type that is also
+    optional should hear about the type, which is the more specific complaint
+    and the one worth fixing first.
+    """
+    if required or nullable:
+        return
+
+    msg = (
+        f"column {name!r} is optional with a non-null type, which a stream "
+        f"cannot express: a row that omits it stores NULL. Either add it to "
+        f"'required', or make it nullable with "
+        f'{{"type": [{declared!r}, "null"]}}.'
+    )
+    raise TypeError(msg)
+
+
+def _nested_or_binary(
+    name: str, declared: str, spec: Mapping[str, object]
+) -> tuple[pa.DataType | None, dict[bytes, bytes] | None]:
+    """The Arrow type for a struct, list, map or binary spelling, or `(None, None)`.
+
+    - `object` with `properties` is a **struct**: its fields follow every rule
+      a top-level column does, `required` and nullability included.
+    - `object` with `additionalProperties` set to a schema, and no
+      `properties`, is a **map** from string keys — JSON has no other kind —
+      to that schema. Both at once is refused: it is neither.
+    - `array` with `items` is a **list** of that schema.
+    - `string` with `contentEncoding` is **binary**, written on the wire in
+      that encoding; `format: "bytesN"` makes it fixed-size, N bytes.
+    """
+    if declared == "object":
+        properties = spec.get("properties")
+        values = spec.get("additionalProperties")
+        if isinstance(properties, dict) and properties:
+            if isinstance(values, dict):
+                msg = (
+                    f"column {name!r}: both 'properties' and a schema for "
+                    f"'additionalProperties' — a struct has fixed fields and a "
+                    f"map has open ones; declare one"
+                )
+                raise TypeError(msg)
+
+            required = _required(name, spec, properties)
+            fields = [
+                _field(f"{name}.{key}", child, required=key in required)
+                for key, child in properties.items()
+            ]
+            return (
+                pa.struct(
+                    [
+                        f.with_name(key)
+                        for f, key in zip(fields, properties, strict=True)
+                    ]
+                ),
+                None,
+            )
+
+        if isinstance(values, dict):
+            value = _field(f"{name}[…]", values, required=True)
+            return pa.map_(pa.string(), value.with_name("value")), None
+
         msg = (
-            f"column {name!r} is optional with a non-null type, which a stream "
-            f"cannot express: a row that omits it stores NULL. Either add it to "
-            f"'required', or make it nullable with "
-            f'{{"type": [{declared!r}, "null"]}}.'
+            f"column {name!r}: an object needs 'properties' (a struct) or a "
+            f"schema for 'additionalProperties' (a map from string keys)"
         )
         raise TypeError(msg)
 
-    return pa.field(name, arrow, nullable=accepts_null)
+    if declared == "array":
+        items = spec.get("items")
+        if not isinstance(items, dict):
+            msg = f"column {name!r}: an array needs a schema for 'items'"
+            raise TypeError(msg)
+
+        item = _field(f"{name}[]", items, required=True)
+        return pa.list_(item.with_name("item")), None
+
+    if declared == "string" and "contentEncoding" in spec:
+        encoding = spec["contentEncoding"]
+        if encoding not in ENCODINGS:
+            msg = (
+                f"column {name!r}: contentEncoding {encoding!r} is not one this "
+                f"wire carries; use {' or '.join(ENCODINGS)}"
+            )
+            raise TypeError(msg)
+
+        fmt = spec.get("format")
+        if fmt is None:
+            arrow: pa.DataType = pa.binary()
+        elif isinstance(fmt, str) and fmt.startswith("bytes") and fmt[5:].isdigit():
+            arrow = pa.binary(int(fmt[5:]))
+        else:
+            msg = (
+                f"column {name!r}: format {fmt!r} on a binary column; the only "
+                f"one is 'bytesN', for a fixed size of N bytes"
+            )
+            raise TypeError(msg)
+
+        return arrow, {ENCODING: str(encoding).encode()}
+
+    return None, None
+
+
+def _required(name: str, spec: Mapping[str, object], properties: dict) -> set[str]:
+    """A struct's `required`, checked as the top level's is."""
+    declared = spec.get("required", [])
+    if not isinstance(declared, (list, tuple)):
+        msg = f"column {name!r}: 'required' is a list of field names, not {declared!r}"
+        raise TypeError(msg)
+
+    unknown = [key for key in declared if key not in properties]
+    if unknown:
+        msg = f"column {name!r}: 'required' names fields not in 'properties': {unknown}"
+        raise TypeError(msg)
+
+    return set(declared)
 
 
 def to_arrow(schema: Mapping[str, object]) -> pa.Schema:
@@ -230,33 +375,66 @@ def from_arrow(schema: pa.Schema) -> dict[str, object]:
 
     Widths are stated explicitly — see `_FROM_ARROW` — so what a subscriber
     reads back is what the column actually is, and so that `to_arrow` of this
-    is the schema it started from.
+    is the schema it started from. Nested types and binary follow the same
+    rule at every depth.
 
     A nullable column is published as `["string", "null"]` rather than merely
     omitted from `required`, because `required` is about presence and a
     subscriber validating against this needs to know the value may be null.
     That also makes everything published here something `to_arrow` accepts.
     """
-    properties: dict[str, object] = {}
-    required: list[str] = []
-    for field in schema:
-        for matches, spec in _FROM_ARROW:
-            if matches(field.type):  # ty: ignore[call-non-callable]
-                published: dict[str, object] = dict(spec)
-                if field.nullable:
-                    published["type"] = [spec["type"], "null"]
+    return _object(list(schema))
 
-                properties[field.name] = published
-                break
 
-        else:
-            msg = f"column {field.name!r}: {field.type} has no JSON Schema spelling"
-            raise TypeError(msg)
-
-        if not field.nullable:
-            required.append(field.name)
+def _object(fields: list[pa.Field]) -> dict[str, object]:
+    properties = {field.name: _spell(field) for field in fields}
+    required = [field.name for field in fields if not field.nullable]
 
     return {"type": "object", "properties": properties, "required": required}
 
 
-__all__ = ["from_arrow", "to_arrow"]
+def _spell(field: pa.Field) -> dict[str, object]:
+    """One field's JSON Schema, nullability included."""
+    kind = field.type
+    published: dict[str, object]
+    if pa.types.is_struct(kind):
+        published = {
+            **_object([kind.field(i) for i in range(kind.num_fields)]),
+            "additionalProperties": False,
+        }
+    elif pa.types.is_map(kind):
+        published = {"type": "object", "additionalProperties": _spell(kind.item_field)}
+    elif pa.types.is_list(kind):
+        published = {"type": "array", "items": _spell(kind.value_field)}
+    elif pa.types.is_fixed_size_binary(kind) or pa.types.is_binary(kind):
+        published = {"type": "string", "contentEncoding": encoding(field)}
+        if pa.types.is_fixed_size_binary(kind):
+            published["format"] = f"bytes{kind.byte_width}"
+    else:
+        for matches, spec in _FROM_ARROW:
+            if matches(kind):  # ty: ignore[call-non-callable]
+                published = dict(spec)
+                break
+
+        else:
+            msg = f"column {field.name!r}: {kind} has no JSON Schema spelling"
+            raise TypeError(msg)
+
+    if field.nullable:
+        published["type"] = [published["type"], "null"]
+
+    return published
+
+
+def encoding(field: pa.Field) -> str:
+    """A binary field's wire encoding, from its metadata.
+
+    base64 when none is recorded — a log created before this existed, or
+    opened from litelink directly — because that is what the wire already
+    sent for bytes: msgspec writes them as base64.
+    """
+    found = (field.metadata or {}).get(ENCODING)
+    return found.decode() if found else "base64"
+
+
+__all__ = ["ENCODING", "ENCODINGS", "encoding", "from_arrow", "to_arrow"]

@@ -533,10 +533,50 @@ would make streamcast take rows its own declared schema rejects. The rule that
 leaves is that every property is either required with a plain type, or nullable
 through its type, and every schema published is one that would be accepted.
 
-**It refuses up front what litelink would refuse at the first append** —
-nested objects, arrays, `date-time`, `byte`, and the narrow integer widths
-Iceberg widens silently — where the message can name JSON Schema's vocabulary
+**It refuses up front what litelink would refuse at the first append**:
+`date-time`, the narrow and unsigned integer widths Iceberg widens or can't
+represent, and unions. The message can then name JSON Schema's vocabulary
 rather than Arrow's.
+
+### Binary and nested columns
+
+| JSON Schema | Arrow |
+|---|---|
+| `object` + `properties` | `struct`, whose fields follow every rule above |
+| `object` + `additionalProperties: {…}` | `map<string, …>` (JSON has only string keys) |
+| `array` + `items` | `list` |
+| `string` + `contentEncoding: "base16"/"base64"` | `binary` |
+| … + `format: "bytesN"` | `fixed_size_binary(N)` |
+
+**JSON has no bytes, so a binary column says how it is written.** `base16`
+(hex) is what OTLP/JSON uses for trace and span ids and what every trace tool
+shows. `base64` is JSON Schema's convention, and a third smaller. The choice
+is per column, and it is kept in the Arrow field's metadata
+(`streamcast.encoding`), which litelink preserves at every depth, so a
+reopened log still knows it. `_codec` does the converting, compiled once per
+stream, and a stream of scalars pays nothing:
+
+- **Out:** msgspec writes bytes as base64 by itself. A `base16` column is
+  converted to hex before the frame is encoded, on the live path and on replay
+  alike.
+- **In:** a remote publisher can only send text, and litelink refuses a `str`
+  for a binary column. So every binary value, at any depth, is decoded with its
+  column's encoding before it is validated or stored. The client decodes what
+  it receives the same way, so a consumer gets `bytes` whether a row came off
+  the socket or out of the archive by catch-up.
+
+**A map has to arrive as a dict, and the reason is invariant 10.** Arrow hands
+a replayed map back as a list of pairs, which would encode as `[["k","v"]]`
+against the live frame's `{"k":"v"}`. So `_log.rows` reads maps as dicts
+(`maps_as_pydicts="strict"`, which raises on a duplicate key rather than
+keeping the last one). And `send` refuses a map value that is not a dict,
+**before** the append: litelink would store a list of pairs, and it would then
+replay as a different frame than was sent live.
+
+**`where=` compares scalar and binary columns.** A binary filter value is text
+in the column's encoding, decoded once at subscribe, so
+`{"trace_id": "4bf92f35…"}` works. A struct, list or map column is refused:
+equality on whole nested values is not a filter anyone means.
 
 **The greeting publishes it**, with the widths stated explicitly, so a
 subscriber in another language reads the columns without this repo and gets
@@ -1131,10 +1171,11 @@ live single row in a 1-row batch is mostly framing overhead. The cost is the
 client unpacking batches transparently. Two encoders and two client paths is
 the price; nobody has needed it yet.
 
-**Binary columns.** litelink refuses them today, so a stream whose rows carry
-real bytes has no column for them. There is no base64 workaround here any more
-— that belonged to the blob schema §5 removed — and the answer is litelink's
-§15.
+**Large binary payloads.** A `binary` column suits identifiers, hashes and
+small values: it goes through litelink's SQLite buffer like any other value. A
+payload of a megabyte or more belongs in litelink's blob fields (its SPEC
+§15), which are not built. OTel's `bytes_value` is the first real use for them
+(#40).
 
 **A consumer cursor that is not last-writer-wins.** `cursor_uri` ships one
 integer to object storage on an interval so a consumer can resume on another

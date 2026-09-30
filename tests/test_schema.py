@@ -102,11 +102,12 @@ class TestRefusals:
     @pytest.mark.parametrize(
         ("spec", "match"),
         [
-            ({"type": "object"}, "nested objects are not a column"),
-            ({"type": "array"}, "arrays are not a column"),
+            ({"type": "object"}, "needs 'properties'"),
+            ({"type": "array"}, "needs a schema for 'items'"),
             ({"type": "null"}, "carries nothing"),
             ({"type": "string", "format": "date-time"}, "epoch integers"),
-            ({"type": "string", "format": "byte"}, "refuses binary columns"),
+            ({"type": "string", "format": "byte"}, "contentEncoding"),
+            ({"type": "string", "contentEncoding": "base32"}, "base16 or base64"),
             ({"type": "integer", "format": "int8"}, "is not a column type"),
             ({"type": "integer", "format": "uint64"}, "is not a column type"),
             ({"type": "wat"}, "is not a column type"),
@@ -197,7 +198,7 @@ class TestRoundTrip:
         assert properties(from_arrow(arrow))["c"] == {"type": "string"}
 
     def test_a_type_with_no_json_spelling_says_so(self):
-        arrow = pa.schema([pa.field("c", pa.binary())])
+        arrow = pa.schema([pa.field("c", pa.decimal128(10, 2))])
         with pytest.raises(TypeError, match="no JSON Schema spelling"):
             from_arrow(arrow)
 

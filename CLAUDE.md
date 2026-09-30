@@ -150,6 +150,7 @@ src/streamcast/
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
     _publish.py     publish, Publication — the producer end, over a socket
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
+    _codec.py       what JSON needs done to binary and map values, in and out
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
     _stats.py       Stats — what a stream reports about itself, and /stats

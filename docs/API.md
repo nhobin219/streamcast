@@ -926,6 +926,10 @@ says which.
 | `number` | — or `double` | `float64` |
 | `number` | `float` | `float32` |
 | `string` | — | `string` |
+| `string` + `contentEncoding: "base16"` or `"base64"` | — or `bytesN` | `binary`, or `fixed_size_binary(N)` |
+| `object` + `properties` | — | `struct` |
+| `object` + `additionalProperties: {…}` | — | `map<string, …>` |
+| `array` + `items` | — | `list` |
 
 **`format` carries the width, because JSON Schema does not.** `integer` does not choose
 between int32 and int64; left out, the wider of each pair wins — a feed that overflows an
@@ -971,8 +975,37 @@ of `required` — a subscriber validating against it needs to know the value may
 apart.
 
 Anything litelink cannot store is refused **here**, where the message names JSON Schema's
-vocabulary rather than Arrow's: nested objects, arrays, `date-time` (store epoch
-integers), `byte`/`binary`, and the narrow integer widths Iceberg would widen silently.
+vocabulary rather than Arrow's: `date-time` (store epoch integers), the narrow and unsigned
+integer widths Iceberg would widen or can't hold, and unions.
+
+### Binary and nested columns
+
+```python
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "trace_id": {"type": "string", "contentEncoding": "base16", "format": "bytes16"},
+        "payload": {"type": ["string", "null"], "contentEncoding": "base64"},
+        "attrs": {"type": "object", "additionalProperties": {"type": "string"}},
+        "res": {"type": "object", "properties": {"service": {"type": "string"}},
+                "required": ["service"], "additionalProperties": False},
+        "tags": {"type": ["array", "null"], "items": {"type": "string"}},
+    },
+    "required": ["trace_id", "attrs", "res"],
+}
+```
+
+- **Binary** is `bytes` in Python and text on the wire, in the column's `contentEncoding`:
+  `base16` (hex, as OTLP/JSON writes trace and span IDs) or `base64` (a third smaller).
+  `format: "bytesN"` fixes the size. A remote publisher sends the text; `send` takes
+  `bytes`; a `Subscription` hands you `bytes` back, and so does catch-up.
+- **A map is a JSON object** from string keys. Pass a `dict` to `send`: a list of pairs is
+  refused, because it would replay as a different frame than it was sent as.
+- **`where=`** works on binary columns, with the value given as text in the column's
+  encoding (`where={"trace_id": "4bf92f35…"}`). Struct, list and map columns can't be
+  filtered on.
+- A `binary` column is for small values. Large payloads wait for litelink's blob fields
+  (#40).
 
 ```python
 streamcast.to_arrow(SCHEMA)     -> pa.Schema      # if you want the litelink schema

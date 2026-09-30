@@ -59,7 +59,7 @@ from streamcast import _schema
 from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
     from litelink import LogHandle, WriteHandle
 
@@ -279,7 +279,13 @@ async def rows(
                 )
                 raise RuntimeError(msg)
 
-            for message in batch.to_pylist():
+            # **Maps as dicts**, because a live frame encodes the caller's dict
+            # and Arrow's default is a list of pairs — `[["k","v"]]` on replay
+            # against `{"k":"v"}` live, which breaks I6. "strict" raises on a
+            # duplicate key rather than letting the last one win silently;
+            # streamcast only ever stores a map it received as a dict, so a
+            # duplicate means a log written by something else.
+            for message in batch.to_pylist(maps_as_pydicts="strict"):
                 offset = message.pop(COLUMN)
                 yield offset, message
 
@@ -374,6 +380,7 @@ async def replay(
     start: int,
     stop: int,
     where: Predicate | None = None,
+    outbound: Callable[[Mapping[str, object]], dict[str, object]] | None = None,
 ) -> AsyncGenerator[tuple[int, bytes], None]:
     """`rows`, encoded — what a subscriber's pump sends.
 
@@ -396,13 +403,18 @@ async def replay(
     """
     first = True
     async for offset, message in rows(log, start, stop):
+        # `where` reads the stored values and `outbound` converts a copy for
+        # the wire, in that order: a filter on a binary column compares bytes,
+        # exactly as it does against a live row.
         if first:
             first = False
-            yield offset, _encode_projected(offset, message)
+            wire = message if outbound is None else outbound(message)
+            yield offset, _encode_projected(offset, wire)
             continue
 
         if where is None or where(message):
-            yield offset, _encode_projected(offset, message)
+            wire = message if outbound is None else outbound(message)
+            yield offset, _encode_projected(offset, wire)
 
 
 __all__ = [

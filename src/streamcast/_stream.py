@@ -36,6 +36,7 @@ import litelink
 from websockets.frames import CloseCode
 
 from streamcast import _filter, _log, _manifest, _metadata, _schema
+from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
     EARLIEST,
@@ -133,7 +134,9 @@ class Stream:
     """
 
     __slots__ = (
+        "_codec",
         "_columns",
+        "_declared",
         "_end_offset",
         "_floor",
         "_last_send",
@@ -196,6 +199,11 @@ class Stream:
         # frame takes the row's own order. Such a stream is a multicaster and
         # nothing replays from it, so there is no second encoding to match.
         self._columns = None if log is None else _log.columns(log)
+        # The declared columns as Arrow — what `where=` and the codec read —
+        # and the wire conversions they need, compiled once. A stream of
+        # scalars gets `NONE`, and pays for none of it on the hot path.
+        self._declared = None if log is None else _log.declared(log.schema)
+        self._codec = compile_codec(self._declared)
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish. Without
         # `streamcast_ts`, which no frame carries — see `_log.declared`.
@@ -711,6 +719,12 @@ class Stream:
         it at their own pace.
         """
         now = time.time_ns()
+        codec = self._codec
+        if codec.check is not None:
+            # Before the append, where refusing costs nothing: a map sent as
+            # pairs would be stored, and then replayed as a different frame.
+            codec.check(row)
+
         offset = None
         if self._log is not None:
             offset = self._log.append(
@@ -719,7 +733,8 @@ class Stream:
             self._end_offset = offset + 1
 
         self._stamp(now)
-        self._fan_out(row, encode(offset, row, self._columns))
+        wire = row if codec.outbound is None else codec.outbound(row)
+        self._fan_out(row, encode(offset, wire, self._columns))
 
         return offset
 
@@ -744,6 +759,13 @@ class Stream:
         # transaction and its rows commit together, so per-row values would
         # imply a precision the commit does not have.
         now = time.time_ns()
+        codec = self._codec
+        if codec.check is not None:
+            # Every row, before the one transaction: one bad map refuses the
+            # group, as one bad row does inside litelink.
+            for row in batch:
+                codec.check(row)
+
         offsets: list[int | None] = [None] * len(batch)
         if self._log is not None:
             stored = (
@@ -754,7 +776,8 @@ class Stream:
 
         self._stamp(now)
         for offset, row in zip(offsets, batch, strict=True):
-            self._fan_out(row, encode(offset, row, self._columns))
+            wire = row if codec.outbound is None else codec.outbound(row)
+            self._fan_out(row, encode(offset, wire, self._columns))
 
         return offsets
 
@@ -895,6 +918,17 @@ class Stream:
                 continue
 
             try:
+                # **Text to bytes, before anything else.** A publisher over
+                # JSON can only send a binary value as text, in its column's
+                # encoding, and litelink refuses a `str` for a binary column.
+                inbound = self._codec.inbound
+                if inbound is not None:
+                    rows = (
+                        [inbound(row) for row in rows]
+                        if isinstance(rows, list)
+                        else inbound(rows)
+                    )
+
                 if isinstance(rows, list):
                     offsets = await self.send_many(rows)
                 else:
@@ -937,7 +971,7 @@ class Stream:
             # naming a column this stream does not have is a refusal at
             # subscribe rather than a subscription that never delivers.
             _filter.validate(where, self._columns)
-            predicate = _filter.compile_where(where)
+            predicate = _filter.compile_where(_filter.prepare(where, self._declared))
 
         # `(log, start)` rather than `start`, so the handle a replay needs
         # travels with the decision that it is needed. The alternative is
@@ -1123,7 +1157,7 @@ class Stream:
         resuming with nothing outstanding, and it is the common case for a
         reconnect that lost the connection rather than the race.
         """
-        stream = _log.replay(log, start, frontier, where)
+        stream = _log.replay(log, start, frontier, where, self._codec.outbound)
         try:
             first = await anext(stream, None)
 
@@ -1155,7 +1189,13 @@ class Stream:
                 "evicted", offset=start, earliest=offset, archive=log.archive
             )
 
-        if where is not None and not where(decode(first[1])[1]):
+        # Decoded from the frame, so a binary column is text again — and the
+        # filter compares bytes. `inbound` turns it back, as the client does.
+        message = decode(first[1])[1]
+        if self._codec.inbound is not None:
+            message = self._codec.inbound(message)
+
+        if where is not None and not where(message):
             # `_log.replay` yields its first row whatever the filter says, so
             # the check above measures the LOG's floor rather than the first
             # match. Having used it for that, drop it — the subscriber asked
