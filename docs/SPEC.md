@@ -70,8 +70,10 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ## 2. The wire
 
-**Every frame is JSON text.** The greeting, then an `[offset, msg]` pair per
-message:
+**Every frame is JSON.** The greeting is a WebSocket **text** frame. Then comes
+an `[offset, msg]` pair per message, each a **binary** frame of UTF-8 JSON:
+encoded once as bytes and shared by every subscriber, so it goes out without a
+decode to `str`.
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
@@ -100,8 +102,9 @@ wscat ws://localhost:8765/trades?offset=0
 ```
 
 A working subscriber with no client library at all, printing rows a human can
-read. A consumer in another language needs a JSON parser rather than this
-document.
+read. A consumer in another language needs a JSON parser, and, for a stream
+with binary columns, the few decoding rules in "Reading a row in another
+language" below. Nothing else.
 
 **msgspec, not `json`.** Serialisation is on the hot path in both directions —
 every publish encodes a row, every replayed row re-encodes one — which is what
@@ -150,6 +153,72 @@ replayed before any of it arrives.
 the server accepted the subscribe. The alternative surfaces a refused offset as
 a failure of whatever `recv` the application happened to reach first, which on a
 quiet stream is minutes later and somewhere else.
+
+### Reading a row in another language
+
+**Everything a client needs to read a row is in the greeting's `schema`**: the
+stream's columns as JSON Schema, in the spellings of §5 ("Binary and nested
+columns"). JSON carries every value directly except binary, which has no JSON
+form and travels as text. So a client in any language reads a row like this:
+
+1. **Keep the greeting's `schema`.** It is the first frame, a text frame.
+   `null` means the stream has no log and declares no columns: its rows are
+   plain JSON, with nothing to decode.
+2. **For each data frame**, a binary frame, decode it as UTF-8 JSON into
+   `[offset, msg]`. Then **walk `msg` against `schema`**, one property at a
+   time, recursing into nested values:
+
+   | property schema | the value in `msg` | read it as |
+   |---|---|---|
+   | `type` is a list with `"null"`, e.g. `["string", "null"]` | `null`, or a value of the other type | null, or the rest of this table for the other type |
+   | `"string"` with `"contentEncoding": "base16"` | hex text | bytes. RFC 4648 base16: two characters per byte. The server writes lowercase; accept either case |
+   | `"string"` with `"contentEncoding": "base64"` | base64 text | bytes. RFC 4648 base64: the standard alphabet, padded |
+   | … plus `"format": "bytesN"` | as above | exactly N bytes |
+   | `"object"` with `properties` (a struct) | a JSON object | each named field, by its own schema. `additionalProperties: false`: no other keys |
+   | `"object"` with `additionalProperties: {…}` (a map) | a JSON object | every value by that one schema. Keys are strings |
+   | `"array"` with `items` | a JSON array | every element by `items` |
+   | `"integer"`, `"format": "int32"` or `"int64"` | a JSON number | an integer. **An int64 can exceed 2⁵³**, e.g. a nanosecond timestamp, and a parser that reads every number as a double (JavaScript's `JSON.parse`) rounds it. Use one that keeps 64-bit integers if the column needs them |
+   | `"number"`, `"format": "float"` or `"double"` | a JSON number | a float. Always finite: a stream with a log refuses NaN and ±inf, so it never sends one |
+   | `"boolean"`, `"string"` | as is | as is |
+   | anything this table doesn't list | as is | leave it as it arrived: a newer server may spell something this client doesn't know, and one unfamiliar column is no reason to drop a row |
+
+3. **The offset is the pair's first element**, an integer, or `null` on a
+   stream with no log (above). Keys arrive in `schema`'s property order.
+   Nothing depends on that, but it makes frames diffable.
+
+**Writing is the same rules in reverse.** A remote publisher sends a binary
+value as text in its column's encoding, and a map as a JSON object, never a
+list of pairs. A `where=` value for a binary column is text in its encoding
+too: `where={"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}`.
+
+A JavaScript reader, as a sketch:
+
+```js
+const hex = (s) => Uint8Array.from(s.match(/../g) ?? [], (b) => parseInt(b, 16));
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+function read(schema, value) {
+  if (value === null || schema == null) return value;
+  const type = Array.isArray(schema.type) ? schema.type.find((t) => t !== "null") : schema.type;
+  if (type === "string" && schema.contentEncoding === "base16") return hex(value);
+  if (type === "string" && schema.contentEncoding === "base64") return b64(value);
+  if (type === "array") return value.map((v) => read(schema.items, v));
+  if (type === "object" && schema.properties)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, read(schema.properties[k], v)]));
+  if (type === "object" && schema.additionalProperties)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, read(schema.additionalProperties, v)]));
+  return value;
+}
+
+// ws.binaryType = "arraybuffer";
+// the greeting, a text frame:   const schema = JSON.parse(event.data).schema;
+// each data frame, binary JSON: const [offset, msg] = JSON.parse(new TextDecoder().decode(event.data));
+//                               const row = read(schema, msg);
+```
+
+The Python client does exactly this: `Subscription.recv` compiles `_codec`
+from the greeting's `schema` once, and decodes each frame, so a consumer gets
+`bytes` from the socket just as it does from catch-up.
 
 ### Refusals
 
