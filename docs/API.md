@@ -282,7 +282,9 @@ server that is 45 ms with nothing fanned out and no keepalive answered, which su
 latency spikes that look like a network problem.
 
 It dies with the server, which is safe because litelink allows one writer: nothing is
-appending, so an unsealed buffer is not growing. The other direction is supervised — a
+appending, so an unsealed buffer is not growing. On Linux that includes a `SIGKILL` of the
+server: the child is started with `PR_SET_PDEATHSIG`, as the sidecar is below. Elsewhere
+only an orderly shutdown stops it. The other direction is supervised — a
 maintainer that exits while the server runs is restarted with backoff, because losing it
 silently returns the server to never sealing.
 

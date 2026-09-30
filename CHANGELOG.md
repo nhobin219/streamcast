@@ -75,6 +75,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- **A SIGKILLed server left its maintainer running** (#45), reparented to
+  PID 1: ~207 MB of interpreter still contending for the logs' leases, and
+  holding the server's inherited file descriptors. On Linux it now starts
+  with `PR_SET_PDEATHSIG`, as the litestream sidecar already did, through one
+  shared helper; a test SIGKILLs a real server and checks both children go.
+
 - **`streamcast.publish` sent `bytes` as base64 to every binary column**,
   whatever its declared encoding, so a `base16` column rejected every row
   published from Python. The publisher now applies the column's encoding, as

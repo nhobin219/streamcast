@@ -90,8 +90,9 @@ possible is wrong even if every test passes.
    window instead.
 8. **Run two litestream instances against one database.** It is the one thing litestream
    forbids. The sidecar takes an `flock` beside the log — not beside `log.root`, which is
-   the shared parent — holds it for the server's life, sets `PR_SET_PDEATHSIG` so a
-   `SIGKILL` cannot orphan the child, and stands by rather than starting a second.
+   the shared parent — holds it for the server's life, and stands by rather than starting
+   a second. Both it and the maintainer start through `_process.popen`, which sets
+   `PR_SET_PDEATHSIG` so a `SIGKILL` of the server cannot orphan either.
 9. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
    which is safe; a cursor ahead of it skips messages for ever. `_cursor` advances only
    when the loop asks for the next message, and never when the handler raised.
@@ -158,6 +159,7 @@ src/streamcast/
     _codec.py       what JSON needs done to binary and map values, in and out
     _maintain.py    the maintainer subprocess, and the supervisor that owns it
     _replicate.py   the litestream sidecar: flock-guarded, never two on one db
+    _process.py     starting a child the kernel kills with the server
     _stats.py       Stats — what a stream reports about itself, and /stats
     _transport.py   Peer — the four methods a transport must offer
     _server.py      serve — routing, close codes, maintainer lifetime
