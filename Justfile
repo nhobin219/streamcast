@@ -211,9 +211,10 @@ demo-otel host="127.0.0.1" port="4318":
     broker=$!
     uv run python examples/otel/export.py --receiver "http://127.0.0.1:{{port}}/v1/logs" >>"$log" 2>&1 &
     exporter=$!
-    # SIGINT to the Python pieces, so they unwind as on Ctrl-C and the broker
-    # stops its maintainer rather than leaving it behind.
-    trap 'kill -INT "$exporter" "$broker" 2>/dev/null || true; kill "$gui_pid" 2>/dev/null || true; wait' EXIT
+    # SIGTERM, not SIGINT: bash starts background jobs with SIGINT ignored, so
+    # Ctrl-C reaches only this script. Both Python pieces unwind on SIGTERM as
+    # on Ctrl-C, and the broker stops its maintainer rather than orphaning it.
+    trap 'kill "$exporter" "$broker" "$gui_pid" 2>/dev/null || true; wait' EXIT
     echo "dashboard: http://{{host}}:{{port}}   (logs: $log)   Ctrl-C to stop"
     wait "$broker"
 

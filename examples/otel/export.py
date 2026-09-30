@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import signal
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry._logs import LogRecord, SeverityNumber
@@ -170,5 +171,11 @@ if __name__ == "__main__":
         "--receiver", default=RECEIVER, help="an OTLP/HTTP logs endpoint"
     )
     arguments = parser.parse_args()
+    # Started in the background, as `just demo-otel` starts it, a script
+    # inherits SIGINT ignored; and a supervisor stops it with SIGTERM. Both
+    # become KeyboardInterrupt, so every stop unwinds the same way — the
+    # broker stopping its maintainer rather than orphaning it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main(arguments.broker, arguments.receiver))

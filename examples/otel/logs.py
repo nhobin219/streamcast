@@ -45,6 +45,7 @@ import json
 import logging
 import math
 import random
+import signal
 import tempfile
 import threading
 from pathlib import Path
@@ -445,6 +446,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--port", type=int, default=8766)
     arguments = parser.parse_args()
+    # Started in the background, as `just demo-otel` starts it, a script
+    # inherits SIGINT ignored; and a supervisor stops it with SIGTERM. Both
+    # become KeyboardInterrupt, so every stop unwinds the same way — the
+    # broker stopping its maintainer rather than orphaning it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     if arguments.serve:
         with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(serve_forever(arguments.port))
