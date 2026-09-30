@@ -49,6 +49,7 @@ from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from streamcast._client import _refusal
+from streamcast._codec import from_greeting
 from streamcast._cursor import Cursor
 from streamcast._protocol import (
     Greeting,
@@ -78,6 +79,7 @@ class Publication:
         "_connection",
         "_cursor",
         "_info",
+        "_outbound",
         "_resumed",
         "_stream",
     )
@@ -92,6 +94,11 @@ class Publication:
     ) -> None:
         self._connection = connection
         self._info = info
+        # Bytes to hex for a `base16` column, before encoding — the server
+        # decodes each binary column with its declared encoding, and msgspec
+        # would write bytes as base64 regardless. None for a stream with no
+        # hex column, which keeps its `send` exactly as it was.
+        self._outbound = from_greeting(info.schema).outbound
         self._stream = stream
         self._cursor = cursor
         self._resumed = resumed
@@ -146,7 +153,8 @@ class Publication:
         message naming the column. Nothing was committed, and the connection
         stays open, so a corrected row can be sent next.
         """
-        offsets = await self._round_trip(dict(row))
+        payload = dict(row) if self._outbound is None else self._outbound(row)
+        offsets = await self._round_trip(payload)
 
         return offsets[0] if offsets else None
 
@@ -162,7 +170,8 @@ class Publication:
         behaviour worth having — a partially committed batch would leave the
         publisher unable to say which rows to send again.
         """
-        batch = [dict(row) for row in rows]
+        outbound = self._outbound
+        batch = [dict(row) if outbound is None else outbound(row) for row in rows]
         if not batch:
             return []
 
@@ -180,7 +189,8 @@ class Publication:
         offset order, which is the honest representation of what it asked for.
         """
         try:
-            await self._connection.send(encode_publish(payload))
+            # A TEXT frame, as every frame is: the payload is JSON.
+            await self._connection.send(encode_publish(payload), text=True)
             offsets = parse_publish_reply(await self._connection.recv())
 
         except ConnectionClosed as exc:

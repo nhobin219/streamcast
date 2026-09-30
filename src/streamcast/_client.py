@@ -51,7 +51,7 @@ from streamcast._catchup import (
     from_refusal,
     nowhere_to_read,
 )
-from streamcast._codec import compile_codec
+from streamcast._codec import from_greeting
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
@@ -63,7 +63,6 @@ from streamcast._errors import (
 )
 from streamcast._protocol import decode, parse_greeting, parse_refusal
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
-from streamcast._schema import to_arrow
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -103,13 +102,7 @@ def _inbound(
     rows arrive with binary left as text rather than the subscription failing
     over a column the consumer may never look at.
     """
-    if info.schema is None:
-        return None
-
-    try:
-        return compile_codec(to_arrow(info.schema)).inbound
-    except TypeError:
-        return None
+    return from_greeting(info.schema).inbound
 
 
 def _refusal(

@@ -426,9 +426,31 @@ def _decoder(encoding: str, path: str) -> Convert:
     return decode
 
 
+def from_greeting(schema: Mapping[str, object] | None) -> Codec:
+    """The codec for a stream, from the JSON Schema its greeting publishes.
+
+    What a client uses at either end: a subscriber's `recv` decodes with its
+    `inbound`, and a publisher's `send` encodes with its `outbound`, so the
+    text on the wire is what the server expects whichever way a row crosses.
+
+    `NONE` for a stream with nothing to convert — no schema, or no binary
+    column. A schema this build cannot read (a newer server's spelling) also
+    gets `NONE`: a subscriber then sees binary as text, and a publisher's
+    bytes go as base64, rather than the connection failing over a column that
+    may never be touched.
+    """
+    if schema is None:
+        return NONE
+
+    try:
+        return compile_codec(_schema.to_arrow(schema))
+    except TypeError:
+        return NONE
+
+
 def decode_value(field: pa.Field, value: object) -> object:
     """One binary value from text, for a `where=` term. Raises `ValueError`."""
     return _decoder(_schema.encoding(field), field.name)(value)
 
 
-__all__ = ["NONE", "Codec", "compile_codec", "decode_value"]
+__all__ = ["NONE", "Codec", "compile_codec", "decode_value", "from_greeting"]

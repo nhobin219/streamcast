@@ -262,6 +262,29 @@ class TestRemotePublishers:
             "nested": {"m": {"b": b"\x01\x02"}},
         }
 
+    async def test_the_python_publisher_sends_bytes_in_each_columns_encoding(
+        self, tmp_path, serve
+    ):
+        """`streamcast.publish` with real `bytes`, hex and base64 columns alike.
+
+        msgspec writes bytes as base64 whatever the column says, so without the
+        publisher's own codec a `base16` column rejected every row. The Node
+        test did not see it: it publishes TEXT, as a JSON client does.
+        """
+        stream = stream_at(tmp_path)
+        assert stream.log is not None
+        async with serve(stream, publish=True, maintain=False) as uri:
+            async with streamcast.publish(uri) as producer:
+                assert await producer.send(row(1)) == 1
+                assert await producer.send_many([row(2), row(3)]) == [2, 3]
+
+            stored = stream.log.scan(columns=["trace_id", "blob", "nested"]).read_all()
+
+        found = stored.to_pylist(maps_as_pydicts="strict")
+        assert [r["trace_id"] for r in found] == [TRACE] * 3
+        assert [r["blob"] for r in found] == [row(i)["blob"] for i in (1, 2, 3)]
+        assert found[0]["nested"] == {"m": {"b": b"\x01\x02"}}
+
     async def test_text_that_is_not_its_encoding_is_rejected(self, tmp_path, serve):
         stream = stream_at(tmp_path)
         async with serve(stream, publish=True, maintain=False) as uri:
