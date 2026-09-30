@@ -130,3 +130,44 @@ mounted sub-app's lifespan, so that block is what starts the maintainer which se
 log, and what closes the log on the way out.
 
 Needs the extra: `pip install 'streamcast[asgi]'`.
+
+## OpenTelemetry logs, in a dashboard
+
+```
+just demo-otel         # the broker, an OTLP exporter, and otel-gui's dashboard
+just demo-otel-once    # the same pipeline once, printing what each part saw
+```
+
+`otel_logs.py` runs two simulated services (checkout and payments) that log
+through Python's `logging` and the OpenTelemetry SDK. A small exporter
+publishes each log record to a stream as a row. `otel_export.py` subscribes to
+the stream and re-exports every row as OTLP to [otel-gui](https://github.com/metafab/otel-gui),
+a local dashboard for traces, logs and metrics, where the logs arrive live.
+Failed orders show up as a `card declined` error and an `order failed`
+warning, sharing one trace id.
+
+**None of this is in streamcast.** The OTel record's schema and the
+record-to-row conversion live in `otel_logs.py`, built from the column types
+any stream can declare: trace and span ids as hex binary, attributes as a
+map, and OTel's `AnyValue` as a struct. The OTel packages are dev
+dependencies, for this example only.
+
+**`otel_export.py` is an ordinary OTLP exporter.** OTel viewers are
+*receivers*: telemetry is pushed to them, and none subscribes to a WebSocket.
+So this subscribes to the stream, turns each row back into an SDK log record,
+and hands it to OpenTelemetry's own `BatchLogRecordProcessor` and
+`OTLPLogExporter`. The batching, the protobuf encoding and the retries are
+OTel's, and it works with any OTLP/HTTP receiver. Point `--receiver` at an
+OTel Collector and it feeds whatever the Collector does.
+
+**Nothing leaves the machine.** The first `just demo-otel` downloads otel-gui's
+release for your platform, checks its SHA-256 and caches it. The dashboard
+listens on `127.0.0.1:4318`, which is OTLP/HTTP's standard port.
+
+`just demo-otel-once` shows what a subscriber can do beyond a dashboard:
+
+- a live tail filtered to `severity_text` in `["ERROR", "WARN"]`;
+- one failed request replayed by its trace id, with the id given as hex text
+  in `where=`;
+- SQL over the stored table: errors per service, and ingest lag from
+  `streamcast_ts`.

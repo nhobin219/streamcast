@@ -11,6 +11,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`examples/otel_logs.py`** and **`just demo-otel`**: OpenTelemetry logs
+  from two simulated services, published to a stream, and re-exported as
+  OTLP by `examples/otel_export.py` (OpenTelemetry's own exporter) to
+  otel-gui's local dashboard. The OTel schema and conversion live in the
+  examples; OTel is a dev dependency only.
+
 - **`Stream(name, schema=...)`** — a stream without a log can declare a
   schema, and then accepts exactly the rows a stream with a log would: every
   row goes through litelink's `validate_row`, so a wrong type, an unknown or
@@ -66,6 +72,14 @@ there was nothing to have changed from. Everything above it is ordinary.
 - A migrated stream's server replays only its current log. A subscribe below
   the seam is refused `evicted` with `earliest` at the seam, rather than being
   served an empty replay. Reading across the seam is #32.
+
+### Fixed
+
+- **`streamcast.publish` sent `bytes` as base64 to every binary column**,
+  whatever its declared encoding, so a `base16` column rejected every row
+  published from Python. The publisher now applies the column's encoding, as
+  the subscriber's `recv` already did. JSON publishers sending hex text were
+  unaffected.
 
 ## 0.8.0 — 2026-09-29
 

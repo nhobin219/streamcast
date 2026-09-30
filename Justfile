@@ -169,6 +169,58 @@ demo-fastapi *args:
 demo-live *args:
     uv run python examples/server.py --no-log {{args}}
 
+# Two simulated services log through the OTel SDK; the logs are published to a
+# stream; `examples/otel_export.py` subscribes and re-exports them as OTLP to
+# otel-gui (https://github.com/metafab/otel-gui), a local dashboard. The first
+# run downloads otel-gui's release for this platform, checks its SHA-256, and
+# caches it. Everything stays on this machine; Ctrl-C stops all three.
+#
+# OpenTelemetry logs through a stream, live in otel-gui's dashboard.
+demo-otel host="127.0.0.1" port="4318":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=2.1.0
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)             asset=otel-gui-linux-x64 ;;
+        Linux-aarch64|Linux-arm64) asset=otel-gui-linux-arm64 ;;
+        Darwin-x86_64)            asset=otel-gui-macos-x64 ;;
+        Darwin-arm64)             asset=otel-gui-macos-arm64 ;;
+        *) echo "no otel-gui build for $(uname -s)-$(uname -m); see https://github.com/metafab/otel-gui" >&2; exit 1 ;;
+    esac
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/streamcast/otel-gui-$version"
+    gui="$cache/$asset/otel-gui"
+    if [ ! -x "$gui" ]; then
+        echo "downloading otel-gui $version ($asset)"
+        mkdir -p "$cache"
+        url="https://github.com/metafab/otel-gui/releases/download/v$version/$asset.tar.gz"
+        curl -fsSL -o "$cache/$asset.tar.gz" "$url"
+        curl -fsSL -o "$cache/$asset.tar.gz.sha256" "$url.sha256"
+        if command -v sha256sum >/dev/null; then
+            (cd "$cache" && sha256sum -c "$asset.tar.gz.sha256")
+        else
+            (cd "$cache" && shasum -a 256 -c "$asset.tar.gz.sha256")
+        fi
+        tar -xzf "$cache/$asset.tar.gz" -C "$cache"
+    fi
+    log="$(mktemp -t streamcast-otel-XXXXXX.log)"
+    # HOST is not in otel-gui's README, but its server honours it (SvelteKit's
+    # node adapter): 127.0.0.1 keeps the dashboard off the network.
+    HOST="{{host}}" PORT="{{port}}" "$gui" >"$log" 2>&1 &
+    gui_pid=$!
+    uv run python examples/otel_logs.py --serve >>"$log" 2>&1 &
+    broker=$!
+    uv run python examples/otel_export.py --receiver "http://127.0.0.1:{{port}}/v1/logs" >>"$log" 2>&1 &
+    exporter=$!
+    # SIGINT to the Python pieces, so they unwind as on Ctrl-C and the broker
+    # stops its maintainer rather than leaving it behind.
+    trap 'kill -INT "$exporter" "$broker" 2>/dev/null || true; kill "$gui_pid" 2>/dev/null || true; wait' EXIT
+    echo "dashboard: http://{{host}}:{{port}}   (logs: $log)   Ctrl-C to stop"
+    wait "$broker"
+
+# The OTel example once, start to finish, printing what each part saw.
+demo-otel-once:
+    uv run python examples/otel_logs.py
+
 # Delete what the demo captured.
 demo-clean root="streamcast-data":
     #!/usr/bin/env bash
