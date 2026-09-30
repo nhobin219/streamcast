@@ -37,7 +37,8 @@ and the whole design here is about not doing it:
   writes into the log's own directory.
 * `PR_SET_PDEATHSIG` on the child, so a SIGKILL of the server does not leave
   litestream running against a database the next server is about to start
-  replicating. A signal handler cannot cover SIGKILL; only the kernel can.
+  replicating. A signal handler cannot cover SIGKILL; only the kernel can
+  (`_process`).
 * A log whose lock cannot be taken is left out and retried rather than given
   up on, so a server started beside a dying one takes each database over as
   the kernel frees it. Acquiring one mid-run means rewriting the config and
@@ -55,11 +56,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ctypes
 import fcntl
 import itertools
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -67,6 +66,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from litelink._replication import litestream_binary
+
+from streamcast._process import popen
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,16 +83,6 @@ _CLAIM_EVERY: Final = 5.0
 
 _STOP_GRACE: Final = 10.0
 _BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
-
-# `PR_SET_PDEATHSIG`. Linux only; there is no portable equivalent, and on
-# anything else the child is reaped by `terminate` alone — which covers every
-# ordinary shutdown and not a SIGKILL of the server.
-_PR_SET_PDEATHSIG: Final = 1
-
-
-def _die_with_parent() -> None:  # pragma: no cover — runs between fork and exec
-    """In the child: ask the kernel for SIGKILL when the parent dies."""
-    ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
 class SidecarUnavailable(RuntimeError):
@@ -264,10 +255,7 @@ class Sidecar:
         self._config.write_text("\n".join(lines) + "\n")
 
     def _spawn(self) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(  # noqa: S603
-            [self._binary, "replicate", "-config", str(self._config)],
-            preexec_fn=_die_with_parent if sys.platform == "linux" else None,  # noqa: PLW1509
-        )
+        return popen([self._binary, "replicate", "-config", str(self._config)])
 
     def start(self) -> None:
         self._watch = asyncio.create_task(self._supervise())

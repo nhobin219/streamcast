@@ -22,9 +22,11 @@ its `examples/adsb/` runs the writer and the maintainer separately, and the
 claim table coordinates them. Each pass claims the offset range it works on, so
 the server's appends and this process's seals never contend for the same rows.
 
-**It dies with the server, on purpose.** litelink allows one writer, so when
-the server is gone nothing is appending and an unsealed buffer is not growing
-— there is nothing for an orphaned maintainer to do. The interesting direction
+**It dies with the server, on purpose** — however the server dies, SIGKILL
+included (`_process`). litelink allows one writer, so when the server is gone
+nothing is appending and an unsealed buffer is not growing — there is nothing
+for an orphaned maintainer to do but hold ~207 MB and contend for the next
+server's leases. The interesting direction
 is the other one: a maintainer that dies while the server lives puts the
 library straight back into the state above, silently. So `Supervisor` restarts
 it, which litelink's leases make safe — they lapse, and the next process takes
@@ -46,6 +48,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
+
+from streamcast._process import popen
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -284,7 +288,7 @@ class Supervisor:
             str(self._plan.maintain_every),
         ]
 
-        return subprocess.Popen(argv)  # noqa: S603
+        return popen(argv)
 
     def start(self) -> None:
         self._process = self._spawn()
