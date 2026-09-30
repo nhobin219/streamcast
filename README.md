@@ -136,9 +136,9 @@ Full reference in [`docs/API.md`](docs/API.md).
 
 ## The wire
 
-Every frame is JSON: a greeting (a text frame), then an `[offset, msg]` pair per message
-(a binary frame of UTF-8 JSON). A client in any language needs a JSON parser, plus, for
-binary columns, the decoding rules in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
+Every frame is a text frame of JSON: a greeting, then an `[offset, msg]` pair per message.
+A client in any language needs a JSON parser, plus, for binary columns, the decoding rules
+in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],

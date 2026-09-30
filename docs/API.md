@@ -1118,10 +1118,9 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
 ## On the wire
 
-Every frame is JSON. The greeting is a text frame, then a **two-element pair** per message,
-each a binary frame of UTF-8 JSON: the offset, then the row. Reading a row in another
-language, including binary columns, is spelled out step by step in
-[SPEC §2](SPEC.md#reading-a-row-in-another-language).
+Every frame is a text frame of JSON. The greeting, then a **two-element pair** per message:
+the offset, then the row. Reading a row in another language, including binary columns, is
+spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language).
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],

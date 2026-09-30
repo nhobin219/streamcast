@@ -184,12 +184,13 @@ class _Peer:
         """
         return ConnectionClosedError(self._rcvd, None)
 
-    async def send(self, message: str | bytes, /) -> None:
-        """One frame, preserving TEXT for `str` and BINARY for `bytes`.
+    async def send(self, message: str | bytes, /, *, text: bool | None = None) -> None:
+        """One frame, with `websockets`' rule for the opcode — see `Peer.send`.
 
-        The greeting is a `str` and every data frame is `bytes`. Collapsing
-        them onto one opcode would change the wire for every existing client,
-        so the branch is the contract rather than a convenience.
+        A `str` is TEXT, and so are `bytes` with `text=True`, which is how
+        every data frame arrives. ASGI's `"text"` has to be a `str`, so this
+        transport decodes the shared bytes once per subscriber — ~50 ns for a
+        typical frame, the one cost of TEXT that `websockets` does not pay.
         """
         if self._closed.is_set():
             raise self._gone()
@@ -197,6 +198,9 @@ class _Peer:
         try:
             if isinstance(message, str):
                 await self._ws.send_text(message)
+
+            elif text:
+                await self._ws.send_text(message.decode())
 
             else:
                 await self._ws.send_bytes(message)

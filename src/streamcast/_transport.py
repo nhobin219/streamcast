@@ -35,14 +35,21 @@ class Peer(Protocol):
     cannot catch if nothing ever passes the adapter to an annotated parameter.
     """
 
-    async def send(self, message: str | bytes, /) -> None:
-        """One frame. `str` goes out as TEXT, `bytes` as BINARY.
+    async def send(self, message: str | bytes, /, *, text: bool | None = None) -> None:
+        """One frame. Every frame streamcast sends is TEXT.
 
-        **The split is load-bearing and not a detail of the encoder.** The
-        greeting is a `str` and every data frame is `bytes`, so a transport
-        that sent both the same way would change the wire for every existing
-        client. `tests/test_asgi.py` asserts the opcodes rather than the
-        payloads for exactly this reason.
+        `websockets`' own signature, so its `ServerConnection` is a `Peer` as
+        it stands: a `str` is a text frame, and `bytes` are one too when
+        `text=True` — sent as they are, because they are already UTF-8 JSON.
+        That is how a data frame goes out: `Stream.send` encodes it ONCE as
+        bytes, every subscriber shares them, and none re-encodes a `str`.
+
+        **Text, because the payload is JSON.** A text frame is what a browser's
+        `WebSocket` hands straight to `JSON.parse`, what devtools display, and
+        what every JSON feed of this kind sends; binary frames are for binary
+        formats. `tests/test_asgi.py` and `tests/test_node.py` assert the
+        opcode rather than the payload, because a transport that switched it
+        would keep every decode-and-compare test passing.
 
         Raises `ConnectionClosed` once the peer is gone, because that is the
         signal `Subscriber.pump` unwinds on and `_server` treats as an

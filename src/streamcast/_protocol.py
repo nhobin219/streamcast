@@ -1,9 +1,9 @@
 """Everything that crosses the wire, and nothing that does not.
 
-**Every frame is JSON.** The greeting is a text frame, and every message after
-it is a binary frame holding a two-element pair — the offset, then one row of
-the stream's table. How another language reads a row, binary columns
-included, is `docs/SPEC.md` §2, "Reading a row in another language":
+**Every frame is a text frame of JSON.** The greeting is one, and every
+message after it is a two-element pair — the offset, then one row of the
+stream's table. How another language reads a row, binary columns included, is
+`docs/SPEC.md` §2, "Reading a row in another language":
 
     {"streamcast":2,"stream":"trades","end_offset":1861,"log":{...},...}
     [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]

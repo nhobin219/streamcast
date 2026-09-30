@@ -70,10 +70,8 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ## 2. The wire
 
-**Every frame is JSON.** The greeting is a WebSocket **text** frame. Then comes
-an `[offset, msg]` pair per message, each a **binary** frame of UTF-8 JSON:
-encoded once as bytes and shared by every subscriber, so it goes out without a
-decode to `str`.
+**Every frame is a WebSocket text frame of JSON.** The greeting, then an
+`[offset, msg]` pair per message:
 
 ```
 {"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
@@ -161,12 +159,12 @@ stream's columns as JSON Schema, in the spellings of §5 ("Binary and nested
 columns"). JSON carries every value directly except binary, which has no JSON
 form and travels as text. So a client in any language reads a row like this:
 
-1. **Keep the greeting's `schema`.** It is the first frame, a text frame.
-   `null` means the stream has no log and declares no columns: its rows are
-   plain JSON, with nothing to decode.
-2. **For each data frame**, a binary frame, decode it as UTF-8 JSON into
-   `[offset, msg]`. Then **walk `msg` against `schema`**, one property at a
-   time, recursing into nested values:
+1. **Keep the greeting's `schema`.** It is the first frame. `null` means the
+   stream has no log and declares no columns: its rows are plain JSON, with
+   nothing to decode.
+2. **For each data frame**, parse it as JSON into `[offset, msg]`. Then **walk
+   `msg` against `schema`**, one property at a time, recursing into nested
+   values:
 
    | property schema | the value in `msg` | read it as |
    |---|---|---|
@@ -210,15 +208,26 @@ function read(schema, value) {
   return value;
 }
 
-// ws.binaryType = "arraybuffer";
-// the greeting, a text frame:   const schema = JSON.parse(event.data).schema;
-// each data frame, binary JSON: const [offset, msg] = JSON.parse(new TextDecoder().decode(event.data));
-//                               const row = read(schema, msg);
+// the greeting, the first message: const schema = JSON.parse(event.data).schema;
+// each message after it:            const [offset, msg] = JSON.parse(event.data);
+//                                   const row = read(schema, msg);
 ```
 
 The Python client does exactly this: `Subscription.recv` compiles `_codec`
 from the greeting's `schema` once, and decodes each frame, so a consumer gets
-`bytes` from the socket just as it does from catch-up.
+`bytes` from the socket just as it does from catch-up. `tests/test_node.py`
+runs this reader, verbatim, in Node's built-in `WebSocket` — the API every
+browser exposes — against a real server, in CI.
+
+**Why text frames.** The payload is JSON, and a text frame is what a
+browser's `WebSocket` hands straight to `JSON.parse`, what devtools display,
+and what JSON feeds of this kind send; binary frames are for binary formats.
+It costs nothing on the server: `Stream.send` encodes a frame ONCE as UTF-8
+bytes, every subscriber shares them, and `websockets` sends them as a text
+frame without re-encoding (`send(frame, text=True)`). The ASGI transport has
+to hand ASGI a `str`, so it decodes once per subscriber, ~50 ns. A receiver
+validates UTF-8 on a text frame — ~50 ns on a typical 87-byte frame, against
+~590 ns for msgspec to parse it.
 
 ### Refusals
 

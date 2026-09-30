@@ -363,7 +363,9 @@ class Subscription:
                 self._inbound = _inbound(catcher.info)
 
         try:
-            frame = await self._live().recv()
+            # `decode=False`: a data frame is a TEXT frame of JSON, and msgspec
+            # parses the bytes directly — no `str` built only to be parsed.
+            frame = await self._live().recv(decode=False)
         except ConnectionClosed as exc:
             refusal = _refusal(exc, stream=self._stream, offset=self._offset)
             if refusal is None:

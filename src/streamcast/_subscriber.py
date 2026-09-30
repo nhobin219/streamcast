@@ -172,7 +172,7 @@ class Subscriber:
         """
         if replay is not None:
             async for _offset, frame in replay:
-                await self._connection.send(frame)
+                await self._connection.send(frame, text=True)
 
         while True:
             frame = await self._queue.get()
@@ -182,7 +182,7 @@ class Subscriber:
                 )
                 return
 
-            await self._connection.send(frame)
+            await self._connection.send(frame, text=True)
 
 
 __all__ = ["Subscriber"]

@@ -87,8 +87,8 @@ socket up where the archive ended.
 
 ``EARLIEST`` is the offset that means "everything the log still holds".
 
-Every frame on the wire is JSON — the greeting as a text frame, then an
-``[offset, msg]`` pair per message as a binary frame of UTF-8 JSON — so ``wscat ws://localhost:8765/trades?offset=0`` is a working
+Every frame on the wire is a text frame of JSON — the greeting, then an
+``[offset, msg]`` pair per message — so ``wscat ws://localhost:8765/trades?offset=0`` is a working
 subscriber with no client library at all. **``msg`` is the row the publisher
 sent and nothing else**: no offset key, no injected metadata, so a subscriber
 can log it, forward it or append it to another stream whole.
