@@ -120,6 +120,14 @@ dev = [
     # `test_manifest.py` generates them and checks every exclusion against
     # DuckDB, the engine a reader actually queries with.
     "hypothesis>=6.100",
+    # FOR AN EXAMPLE ONLY: `examples/otel/` runs OpenTelemetry logs and
+    # traces through two streams and re-exports them as OTLP, and
+    # `tests/test_otel_example.py` runs it. Nothing in `streamcast` imports
+    # OTel — the schemas and conversions live in the example, built from
+    # streamcast's ordinary column types.
+    "opentelemetry-sdk>=1.45.0",
+    "opentelemetry-instrumentation-logging>=0.66b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.0",
 ]
 
 [tool.ruff]

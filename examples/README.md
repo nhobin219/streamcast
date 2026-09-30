@@ -130,3 +130,53 @@ mounted sub-app's lifespan, so that block is what starts the maintainer which se
 log, and what closes the log on the way out.
 
 Needs the extra: `pip install 'streamcast[asgi]'`.
+
+## OpenTelemetry logs and traces, in a dashboard
+
+```
+just demo-otel         # the broker, an OTLP exporter, and otel-gui's dashboard
+just demo-otel-once    # the same pipeline once, printing what each part saw
+```
+
+Two simulated services, checkout and payments, handle traced orders and log
+through Python's `logging` and the OpenTelemetry SDK. Their log records and
+spans are published to two streams, `logs` and `spans`. `otel/export.py`
+follows both and re-exports every row as OTLP to [otel-gui](https://github.com/metafab/otel-gui),
+a local dashboard where logs, traces and the service map fill in live. A
+failed order is one trace across both services: payments' `POST /charge`
+span with a `card declined` event and error log, and checkout's request
+marked failed with an `order failed` warning.
+
+| file | what it holds |
+|---|---|
+| `otel/common.py` | what both signals share: `AnyValue`, ids, scope, and publishing from OTel's export thread |
+| `otel/logs.py` | the log record's schema, its row conversion, and `StreamLogExporter` |
+| `otel/spans.py` | the span's schema, its row conversion, and `StreamSpanExporter` |
+| `otel/demo.py` | the two services, the broker, and the one-shot demo |
+| `otel/export.py` | rows back to OTel records and spans, out through OTel's OTLP exporters |
+
+**None of this is in streamcast.** The schemas and conversions are built from
+the column types any stream can declare: trace and span ids as hex binary,
+attributes as a map, OTel's `AnyValue` as a struct, and a span's events and
+links as lists of structs. The OTel packages are dev dependencies, for this
+example only.
+
+**`otel/export.py` is an ordinary OTLP exporter.** OTel viewers are
+*receivers*: telemetry is pushed to them, and none subscribes to a WebSocket.
+So this subscribes to the streams, turns each row back into an SDK log record
+or span, and hands it to OpenTelemetry's own batch processors and OTLP/HTTP
+exporters. The batching, the protobuf encoding and the retries are OTel's,
+and it works with any OTLP/HTTP receiver. Point `--receiver` at an OTel
+Collector and it feeds whatever the Collector does.
+
+**Nothing leaves the machine.** The first `just demo-otel` downloads otel-gui's
+release for your platform, checks its SHA-256 and caches it. The dashboard
+listens on `127.0.0.1:4318`, which is OTLP/HTTP's standard port.
+
+`just demo-otel-once` shows what a subscriber can do beyond a dashboard:
+
+- a live tail filtered to `severity_text` in `["ERROR", "WARN"]`;
+- one failed request replayed by its trace id from both streams, with the id
+  given as hex text in `where=`;
+- SQL over the stored tables: errors per service, the slowest request from
+  its root span, and ingest lag from `streamcast_ts`.
