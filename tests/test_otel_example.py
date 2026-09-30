@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
-from examples.otel import common, demo, export, logs  # noqa: E402
+from examples.otel import common, demo, export, logs, spans  # noqa: E402
 
 
 class TestTheDemo:
@@ -47,6 +47,38 @@ class TestTheDemo:
         # And the table answers a log search's questions.
         assert seen["errors"] == [{"service": "payments", "errors": 1}]
         assert seen["lag_ms"] >= 0
+
+    async def test_the_failed_request_is_one_trace_across_both_services(self, tmp_path):
+        seen = await demo.main(tmp_path)
+        # Three spans a request: checkout's request, its call, payments' charge.
+        assert seen["spans"] == 9
+        assert seen["slowest_ms"] > 0
+
+        by_name = {s["name"]: s for s in seen["failed_spans"]}
+        request, call, charge = (
+            by_name["POST /orders"],
+            by_name["charge card"],
+            by_name["POST /charge"],
+        )
+        # The parent links cross the services: that is the service map's edge.
+        assert request["parent_span_id"] is None
+        assert call["parent_span_id"] == request["span_id"]
+        assert charge["parent_span_id"] == call["span_id"]
+        assert [s["service"] for s in (request, call, charge)] == [
+            "checkout",
+            "checkout",
+            "payments",
+        ]
+        # OTLP's numbers: SERVER is 2 and CLIENT 3, one above Python's.
+        assert [s["kind"] for s in (request, call, charge)] == [2, 3, 2]
+        assert all(s["status_code"] == spans.ERROR for s in (request, call, charge))
+        [declined] = charge["events"]
+        assert declined["name"] == "card declined"
+        assert declined["attributes"]["amount"]["double_value"] == 250.0
+
+        # payments' error is logged inside payments' span.
+        [error] = [m for m in seen["failed_logs"] if m["severity_text"] == "ERROR"]
+        assert error["span_id"] == charge["span_id"]
 
 
 class TestAnyValue:
@@ -107,6 +139,34 @@ def emitted() -> list:
     return list(captured.get_finished_logs())
 
 
+def finished() -> list:
+    """A real finished SDK span, child of another, with an event and a link."""
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+    from opentelemetry.trace import Link, SpanKind, Status, StatusCode
+
+    captured = InMemorySpanExporter()
+    provider = TracerProvider(resource=Resource({"service.name": "payments"}))
+    provider.add_span_processor(SimpleSpanProcessor(captured))
+    tracer = provider.get_tracer("t", "1.0")
+    with tracer.start_as_current_span("POST /orders") as parent:
+        other = parent.get_span_context()
+        with tracer.start_as_current_span(
+            "POST /charge",
+            kind=SpanKind.SERVER,
+            attributes={"amount": 250.0, "items": ("book", "pen")},
+            links=[Link(other, {"cause": "retry"})],
+        ) as span:
+            span.add_event("card declined", {"amount": 250.0})
+            span.set_status(Status(StatusCode.ERROR, "card declined"))
+
+    return [s for s in captured.get_finished_spans() if s.name == "POST /charge"]
+
+
 class TestTheExporter:
     """A stored row back to an SDK log record, and out through OTel's exporter."""
 
@@ -132,6 +192,32 @@ class TestTheExporter:
         assert dict(now.attributes) == dict(was.attributes)  # ty: ignore[no-matching-overload]
         assert dict(now.attributes)["items"] == ("book", "pen")  # ty: ignore[no-matching-overload]
 
+    def test_a_span_survives_the_round_trip_through_a_row(self):
+        [original] = finished()
+        again = export.span(spans.row(original))
+
+        assert again.name == original.name
+        assert again.context == original.context
+        assert again.context.trace_flags.sampled  # else an exporter drops it
+        assert again.parent is not None
+        assert original.parent is not None
+        assert again.parent.span_id == original.parent.span_id
+        assert again.kind == original.kind
+        assert again.status.status_code == original.status.status_code
+        assert again.status.description == original.status.description
+        assert (again.start_time, again.end_time) == (
+            original.start_time,
+            original.end_time,
+        )
+        assert dict(again.attributes or {}) == dict(original.attributes or {})
+        assert [
+            (e.name, e.timestamp, dict(e.attributes or {})) for e in again.events
+        ] == [(e.name, e.timestamp, dict(e.attributes or {})) for e in original.events]
+        [link] = again.links
+        assert link.context.span_id == original.links[0].context.span_id
+        assert dict(link.attributes or {}) == {"cause": "retry"}
+        assert again.resource.attributes["service.name"] == "payments"
+
     def test_it_reaches_an_otlp_receiver_as_otel_encodes_it(self):
         """OTel's own batch processor and OTLP/HTTP exporter, to a local receiver.
 
@@ -142,17 +228,24 @@ class TestTheExporter:
         import threading
 
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
             ExportLogsServiceRequest,
         )
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+            ExportTraceServiceRequest,
+        )
         from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        received: list[tuple[str, bytes]] = []
+        received: dict[str, bytes] = {}
 
         class Receiver(http.server.BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802 — the http.server name
                 body = self.rfile.read(int(self.headers["Content-Length"]))
-                received.append((self.path, body))
+                received[self.path] = body
                 self.send_response(200)
                 self.end_headers()
 
@@ -162,18 +255,27 @@ class TestTheExporter:
         server = http.server.HTTPServer(("127.0.0.1", 0), Receiver)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            endpoint = f"http://127.0.0.1:{server.server_port}/v1/logs"
-            processor = BatchLogRecordProcessor(OTLPLogExporter(endpoint=endpoint))
+            receiver = f"http://127.0.0.1:{server.server_port}"
+            log_processor = BatchLogRecordProcessor(
+                OTLPLogExporter(endpoint=f"{receiver}/v1/logs")
+            )
             [original] = emitted()
-            processor.on_emit(export.record(logs.row(original)))
-            assert processor.force_flush(timeout_millis=10_000)
-            processor.shutdown()
+            log_processor.on_emit(export.record(logs.row(original)))
+            assert log_processor.force_flush(timeout_millis=10_000)
+            log_processor.shutdown()
+
+            span_processor = BatchSpanProcessor(
+                OTLPSpanExporter(endpoint=f"{receiver}/v1/traces")
+            )
+            [original_span] = finished()
+            span_processor.on_end(export.span(spans.row(original_span)))
+            assert span_processor.force_flush(timeout_millis=10_000)
+            span_processor.shutdown()
         finally:
             server.shutdown()
 
-        [(path, body)] = received
-        assert path == "/v1/logs"
-        request = ExportLogsServiceRequest.FromString(body)
+        assert sorted(received) == ["/v1/logs", "/v1/traces"]
+        request = ExportLogsServiceRequest.FromString(received["/v1/logs"])
         [resource] = request.resource_logs
         [scope] = resource.scope_logs
         [log] = scope.log_records
@@ -183,3 +285,11 @@ class TestTheExporter:
         assert log.trace_id == original.log_record.trace_id.to_bytes(16, "big")
         assert log.body.string_value == "card declined"
         assert log.severity_text == "ERROR"
+
+        traces = ExportTraceServiceRequest.FromString(received["/v1/traces"])
+        [span] = traces.resource_spans[0].scope_spans[0].spans
+        assert span.name == "POST /charge"
+        assert span.kind == 2  # OTLP's SPAN_KIND_SERVER, as stored
+        assert span.parent_span_id == original_span.parent.span_id.to_bytes(8, "big")
+        assert span.status.code == 2  # STATUS_CODE_ERROR
+        assert [e.name for e in span.events] == ["card declined"]

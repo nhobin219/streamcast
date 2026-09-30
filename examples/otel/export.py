@@ -29,6 +29,7 @@ import signal
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import ReadWriteLogRecord
@@ -87,6 +88,15 @@ def value(any_value: Mapping[str, Any] | None) -> Any:  # noqa: ANN401 — OTel'
 
 def attributes(values: Mapping[str, Any] | None) -> dict[str, Any]:
     return {key: value(item) for key, item in (values or {}).items()}
+
+
+def frozen(values: Mapping[str, Any] | None) -> BoundedAttributes:
+    """Attributes as a live SDK span holds them, arrays as tuples.
+
+    A `LogRecord` does this to its own attributes; a `ReadableSpan` is built
+    finished, so it is done here.
+    """
+    return BoundedAttributes(attributes=attributes(values), immutable=True)
 
 
 def scope(row: Mapping[str, Any]) -> InstrumentationScope | None:
@@ -159,15 +169,15 @@ def span(row: Mapping[str, Any]) -> ReadableSpan:
         context=SpanContext(trace, ident(row["span_id"]), False, flags, state),
         parent=SpanContext(trace, ident(parent), False, flags) if parent else None,
         resource=Resource(attributes(row["resource"])),
-        attributes=attributes(row["attributes"]),
+        attributes=frozen(row["attributes"]),
         events=[
-            Event(e["name"], attributes(e["attributes"]), e["time_unix_nano"])
+            Event(e["name"], frozen(e["attributes"]), e["time_unix_nano"])
             for e in row["events"] or ()
         ],
         links=[
             Link(
                 SpanContext(ident(link["trace_id"]), ident(link["span_id"]), True),
-                attributes(link["attributes"]),
+                frozen(link["attributes"]),
             )
             for link in row["links"] or ()
         ],

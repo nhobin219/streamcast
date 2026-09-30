@@ -66,26 +66,48 @@ class Service:
     tracer: Tracer
     log_provider: LoggerProvider
     tracer_provider: TracerProvider
+    handler: logging.Handler
 
-    def flush(self) -> None:
-        self.tracer_provider.force_flush()
-        self.log_provider.force_flush()
+    def detach(self) -> None:
+        """Take the handler off the logger, which outlives this service.
+
+        `logging.getLogger` is process-wide: a handler left on it sends a
+        later run's records to this run's exporters as well.
+        """
+        self.logger.removeHandler(self.handler)
+
+    def shutdown(self) -> None:
+        """Detach, then flush and stop both providers."""
+        self.detach()
+        self.tracer_provider.shutdown()
+        self.log_provider.shutdown()
 
 
 def instrument(name: str, exporters: Exporters) -> Service:
     """A service's logger and tracer, exported through OTel to the streams."""
     resource = Resource.create({"service.name": name})
     log_provider = LoggerProvider(resource=resource)
-    log_provider.add_log_record_processor(BatchLogRecordProcessor(exporters.logs))
+    # Half a second for both: the SDK's defaults (1 s for logs, 5 s for spans)
+    # would show a dashboard each request's logs seconds before its trace.
+    log_provider.add_log_record_processor(
+        BatchLogRecordProcessor(exporters.logs, schedule_delay_millis=500)
+    )
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(exporters.spans))
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(exporters.spans, schedule_delay_millis=500)
+    )
 
     logger = logging.getLogger(f"shop.{name}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    logger.addHandler(LoggingHandler(logger_provider=log_provider))
+    handler = LoggingHandler(logger_provider=log_provider)
+    logger.addHandler(handler)
     return Service(
-        logger, tracer_provider.get_tracer("shop"), log_provider, tracer_provider
+        logger,
+        tracer_provider.get_tracer("shop"),
+        log_provider,
+        tracer_provider,
+        handler,
     )
 
 
@@ -152,8 +174,8 @@ def traffic(exporters: Exporters) -> tuple[str, int]:
     for order_id, amount in [(1, 19.99), (2, 250.0), (3, 5.25)]:
         failed = order(checkout, payments, order_id, amount) or failed
 
-    checkout.flush()
-    payments.flush()
+    checkout.shutdown()
+    payments.shutdown()
     return failed, 2
 
 
@@ -162,17 +184,24 @@ def orders_forever(exporters: Exporters, stop: threading.Event) -> None:
     checkout = instrument("checkout", exporters)
     payments = instrument("payments", exporters)
     order_id = 0
-    while not stop.wait(random.uniform(0.3, 1.2)):
-        order_id += 1
-        declined = random.random() < 0.2
-        amount = round(
-            random.uniform(120, 400) if declined else random.uniform(5, 90), 2
-        )
-        failed = order(checkout, payments, order_id, amount)
-        print(
-            f"order {order_id:>4}  {amount:>7.2f}  {'FAILED ' + failed if failed else 'ok'}",
-            flush=True,
-        )
+    try:
+        while not stop.wait(random.uniform(0.3, 1.2)):
+            order_id += 1
+            declined = random.random() < 0.2
+            amount = round(
+                random.uniform(120, 400) if declined else random.uniform(5, 90), 2
+            )
+            failed = order(checkout, payments, order_id, amount)
+            print(
+                f"order {order_id:>4}  {amount:>7.2f}  {'FAILED ' + failed if failed else 'ok'}",
+                flush=True,
+            )
+
+    finally:
+        # Detach only: on Ctrl-C the publications may already be closed, so
+        # a last flush could not land. The last half-second is dropped.
+        checkout.detach()
+        payments.detach()
 
 
 # -- the broker -------------------------------------------------------------------
