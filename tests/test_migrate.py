@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import _log, _manifest, _metadata
+from streamcast import _log, _manifest, _metadata, _schema
 from streamcast._server import _supervisors
 
 V1: dict[str, Any] = {
@@ -88,9 +88,16 @@ class TestTheSeam:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        with litelink.open(tmp_path, "trades") as old:
-            assert old.coverage().buffered is None, "rows left in the buffer"
-            assert old.table_extent() == (1, 5)
+        # Retired: litelink itself refuses a writer from here on.
+        with pytest.raises(litelink.RetiredError):
+            litelink.open(tmp_path, "trades")
+
+        # And every row is in its published table, none left local.
+        with litelink.open(tmp_path, "trades", read_only=True) as old:
+            coverage = old.coverage()
+            assert coverage.buffer is None, "rows left in the buffer"
+            assert coverage.staging is None, "rows left in the staging table"
+            assert coverage.published == (1, 6)
 
     async def test_the_metadata_records_both_logs(self, tmp_path):
         await seeded(tmp_path)
@@ -102,6 +109,12 @@ class TestTheSeam:
             ("trades", 1, 6),
             ("trades-v2", 6, None),
         ]
+        # Where each log's rows are read from, and the sealed one's time span.
+        assert all(e.published is not None for e in metadata.logs)
+        sealed = metadata.sealed_logs[0]
+        assert sealed.start_ts is not None
+        assert sealed.end_ts is not None
+        assert sealed.start_ts <= sealed.end_ts
         assert "venue" in metadata.current.schema["properties"]  # ty: ignore[unsupported-operator]
         assert "venue" not in metadata.logs[0].schema["properties"]  # ty: ignore[unsupported-operator]
         # Owned columns are not declared ones.
@@ -384,6 +397,62 @@ class TestServingAMigratedStream:
         finally:
             await stream.aclose()
 
+    async def test_catch_up_reads_below_the_seam_from_the_retired_log(
+        self, tmp_path, serve
+    ):
+        """The refusal above, closed: a retired log is published in full."""
+        await seeded(tmp_path)
+        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        try:
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri, offset=2, catch_up=True) as sub:
+                    caught_up = [await sub.recv() for _ in range(4)]
+                    await stream.send(row(5, venue="x"))
+                    live = await sub.recv()
+
+            assert [offset for offset, _ in caught_up] == [2, 3, 4, 5]
+            assert [message["price"] for _, message in caught_up] == [
+                101.0,
+                102.0,
+                103.0,
+                104.0,
+            ]
+            assert live[0] == 6
+            assert live[1]["venue"] == "x"
+        finally:
+            await stream.aclose()
+
+    async def test_a_retired_log_published_short_is_refused_not_stepped_over(
+        self, tmp_path, serve
+    ):
+        """Catch-up steps to the snapshot's end, so a short table is a hole.
+
+        Two rows fewer in the table than the manifest says the log held: the
+        shape of a log retired before every row was published.
+        """
+        await seeded(tmp_path)
+        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        counts = manifest.column("record_count").to_pylist()
+        _manifest.save(
+            tmp_path,
+            "trades",
+            manifest.set_column(
+                manifest.schema.get_field_index("record_count"),
+                "record_count",
+                pa.array([count + 2 for count in counts], pa.int64()),
+            ),
+        )
+        try:
+            async with serve(stream, maintain=False) as uri:
+                with pytest.raises(
+                    streamcast.CatchUpUnavailable, match="holds 5 of the 7 rows"
+                ):
+                    await streamcast.connect(uri, offset=2, catch_up=True)
+        finally:
+            await stream.aclose()
+
     async def test_earliest_on_a_fresh_seam_is_where_the_log_begins(
         self, tmp_path, serve
     ):
@@ -446,7 +515,7 @@ class TestTheManifest:
         assert metadata is not None
         assert metadata.manifest == "trades.manifest.parquet"
         assert (tmp_path / metadata.manifest).exists(), (
-            "relative to the metadata file, so the same pointer serves the archive"
+            "relative to the metadata file, so one pointer serves the published copy"
         )
 
     async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
@@ -510,7 +579,7 @@ class TestTheManifest:
         await seeded(tmp_path)
 
         def refuse(self, **_):
-            raise OSError("the archive is unreachable")
+            raise OSError("the published table is unreachable")
 
         monkeypatch.setattr(litelink.WriteHandle, "column_statistics", refuse)
         with pytest.raises(OSError, match="unreachable"):
@@ -566,23 +635,28 @@ def test_extending_replaces_a_row_rather_than_duplicating_it():
         "properties": {"x": {"type": "integer"}},
         "required": ["x"],
     }
-    entry = _metadata.Entry("trades", 1, 3, schema, NO_SYSTEM)
-    stats = _manifest.LogStatistics(2, {"x": _manifest.ColumnStatistics(1, 2, 0, 2)})
+    stats = litelink.TierStatistics(
+        tier=None,
+        record_count=2,
+        file_count=1,
+        columns={"x": litelink.ColumnStatistics(1, 2, 0, 2, None)},
+    )
+    entry = _manifest.entry("trades", 1, 3, _schema.to_arrow(schema), stats)
 
-    once = _manifest.extend(None, entry, stats)
-    twice = _manifest.extend(once, entry, stats)
+    once = _manifest.extend(None, entry)
+    twice = _manifest.extend(once, entry)
 
     assert twice["log"].to_pylist() == ["trades"]
     assert twice == once
 
 
 @pytest.mark.replication
-class TestTheArchive:
+class TestThePublishedCopy:
     async def test_the_metadata_is_published_beside_the_logs(
         self, tmp_path, s3, bucket
     ):
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=V1, archive=bucket, s3=s3
+            "trades", root=tmp_path, schema=V1, published=bucket, s3=s3
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
@@ -590,7 +664,7 @@ class TestTheArchive:
         migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2, s3=s3)
         try:
             assert migrated.log is not None
-            assert migrated.log.archive == bucket
+            assert migrated.log.published == bucket
         finally:
             await migrated.aclose()
 
@@ -606,10 +680,10 @@ class TestTheArchive:
         with filesystem.open_input_file(key) as source:
             assert pq.read_table(source) == _manifest.load(tmp_path, "trades")
 
-        # And the retired log is in the archive whole, not just its settled
-        # prefix: nothing will push its tail later.
-        with litelink.open(tmp_path, "trades") as old:
-            assert old.archived_through() == 5
+        # And the retired log is in its published table whole, not just its
+        # settled prefix: nothing will push its tail later.
+        with litelink.open(tmp_path, "trades", read_only=True) as old:
+            assert old.published_through() == 5
 
     async def test_a_stream_that_never_migrated_has_no_metadata_there(
         self, tmp_path, s3, bucket
@@ -621,11 +695,89 @@ def test_the_metadata_round_trips():
     metadata = _metadata.Metadata(
         stream="trades",
         stream_id="6f1c0b8e-0000-4000-8000-000000000000",
-        sealed_logs=(_metadata.Entry("trades", 1, 6, V1, NO_SYSTEM),),
-        live_log=_metadata.Entry("trades-v2", 6, None, V2, SYSTEM_NOW),
+        sealed_logs=(
+            _metadata.Entry(
+                "trades",
+                1,
+                6,
+                V1,
+                NO_SYSTEM,
+                published="s3://bucket/prod",
+                start_ts=1_790_000_000_000_000,
+                end_ts=1_790_000_000_500_000,
+            ),
+        ),
+        live_log=_metadata.Entry(
+            "trades-v2",
+            6,
+            None,
+            V2,
+            SYSTEM_NOW,
+            published="s3://bucket/prod",
+            start_ts=1_790_000_000_600_000,
+        ),
+        manifest="trades.manifest.parquet",
     )
     assert _metadata.Metadata.from_json(metadata.to_json()) == metadata
-    assert json.loads(metadata.to_json())["streamcast_metadata"] == 1
+    assert json.loads(metadata.to_json())["streamcast_metadata"] == 2
+
+
+def test_a_version_1_file_is_read_with_its_new_fields_unknown():
+    """What `serve` wrote in 0.9.0: no published prefix, no timestamps."""
+    v1 = {
+        "streamcast_metadata": 1,
+        "stream": "trades",
+        "stream_id": "6f1c0b8e-0000-4000-8000-000000000000",
+        "sealed_logs": [
+            {
+                "name": "trades",
+                "start_offset": 1,
+                "end_offset": 6,
+                "schema": V1,
+                "system_schema": NO_SYSTEM,
+            }
+        ],
+        "live_log": {
+            "name": "trades-v2",
+            "start_offset": 6,
+            "schema": V2,
+            "system_schema": SYSTEM_NOW,
+        },
+        "manifest": None,
+    }
+    read = _metadata.Metadata.from_json(json.dumps(v1))
+    assert [(e.name, e.published, e.start_ts, e.end_ts) for e in read.logs] == [
+        ("trades", None, None, None),
+        ("trades-v2", None, None, None),
+    ]
+
+
+async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
+    """`ensure` fills in what version 1 lacked, and rewrites the file at 2."""
+    stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    await stream.send_many([row(i) for i in range(3)])
+    async with serve(stream, maintain=False):
+        pass
+
+    written = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    written["streamcast_metadata"] = 1
+    for key in ("published", "start_ts"):
+        del written["live_log"][key]
+
+    _metadata.path(tmp_path, "trades").write_text(json.dumps(written))
+    again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    assert again.log is not None
+    while again.log.seal() is not None:  # so its statistics hold a `streamcast_ts`
+        pass
+
+    async with serve(again, maintain=False):
+        pass
+
+    upgraded = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    assert upgraded["streamcast_metadata"] == 2
+    assert upgraded["live_log"]["published"].startswith("file://")
+    assert upgraded["live_log"]["start_ts"] is not None
+    assert upgraded["stream_id"] == written["stream_id"], "the id is kept"
 
 
 def test_an_unknown_metadata_version_is_refused():

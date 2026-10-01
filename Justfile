@@ -166,6 +166,11 @@ bench *args:
 bench-replay *args:
     uv run python benchmarks/replay.py {{args}}
 
+# What reading a stream's history costs, one log against several: the floor,
+# a full scan, and what pruning saves. --rows and --logs take several values.
+bench-snapshot *args:
+    uv run python benchmarks/snapshot.py {{args}}
+
 # What permessage-deflate costs per subscriber against what it saves. This is
 # the measurement `compression`'s default rests on — rerun it before arguing
 # with the default.

@@ -18,7 +18,7 @@ import pytest
 import websockets
 
 import streamcast
-from streamcast import _log
+from streamcast import _log, _snapshot
 from tests.conftest import SCHEMA, trade
 
 SCHEMA_JSON: dict[str, Any] = streamcast.from_arrow(SCHEMA)
@@ -57,7 +57,13 @@ class TestItIsStamped:
         await stream.send(trade(0))
 
         [ts] = stored(stamped)
-        assert stream.stats.last_send_ts == pytest.approx(ts / 1e6, abs=1e-6)
+        # One `time_ns()` reading, two forms: the log keeps it truncated to
+        # whole microseconds, the stats keep it as float seconds. They differ
+        # by under 1 us of truncation plus float rounding, which at today's
+        # epoch is one ulp of 2**-22 s (0.24 us) per value — so 1.5 us is a
+        # bound, not a margin. 1 us alone failed on a reading 0.99 us past
+        # the microsecond.
+        assert stream.stats.last_send_ts == pytest.approx(ts / 1e6, abs=1.5e-6)
 
     async def test_the_callers_row_is_not_modified(self, stamped):
         stream = streamcast.Stream("trades", log=stamped)
@@ -117,8 +123,10 @@ class TestItIsNeverSent:
     async def test_the_greeting_names_the_columns_the_log_owns(self, serve, stamped):
         stream = streamcast.Stream("trades", log=stamped)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is not None
-            assert sub.info.log.owned == ("litelink_offset", _log.STAMP)
+            # In the stream's metadata, per log: the greeting names the file.
+            assert sub.info.metadata is not None
+            found = _snapshot.metadata(sub.info.metadata, None, sub.info.stream_id)
+            assert _log.STAMP in found.live_log.system_schema["properties"]  # ty: ignore[unsupported-operator]
 
     async def test_a_filter_cannot_name_it(self, serve, stamped):
         # It is not a column a subscriber can see, so it is not one it can
@@ -225,9 +233,7 @@ class TestLogsWithoutIt:
             assert stream.log is not None
             assert _log.STAMP not in stream.log.schema.names
             assert await stream.send(trade(0)) == 1
-            info = stream._log_info()
-            assert info is not None
-            assert info[2] == ("litelink_offset",)
+            assert not _log.stamped(stream.log)
         finally:
             await stream.aclose()
 
@@ -237,5 +243,6 @@ class TestLogsWithoutIt:
 
         assert _log.STAMP not in log.schema.names
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is not None
-            assert sub.info.log.owned == ("litelink_offset",)
+            assert sub.info.metadata is not None
+            found = _snapshot.metadata(sub.info.metadata, None, sub.info.stream_id)
+            assert found.live_log.system_schema["properties"] == {}

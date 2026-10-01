@@ -21,8 +21,8 @@ publisher rather than once per subscriber.
 loop.** `cursor=` keeps the last handled offset on disk and resumes one above
 it; `cursor_uri=` ships that integer to object storage, so a consumer whose
 machine is gone can resume on another; `catch_up=True` reads the gap from the
-log's archive when the consumer has fallen past what the server will replay,
-then picks the socket up where the archive ended. `_cursor`, `_remote` and
+stream's published tables when the consumer has fallen past what the server
+will replay, then picks the socket up where they ended. `_cursor`, `_remote` and
 `_catchup` are where each is argued.
 
 **The second deviation is that there is no `send`.** A subscription is
@@ -48,7 +48,6 @@ from streamcast._catchup import (
     CATCH_UP_RETRIES,
     RECOVERABLE,
     Catcher,
-    from_refusal,
     nowhere_to_read,
 )
 from streamcast._codec import from_greeting
@@ -249,7 +248,7 @@ class Subscription:
         self._stream = stream
         self._offset: int | None = None
         self._cursor = cursor
-        # Rows from the archive, drained BEFORE anything is connected — see
+        # Rows from the published tables, drained BEFORE anything is connected — see
         # `_catchup`, where holding a socket through a long catch-up is what
         # gets the subscriber dropped for falling behind. `_catcher` opens the
         # connection itself once the gap is closed.
@@ -308,11 +307,11 @@ class Subscription:
     def _live(self) -> ClientConnection:
         """The socket, once there is one.
 
-        None only while a catch-up is draining the archive — `Catcher` opens
+        None only while a catch-up is reading the published tables — `Catcher` opens
         it when the gap closes, and `recv` swaps it in before reaching here.
         """
         if self._connection is None:  # pragma: no cover — recv swaps it in
-            msg = "still reading the archive; there is no connection yet"
+            msg = "still reading the published tables; there is no connection yet"
             raise RuntimeError(msg)
 
         return self._connection
@@ -347,7 +346,7 @@ class Subscription:
             # Exhausted, which means `Catcher.stream` returned — and it does
             # not return until it has a live connection. Everything below the
             # socket came from object storage; everything from here comes from
-            # the server, starting where the archive stopped.
+            # the server, starting where the tables stopped.
             self._prelude = None
             catcher, self._catcher = self._catcher, None
             if catcher is not None and catcher.connection is not None:
@@ -368,7 +367,7 @@ class Subscription:
 
         offset, row = decode(frame)
         # Binary columns arrive as text in their encoding, and a row that
-        # came out of the archive by catch-up carries bytes: decoded here so
+        # came out of the published tables by catch-up carries bytes: decoded here so
         # the consumer cannot tell which source a row came from.
         if self._inbound is not None:
             row = self._inbound(row)
@@ -583,30 +582,29 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
 
     **`catch_up=True` handles having been down too long.** A consumer that
     falls past the server's `max_replay` is refused — the rows are in the
-    log's archive, not gone — and this reads the gap from there, then picks
-    the socket up where the archive ended:
+    stream's published tables, not gone — and this reads the gap from there
+    with `Stream.snapshot`, then picks the socket up where they ended:
 
         streamcast.connect(uri, cursor=".trades.offset", catch_up=True)
 
-    Nothing is connected while the archive is read, because a subscriber that
+    Nothing is connected while the tables are read, because a subscriber that
     holds a socket through a long catch-up is dropped for falling behind. It
     loops, bounded by `catch_up_retries` (3), for a server that moves on while
-    the gap is being read. `archive=` overrides where to read — otherwise it
-    comes from the refusal, or from the greeting — and `s3=` the credentials.
-    An archive that cannot be read raises `CatchUpUnavailable` HERE, at
-    `connect`, with a message naming what was tried and what to change. See
-    `_catchup`.
+    the gap is being read. `metadata=` overrides which metadata file to read —
+    otherwise it is the greeting's — and `s3=` the credentials. A stream that
+    cannot be read raises `CatchUpUnavailable` HERE, at `connect`, with a
+    message naming what was tried and what to change. See `_catchup`.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`
     defaults to None for the same reason it does in `serve`.
     """
 
     __slots__ = (
-        "_archive",
         "_catch_up",
         "_catch_up_retries",
         "_cursor",
         "_kwargs",
+        "_metadata",
         "_offset",
         "_remote",
         "_resolved",
@@ -629,7 +627,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         where: Where | None = None,
         catch_up: bool = False,
         catch_up_retries: int = CATCH_UP_RETRIES,
-        archive: str | None = None,
+        metadata: str | None = None,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -641,7 +639,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         self._where = where
         self._catch_up = catch_up
         self._catch_up_retries = catch_up_retries
-        self._archive = archive
+        self._metadata = metadata
         self._s3 = s3
         self._stream = urlsplit(uri).path.lstrip("/")
         self._cursor = Cursor(cursor) if cursor is not None else None
@@ -700,43 +698,40 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     async def _recover(self, refused: NotReplayable) -> Subscription:
         """Hand back a subscription that reads the gap before it connects.
 
-        **Nothing is connected while the archive is read.** Holding a socket
-        through a catch-up that streams millions of rows makes the server
-        queue for a subscriber that is not reading, and `max_backlog` drops it
-        — a recovery that guaranteed its own failure. `Catcher` opens the
-        connection itself, after the gap is closed and at the offset the
-        archive actually reached, looping if the server has moved on since.
+        **Nothing is connected while the published tables are read.** Holding
+        a socket through a catch-up that streams millions of rows makes the
+        server queue for a subscriber that is not reading, and `max_backlog`
+        drops it — a recovery that guaranteed its own failure. `Catcher` opens
+        the connection itself, after the gap is closed and at the offset the
+        tables actually reached, looping if the server has moved on since.
         """
         name = self._stream
         # One throwaway live connection, always. Something has to describe
         # the stream until the real connection exists — `durable`, `schema`
-        # and `log` are properties of the STREAM rather than of a connection
-        # — and the greeting is the only place the log's NAME is published.
-        # `end_offset` and `replay` are replaced when the socket opens.
+        # and `metadata` are properties of the STREAM rather than of a
+        # connection — and the greeting is where its metadata file and id are
+        # published. `end_offset` and `replay` are replaced when the socket
+        # opens.
         connection, probe = await self._handshake(None)
         await connection.close()
 
-        # **The LOG's name, which is not always the stream's.** A stream
-        # serves at its own name and its log has its own; `Stream.new` feeds
-        # one through and `Stream(log=handle)` does not. Asking the archive
-        # for a table named after the stream found nothing and reported it as
-        # a credentials failure — the server knows the answer, so it says it.
-        log_name = name if probe.log is None else probe.log.name
-
-        where = from_refusal(refused, self._archive)
-        if where is None:
-            # The refusal did not carry it — a bucket URI and the numbers that
-            # diagnose the refusal do not both fit in 123 bytes, and the
-            # numbers are ordered first. The greeting has no such limit.
-            where = None if probe.log is None else probe.log.archive
-            if where is None:
-                raise nowhere_to_read(name)
+        uri = self._metadata or probe.metadata
+        if uri is None:
+            raise nowhere_to_read(name)
 
         start = self._resolved if isinstance(self._resolved, int) else 1
+        # The greeting's id checks the file is this stream's; a caller who
+        # named a file meant that one, and is trusted to.
         catcher = Catcher(
-            where, log_name, self._s3, start, self._catch_up_retries, self._handshake
+            uri,
+            probe.stream_id if self._metadata is None else None,
+            name,
+            self._s3,
+            start,
+            self._catch_up_retries,
+            self._handshake,
         )
-        # BEFORE handing anything back, so an unreadable archive raises here
+        # BEFORE handing anything back, so an unreadable table raises here
         # rather than from whatever line first calls `recv`. Entering the
         # block has to keep meaning that the subscription works.
         await catcher.prepare()
@@ -806,7 +801,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
                 raise
 
             # Too far behind for the server to replay, which is exactly what
-            # the archive is for.
+            # the published tables are for.
             subscription = await self._recover(refusal)
 
         else:

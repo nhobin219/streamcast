@@ -10,7 +10,7 @@ frame stops matching the live one it repeats (invariant 10).
   depth, is decoded with its column's encoding — `base16` or `base64`, see
   `_schema.ENCODINGS` — before the row is validated or stored. The client does
   the same to what it receives, so a consumer gets `bytes` whether a row came
-  off the socket or out of the archive by catch-up.
+  off the socket or out of the published tables by catch-up.
 - **Binary, outbound.** msgspec writes `bytes` as base64 by itself, so only a
   `base16` column is converted, to hex, before the frame is encoded.
 - **Maps.** Arrow hands a replayed map back as a dict (see `_log.rows`), and a

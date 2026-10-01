@@ -11,6 +11,20 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Stream.snapshot(metadata_uri)`**: a stream's history as of one point,
+  read on any machine from its published tables, with the reader's own
+  credentials (#32). Every log a migration left behind reads as one table.
+  The point is everything published, `as_of_offset=` (with `broker=` for rows
+  not yet published, and `LATEST` for the broker's frontier), or `as_of_ts=`
+  on `streamcast_ts`. A `Snapshot` has `scan`, `sql` (over the table `log`)
+  and `rows`; `Stream.scan` and `Stream.sql` are the one-shot forms.
+  `filters=` terms and `start_offset`/`end_offset`, on `scan` and `sql`,
+  prune whole retired logs on the manifest before any is opened. SQL is not
+  mined for terms yet (#57). Anything it cannot answer exactly raises `SnapshotUnavailable`.
+- **`Stream.metadata_uri`**: where a reader finds the stream's metadata file.
+- **`connect(metadata=)`**: the metadata file `catch_up` reads from, in place
+  of the greeting's.
+
 - **`examples/keyed_table/`**: orders written as a keyed table log (each row a
   whole record, keyed by id, with a `deleted` flag), and a subscriber that
   keeps the table in SQLite: the last row by id, where not deleted. It writes
@@ -27,7 +41,31 @@ there was nothing to have changed from. Everything above it is ordinary.
   diffed with one DuckDB join on the source offset each row carries; `--bug`
   shows a wrong migration named order by order.
 
+### Changed — breaking
+
+- **litelink 0.6** (`>=0.6.0,<0.7`), and its vocabulary with it (#42). The
+  archive is the published table: `Stream.new` and `Stream.restore` take
+  `published=` for `archive=`, and `replay_published=` for
+  `replay_archive=`. Every log publishes; without a location, to a table
+  under its own directory.
+- **The greeting is version 3.** `metadata` (the metadata file's URI) and
+  `stream_id` replace `log`, whose `name`, `archive` and `owned` are gone;
+  a log's system columns are in its metadata entry's `system_schema`.
+  Refusals no longer carry a location.
+- **`connect(archive=)` is gone**, replaced by `connect(metadata=)`.
+- **The metadata file is version 2**: each log records `published`, and its
+  `streamcast_ts` range as `start_ts` and `end_ts`. Version 1 is still read,
+  and `serve` rewrites it as version 2.
+
 ### Changed
+
+- **`catch_up=True` is built on `Stream.snapshot`**, so it reads every log of
+  a migrated stream and crosses the seam a server refuses as `evicted`.
+- **`Stream.migrate` retires the old log** with litelink's `retire()`: sealed,
+  published in full, and refusing writers from then on. A migration that
+  died after the retire finishes on the rerun. A log with
+  `wal_replication` gets its sidecar started for the call.
+- **The maintainer publishes every log** on each sweep.
 
 - **The examples are rewritten as producer, broker and subscriber**, each its
   own process, because that is the shape to copy. `examples/broker.py` is one

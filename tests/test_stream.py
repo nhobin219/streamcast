@@ -10,7 +10,7 @@ from __future__ import annotations
 import litelink
 import pyarrow as pa
 import pytest
-from litelink.log import OFFSET as COLUMN
+from litelink import OFFSET as COLUMN
 
 import streamcast
 from streamcast._protocol import decode, encode

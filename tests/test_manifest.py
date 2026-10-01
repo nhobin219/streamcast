@@ -24,10 +24,11 @@ from typing import Any
 import duckdb
 import pyarrow as pa
 import pytest
+from litelink import ColumnStatistics, TierStatistics
+from litelink import manifest as _litelink
 
-from streamcast import _manifest, _schema
-from streamcast._manifest import ColumnStatistics, LogStatistics, build, prune
-from streamcast._metadata import Entry
+from streamcast import _manifest
+from streamcast._manifest import prune
 
 POOL: dict[str, pa.DataType] = {
     "i32": pa.int32(),
@@ -42,7 +43,7 @@ NO_SYSTEM: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
 # -- statistics the way litelink#85 reports them -------------------------------
 
 
-def statistics(table: pa.Table) -> LogStatistics:
+def statistics(table: pa.Table) -> TierStatistics:
     """Min and max over the non-null, non-NaN values, as Iceberg's bounds are.
 
     Plain Python rather than `pyarrow.compute`, so the stand-in for litelink#85
@@ -66,18 +67,26 @@ def statistics(table: pa.Table) -> LogStatistics:
             nan_count=nans if floating else None,
         )
 
-    return LogStatistics(record_count=table.num_rows, columns=found)
+    return TierStatistics(
+        tier=None, record_count=table.num_rows, file_count=1, columns=found
+    )
 
 
-def entry(name: str, start: int, table: pa.Table) -> Entry:
-    fields = [pa.field(f.name, f.type, nullable=True) for f in table.schema]
-    return Entry(
+def entry(
+    name: str, start: int, table: pa.Table, stats: TierStatistics | None = None
+) -> _litelink.Entry:
+    """A sealed log holding `table`, as the manifest entry `migrate` writes."""
+    return _manifest.entry(
         name,
         start,
         start + table.num_rows,
-        _schema.from_arrow(pa.schema(fields)),
-        NO_SYSTEM,
+        table.schema,
+        statistics(table) if stats is None else stats,
     )
+
+
+def build(entries: list[_litelink.Entry]) -> pa.Table:
+    return _litelink.build(entries, key=_manifest.KEY)
 
 
 # -- what DuckDB says ------------------------------------------------------------
@@ -294,11 +303,11 @@ def excluded_matches(
     """Every (log, predicate) the pruner excludes although DuckDB finds a row."""
     sealed, start = [], 1
     for name, table in tables.items():
-        sealed.append((entry(name, start, table), statistics(table)))
+        sealed.append(entry(name, start, table))
         start += max(table.num_rows, 1)
 
     manifest = build(sealed)
-    names = [log.name for log, _ in sealed]
+    names = [log.name for log in sealed]
     truth = {name: counts(table, predicates) for name, table in tables.items()}
     wrong = []
     for index, terms in enumerate(predicates):
@@ -351,8 +360,8 @@ def test_terms_over_two_columns_are_anded_soundly():
 # -- the rules, one at a time -----------------------------------------------------
 
 
-def one(table: pa.Table, name: str = "log0") -> tuple[Entry, LogStatistics]:
-    return entry(name, 1, table), statistics(table)
+def one(table: pa.Table, name: str = "log0") -> _litelink.Entry:
+    return entry(name, 1, table)
 
 
 class TestItPrunes:
@@ -391,12 +400,14 @@ class TestItIncludesWhatItCannotDecide:
         Its bounds say [1, 2], which would exclude `x > 50` — but a NaN
         beside those values would match, and nothing says there is none.
         """
-        stats = LogStatistics(
+        stats = TierStatistics(
+            tier=None,
+            file_count=1,
             record_count=2,
             columns={"x": ColumnStatistics(1.0, 2.0, 0, 2, nan_count=None)},
         )
         table = pa.table({"x": pa.array([1.0, 2.0])})
-        manifest = build([(entry("log0", 1, table), stats)])
+        manifest = build([entry("log0", 1, table, stats)])
 
         assert prune(manifest, ["log0"], [("x", ">", 50.0)]) == ["log0"]
 

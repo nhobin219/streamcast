@@ -81,9 +81,9 @@ the reason litelink's read handles have no `append`.
 
 **Recovery is three keywords on `connect`.** `cursor=` keeps the last handled
 offset on disk; `cursor_uri=` ships it to object storage so a consumer can
-resume on another box; `catch_up=True` reads the gap from the log's archive
-when a consumer has fallen past what the server will replay, then picks the
-socket up where the archive ended.
+resume on another box; `catch_up=True` reads the gap from the stream's
+published tables when a consumer has fallen past what the server will replay,
+then picks the socket up where they ended.
 
 ``EARLIEST`` is the offset that means "everything the log still holds".
 
@@ -111,10 +111,11 @@ from streamcast._errors import (
     TooSlow,
 )
 from streamcast._maintain import Maintain
-from streamcast._protocol import EARLIEST, Greeting, LogInfo
+from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
+from streamcast._snapshot import LATEST, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
 from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
 
@@ -125,13 +126,15 @@ except PackageNotFoundError:  # a source tree that was never installed
 
 __all__ = [
     "EARLIEST",
+    "LATEST",
     "MAX_BACKLOG",
     "MAX_REPLAY",
     "CatchUpUnavailable",
+    "Snapshot",
+    "SnapshotUnavailable",
     "Close",
     "Cursor",
     "Greeting",
-    "LogInfo",
     "Maintain",
     "S3Options",
     "NotReplayable",

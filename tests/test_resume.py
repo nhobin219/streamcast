@@ -83,7 +83,7 @@ class TestReplay:
             pass
 
         await stream.send_many([trade(i) for i in range(60, 70)])
-        assert log.table_files() > 0
+        assert log.staging_files() > 0
 
         async with serve(stream) as uri:
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:

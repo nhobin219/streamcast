@@ -58,7 +58,9 @@ missed. With one, it has an offset.
 
 In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
-archive when a consumer has fallen past what the server will replay.
+published tables when a consumer has fallen past what the server will replay.
+Reading a stream's whole history from another machine (`Stream.snapshot`) is
+in too, because catch-up is built on it.
 
 Out: acknowledgements, consumer groups, delivery guarantees beyond "a
 contiguous prefix", authentication, and transport security. The last two
@@ -74,9 +76,9 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 `[offset, msg]` pair per message:
 
 ```
-{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "log":{"name":"trades","archive":"s3://market-data/prod",
-        "owned":["litelink_offset","streamcast_ts"]},"durable":true}
+{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"5f0c…",
+ "durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
@@ -151,6 +153,14 @@ replayed before any of it arrives.
 the server accepted the subscribe. The alternative surfaces a refused offset as
 a failure of whatever `recv` the application happened to reach first, which on a
 quiet stream is minutes later and somewhere else.
+
+**It names where the history is read.** `metadata` is the URI of the stream's
+metadata file (§5) and `stream_id` the id that file records; both are null on a
+stream with no log. They are all a reader on another machine needs, with its
+own credentials, to read every log the stream has had — which is what
+`catch_up` and `Stream.snapshot` start from. The id is checked against the
+file, because a `file://` path can exist on two machines for two different
+streams. Credentials are never sent.
 
 ### Reading a row in another language
 
@@ -239,7 +249,7 @@ travels as compact JSON and the sentence is built at the subscriber:
       ↓
       offset 100 is below 5000, the earliest offset this stream's log still
       serves. Reconnect with catch_up=True to read the rows between from
-      the archive if it still holds them — it will say so if it does not —
+      the published tables if they still hold them — it will say so if not —
       or with offset=streamcast.EARLIEST to take what is left.
 ```
 
@@ -441,7 +451,7 @@ A blob column gives up every property the table exists for:
 |---|---|---|
 | **pruning** | nothing to prune on; a one-minute query reads every byte in range | statistics per column (§7) |
 | **compression** | JSON text, poorly | float64 against its neighbours |
-| **the archive** | one string per row; parse JSON in SQL to ask anything | a table any Iceberg engine reads |
+| **the published table** | one string per row; parse JSON in SQL to ask anything | a table any Iceberg engine reads |
 | **the replay** | strings out of Arrow, re-encoded per row | columns, already typed |
 | **the subscriber** | a blob to parse, once per consumer | the row, parsed once at the publisher |
 
@@ -472,22 +482,22 @@ Today there is one, `streamcast_ts`: int64 microseconds since the epoch,
 stamped by the server at append, beside the application's columns and
 litelink's `litelink_offset`. It answers "when did this server have it", which no
 application column carries — a row's own timestamps are the publisher's — and
-`streamcast_ts - event_ts` is feed latency per row, over the whole archive.
+`streamcast_ts - event_ts` is feed latency per row, over the whole history.
 
 It is owned on exactly the terms litelink owns its offset:
 
 * **Never on the wire.** `_log.columns` leaves it out, and that tuple fixes the
   key order of every frame, live and replayed — so invariant 10 holds on a log
   that holds a column the wire does not.
-* **Never in the greeting's `schema`**, which is filtered by the same rule. The
-  greeting's `log.owned` names it instead, beside `litelink_offset`.
+* **Never in the greeting's `schema`**, which is filtered by the same rule.
+  Each log's `system_schema` in the metadata file names it instead.
 * **The server's to fill.** A row that carries it is refused rather than
   overwritten, and a declaration that names it is refused at `Stream.new`.
 
 **This is not owning the shape, and the line is worth drawing precisely.** The
 design this section argues against owned the ROW — a fixed schema with the
 frame stored whole — and so gave up pruning, compression and a readable
-archive. One scalar beside the application's own columns gives up none of
+published table. One scalar beside the application's own columns gives up none of
 those: every declared column is still a real column.
 
 The rest is decided, not incidental:
@@ -505,7 +515,8 @@ The rest is decided, not incidental:
 * **Per log, not per server.** A log created before the column existed opens
   unchanged and is never stamped — adding a column is not a side effect an
   `open` should have (litelink#29). A handle passed as `Stream(log=)` is
-  stamped only if its own schema has the column. `log.owned` says which.
+  stamped only if its own schema has the column. The metadata file's
+  `system_schema` says which.
 
 ### The counter
 
@@ -561,13 +572,13 @@ column order against what it projected before relying on it, once per batch:
 the saving holds only while that does, and a silent reordering would break I6.
 
 **Which tiers a replay reads was decided when the log was opened.** litelink
-fixes that at assembly, and a server opens local-only unless
-`Stream.new(replay_archive=True)` says otherwise — serving a replay out of
-object storage is a long network read held on a worker thread while the
-subscriber's socket sits attached, which is the failure `catch_up` avoids by
-doing the same read client-side with nothing connected. A log with no local
-files left refuses rather than serving the buffer alone, and that refusal
-reaches the subscriber as `evicted`.
+passes `published=` per read, and a server reads staging and the buffer only
+unless `Stream.new(replay_published=True)` says otherwise — serving a replay
+out of object storage is a long network read held on a worker thread while
+the subscriber's socket sits attached, which is the failure `catch_up` avoids
+by doing the same read client-side with nothing connected. A replay that
+reaches below what staging still holds is refused `evicted` rather than
+served from wherever staging starts.
 
 ### The schema, in JSON
 
@@ -641,7 +652,7 @@ stream, and a stream of scalars pays nothing:
   for a binary column. So every binary value, at any depth, is decoded with its
   column's encoding before it is validated or stored. The client decodes what
   it receives the same way, so a consumer gets `bytes` whether a row came off
-  the socket or out of the archive by catch-up.
+  the socket or out of the published tables by catch-up.
 
 **A map has to arrive as a dict, and the reason is invariant 10.** Arrow hands
 a replayed map back as a list of pairs, which would encode as `[["k","v"]]`
@@ -681,13 +692,17 @@ litelink fixes a log's shape at creation, so a new schema means a new log.
 `Stream.migrate` makes the stream a sequence of them, with the server
 stopped:
 
-1. **The current log is sealed for good**: every buffered row goes to
-   Parquet, and with an archive the whole log is pushed, including the trailing
-   run a plain `sync` holds back for compaction that will now never come.
+1. **The current log is retired** (litelink's `retire()`): every buffered row
+   is sealed, the whole log is published — including the trailing run a plain
+   `publish()` holds back for compaction that will now never come — staging is
+   evicted, and the log refuses every writer from then on. A log with
+   `wal_replication` needs its sidecar running to retire, so `migrate` starts
+   one for the call, under the same `flock` the server's takes.
 2. **The next log is created**, `trades-v2` and so on, starting at exactly the
    old log's `end_offset`.
 3. **The metadata records both**, the new one live, at
-   `root/<stream>.metadata.json` and `<archive>/<stream>.metadata.json`.
+   `root/<stream>.metadata.json` and, when the logs publish to S3,
+   `<published>/<stream>.metadata.json`.
 
 **Offline, so dense.** A live rotation would have to create the next log
 (100–300 ms, measured) while `send` kept writing the old one, and so could not
@@ -701,22 +716,26 @@ naming a log that does not exist. A crash before it leaves an orphan log that
 the metadata doesn't name. The next `migrate` adopts the orphan if it is empty,
 starts at the seam and has the requested shape. Otherwise it refuses, because
 adopting a log holding rows the metadata cannot account for is not a decision to
-make silently.
+make silently. A crash after the retire is resumable too: the retired log is
+opened read-only on the rerun, and the migration carries on from there.
 
 ### The metadata file
 
 ```json
-{"streamcast_metadata": 1, "stream": "trades", "stream_id": "6f1c…",
- "sealed_logs": [{"name": "trades", "start_offset": 1, "end_offset": 1001,
+{"streamcast_metadata": 2, "stream": "trades", "stream_id": "6f1c…",
+ "sealed_logs": [{"name": "trades", "published": "s3://market-data/prod",
+                  "start_offset": 1, "end_offset": 1001,
+                  "start_ts": 1790038800123456, "end_ts": 1790042400654321,
                   "schema": {…}, "system_schema": {…}}],
- "live_log": {"name": "trades-v2", "start_offset": 1001,
+ "live_log": {"name": "trades-v2", "published": "s3://market-data/prod",
+              "start_offset": 1001, "start_ts": 1790042411000000,
               "schema": {…}, "system_schema": {…}},
- "manifest": null}
+ "manifest": "trades.manifest.parquet"}
 ```
 
 **Every durable stream has one, written by `serve`.** Before it listens,
-`serve` writes the file for any stream that has none, and with an archive
-compares it with the archive's copy and uploads it if they differ. **A failure
+`serve` writes the file for any stream that has none, and when the logs
+publish to S3 compares it with the copy there and uploads it if they differ. **A failure
 is a failure to start.** The file is what a reader on another machine starts
 from, so a stream without one can only be read through its own server, and
 that is better found out at deploy than at the first remote read. It is
@@ -729,8 +748,19 @@ too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
 - **`stream_id` is minted once**, when the file is first written, as
   Iceberg's `table-uuid` is. A `file://` path can exist on two machines for
   two different streams, and the id is how a reader tells them apart.
+- **Each log says where it is read from.** `published` is the prefix its
+  table sits under, at `<published>/<name>` — every log publishes, to
+  `file://<root>/<name>/published` when nothing else is configured. A reader
+  opens each table at the snapshot its `version-hint.text` names.
+- **Each log carries its `streamcast_ts` range**, `start_ts` and, once
+  sealed, `end_ts`, so a read as of a time skips logs that begin after it
+  without opening them. Null on a log without the column, and on a live log
+  that has no rows yet.
 - **`manifest` points to the sealed logs' statistics**, and is null until
   there is a sealed log to describe.
+- **Version 1 is still read.** A version-1 file has no `published` or
+  timestamps; `serve` fills them in from the logs on this disk and rewrites
+  it as version 2.
 - **The live log it names is the only one `serve` will serve.** A
   `Stream(log=…)` handed a sealed log is refused at start, because serving
   it would write to a log the file says is finished. Handed the live one, it
@@ -779,7 +809,7 @@ loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
 the server's replay. `EARLIEST` on a freshly migrated stream is where the
 current log begins.
 
-Retired logs stay on disk and in the archive. `serve`'s maintainer keeps
+Retired logs stay on disk and in their published tables. `serve`'s maintainer keeps
 maintaining the ones on this disk, so their local retention still runs.
 litestream replicates only the current log, since nothing writes to a retired
 one.
@@ -798,7 +828,7 @@ per **sealed** log, with a struct per column (`min`, `max`, `null_count`,
 `value_count`, and `nan_count` for floats), rolled up from the log's own
 Iceberg statistics (litelink#85). The live log has no row and is never pruned.
 
-**`Stream.migrate` writes it.** After the retired log is sealed and pushed,
+**`Stream.migrate` writes it.** After the old log is retired,
 and before the next log exists, `migrate` reads the retired log's
 `column_statistics()` across every tier. A failure at that point leaves the
 stream exactly as it was. The retired log's row is added to the manifest
@@ -858,7 +888,7 @@ several terms.
 | `empty` | the log holds nothing yet | subscribe live |
 | `ahead` | above the frontier | the server was restored or rebuilt; investigate |
 | `too_old` | further back than `max_replay` | `catch_up=True`, or read the log directly |
-| `evicted` | below what the scan's tier holds | `catch_up=True` if the archive goes back further, else accept the gap |
+| `evicted` | below what the scan's tier holds | `catch_up=True` if the published tables go back further, else accept the gap |
 
 Five rather than one, because the move differs for each and collapsing them made
 every one of them a guess.
@@ -869,82 +899,125 @@ wherever the log happens to start would give a stream that silently begins above
 where it asked — a hole at the join, which is the one wrong answer a resume must
 never give.
 
-**`earliest` asks three tiers, not two.** `coverage()` reports the archive and
-the buffer, because it answers "what can this reader serve" for a reader
-assembled from an archive and a replica, where the local Iceberg table is empty
-by construction. A server reads its *own* log, where that table holds almost
-everything. *Measured*: 60 rows sealed into 4 Parquet files, `coverage()`
-reporting `archive=None, buffered=None`, and every `offset=EARLIEST` subscribe
-refused as "holds no rows yet". `table_extent()` is the third tier.
+**An empty scan below the frontier is not always a hole.** A restore fences
+2**20 offsets that were never issued, so a replay inside the fence reads
+nothing and there is nothing to refuse. Rows evicted from staging read nothing
+too. The published tier tells them apart: if it holds rows from the requested
+offset on, the rows exist and staging has dropped them, so the replay is
+refused `evicted`; otherwise the range was never written and the replay is
+empty.
 
-### Catching up from the archive
+**`earliest` reads the tiers the replay reads.** `coverage()` reports three —
+published, staging and buffer — and a server that replays from staging and the
+buffer reports the lowest of those two, so `EARLIEST` is never a promise the
+scan cannot keep.
+
+### Reading a stream's history: `Stream.snapshot`
+
+A stream is a sequence of logs, each publishing an ordinary Iceberg table, and
+its metadata file says which, in order, where each is published, and the
+offsets and `streamcast_ts` range each holds. `Stream.snapshot(metadata_uri)`
+reads that file and then the tables, on the reader's machine with the reader's
+credentials. The tables are read through DuckDB's `iceberg_scan`, each pinned
+to the snapshot its `version-hint.text` named when it was opened, and the logs
+are read as one table with `UNION ALL BY NAME`.
+
+**A fixed point, named at most one way.** Nothing: everything published.
+`as_of_offset=N`: every row up to and including `N`, with the rows above the
+published end read from `broker=` and refused without one (`LATEST` is the
+broker's frontier). `as_of_ts=T`: every row stamped at or before `T`, from
+published rows only, because the wire never carries `streamcast_ts`; a `T` past
+what the live log has published is refused rather than answered short. A
+server clock step can put two rows out of order by stamp while their offsets
+stay monotonic, and that is the one way `as_of_ts` is not exact.
+
+**Correct or it raises.** A missing metadata file, a file whose `stream_id`
+is not the one the greeting named, and a range neither the tables nor the
+broker holds all raise `SnapshotUnavailable`, the last with both numbers. So
+does **a retired log whose table holds fewer rows than the manifest's
+`record_count`**, the whole log's count read at retirement. A short table
+reads as a smaller log, and offsets are not dense across a restore fence, so
+nothing downstream could tell missing rows from fenced ones; the count can.
+
+**The heavy work is the reader's.** Pruning, the table reads and the query
+run on the reader; the broker's cost is one greeting and, when asked, a
+bounded tail. `filters=` terms and offset bounds, on `scan` and `sql` alike,
+are pruned against the manifest first, so a retired log they exclude is never
+opened, and are applied to the rows as well, so the answer does not depend on
+what was pruned. SQL is not mined for terms: a misread predicate would drop a
+log that held matches and answer short, so that waits on a sound extractor
+(#57).
+
+**The caller's conditions apply over the union, not inside each log.** A log
+from before a migration added a column has no such column, so a condition on
+it inside that log's read would not bind. Over the union the column is NULL
+there, as in any other read. The snapshot's own limits (the offsets, and the
+`as_of_ts` bound on logs that carry the stamp) stay inside, where they always
+bind and push down.
+
+### Catching up from the published tables
 
 `too_old` and `evicted` are the two refusals that mean *the rows exist, just not
-here*. `connect(catch_up=True)` is the client reading them out of the log's
-archive itself, so recovering a consumer that has been down a long time is a
-flag rather than an orchestration problem.
+here*. `connect(catch_up=True)` is the client reading them out of the stream's
+published tables itself, so recovering a consumer that has been down a long
+time is a flag rather than an orchestration problem.
 
-The rule that shapes it: **nothing is connected while the archive is read.**
-The obvious design opens the socket at the archive's frontier first, which
-closes the gap by construction — and makes the server queue for a subscriber
-that will not read a message until it has pulled millions of rows out of object
-storage. `max_backlog` is 8,192, so it is dropped with `TooSlow` before the
-catch-up finishes: a recovery that guarantees its own failure on exactly the
-consumers that need it. *Measured* with `max_backlog=16`, where the first shape
-died immediately and this one caught up 20,000 rows.
+The rule that shapes it: **nothing is connected while the tables are read.**
+The obvious design opens the socket at the published end first, which closes
+the gap by construction — and makes the server queue for a subscriber that will
+not read a message until it has pulled millions of rows out of object storage.
+`max_backlog` is 8,192, so it is dropped with `TooSlow` before the catch-up
+finishes: a recovery that guarantees its own failure on exactly the consumers
+that need it. *Measured* with `max_backlog=16`, where the first shape died
+immediately and this one caught up 20,000 rows.
 
-So it is a loop, and each round is: read the archive from the consumer's offset
-to whatever the archive now reaches, then try to connect there.
+**It is built on `Stream.snapshot`.** Each round takes a snapshot of everything
+published, streams its rows from the consumer's offset, and connects at the
+snapshot's `end_offset` — or at the last row plus one, if that is higher. The
+snapshot reads every log the stream has had, so a catch-up crosses a
+migration's seam as it crosses anything else.
 
 | round ends | because |
 |---|---|
-| connected | the archive got inside the server's replay window |
-| refused again | the server moved on while the gap was read; the archive moved too, so go again |
-| `catch_up_retries` exhausted | the stream is published faster than it is archived — raise `max_replay`, sync more often, or allow more rounds |
+| connected | the published tables got inside the server's replay window |
+| refused again | the server moved on while the gap was read; more was published too, so go again |
+| `catch_up_retries` exhausted | the stream is written faster than it is published — raise `max_replay`, publish more often, or allow more rounds |
 
 Rows already yielded are not re-read: a round that fails starts the next above
 where it stopped. Memory is one `RecordBatch`, and every blocking call crosses
 into a thread, exactly as the server's replay does.
 
-**The gap that nothing holds.** If the archive's frontier is itself below the
-server's window, a range exists that the server has forgotten and the archive
-never received. That is reported with both numbers rather than half-served: a
-consumer that silently resumed above it would have lost data and been told it
-recovered.
+**The gaps that nothing holds.** If the published tables end below the
+server's window, a range exists that the server has forgotten and was never
+published. If they start above the consumer's offset, the rows it asked for
+are in neither. Both are reported with the numbers rather than half-served: a
+consumer that silently resumed above a gap would have lost data and been told
+it recovered.
 
-**Where the archive location comes from**, in order: an explicit `archive=`, the
-refusal, then the greeting. The refusal carries it last, so the numbers survive
-the 123-byte trim and a long bucket URI is what drops; the greeting has no such
-limit, and a client that did not get it from the refusal spends one throwaway
-connection asking.
+**Where the metadata file comes from**: an explicit `connect(metadata=)`, else
+the greeting. The refusal does not carry it — a close frame is 123 bytes and
+a bucket URI does not fit beside the numbers — so a refused client spends one
+throwaway connection asking. The greeting's `stream_id` is checked against the
+file; an explicit `metadata=` is trusted to be the file the caller meant.
 
-**The archive, not the WAL replica.** `snapshot(include_wal=False)`, which is
-the default, and the choice is load-bearing rather than incidental. A WAL
-replica carries the buffer — the unsealed tail and the range between
-`archived_through` and the frontier — and that band is exactly what the
-SERVER still holds and streams once the catch-up hands back to the socket.
-Restoring it here fetches a second copy of the next few seconds of the
-subscription.
-
-It would also fail on a log with no replica, and `wal_replication` is opt-in
-so most have none: litelink measures `include_wal=True` raising in 0.10 s
-where archive-only served 3,870 rows. And it needs the litestream binary on
-the CONSUMER, where today a catch-up needs S3 read access and nothing else —
-no subprocess, no scratch directory, nothing to provision on every box that
-might fall behind. A 1.9 MB buffer takes 7.2 s to restore at 60-75 ms RTT, of
-which ~0.2 s is transfer; the rest is a LIST plus ~20 serial GETs whose count
-grows with the log's AGE rather than its size.
-
-A consumer that wants the whole history with no server in the picture is not
-doing a catch-up — it wants `litelink.snapshot` directly, and the greeting
-publishes what it needs (`info.log`).
+**The published tables, not the WAL replica.** A WAL replica carries the
+buffer — the unsealed tail and the range between `published_through` and the
+frontier — and that band is exactly what the SERVER still holds and streams
+once the catch-up hands back to the socket. Restoring it here would fetch a
+second copy of the next few seconds of the subscription. It would also fail
+on a log with no replica, and `wal_replication` is opt-in, so most have none.
+And it needs the litestream binary on the CONSUMER, where a catch-up needs
+read access to the tables and nothing else — no subprocess, no scratch
+directory, nothing to provision on every box that might fall behind.
 
 **Credentials are the client's.** The server never sends any, and the client
 resolves them the way litelink does — the ordinary AWS chain, overridable with
-`S3Options`. An archive that cannot be read raises `CatchUpUnavailable` at
+`S3Options`. Tables that cannot be read raise `CatchUpUnavailable` at
 `connect` rather than at the first `recv`, because a consumer told its
 subscription was open and handed a credentials error minutes later from
 whatever line read next is the failure the eager greeting exists to prevent.
+A stream that publishes only to local `file://` tables can be caught up on the
+server's own machine; anywhere else the read says the history is local.
 
 ---
 
@@ -1051,15 +1124,15 @@ resume_at = landed + 1
 ```
 
 That is the whole of it: an ordinary subscribe, and a comparison. Nothing
-queries the archive — it lags, so a row published a second ago is not in it —
+queries the published tables — they lag, so a row published a second ago is not in it —
 and nothing needs new server state.
 
 **A publisher recovering this way needs no litelink**, which is the point of
 doing it over the socket rather than against the log. It needs streamcast and
 the ability to reach the server, exactly like a consumer; no Iceberg reader,
 no object-storage credentials, no second dependency on a box whose only job
-is to publish. The same argument as `catch_up` reading the archive rather than
-the WAL replica (§5), one layer out.
+is to publish. The same argument as `catch_up` reading the published tables rather
+than the WAL replica (§5), one layer out.
 
 **The offset and the key do different jobs, and both are needed.** The offset
 bounds *where to look*: `send` already returned it, so the replay covers only
@@ -1145,16 +1218,16 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 | a replay outruns `max_backlog` | the subscriber is dropped right after catching up. Size the two together (§4) |
 | two publishers on one log | litelink refuses: one writer per log. A second server on the same directory fails to open |
 | the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
-| a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the archive and then connects (§5) |
+| a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the published tables and then connects (§5) |
 | a catching-up consumer has no credentials | `CatchUpUnavailable` at `connect`, naming the endpoint, the credential source, and four ways out |
 
 ---
 
 ## 8b. Recovering a server
 
-`Stream.restore(name, root=…, archive=…)` stands a stream up on a box that
-never held its log: litelink rebuilds it from the archive and the replicated
-WAL, and the result serves and appends like any other.
+`Stream.restore(name, root=…, published=…)` stands a stream up on a box that
+never held its log: litelink rebuilds it from the published table and the
+replicated WAL, and the result serves and appends like any other.
 
 **Offsets are fenced, not reissued**, and that is what makes the move safe for
 consumers. litelink burns 2**20 offsets, so the restored stream resumes above
@@ -1191,12 +1264,12 @@ default server and a plain `connect` — no raised bound, no `catch_up`.
 
 | what is recovered | what is not |
 |---|---|
-| the archive in full, adopted via `version-hint.text` | the local table — rebuilt EMPTY; its Parquet was on the dead machine |
-| the unsealed tail and the band between `archived_through` and `end_offset`, from the replicated `buffer.db` | rows appended inside the replication lag — served to callers, never shipped |
+| the published table in full, adopted via `version-hint.text` | the staging table — rebuilt EMPTY; its Parquet was on the dead machine |
+| the unsealed tail and the band between `published_through` and `end_offset`, from the replicated `buffer.db` | rows appended inside the replication lag — served to callers, never shipped |
 
-`hydrate=timedelta(...)` re-registers archived files into the local tier. It
-has no default because it costs egress and the window is the caller's; without
-it the local table stays empty and a local-only read sees nothing.
+`hydrate=timedelta(...)` re-registers published files into staging. It has no
+default because it costs egress and the window is the caller's; without it
+staging stays empty and a replay without `replay_published=True` sees nothing.
 
 **A planned cutover loses nothing**: stop the writer, let the sidecar ship its
 last frames, then restore. Only unplanned failover loses rows, and it loses
@@ -1212,7 +1285,7 @@ succeeds against one.
 *Measured*: a restore against a live primary returned a handle fenced
 1,048,575 offsets above it. Both handles then appended (offset 202 on the
 primary, 1048777 on the revived one — no collision, because the fence works),
-and both synced to the same archive. Nothing refused, nothing warned.
+and both published to the same table. Nothing refused, nothing warned.
 
 **Stop the old producer before restoring.** This is an operational
 requirement, not something either library enforces, and it is
@@ -1223,7 +1296,7 @@ requirement, not something either library enforces, and it is
 ## 9. Open
 
 **A catch-up that does not re-read what it already has.** `catch_up` reads
-the archive from the consumer's offset each round, and a round that fails
+the published tables from the consumer's offset each round, and a round that fails
 after yielding rows starts the next above them — so nothing is re-delivered
 WITHIN one `connect`. Across two, a consumer that died mid-catch-up starts
 from its cursor again, which may be well below where it got to, because the

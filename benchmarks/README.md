@@ -5,6 +5,8 @@ just bench                       # fan-out and publish
 just bench --subscribers 500 --messages 100000
 just bench-replay                # replay, and which layer it is spent in
 just bench-replay --rows 200000
+just bench-snapshot              # reading a stream's history: 100k rows in 1, 4, 16 logs
+just bench-snapshot --rows 1000000 --logs 1 8
 ```
 
 Three numbers, because three different things could be the bottleneck and only one
@@ -28,6 +30,13 @@ and the split across DuckDB, Arrow and the encoder — and then the arithmetic
 that sizes `max_replay` against `max_backlog` for your hardware. The numbers in
 [`docs/SPEC.md`](../docs/SPEC.md) §4 come from it, after an earlier version of
 that section stated two guesses as measurements and had both about 2x wrong.
+
+`bench-snapshot` measures `Stream.snapshot` over a stream written as `--logs` logs, each
+a migration adding a column, so the read is the real `UNION ALL BY NAME`. It reports the
+cold first query, the floor (opening a snapshot, reading one row), a full count, scan and
+aggregate, and the same selective read written as `where=` and as `filters=`, which is
+what pruning saves, beside what deciding the prune costs. Each config runs in its own
+process, so every cold figure is cold.
 
 Then an end-to-end pass over loopback with real subscribers, reporting p50 and p99
 delivery latency. p99 rather than a mean, because the interesting failure is a
