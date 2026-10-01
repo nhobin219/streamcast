@@ -1,9 +1,9 @@
 """Every demo, by name, with all of its processes: `just demo NAME`.
 
-    just demo                        # a broker, the trades producer, a consumer
+    just demo                        # every demo, and what it shows
+    just demo trades                 # a broker, the trades producer, a consumer
     just demo consumer --label b     # one more consumer, in another terminal
     just demo otel                   # OpenTelemetry, live in a dashboard
-    just demo --list                 # every demo, and what it shows
 
 Every example has the same three roles, each its own process: a **producer**
 client publishes rows, a **broker** serves the streams, and a **subscriber**
@@ -14,8 +14,7 @@ role, and stops them all, last started first, on Ctrl-C.
 
 Each process is a module with its own `--help`, so any one of them runs on its
 own with `uv run python -m`. `just demo NAME ARGS` passes ARGS to the demo's
-last process, its subscriber; arguments that start with `-` and no name go to
-the default demo.
+last process, its subscriber. With no NAME, or `--help`, it lists the demos.
 """
 
 from __future__ import annotations
@@ -67,20 +66,20 @@ def trades(
 
 
 DEMOS: dict[str, Demo] = {
-    "server": Demo(
+    "trades": Demo(
         "Bitstamp's BTC/USD trades: a producer, a broker with a log, a consumer",
         trades("--sort-by", "trades=event_ts"),
     ),
     "consumer": Demo(
-        "one more consumer of the server demo: stop it, restart it, watch it replay",
+        "one more consumer of the trades demo: stop it, restart it, watch it replay",
         [Process("consumer", module("examples.trades.consumer"))],
     ),
     "live": Demo(
-        "the server demo with a live-only broker: no log, nothing to replay",
+        "the trades demo with a live-only broker: no log, nothing to replay",
         trades("--no-log"),
     ),
     "fastapi": Demo(
-        "the server demo with the broker mounted in a FastAPI app",
+        "the trades demo with the broker mounted in a FastAPI app",
         [
             Process(
                 "broker",
@@ -156,9 +155,8 @@ def listing() -> str:
     width = max(len(name) for name in DEMOS) + 2
     lines = [f"  {name:<{width}}{demo.about}" for name, demo in DEMOS.items()]
     lines.append(f"  {'clean':<{width}}delete what the demos stored")
-    return (
-        "just demo [NAME] [ARGS]   (no NAME: server; ARGS go to its subscriber)\n\n"
-        + "\n".join(lines)
+    return "just demo NAME [ARGS]   (ARGS go to the demo's subscriber)\n\n" + "\n".join(
+        lines
     )
 
 
@@ -248,12 +246,9 @@ def run(demo: Demo, args: list[str]) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if argv[:1] in (["--list"], ["-l"], ["list"]):
+    if not argv or argv[0] in ("-h", "--help"):
         print(listing())
         return
-
-    if not argv or argv[0].startswith("-"):
-        argv = ["server", *argv]
 
     name, args = argv[0], argv[1:]
     if name == "clean":
@@ -261,7 +256,7 @@ def main(argv: list[str]) -> None:
         return
 
     if name not in DEMOS:
-        print(f"no demo called {name!r}\n\n{listing()}", file=sys.stderr)
+        print(f"no demo called {name!r}; name one\n\n{listing()}", file=sys.stderr)
         raise SystemExit(2)
 
     if name in HINTS:

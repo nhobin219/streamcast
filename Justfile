@@ -142,18 +142,18 @@ rustfs-stop:
 check-all: lint format-check typecheck
     STREAMCAST_REQUIRE_S3=1 STREAMCAST_REQUIRE_NODE=1 uv run pytest
 
-# START HERE. Every demo, by name: `just demo --list` shows them all. A demo
+# START HERE. Every demo, by name: `just demo` alone lists them. A demo
 # is a producer, a broker and a subscriber, each its own process, and this
-# starts all of them. With no name: Bitstamp's BTC/USD trades, over an
+# starts all of them. The first to try is Bitstamp's BTC/USD trades, over an
 # unauthenticated websocket, so there is nothing to configure.
 #
-#   just demo                        terminal 1: broker, producer, consumer
+#   just demo trades                 terminal 1: broker, producer, consumer
 #   just demo consumer --label two   terminal 2 (and 3, and 4): one more consumer
 #
 # Stop a consumer, leave it stopped for a while, start it again, and watch it
 # replay what it missed before it goes live. See examples/README.md.
 #
-# Run a demo with all its processes (default: the server); `--list` shows them.
+# Run a demo with all its processes; with no name, list them.
 demo *args:
     uv run python -m examples {{args}}
 

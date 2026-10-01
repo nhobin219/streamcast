@@ -27,16 +27,16 @@ There are two kinds of example:
 ## Running a demo
 
 ```
-just demo --list           # every runnable demo, and what it shows
-just demo NAME [ARGS]      # run one; with no NAME, the server demo
+just demo                  # every runnable demo, and what it shows
+just demo NAME [ARGS]      # run one, with all its processes
 ```
 
 | `just demo` | its processes | what it shows |
 |---|---|---|
-| *(no name)*, `server` | broker, `trades/producer.py`, `trades/consumer.py` | Bitstamp's BTC/USD trades, with a log to replay from |
-| `consumer` | `trades/consumer.py` | one more subscriber for the server demo, in a second terminal |
-| `live` | as `server`, with a live-only broker | no log: nothing to replay |
-| `fastapi` | `fastapi_app.py` as the broker, then as `server` | the broker mounted in a FastAPI app |
+| `trades` | broker, `trades/producer.py`, `trades/consumer.py` | Bitstamp's BTC/USD trades, with a log to replay from |
+| `consumer` | `trades/consumer.py` | one more subscriber for the trades demo, in a second terminal |
+| `live` | as `trades`, with a live-only broker | no log: nothing to replay |
+| `fastapi` | `fastapi_app.py` as the broker, then as `trades` | the broker mounted in a FastAPI app |
 | `book` | broker, `book/producer.py`, `book/index.html` | Bitstamp's live order book as a keyed table log, kept by a browser page |
 | `otel` | otel-gui, broker, `otel/services.py`, `otel/export.py` | OpenTelemetry logs and traces through streams, in a dashboard |
 | `clean` | | delete what the demos stored |
@@ -44,14 +44,14 @@ just demo NAME [ARGS]      # run one; with no NAME, the server demo
 `just demo` starts a demo's processes in order, waiting for each one that
 listens to answer, and prints their output in one terminal with each line
 labelled by its role. Ctrl-C stops them all, last started first. ARGS go to
-the demo's subscriber (`just demo --label two`). Every process is a module
+the demo's subscriber (`just demo trades --label two`). Every process is a module
 with its own `--help`, so any one runs alone with `uv run python -m`.
 `examples/__main__.py` holds the list.
 
 ## Start here
 
 ```
-just demo                        # terminal 1: broker, producer, consumer
+just demo trades                 # terminal 1: broker, producer, consumer
 just demo consumer --label two   # terminal 2: one more consumer, and 3, and 4
 ```
 

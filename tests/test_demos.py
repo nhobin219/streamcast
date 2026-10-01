@@ -46,26 +46,27 @@ class TestEachDemo:
 
 
 class TestTheRunner:
-    @pytest.mark.parametrize("flag", ["--list", "-l", "list"])
-    def test_the_list_names_every_demo(self, flag, capsys):
-        demos.main([flag])
+    @pytest.mark.parametrize("argv", [[], ["-h"], ["--help"]])
+    def test_no_name_lists_every_demo(self, argv, capsys):
+        demos.main(argv)
         listed = capsys.readouterr().out
         assert all(f"  {name} " in listed for name in demos.DEMOS)
 
-    def test_an_unknown_name_is_refused_with_the_list(self, capsys):
+    @pytest.mark.parametrize("argv", [["nope"], ["--list"], ["--label", "b"]])
+    def test_anything_but_a_name_is_refused_with_the_list(self, argv, capsys):
         with pytest.raises(SystemExit) as refused:
-            demos.main(["nope"])
+            demos.main(argv)
 
         assert refused.value.code == 2
-        assert "no demo called 'nope'" in capsys.readouterr().err
+        assert "no demo called" in capsys.readouterr().err
 
     def test_arguments_go_to_the_subscriber(self, monkeypatch):
         ran: list[tuple[str, list[str]]] = []
         monkeypatch.setattr(
             demos, "run", lambda demo, args: ran.append((demo.about, args))
         )
-        demos.main(["--label", "b"])
-        assert ran == [(demos.DEMOS["server"].about, ["--label", "b"])]
+        demos.main(["trades", "--label", "b"])
+        assert ran == [(demos.DEMOS["trades"].about, ["--label", "b"])]
 
     def test_a_port_already_taken_stops_it_before_it_starts(self, capsys):
         with socket.socket() as holder:

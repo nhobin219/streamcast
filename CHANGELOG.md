@@ -38,9 +38,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   own (`otel/services.py`).
 - **`just demo NAME`** replaces the `demo-*` recipes and starts every process
   a demo has, in one terminal with each line labelled by its role, stopping
-  them all on Ctrl-C. `just demo --list` shows every runnable demo; with no
-  name it is the server demo, and `just demo consumer` adds one more
-  consumer from a second terminal.
+  them all on Ctrl-C. `just demo` alone (or `--help`) lists every runnable
+  demo; `just demo trades` is the one to start with, and `just demo consumer`
+  adds one more consumer from a second terminal.
 
 ### Fixed
 

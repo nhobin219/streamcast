@@ -1,6 +1,6 @@
 """A producer: Bitstamp's live BTC/USD trades, published to a broker.
 
-    just demo                    # this, a broker, and a consumer
+    just demo trades             # this, a broker, and a consumer
     uv run python -m examples.trades.producer --uri ws://127.0.0.1:8765/trades
 
 Bitstamp publishes trades over an unauthenticated websocket, so there is

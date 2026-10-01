@@ -1,6 +1,6 @@
 """A subscriber that resumes, and the whole of what that costs.
 
-    just demo                       # a broker, the producer, and this
+    just demo trades                # a broker, the producer, and this
     just demo consumer --label b    # another one, in a second terminal
 
 Run several. Stop one with Ctrl-C, leave it stopped while trades keep
