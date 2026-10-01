@@ -43,7 +43,7 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed — breaking
 
-- **litelink 0.6** (`>=0.6.0,<0.7`), and its vocabulary with it (#42). The
+- **litelink 0.6** (`>=0.6.1,<0.7`), and its vocabulary with it (#42). The
   archive is the published table: `Stream.new` and `Stream.restore` take
   `published=` for `archive=`, and `replay_published=` for
   `replay_archive=`. Every log publishes; without a location, to a table
