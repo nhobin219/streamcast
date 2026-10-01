@@ -123,9 +123,9 @@ streamcast.EARLIEST · streamcast.LATEST
 
 Three deliberate exceptions:
 
-- **Iterating yields `(offset, msg)`**, not `message`. The offset is what makes a reconnect
-  a resume rather than a restart, and a subscriber that has to ask for it separately will
-  forget to.
+- **Iterating yields `(offset, ts, msg)`**, not `message`. The offset is what makes a
+  reconnect a resume rather than a restart, and a subscriber that has to ask for it
+  separately will forget to. `ts` is when the server took the row.
 - **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
   Publishing is `Stream.send`, in the server's own process.
 - **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`.
@@ -147,17 +147,17 @@ Full reference in [`docs/API.md`](docs/API.md).
 
 ## The wire
 
-Every frame is a text frame of JSON: a greeting, then an `[offset, msg]` pair per message.
+Every frame is a text frame of JSON: a greeting, then `[offset, ts, msg]` per message.
 A client in any language needs a JSON parser, plus, for binary columns, the decoding rules
 in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
  "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"6f1c…","durable":true}
-[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
+[1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-The offset is positional, so `const [offset, msg] = JSON.parse(frame)` is a client in
+The offset and the stamp are positional, so `const [offset, ts, msg] = JSON.parse(frame)` is a client in
 another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
 with none at all.
 
@@ -239,8 +239,8 @@ log.sql("SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed lat
 ```
 
 The table has two columns you did not declare. `litelink_offset` is the offset every frame
-carries, and `streamcast_ts` is when the server took the row, in UTC microseconds. The
-second is stored and never sent.
+carries, and `streamcast_ts` is when the server took the row, in UTC microseconds — every
+frame carries that too, as its `ts`, beside the row rather than in it.
 
 ### Changing the schema
 
@@ -595,7 +595,7 @@ widens the replay — a cursor that leads would skip rows and duplicate them.
 
 ```python
 async with streamcast.connect("ws://localhost:8765/trades") as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         print(offset, msg["price"], msg["amount"])
 ```
 
@@ -642,7 +642,7 @@ stream exactly — no gap, no duplicate.
 
 ```python
 async with streamcast.connect(uri, cursor=".trades.offset") as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         handle(msg)
 ```
 
@@ -682,7 +682,7 @@ async with streamcast.connect(
     cursor_uri="s3://streamcast/consumer1/stream.offset",
     catch_up=True,
 ) as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         handle(msg)
 ```
 

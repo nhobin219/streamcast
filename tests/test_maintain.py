@@ -134,8 +134,8 @@ class TestTheDefect:
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                 got = [await sub.recv() for _ in range(500)]
 
-        assert [offset for offset, _row in got] == list(range(1, 501))
-        assert got[0][1]["event_ts"] == 0
+        assert [offset for offset, _ts, _row in got] == list(range(1, 501))
+        assert got[0][2]["event_ts"] == 0
 
 
 def _a_log(root, name):

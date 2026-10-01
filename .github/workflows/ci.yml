@@ -176,8 +176,11 @@ jobs:
                   async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                       got = [await sub.recv() for _ in range(50)]
 
-                  assert [offset for offset, _ in got] == list(range(1, 51)), got[:3]
-                  assert got[7][1]["price"] == 85_572.0, got[7]
+                  assert [offset for offset, _, _ in got] == list(range(1, 51)), got[:3]
+                  # A bare litelink log has no streamcast_ts column, so every
+                  # frame's ts is null — live and replayed alike (I10).
+                  assert all(ts is None for _, ts, _ in got), got[:3]
+                  assert got[7][2]["price"] == 85_572.0, got[7]
                   # And the log is a TABLE, which is the whole reason litelink
                   # is underneath this rather than an append-only file. A wheel
                   # that shipped a working server over an unqueryable log would

@@ -120,11 +120,13 @@ class TestTheBroker:
             ) as snap:
                 assert snap.end_offset == 8
                 table = await snap.scan()
-                streamed = [offset async for offset, _row in snap.rows(1)]
+                streamed = [(offset, ts) async for offset, ts, _row in snap.rows(1)]
 
         assert offsets(table) == list(range(1, 8))
         assert table.column("price").to_pylist() == [100.0 + i for i in range(7)]
-        assert streamed == list(range(1, 8))
+        assert [offset for offset, _ts in streamed] == list(range(1, 8))
+        # The tables and the broker's tail both carry the stamp.
+        assert all(isinstance(ts, int) for _offset, ts in streamed)
 
     async def test_no_socket_when_the_tables_cover_it(self, tmp_path, serve):
         stream = await stream_of(tmp_path, 4)

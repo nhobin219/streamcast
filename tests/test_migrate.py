@@ -371,9 +371,10 @@ class TestServingAMigratedStream:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=6) as sub:
                     await stream.send(row(5, venue="x"))
-                    offset, message = await sub.recv()
+                    offset, ts, message = await sub.recv()
 
             assert offset == 6
+            assert isinstance(ts, int)
             assert message["venue"] == "x"
         finally:
             await stream.aclose()
@@ -410,15 +411,16 @@ class TestServingAMigratedStream:
                     await stream.send(row(5, venue="x"))
                     live = await sub.recv()
 
-            assert [offset for offset, _ in caught_up] == [2, 3, 4, 5]
-            assert [message["price"] for _, message in caught_up] == [
+            assert [offset for offset, _ts, _ in caught_up] == [2, 3, 4, 5]
+            assert [message["price"] for _, _ts, message in caught_up] == [
                 101.0,
                 102.0,
                 103.0,
                 104.0,
             ]
             assert live[0] == 6
-            assert live[1]["venue"] == "x"
+            assert isinstance(live[1], int)
+            assert live[2]["venue"] == "x"
         finally:
             await stream.aclose()
 
@@ -464,9 +466,10 @@ class TestServingAMigratedStream:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                     assert sub.info.replay == (6, 6)
                     await stream.send(row(5, venue=None))
-                    offset, _message = await sub.recv()
+                    offset, ts, _message = await sub.recv()
 
             assert offset == 6
+            assert isinstance(ts, int)
         finally:
             await stream.aclose()
 

@@ -42,10 +42,11 @@ through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest 
 exactly as they do there — and `serve` returns an object that proxies `websockets.Server`
 (`sockets`, `serve_forever`, `connections`, `is_serving`). Three things differ:
 
-**Iterating a subscription yields `(offset, msg)`**, not `message`. The offset is the
+**Iterating a subscription yields `(offset, ts, msg)`**, not `message`. The offset is the
 only thing that makes a reconnect a resume rather than a restart, and a subscriber that
-has to ask for it separately will forget to. `msg` is a `dict` over your declared columns
-**and nothing else** — the offset is framing, not data, and never appears inside it.
+has to ask for it separately will forget to. `ts` is `streamcast_ts`, when the server took
+the row. `msg` is a `dict` over your declared columns **and nothing else** — the offset
+and the stamp are framing, not data, and never appear inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
 because publishing is `Stream.send` in the server's own process. Nothing inherits a
@@ -566,7 +567,7 @@ Awaitable and an async context manager, like `websockets.connect`.
 
 ```python
 async with streamcast.connect("ws://localhost:8765/trades", offset=123) as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         ...
 ```
 
@@ -590,8 +591,8 @@ some `recv`.
 ### `Subscription`
 
 ```python
-await sub.recv() -> tuple[int | None, dict[str, object]]
-async for offset, msg in sub: ...
+await sub.recv() -> tuple[int | None, int | None, dict[str, object]]   # (offset, ts, msg)
+async for offset, ts, msg in sub: ...
 await sub.close(code=1000, reason="") -> None   # drains what is in flight
 sub.commit(offset=None) -> None   # save the cursor now — see Resuming
 
@@ -608,6 +609,11 @@ so the parse happened once at the publisher.
 
 `offset` is `None` on a stream with no log. Nothing assigned one, and `?offset=` is
 refused on such a stream, so there is nothing to resume from.
+
+`ts` is `streamcast_ts`: when the server took the row, in UTC microseconds — the value
+its log stored, so a replayed or caught-up row carries the same `ts` it carried live. A
+stream with no log sends its send time. `None` only for a row of a log created before the
+column existed.
 
 Iteration **stops** on a normal close (1000/1001) and **raises** on anything else — the
 same contract as iterating a `websockets` connection, with the refusals below filling in
@@ -687,7 +693,7 @@ subscription loads it at connect, resumes one above, and saves as the loop runs.
 
 ```python
 async with streamcast.connect(uri, cursor=".trades.offset") as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         handle(msg)
 ```
 
@@ -752,7 +758,7 @@ all of it:
 
 ```python
 async with streamcast.connect(uri, cursor=".trades.offset", catch_up=True) as stream:
-    async for offset, msg in stream:
+    async for offset, ts, msg in stream:
         handle(msg)
 ```
 
@@ -936,10 +942,11 @@ would otherwise be ignored and every send validated against columns you never wr
 **The table carries two columns you did not declare.** `litelink_offset` is litelink's, and
 every frame carries it as its offset. **`streamcast_ts`** is streamcast's: the time the server
 took the row, in UTC microseconds — so `streamcast_ts - event_ts` is feed latency per row,
-queryable over the whole history. It is stored and never sent: no frame carries it and the
-greeting's `schema` leaves it out. `send_many` gives its whole group one value, because the
-group commits as one transaction. It is wall clock, so a clock step on the server shows in
-it.
+live as `ts - msg["event_ts"]` and queryable over the whole history. Every frame carries it
+as its `ts`, the value the log stored, so a replay sends what the live frame did; the
+greeting's `schema` leaves it out. A stream with no log sends its send time. `send_many`
+gives its whole group one value, because the group commits as one transaction. It is wall
+clock, so a clock step on the server shows in it.
 
 The name is reserved. A declaration that uses it is refused, and so is a row that
 supplies it. A log created before the column existed opens unchanged and is not stamped,
@@ -1044,7 +1051,7 @@ streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
 without this repo:
 
 ```json
-{"streamcast":3,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
  "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
 ```
 
@@ -1170,7 +1177,7 @@ for rows no table holds yet, and only when asked.
 async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
     await snapshot.scan(columns=["price"], filters=[("price", ">", 500.0)])
-    async for offset, row in snapshot.rows(1):
+    async for offset, ts, row in snapshot.rows(1):
         ...
 ```
 
@@ -1183,7 +1190,7 @@ async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
 | *(neither)* | everything published. The live log's unpublished tail is left out, and no broker is involved |
 | `as_of_offset=N` | every row up to and including offset `N`. Past what is published the rest comes from `broker=`, and is refused without it |
 | `as_of_offset=streamcast.LATEST` | the broker's frontier when it connects; needs `broker=` |
-| `as_of_ts=T` | every row whose `streamcast_ts` is at most `T`. Published rows only, since the wire never carries `streamcast_ts`, so a `T` past what is published is refused rather than answered short |
+| `as_of_ts=T` | every row whose `streamcast_ts` is at most `T`. Published rows only — the broker is consulted as of an offset, not a time — so a `T` past what is published is refused rather than answered short |
 
 `snapshot.end_offset` is exclusive: every row the snapshot holds is below it, and a reader
 carrying on live subscribes there.
@@ -1192,7 +1199,7 @@ carrying on live subscribes there.
 |---|---|
 | `scan(columns=, where=, filters=, start_offset=, end_offset=)` | rows in `[start_offset, end_offset)`, oldest first, as one Arrow table |
 | `sql(query, filters=, start_offset=, end_offset=)` | `query` over the snapshot, which it reads as the table `log`, holding only the rows in `[start_offset, end_offset)` that match `filters` |
-| `rows(start, stop=None)` | one `(offset, row)` at a time, built exactly as a server replays them |
+| `rows(start, stop=None)` | one `(offset, ts, row)` at a time, built exactly as a server replays them |
 | `close()` | or `async with` |
 
 `where` is SQL over the stream's columns. `filters` are `(column, operator, value)` terms,
@@ -1227,22 +1234,23 @@ machine. On another machine the read says so and suggests an `s3://` location.
 
 ## On the wire
 
-Every frame is a text frame of JSON. The greeting, then a **two-element pair** per message:
-the offset, then the row. Reading a row in another language, including binary columns, is
+Every frame is a text frame of JSON. The greeting, then a **three-element array** per
+message: the offset, the time the server took the row, then the row. Reading a row in another language, including binary columns, is
 spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
  "metadata":"s3://market-data/prod/trades.metadata.json",
  "stream_id":"5f0c…","schema":{...},"durable":true}
-[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
+[1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
 (The greeting is one line on the wire; it is wrapped here to fit.)
 
-The offset is **positional**, not a key in the object — `const [offset, msg] =
-JSON.parse(frame)` — so `msg` is the publisher's row and nothing else, with no column to
-strip before forwarding it. No binary header, no length prefix, no payload kind.
+The offset and the stamp are **positional**, not keys in the object —
+`const [offset, ts, msg] = JSON.parse(frame)` — so `msg` is the publisher's row and nothing
+else, with no column to strip before forwarding it. `offset` is `null` on a stream with no
+log; `ts` is `null` only for a row of a log created before `streamcast_ts` existed. No binary header, no length prefix, no payload kind.
 
 `wscat ws://localhost:8765/trades?offset=0` is a working subscriber, and a consumer in any
 language needs a JSON parser rather than this document.

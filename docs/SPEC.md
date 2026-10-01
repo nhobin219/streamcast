@@ -72,26 +72,37 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ## 2. The wire
 
-**Every frame is a WebSocket text frame of JSON.** The greeting, then an
-`[offset, msg]` pair per message:
+**Every frame is a WebSocket text frame of JSON.** The greeting, then
+`[offset, ts, msg]` per message:
 
 ```
-{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
  "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"5f0c…",
  "durable":true}
-[1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
+[1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
-**The frame is a pair, and the halves are different kinds of thing.** The
-offset is the server's framing; `msg` is the publisher's row, untouched — no
-offset key, no injected metadata, so a subscriber can log it, forward it or
-append it to another stream whole.
+**The frame's parts are different kinds of thing.** The offset and the stamp
+are the server's framing; `msg` is the publisher's row, untouched — no offset
+key, no timestamp key, no injected metadata, so a subscriber can log it,
+forward it or append it to another stream whole (§6, where a row carrying
+`streamcast_ts` as a key would be refused by the next server).
 
-Positional, not a key in the object. A subscriber consumes it positionally
-either way — `offset, msg = await sub.recv()` in Python,
-`const [offset, msg] = JSON.parse(frame)` in JS — so a key would be a name in
-the contract that nothing reads, and injecting one would mean `msg` is not
-quite the row that was published.
+- **`offset`** is the log's `litelink_offset`, or `null` on a stream with no
+  log.
+- **`ts`** is `streamcast_ts`: when the server took the row, in UTC
+  microseconds — the value the log stored, so a replay sends exactly what the
+  live frame did (invariant 10). A stream with no log sends its send time.
+  It is `null` only for a row of a log created before the column existed,
+  live and replayed alike. A microsecond epoch (about 1.8e15) is well inside
+  the integers a JavaScript number holds exactly.
+
+Positional, not keys in the object. A subscriber consumes them positionally
+either way — `offset, ts, msg = await sub.recv()` in Python,
+`const [offset, ts, msg] = JSON.parse(frame)` in JS — so a key would be a name
+in the contract that nothing reads, and injecting one would mean `msg` is not
+quite the row that was published. The server's fields come first, the row
+last.
 
 There is no binary header, no length prefix and no payload kind. A message is
 a row of a typed table (§5), and a row is a JSON object — there is nothing for
@@ -172,7 +183,7 @@ form and travels as text. So a client in any language reads a row like this:
 1. **Keep the greeting's `schema`.** It is the first frame. `null` means the
    stream has no log and declares no columns: its rows are plain JSON, with
    nothing to decode.
-2. **For each data frame**, parse it as JSON into `[offset, msg]`. Then **walk
+2. **For each data frame**, parse it as JSON into `[offset, ts, msg]`. Then **walk
    `msg` against `schema`**, one property at a time, recursing into nested
    values:
 
@@ -190,8 +201,9 @@ form and travels as text. So a client in any language reads a row like this:
    | `"boolean"`, `"string"` | as is | as is |
    | anything this table doesn't list | as is | leave it as it arrived: a newer server may spell something this client doesn't know, and one unfamiliar column is no reason to drop a row |
 
-3. **The offset is the pair's first element**, an integer, or `null` on a
-   stream with no log (above). Keys arrive in `schema`'s property order.
+3. **The offset is the frame's first element**, an integer, or `null` on a
+   stream with no log (above), and **`ts` the second**, an integer, or `null`
+   for a row of a log that predates it. Keys arrive in `schema`'s property order.
    Nothing depends on that, but it makes frames diffable.
 
 **Writing is the same rules in reverse.** A remote publisher sends a binary
@@ -219,7 +231,7 @@ function read(schema, value) {
 }
 
 // the greeting, the first message: const schema = JSON.parse(event.data).schema;
-// each message after it:            const [offset, msg] = JSON.parse(event.data);
+// each message after it:            const [offset, ts, msg] = JSON.parse(event.data);
 //                                   const row = read(schema, msg);
 ```
 
@@ -486,9 +498,11 @@ application column carries — a row's own timestamps are the publisher's — an
 
 It is owned on exactly the terms litelink owns its offset:
 
-* **Never on the wire.** `_log.columns` leaves it out, and that tuple fixes the
-  key order of every frame, live and replayed — so invariant 10 holds on a log
-  that holds a column the wire does not.
+* **On the wire as framing, never as a key.** It is element 1 of every frame
+  (§2), beside the row as the offset is. `_log.columns` leaves it out of the
+  row, and that tuple fixes the key order of every frame, live and replayed —
+  so `msg` stays exactly the publisher's row, and invariant 10 holds with the
+  stamp read back from the log on replay.
 * **Never in the greeting's `schema`**, which is filtered by the same rule.
   Each log's `system_schema` in the metadata file names it instead.
 * **The server's to fill.** A row that carries it is refused rather than
@@ -926,8 +940,9 @@ are read as one table with `UNION ALL BY NAME`.
 `as_of_offset=N`: every row up to and including `N`, with the rows above the
 published end read from `broker=` and refused without one (`LATEST` is the
 broker's frontier). `as_of_ts=T`: every row stamped at or before `T`, from
-published rows only, because the wire never carries `streamcast_ts`; a `T` past
-what the live log has published is refused rather than answered short. A
+published rows only, since the broker is consulted as of an offset and not a
+time; a `T` past what the live log has published is refused rather than
+answered short. A
 server clock step can put two rows out of order by stamp while their offsets
 stay monotonic, and that is the one way `as_of_ts` is not exact.
 
@@ -1116,7 +1131,7 @@ async with streamcast.connect(uri, offset=last_acked_offset + 1) as sub:
     # `for` over a known count rather than a loop working out when to stop.
     lo, hi = sub.info.replay or (0, 0)
     for _ in range(hi - lo):
-        _offset, row = await sub.recv()
+        _offset, _ts, row = await sub.recv()
         if row["publisher"] == me:
             landed = max(landed, int(row["seq"]))
 

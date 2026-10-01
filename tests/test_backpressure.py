@@ -67,7 +67,7 @@ class TestIsolation:
                 finally:
                     await stalled.close()
 
-        assert [str(row["tag"])[:6] for _offset, row in received] == [
+        assert [str(row["tag"])[:6] for _offset, _ts, row in received] == [
             f"{i:06}" for i in range(40)
         ]
 
@@ -115,7 +115,7 @@ class TestDropping:
         # be invisible, and this is not one. Checked on the tag rather than
         # the offset, because this stream has no log and therefore no offsets
         # — see below.
-        tags = [str(row["tag"])[:6] for _offset, row in received]
+        tags = [str(row["tag"])[:6] for _offset, _ts, row in received]
         assert tags == [f"{i:06}" for i in range(len(tags))]
         # Bounded: it did not get all 200, which is the whole point.
         assert len(tags) < 200
@@ -124,7 +124,9 @@ class TestDropping:
         # resume point is how the library says so: nothing assigned offsets,
         # so there is nothing to reconnect at. That is the plainest argument
         # for attaching a log, and the next test is the other half of it.
-        assert all(offset is None for offset, _row in received)
+        assert all(offset is None for offset, _ts, _row in received)
+        # No log, but the server still took each row at a time it can name.
+        assert all(isinstance(ts, int) for _offset, ts, _row in received)
         assert raised.value.offset is None
         assert "resume at offset" not in str(raised.value)
 
@@ -155,9 +157,11 @@ class TestDropping:
                     for _ in range(total - len(received))
                 ]
 
-        offsets = [offset for offset, _ in received + rest]
+        offsets = [offset for offset, _ts, _ in received + rest]
         assert offsets == list(range(1, total + 1))
-        assert [str(row["tag"])[:6] for _, row in received + rest] == [
+        # `log` is unstamped, live and replayed alike.
+        assert all(ts is None for _, ts, _row in received + rest)
+        assert [str(row["tag"])[:6] for _, _ts, row in received + rest] == [
             f"{i:06}" for i in range(total)
         ]
 

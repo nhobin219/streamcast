@@ -70,7 +70,7 @@ async def one_trace(
     async with streamcast.connect(
         uri, offset=streamcast.EARLIEST, where={"trace_id": trace}
     ) as sub:
-        return [(await sub.recv())[1] for _ in range(counted["n"])]
+        return [(await sub.recv())[2] for _ in range(counted["n"])]
 
 
 async def main(root: Path) -> dict[str, Any]:
@@ -93,7 +93,7 @@ async def main(root: Path) -> dict[str, Any]:
                 failed, problems = await asyncio.to_thread(traffic, exporters)
 
             live: list[dict[str, Any]] = [
-                (await tail.recv())[1] for _ in range(problems)
+                (await tail.recv())[2] for _ in range(problems)
             ]
 
         failed_logs = await one_trace(f"{base}/logs", log_stream, failed)

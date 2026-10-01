@@ -118,8 +118,8 @@ class Stream:
     ordinary litelink table with whatever shape you gave it, so every column
     prunes, compresses and is queryable from any Iceberg engine. A row goes in
     and the same row comes back out, live or replayed. The table also carries
-    `streamcast_ts`, the time the server took each row — stored, never sent;
-    see `_log.STAMP`. `_schema` converts the declaration to Arrow, so a durable stream
+    `streamcast_ts`, the time the server took each row — stored, and sent
+    beside the row as each frame's `ts`; see `_log.STAMP`. `_schema` converts the declaration to Arrow, so a durable stream
     needs no import but this one.
 
     **Who closes the log depends on who opened it.** `root=`+`schema=` creates
@@ -934,7 +934,7 @@ class Stream:
 
         self._stamp(now)
         wire = row if codec.outbound is None else codec.outbound(row)
-        self._fan_out(row, encode(offset, wire, self._columns))
+        self._fan_out(row, encode(offset, self._wire_ts(now), wire, self._columns))
 
         return offset
 
@@ -981,9 +981,10 @@ class Stream:
             self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
 
         self._stamp(now)
+        ts = self._wire_ts(now)
         for offset, row in zip(offsets, batch, strict=True):
             wire = row if codec.outbound is None else codec.outbound(row)
-            self._fan_out(row, encode(offset, wire, self._columns))
+            self._fan_out(row, encode(offset, ts, wire, self._columns))
 
         return offsets
 
@@ -1003,13 +1004,27 @@ class Stream:
         self._last_send = time.monotonic()
         self._last_send_ts = now / 1e9
 
+    def _wire_ts(self, now: int) -> int | None:
+        """The `ts` a frame for a row sent at `now` carries. No await.
+
+        What the log stores, so a replay sends what the live frame did (I10):
+        microseconds, truncated as `_stamp_row` truncates. A stream with no log
+        sends it too — the server took the row then whether or not it kept it
+        — and a log created before `streamcast_ts` existed sends `null`, since
+        that is all its replay could send.
+        """
+        if self._log is not None and not self._stamped:
+            return None
+
+        return now // 1_000
+
     @staticmethod
     def _stamp_row(row: Row, now: int) -> Row:
         """`row` with `streamcast_ts` added, for the log. A copy, never `row`.
 
         A copy because the caller's dict is theirs, and because the fan-out
-        and the `where=` predicate read the original: the stamp is stored and
-        never sent (I6).
+        and the `where=` predicate read the original: the stamp is stored as a
+        column and sent by position, never as a key in the row (I6).
 
         **A row that already carries the column is refused**, not overwritten.
         It is the server's to fill, and a publisher that sent one would
@@ -1385,7 +1400,7 @@ class Stream:
 
         # Decoded from the frame, so a binary column is text again — and the
         # filter compares bytes. `inbound` turns it back, as the client does.
-        message = decode(first[1])[1]
+        message = decode(first[1])[2]
         if self._codec.inbound is not None:
             message = self._codec.inbound(message)
 

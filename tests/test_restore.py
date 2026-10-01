@@ -161,7 +161,7 @@ class TestItStandsUpElsewhere:
                 offset = await revived.send(row(9_999))
                 async with streamcast.connect(uri) as sub:
                     live = await revived.send(row(10_000))
-                    got, _payload = await sub.recv()
+                    got, _ts, _payload = await sub.recv()
 
             assert offset is not None
             assert got == live
@@ -238,7 +238,7 @@ class TestItStandsUpElsewhere:
                 async with streamcast.connect(uri, cursor=cursor) as sub:
                     after = [await sub.recv() for _ in range(20)]
 
-            offsets = [offset for offset, _payload in after]
+            offsets = [offset for offset, _ts, _payload in after]
             assert all(o is not None for o in offsets), "a durable stream numbers them"
             assert offsets == sorted(offsets), (  # ty: ignore[invalid-argument-type]
                 "offsets must not go backwards"

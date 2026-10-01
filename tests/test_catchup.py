@@ -124,14 +124,17 @@ class TestItClosesTheGap:
             async with streamcast.connect(uri, offset=300, catch_up=True, s3=s3) as sub:
                 got = [await sub.recv() for _ in range(want)]
 
-        offsets = [offset for offset, _row in got]
+        offsets = [offset for offset, _ts, _row in got]
         assert offsets == list(range(300, 300 + want))
+        # Stamped on both sides of the join: the published table's
+        # `streamcast_ts` travels positionally, like the live one.
+        assert all(isinstance(ts, int) for _offset, ts, _row in got)
         # And the values crossed the join intact.
-        assert got[0][1]["i"] == 299
-        assert got[-1][1]["i"] == 299 + want - 1
+        assert got[0][2]["i"] == 299
+        assert got[-1][2]["i"] == 299 + want - 1
         # And the published rows carry exactly the keys the live ones do: the
         # published table holds `streamcast_ts`, and a catch-up must not surface it.
-        assert {tuple(row) for _offset, row in got} == {("i", "pad")}
+        assert {tuple(row) for _offset, _ts, row in got} == {("i", "pad")}
 
     @pytest.mark.slow
     async def test_a_long_catch_up_is_not_dropped_for_falling_behind(
@@ -155,7 +158,7 @@ class TestItClosesTheGap:
             async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
                 got = [await sub.recv() for _ in range(TOTAL)]
 
-        assert [offset for offset, _row in got] == list(range(1, TOTAL + 1))
+        assert [offset for offset, _ts, _row in got] == list(range(1, TOTAL + 1))
 
     @pytest.mark.slow
     async def test_nothing_published_during_the_catch_up_is_lost(
@@ -185,7 +188,7 @@ class TestItClosesTheGap:
 
             await publisher
 
-        offsets = [offset for offset, _row in got]
+        offsets = [offset for offset, _ts, _row in got]
         assert offsets == list(range(1, TOTAL + 41))
 
     @pytest.mark.slow
@@ -344,7 +347,7 @@ class TestTheLogIsNamedInTheGreeting:
                 async with streamcast.connect(
                     uri, offset=1, catch_up=True, s3=s3
                 ) as sub:
-                    first, _row = await sub.recv()
+                    first, _ts, _row = await sub.recv()
 
                 assert first == 1
 
@@ -427,9 +430,9 @@ class TestTheWholeHistoryGateway:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                     got = [await sub.recv() for _ in range(400)]
 
-            assert [offset for offset, _row in got] == list(range(1, 401))
+            assert [offset for offset, _ts, _row in got] == list(range(1, 401))
             # And it came from object storage, not from a local file.
-            assert got[0][1]["i"] == 0
+            assert got[0][2]["i"] == 0
 
     async def test_the_factory_takes_it_too(self, tmp_path, s3, bucket, serve):
         """`Stream.new(replay_published=True)`, rather than opening the handle.
@@ -462,7 +465,7 @@ class TestTheWholeHistoryGateway:
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
-                    first, _row = await sub.recv()
+                    first, _ts, _row = await sub.recv()
 
             assert first == 1
 
@@ -527,7 +530,7 @@ class TestAnEvictedLog:
                 async with streamcast.connect(
                     uri, offset=1, catch_up=True, s3=s3
                 ) as sub:
-                    first, _row = await sub.recv()
+                    first, _ts, _row = await sub.recv()
 
                 assert first == 1
 
@@ -749,7 +752,7 @@ def test_nothing_is_connected_while_the_published_table_is_read():
     from streamcast._catchup import Catcher
 
     source = inspect.getsource(Catcher.stream)
-    assert source.index("yield offset, row") < source.index(
+    assert source.index("yield offset, ts, row") < source.index(
         "self._handshake(self.start)"
     ), "the socket is opened before the published table is read"
 

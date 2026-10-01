@@ -48,10 +48,20 @@ there was nothing to have changed from. Everything above it is ordinary.
   `published=` for `archive=`, and `replay_published=` for
   `replay_archive=`. Every log publishes; without a location, to a table
   under its own directory.
-- **The greeting is version 3.** `metadata` (the metadata file's URI) and
-  `stream_id` replace `log`, whose `name`, `archive` and `owned` are gone;
-  a log's system columns are in its metadata entry's `system_schema`.
-  Refusals no longer carry a location.
+- **The protocol is version 4.**
+  - **Every frame is `[offset, ts, msg]`**, where it was `[offset, msg]`.
+    `ts` is `streamcast_ts`, when the server took the row, in UTC
+    microseconds: the value the log stores, so a replayed or caught-up frame
+    carries the same `ts` it did live. A stream with no log sends its send
+    time; a log created before the column existed sends `null`.
+  - **Subscriptions yield `(offset, ts, msg)`**: `offset, ts, msg = await
+    sub.recv()` and `async for offset, ts, msg in sub`. In JavaScript,
+    `const [offset, ts, msg] = JSON.parse(frame)`. `Snapshot.rows` yields
+    the same triple.
+  - **The greeting's `metadata`** (the metadata file's URI) and `stream_id`
+    replace `log`, whose `name`, `archive` and `owned` are gone; a log's
+    system columns are in its metadata entry's `system_schema`. Refusals no
+    longer carry a location.
 - **`connect(archive=)` is gone**, replaced by `connect(metadata=)`.
 - **The metadata file is version 2**: each log records `published`, and its
   `streamcast_ts` range as `start_ts` and `end_ts`. Version 1 is still read,

@@ -71,7 +71,7 @@ class Node:
                     await self._handle(sub)
 
     async def _handle(self, sub: streamcast.Subscription) -> None:
-        async for offset, row in sub:
+        async for offset, _ts, row in sub:
             assert offset is not None  # a pipeline's sources are durable
             if self.delay:
                 await asyncio.sleep(self.delay)

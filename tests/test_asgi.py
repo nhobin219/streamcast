@@ -101,9 +101,9 @@ class TestItServes:
         app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base, streamcast.connect(f"{base}/trades") as sub:
             await stream.send(trade(0))
-            offset, row = await sub.recv()
+            offset, ts, row = await sub.recv()
 
-        assert (offset, row) == (1, trade(0))
+        assert (offset, ts, row) == (1, None, trade(0))  # `log` is unstamped
 
     async def test_mounting_under_a_prefix_keeps_the_stream_name(self, log):
         """`Mount` moves the prefix into `root_path`, so the name is unchanged.
@@ -288,7 +288,7 @@ class TestBackpressureSurvives:
 
                     seen: list[int] = []
                     for _ in range(40):
-                        offset, _row = await healthy.recv()
+                        offset, _ts, _row = await healthy.recv()
                         assert offset is not None, "a durable stream must offset"
                         seen.append(offset)
 
@@ -360,10 +360,10 @@ class TestRemotePublishing:
                 async with streamcast.publish(f"{base}/trades") as producer:
                     offset = await producer.send(trade(0))
 
-                delivered, row = await sub.recv()
+                delivered, ts, row = await sub.recv()
 
         assert offset == 1
-        assert (delivered, row) == (1, trade(0))
+        assert (delivered, ts, row) == (1, None, trade(0))  # `log` is unstamped
 
     async def test_send_many_stays_one_transaction(self, log):
         stream = streamcast.Stream("trades", log=log)

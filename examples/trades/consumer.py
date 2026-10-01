@@ -13,7 +13,7 @@ The recovery loop is the four lines around `offset`:
 
     offset = load()
     async with streamcast.connect(uri, offset=offset) as stream:
-        async for offset, message in stream:
+        async for offset, ts, message in stream:
             handle(message)
 
 `offset` is reassigned by the loop, so the resume point is simply whatever it
@@ -74,7 +74,7 @@ async def run(
                     + ("" if stream.info.durable else "  (stream is NOT durable)")
                 )
 
-                async for offset, msg in stream:
+                async for offset, _ts, msg in stream:
                     replayed = (
                         offset is not None
                         and stream.info.end_offset is not None

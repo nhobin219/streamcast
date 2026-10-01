@@ -34,39 +34,43 @@ ROW = {
     "side": 0,
     "tag": "t0",
 }
+TS = 1_790_038_800_124_001
 
 
 class TestFrames:
-    def test_a_frame_is_a_positional_pair(self):
-        """`[offset, msg]`, and the halves are different kinds of thing.
+    def test_a_frame_is_a_positional_triple(self):
+        """`[offset, ts, msg]`, and the parts are different kinds of thing.
 
-        The offset is the server's framing; `msg` is the publisher's row. Two
-        earlier versions put the offset INSIDE the object — first as
-        `litelink_offset`, then as `offset` — and both were wrong the same
-        way: a subscriber takes the offset positionally, so the key name was a
-        contract nobody wanted, and injecting it meant `msg` was never quite
-        the row that was sent.
+        The offset and the stamp are the server's framing; `msg` is the
+        publisher's row. Two earlier versions put the offset INSIDE the
+        object — first as `litelink_offset`, then as `offset` — and both were
+        wrong the same way: a subscriber takes the offset positionally, so the
+        key name was a contract nobody wanted, and injecting it meant `msg`
+        was never quite the row that was sent.
         """
-        pair = json.loads(encode(7, ROW, COLUMNS))
-        assert isinstance(pair, list)
-        assert len(pair) == 2
-        assert pair[0] == 7
-        assert pair[1] == ROW
-        assert "offset" not in pair[1]
-        assert "litelink_offset" not in pair[1]
+        triple = json.loads(encode(7, TS, ROW, COLUMNS))
+        assert isinstance(triple, list)
+        assert len(triple) == 3
+        assert triple[0] == 7
+        assert triple[1] == TS
+        assert triple[2] == ROW
+        assert "offset" not in triple[2]
+        assert "litelink_offset" not in triple[2]
+        assert "streamcast_ts" not in triple[2]
 
     def test_the_message_is_exactly_what_was_published(self):
-        offset, message = decode(encode(1861, ROW, COLUMNS))
+        offset, ts, message = decode(encode(1861, TS, ROW, COLUMNS))
         assert offset == 1861
+        assert ts == TS
         assert message == ROW
 
     def test_a_frame_is_json_text_any_client_can_read(self):
         # The affordance the format exists for: `wscat ws://server/trades`
-        # prints the stream readably, and `const [offset, msg] =
+        # prints the stream readably, and `const [offset, ts, msg] =
         # JSON.parse(frame)` is the whole client in another language.
-        frame = encode(1861, ROW, COLUMNS)
+        frame = encode(1861, TS, ROW, COLUMNS)
         assert isinstance(frame, bytes)
-        assert json.loads(frame.decode()) == [1861, ROW]
+        assert json.loads(frame.decode()) == [1861, TS, ROW]
 
     def test_the_column_order_comes_from_the_schema_not_the_dict(self):
         """**This is what makes a replay byte-identical to the live send.**
@@ -78,42 +82,56 @@ class TestFrames:
         """
         shuffled = {k: ROW[k] for k in reversed(COLUMNS)}
         assert list(shuffled) != list(ROW)  # same data, opposite key order
-        assert encode(1861, shuffled, COLUMNS) == encode(1861, ROW, COLUMNS)
+        assert encode(1861, TS, shuffled, COLUMNS) == encode(1861, TS, ROW, COLUMNS)
 
         # And the projection is doing the work: without it the two orders
         # produce different bytes, which is the bug this prevents.
-        assert encode(1861, shuffled, None) != encode(1861, ROW, None)
+        assert encode(1861, TS, shuffled, None) != encode(1861, TS, ROW, None)
 
     def test_a_column_the_caller_omitted_becomes_null(self):
         # And comes back as None — which is what the table stores for it, and
         # therefore what a replay of the same row will send.
         without = {k: v for k, v in ROW.items() if k != "tag"}
-        _offset, back = decode(encode(1, without, COLUMNS))
+        _offset, _ts, back = decode(encode(1, TS, without, COLUMNS))
         assert back["tag"] is None
 
     def test_a_stream_with_no_schema_uses_the_rows_own_keys(self):
         # A live-only stream has no declared columns and nothing replays from
         # it, so there is no second encoding to match.
-        _offset, back = decode(encode(None, {"b": 2, "a": 1}, None))
+        _offset, _ts, back = decode(encode(None, TS, {"b": 2, "a": 1}, None))
         assert back == {"b": 2, "a": 1}
 
     def test_a_stream_with_no_log_sends_a_null_offset(self):
         # Null rather than a counter: `null` cannot be mistaken for a resume
-        # cursor, where an integer from a process-local sequence can.
-        frame = encode(None, {"price": 1.0}, ("price",))
+        # cursor, where an integer from a process-local sequence can. The
+        # stamp is still sent: the server took the row whether or not it kept it.
+        frame = encode(None, TS, {"price": 1.0}, ("price",))
         assert json.loads(frame)[0] is None
-        offset, message = decode(frame)
+        offset, ts, message = decode(frame)
         assert offset is None
+        assert ts == TS
+        assert message == {"price": 1.0}
+
+    def test_an_unstamped_row_sends_a_null_ts(self):
+        # A row replayed from a log that predates the stamp column has none.
+        frame = encode(3, None, {"price": 1.0}, ("price",))
+        assert json.loads(frame) == [3, None, {"price": 1.0}]
+        offset, ts, message = decode(frame)
+        assert offset == 3
+        assert ts is None
         assert message == {"price": 1.0}
 
     @pytest.mark.parametrize(
         ("frame", "match"),
         [
             (b"not json at all", "not JSON"),
-            (b"[1, 2, 3]", r"not an \[offset, msg\] pair"),
-            (b'{"price": 1.0}', r"not an \[offset, msg\] pair"),
-            (b'["eight", {}]', "not an integer or null"),
-            (b"[1, 2]", "not an object"),
+            (b"[1, {}]", r"not an \[offset, ts, msg\] triple"),
+            (b"[1, 2, 3, 4]", r"not an \[offset, ts, msg\] triple"),
+            (b'{"price": 1.0}', r"not an \[offset, ts, msg\] triple"),
+            (b'["eight", 1, {}]', "offset is str, not an integer or null"),
+            (b'[1, "noon", {}]', "ts is str, not an integer or null"),
+            (b"[1, 1.5, {}]", "ts is float, not an integer or null"),
+            (b"[1, 2, 3]", "not an object"),
         ],
     )
     def test_anything_that_is_not_a_frame_says_so(self, frame, match):

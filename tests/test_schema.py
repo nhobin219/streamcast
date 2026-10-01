@@ -401,9 +401,10 @@ class TestRequiredIsEnforced:
                 await stream.send({"price": 1.0, "side": 0, "live": True})
 
             await stream.send({"event_ts": 7, "price": 2.0, "side": 1, "live": False})
-            offset, msg = await sub.recv()
+            offset, ts, msg = await sub.recv()
 
         assert offset == 1
+        assert isinstance(ts, int)
         assert msg["event_ts"] == 7
 
         await stream.aclose()

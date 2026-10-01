@@ -214,7 +214,7 @@ async def pump(
     uri: str, sub: streamcast.Subscription, emit: Callable[[Mapping[str, Any]], None]
 ) -> None:
     print(f"following {uri}", flush=True)
-    async for _offset, row in sub:
+    async for _offset, _ts, row in sub:
         emit(row)
 
 

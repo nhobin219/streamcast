@@ -62,8 +62,8 @@ subscriber.onmessage = (event) => {
     schema = data.schema;
     return;
   }
-  const [offset, msg] = data;
-  out.rows.push([offset, plain(read(schema, msg))]);
+  const [offset, ts, msg] = data;
+  out.rows.push([offset, ts, plain(read(schema, msg))]);
   if (out.rows.length === 2) publish();
   done();
 };

@@ -227,14 +227,14 @@ class TestTheCursor:
             async with streamcast.connect(uri, offset=0, cursor=cursor) as sub:
                 first = [await sub.recv() for _ in range(4)]
 
-            assert [o for o, _ in first] == [1, 2, 3, 4]
+            assert [o for o, _ts, _ in first] == [1, 2, 3, 4]
             assert cursor.read_text() == "4"
 
             # No offset= at all: the file decides, and resumes ONE ABOVE it.
             async with streamcast.connect(uri, cursor=cursor) as sub:
                 rest = [await sub.recv() for _ in range(6)]
 
-        assert [o for o, _ in rest] == [5, 6, 7, 8, 9, 10]
+        assert [o for o, _ts, _ in rest] == [5, 6, 7, 8, 9, 10]
         assert cursor.read_text() == "10"
 
     async def test_a_handler_that_raises_does_not_advance_it(
@@ -369,7 +369,7 @@ class TestTheCursorNeverRewinds:
 
             task = asyncio.create_task(publish())
             async with streamcast.connect(uri, offset=1) as sub:
-                seen = [offset for offset, _ in [await sub.recv() for _ in range(300)]]
+                seen = [o for o, _ts, _ in [await sub.recv() for _ in range(300)]]
 
             await task
 
@@ -420,11 +420,10 @@ class TestTheCursorNeverRewinds:
             for i in range(3):
                 await stream.send(trade(i))
 
-            assert [offset for offset, _ in [await sub.recv() for _ in range(3)]] == [
-                None,
-                None,
-                None,
-            ]
+            got = [await sub.recv() for _ in range(3)]
+            assert [offset for offset, _ts, _ in got] == [None, None, None]
+            # The stamp is the server's whether or not it keeps the row.
+            assert all(isinstance(ts, int) for _offset, ts, _ in got)
 
     async def test_an_explicit_offset_cannot_clobber_the_file_backwards(
         self, serve, log, tmp_path
