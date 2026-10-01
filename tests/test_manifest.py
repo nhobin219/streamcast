@@ -140,6 +140,10 @@ def matching(table: pa.Table, terms: list[_manifest.Term]) -> int:
 # minimum, inside, at the maximum, above, or NULL. That space is enumerated
 # here, every case, so a wrong comparison at a bound fails every run rather
 # than when a random draw happens to land on it.
+#
+# A table covers what it lists. Combinations nobody listed — many logs with
+# mixed columns, three or more terms, values anywhere in a type's range — are
+# what a seeded generative test would add beside it: #54.
 
 INF, NAN = math.inf, math.nan
 
@@ -161,6 +165,9 @@ FLOATS: dict[str, list[object] | None] = {
     "up_to_inf": [1.0, INF],
     "from_minus_inf": [-INF, 3.0],
     "zeros": [-0.0, 0.0],
+    # Not exact in binary: a float32 column stores 0.1 as 0.100000001490116,
+    # so its bounds and a double predicate of 0.1 differ in the last place.
+    "point_one": [0.1],
 }
 FLAGS: dict[str, list[object] | None] = {
     "empty": [],
@@ -174,29 +181,66 @@ FLAGS: dict[str, list[object] | None] = {
 
 # Below, at the minimum, inside (whole and not), at the maximum, above.
 AGAINST_NUMBERS: list[object] = [None, 0, 1, 2, 2.5, 3, 4]
-AGAINST_FLOATS: list[object] = [*AGAINST_NUMBERS, NAN, INF, -INF, -0.0, 0.0]
+AGAINST_FLOATS: list[object] = [
+    *AGAINST_NUMBERS,
+    NAN,
+    INF,
+    -INF,
+    -0.0,
+    0.0,
+    0.1,
+    # 0.1 as a float32 holds it, as a double.
+    float(pa.array([0.1], type=pa.float32())[0].as_py()),
+]
 AGAINST_FLAGS: list[object] = [None, True, False]
+
+
+def extremes(low: float, high: float) -> tuple[list[object], list[object]]:
+    """A column at a type's limits, and values at and just past them."""
+    return [low, high], [low - 1, low, high, high + 1]
+
+
+I32_LOW, I32_HIGH = -(2**31), 2**31 - 1
+I64_LOW, I64_HIGH = -(2**63), 2**63 - 1
+F32_MAX, F32_TINY = 3.4028234663852886e38, 1.401298464324817e-45  # max, least subnormal
+F64_MAX, F64_TINY = 1.7976931348623157e308, 5e-324
+
+KINDS: dict[str, tuple[pa.DataType, dict[str, list[object] | None], list[object]]] = {
+    "int32": (
+        pa.int32(),
+        {**NUMBERS, "limits": extremes(I32_LOW, I32_HIGH)[0]},
+        [*AGAINST_NUMBERS, *extremes(I32_LOW, I32_HIGH)[1]],
+    ),
+    "int64": (
+        pa.int64(),
+        {**NUMBERS, "limits": extremes(I64_LOW, I64_HIGH)[0]},
+        [*AGAINST_NUMBERS, *extremes(I64_LOW, I64_HIGH)[1]],
+    ),
+    "float32": (
+        pa.float32(),
+        {**FLOATS, "limits": [-F32_MAX, F32_MAX], "tiny": [F32_TINY]},
+        [*AGAINST_FLOATS, -F32_MAX, F32_MAX, F32_TINY, F64_MAX],
+    ),
+    "float64": (
+        pa.float64(),
+        {**FLOATS, "limits": [-F64_MAX, F64_MAX], "tiny": [F64_TINY]},
+        [*AGAINST_FLOATS, -F64_MAX, F64_MAX, F64_TINY],
+    ),
+    "bool": (pa.bool_(), FLAGS, AGAINST_FLAGS),
+}
 
 # `!=` is not an operator the pruner decides on; it must include, not guess.
 COMPARISONS = ("==", "!=", "<", "<=", ">", ">=")
 
-KINDS: dict[str, tuple[pa.DataType, dict[str, list[object] | None], list[object]]] = {
-    "int32": (pa.int32(), NUMBERS, AGAINST_NUMBERS),
-    "int64": (pa.int64(), NUMBERS, AGAINST_NUMBERS),
-    "float32": (pa.float32(), FLOATS, AGAINST_FLOATS),
-    "float64": (pa.float64(), FLOATS, AGAINST_FLOATS),
-    "bool": (pa.bool_(), FLAGS, AGAINST_FLAGS),
-}
 
-
-def predicates(against: list[object]) -> list[_manifest.Term]:
+def predicates(against: list[object], column: str = "x") -> list[_manifest.Term]:
     """Every operator against every value, and `in` lists that straddle bounds."""
     terms: list[_manifest.Term] = [
-        ("x", operator, value) for operator in COMPARISONS for value in against
+        (column, operator, value) for operator in COMPARISONS for value in against
     ]
     singles = [[value] for value in against]
     pairs = [[a, b] for index, a in enumerate(against) for b in against[index + 1 :]]
-    terms += [("x", "in", values) for values in [[], *singles, *pairs]]
+    terms += [(column, "in", values) for values in [[], *singles, *pairs]]
     return terms
 
 
@@ -204,29 +248,68 @@ def predicates(against: list[object]) -> list[_manifest.Term]:
 _DUCKDB = duckdb.connect()
 
 
-def counts(table: pa.Table, terms: list[_manifest.Term]) -> list[int]:
-    """How many rows DuckDB says match each term, in one query for the table.
+def condition(table: pa.Table, term: _manifest.Term) -> str:
+    """One term as SQL, with a column the log lacks read as NULL."""
+    column, operator, value = term
+    reference = f'"{column}"' if column in table.column_names else "NULL"
+    if operator == "in":
+        options = ", ".join(literal(v) for v in value) or "NULL"  # ty: ignore[not-iterable]
+        return f"{reference} IN ({options})"
 
-    A native table, for the reason `matching` gives. One query with a
-    `FILTER` per term rather than one per term: the space is a few thousand
-    cases, and a query each would be most of this file's run time.
+    sql = "<>" if operator == "!=" else operator.replace("==", "=")
+    return f"{reference} {sql} {literal(value)}"
+
+
+def counts(table: pa.Table, predicates: list[list[_manifest.Term]]) -> list[int]:
+    """How many rows DuckDB says match each predicate.
+
+    DuckDB decides every term on every row — NaN's ordering, NULL's — in one
+    query per table, a plain `SELECT` of each distinct term's condition. A
+    predicate's terms are then combined per row: a row matches when every
+    term is TRUE on it, which is what a `WHERE` of their `AND` counts.
+    Measured against one `FILTER` aggregate per predicate, which planned a
+    930-aggregate query per log in ~1.7 s.
     """
     _DUCKDB.register("arrow_log", table)
     _DUCKDB.execute("CREATE OR REPLACE TABLE log AS SELECT * FROM arrow_log")
     _DUCKDB.unregister("arrow_log")
-    reference = '"x"' if "x" in table.column_names else "NULL"
-    filters = []
-    for _, operator, value in terms:
-        if operator == "in":
-            options = ", ".join(literal(v) for v in value) or "NULL"  # ty: ignore[not-iterable]
-            condition = f"{reference} IN ({options})"
-        else:
-            sql = "<>" if operator == "!=" else operator.replace("==", "=")
-            condition = f"{reference} {sql} {literal(value)}"
+    distinct = list(dict.fromkeys(repr(t) for terms in predicates for t in terms))
+    terms_by_key = {repr(t): t for terms in predicates for t in terms}
+    columns = ", ".join(
+        f"coalesce({condition(table, terms_by_key[key])}, FALSE)" for key in distinct
+    )
+    rows = (
+        _DUCKDB.sql(f"SELECT {columns} FROM log").fetchall() if table.num_rows else []
+    )
+    position = {key: index for index, key in enumerate(distinct)}
+    return [
+        sum(all(row[position[repr(t)]] for t in terms) for row in rows)
+        for terms in predicates
+    ]
 
-        filters.append(f"count(*) FILTER (WHERE {condition})")
 
-    return list(_DUCKDB.sql(f"SELECT {', '.join(filters)} FROM log").fetchone())  # ty: ignore[invalid-argument-type]
+def excluded_matches(
+    tables: dict[str, pa.Table], predicates: list[list[_manifest.Term]]
+) -> list[str]:
+    """Every (log, predicate) the pruner excludes although DuckDB finds a row."""
+    sealed, start = [], 1
+    for name, table in tables.items():
+        sealed.append((entry(name, start, table), statistics(table)))
+        start += max(table.num_rows, 1)
+
+    manifest = build(sealed)
+    names = [log.name for log, _ in sealed]
+    truth = {name: counts(table, predicates) for name, table in tables.items()}
+    wrong = []
+    for index, terms in enumerate(predicates):
+        kept = set(prune(manifest, names, terms))
+        wrong += [
+            f"{name}: pruned on {terms}, but {truth[name][index]} row(s) match"
+            for name in names
+            if name not in kept and truth[name][index]
+        ]
+
+    return wrong
 
 
 @pytest.mark.parametrize("kind", sorted(KINDS))
@@ -238,25 +321,30 @@ def test_an_excluded_log_never_holds_a_match(kind):
         else pa.table({"y": pa.array([1, 2], type=pa.int64())})
         for name, cells in contents.items()
     }
-    sealed, start = [], 1
-    for name, table in tables.items():
-        sealed.append((entry(name, start, table), statistics(table)))
-        start += max(table.num_rows, 1)
+    wrong = excluded_matches(tables, [[term] for term in predicates(against)])
+    assert not wrong, "\n".join(wrong[:20])
 
-    manifest = build(sealed)
-    names = [log.name for log, _ in sealed]
-    terms = predicates(against)
-    truth = {name: counts(table, terms) for name, table in tables.items()}
 
-    wrong = []
-    for index, term in enumerate(terms):
-        kept = set(prune(manifest, names, [term]))
-        wrong += [
-            f"{name} {contents[name]!r}: pruned on {term}, but {truth[name][index]} row(s) match"
-            for name in names
-            if name not in kept and truth[name][index]
-        ]
+def test_terms_over_two_columns_are_anded_soundly():
+    """Every pair of terms on two columns, against logs that differ in each.
 
+    A log is excluded when ANY term rules it out, so a pair is where one
+    sound term and one wrong one meet, and where a column one log lacks
+    meets one it has.
+    """
+    tables = {
+        "both": pa.table({"x": [1, 3], "z": [1.0, 3.0]}),
+        "x_nulls": pa.table({"x": pa.array([None, 2], pa.int64()), "z": [2.0, 2.0]}),
+        "z_nan": pa.table({"x": [1, 3], "z": [1.0, NAN]}),
+        "no_z": pa.table({"x": [1, 3]}),
+        "empty": pa.table(
+            {"x": pa.array([], pa.int64()), "z": pa.array([], pa.float64())}
+        ),
+    }
+    x_terms = [t for t in predicates([None, 0, 1, 3, 4], "x") if t[1] != "in"]
+    z_terms = [t for t in predicates([NAN, 0.0, 1.0, 3.0, 4.0], "z") if t[1] != "in"]
+    pairs = [[a, b] for a in [*x_terms, ("x", "in", [0, 3])] for b in z_terms]
+    wrong = excluded_matches(tables, pairs)
     assert not wrong, "\n".join(wrong[:20])
 
 

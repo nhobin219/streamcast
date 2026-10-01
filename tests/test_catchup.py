@@ -31,16 +31,15 @@ BATCH = 200
 # whose archive is empty measures nothing.
 PAD = "x" * 200
 
-# **Not smaller, and this number is measured.** Every sealed file costs an
-# Iceberg commit, and pyiceberg rewrites the table metadata on each one — so
-# the cost of building an archive is quadratic in the FILE COUNT, not linear
-# in the rows. At 16 KiB these 20,000 rows sealed into 264 files and the
-# fixture took 152s; at 512 KiB it is 9 files and 1.9s, for the same rows
-# against the same endpoint. 81x, from one constant.
-#
-# 9 files is still a multi-file archive read in several batches, which is
-# what these tests actually need. 264 was not testing anything 9 does not.
-SEAL_SIZE = 256 * 1024
+# **A multi-file archive, read in several batches, is what these tests need**,
+# and the sizes are chosen for that and nothing more. Every sealed file costs
+# an Iceberg commit, and pyiceberg rewrites the table metadata on each one, so
+# building an archive costs by the FILE COUNT, not the rows: measured, 20,000
+# rows at 16 KiB sealed into 264 files and took 152 s. TOTAL rows at SEAL_SIZE
+# seal into 7 files, and compaction is held off (KEEP_FILES) so the archive
+# keeps every one of them rather than merging them back into one or two.
+SEAL_SIZE = 64 * 1024
+KEEP_FILES = 1_000
 
 
 @pytest.fixture
@@ -54,7 +53,9 @@ def archived(tmp_path, s3, bucket):
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         archive=bucket,
         s3=s3,
-        config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+        config=litelink.LogConfig(
+            target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
+        ),
     )
     with handle:
         yield handle
@@ -80,6 +81,11 @@ async def fill(stream, log, total=TOTAL):
     # objects, which no test cares about.
     await asyncio.to_thread(log.sync, push_unsettled=True)
 
+    # Several files, or the multi-batch archive read these tests rely on is
+    # not happening. Asserted here for the same reason as the line below.
+    assert total < TOTAL or log.table_files() >= 5, (
+        f"{log.table_files()} files; the archive these tests read is one file"
+    )
     archived = log.archived_through()
     # Asserted in the fixture, so an archive that silently stops being built
     # fails HERE — naming the fixture — rather than surfacing later as a
@@ -317,7 +323,9 @@ class TestTheLogIsNamedInTheGreeting:
             schema=streamcast.to_arrow(SCHEMA),
             archive=bucket,
             s3=s3,
-            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
+            ),
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle, max_replay=10)
@@ -356,7 +364,9 @@ class TestTheLogIsNamedInTheGreeting:
             schema=streamcast.to_arrow(SCHEMA),
             archive=bucket,
             s3=s3,
-            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
+            ),
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle)
@@ -404,7 +414,9 @@ class TestTheWholeHistoryGateway:
             s3=s3,
             include_archive=True,
             config=litelink.LogConfig(
-                target_seal_size=SEAL_SIZE, local_retention=timedelta(0)
+                target_seal_size=SEAL_SIZE,
+                compact_min_files=KEEP_FILES,
+                local_retention=timedelta(0),
             ),
         )
         with handle:
@@ -442,7 +454,9 @@ class TestTheWholeHistoryGateway:
             replay_archive=True,
             max_replay=None,
             config=litelink.LogConfig(
-                target_seal_size=SEAL_SIZE, local_retention=timedelta(0)
+                target_seal_size=SEAL_SIZE,
+                compact_min_files=KEEP_FILES,
+                local_retention=timedelta(0),
             ),
         )
         try:
@@ -496,6 +510,7 @@ class TestAnEvictedLog:
             s3=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
+                compact_min_files=KEEP_FILES,
                 # Evict on upload: the local tier is emptied as soon as the
                 # archive has the rows, which is the state under test.
                 local_retention=timedelta(0),
@@ -559,7 +574,9 @@ class TestTheGapItCannotClose:
             s3=s3,
             # Nothing below 500 exists in ANY tier.
             start_offset=500,
-            config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
+            ),
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle, max_replay=50)
