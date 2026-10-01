@@ -109,6 +109,12 @@ class TestTheSeam:
             ("trades", 1, 6),
             ("trades-v2", 6, None),
         ]
+        # Where each log's rows are read from, and the sealed one's time span.
+        assert all(e.published is not None for e in metadata.logs)
+        sealed = metadata.sealed_logs[0]
+        assert sealed.start_ts is not None
+        assert sealed.end_ts is not None
+        assert sealed.start_ts <= sealed.end_ts
         assert "venue" in metadata.current.schema["properties"]  # ty: ignore[unsupported-operator]
         assert "venue" not in metadata.logs[0].schema["properties"]  # ty: ignore[unsupported-operator]
         # Owned columns are not declared ones.
@@ -633,11 +639,89 @@ def test_the_metadata_round_trips():
     metadata = _metadata.Metadata(
         stream="trades",
         stream_id="6f1c0b8e-0000-4000-8000-000000000000",
-        sealed_logs=(_metadata.Entry("trades", 1, 6, V1, NO_SYSTEM),),
-        live_log=_metadata.Entry("trades-v2", 6, None, V2, SYSTEM_NOW),
+        sealed_logs=(
+            _metadata.Entry(
+                "trades",
+                1,
+                6,
+                V1,
+                NO_SYSTEM,
+                published="s3://bucket/prod",
+                start_ts=1_790_000_000_000_000,
+                end_ts=1_790_000_000_500_000,
+            ),
+        ),
+        live_log=_metadata.Entry(
+            "trades-v2",
+            6,
+            None,
+            V2,
+            SYSTEM_NOW,
+            published="s3://bucket/prod",
+            start_ts=1_790_000_000_600_000,
+        ),
+        manifest="trades.manifest.parquet",
     )
     assert _metadata.Metadata.from_json(metadata.to_json()) == metadata
-    assert json.loads(metadata.to_json())["streamcast_metadata"] == 1
+    assert json.loads(metadata.to_json())["streamcast_metadata"] == 2
+
+
+def test_a_version_1_file_is_read_with_its_new_fields_unknown():
+    """What `serve` wrote in 0.9.0: no published prefix, no timestamps."""
+    v1 = {
+        "streamcast_metadata": 1,
+        "stream": "trades",
+        "stream_id": "6f1c0b8e-0000-4000-8000-000000000000",
+        "sealed_logs": [
+            {
+                "name": "trades",
+                "start_offset": 1,
+                "end_offset": 6,
+                "schema": V1,
+                "system_schema": NO_SYSTEM,
+            }
+        ],
+        "live_log": {
+            "name": "trades-v2",
+            "start_offset": 6,
+            "schema": V2,
+            "system_schema": SYSTEM_NOW,
+        },
+        "manifest": None,
+    }
+    read = _metadata.Metadata.from_json(json.dumps(v1))
+    assert [(e.name, e.published, e.start_ts, e.end_ts) for e in read.logs] == [
+        ("trades", None, None, None),
+        ("trades-v2", None, None, None),
+    ]
+
+
+async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
+    """`ensure` fills in what version 1 lacked, and rewrites the file at 2."""
+    stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    await stream.send_many([row(i) for i in range(3)])
+    async with serve(stream, maintain=False):
+        pass
+
+    written = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    written["streamcast_metadata"] = 1
+    for key in ("published", "start_ts"):
+        del written["live_log"][key]
+
+    _metadata.path(tmp_path, "trades").write_text(json.dumps(written))
+    again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    assert again.log is not None
+    while again.log.seal() is not None:  # so its statistics hold a `streamcast_ts`
+        pass
+
+    async with serve(again, maintain=False):
+        pass
+
+    upgraded = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    assert upgraded["streamcast_metadata"] == 2
+    assert upgraded["live_log"]["published"].startswith("file://")
+    assert upgraded["live_log"]["start_ts"] is not None
+    assert upgraded["stream_id"] == written["stream_id"], "the id is kept"
 
 
 def test_an_unknown_metadata_version_is_refused():

@@ -522,7 +522,11 @@ class Stream:
 
         start = new_log.end_offset()
         metadata = metadata.advance(
-            start, _metadata.describe(new_log.name, start, None, new_log.schema)
+            start,
+            _metadata.describe(
+                new_log.name, start, None, new_log.schema, published=new_log.published
+            ),
+            span=_metadata.span(sealed),
         )
         # The retired log's statistics join the manifest, which is written
         # BEFORE `metadata.json`: the metadata is the commit, and it must
