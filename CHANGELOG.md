@@ -9,6 +9,23 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **`examples/keyed_table/`**, **`just demo-keyed-table`** and
+  **`just demo-branches`**: orders written as a keyed table log (each row a
+  whole record, keyed by id, with a `deleted` flag), and a subscriber that
+  keeps the table in SQLite: the last row by id, where not deleted. It writes
+  the offset it applied in the same transaction, so it resumes on its own.
+  Also branches built on it: each client forks main's view into a private
+  database, follows its own `branch_id`, and commits with one `send_many`
+  onto main.
+- **`examples/migration/`** and **`just demo-migration`**: a pipeline of
+  streams, A -> B -> C, and a schema migration of B tested in a shadow,
+  D -> E, against production's live and historical data without production
+  waiting on it. Old and new are diffed with one DuckDB join on the source
+  offset each row carries; `--bug` shows a wrong migration named order by
+  order.
+
 ### Fixed
 
 - **`just demo-otel`** no longer loses its dashboard on the first export.

@@ -131,6 +131,75 @@ log, and what closes the log on the way out.
 
 Needs the extra: `pip install 'streamcast[asgi]'`.
 
+## A keyed table log, and branches
+
+```
+just demo-keyed-table   # open orders, kept in SQLite by a subscriber
+just demo-branches      # every client its own database, committed with one send_many
+```
+
+What state a stream holds is the application's to define. These examples
+use a common shape, the **keyed table log**: each row is the whole state of
+one record, keyed by an id, with a `deleted` flag. Written that way, the
+table the log stands for is "the last row by id, where not deleted", and a
+subscriber can keep it as it reads. streamcast knows nothing of keys or
+deletes; this schema defines both. `keyed_table/view.py` keeps that table
+for a log of orders, in SQLite, one statement per row.
+
+**The view is its own cursor.** It writes the offset it has applied in the
+same transaction as the row, so a view reopened after a crash resumes at
+exactly the next row. `keyed_table/orders.py` stops one partway, publishes
+more, and reopens it. It then asks the log the same question, as one window
+function over `litelink_offset`, and gets the same book.
+
+**Branches** (`keyed_table/branches.py`) add a `branch_id` column. Production
+writes to `main`. A branch is a client's private database:
+
+1. `View.fork()` copies main's view at the offset it has applied.
+2. A live subscription with `where={"branch_id": "<branch>"}` keeps the copy
+   current with the branch's own rows.
+3. The client writes to its branch freely, and no other view moves.
+4. **A commit is one `send_many`**: the branch's rows again, with
+   `branch_id: "main"`. One transaction, so main's view gets the whole change
+   as one contiguous run of offsets, or none of it.
+
+There is no merge engine: last row by id wins in offset order, as for any
+other write.
+
+A branch can also **track main**. With `where={"branch_id": ["main",
+"<branch>"]}` it follows production live and keeps its own writes on top.
+That is how to try a new system against live data: a migration or a new
+service reads everything production does, writes only to its branch, and
+production never sees a row of it.
+
+## A migration, tested against live production data
+
+```
+just demo-migration          # a correct migration: old and new agree
+just demo-migration --bug    # a wrong one: the diff names every order it breaks
+```
+
+Production is a pipeline of streams: A (`orders`) feeds B (`positions`),
+which feeds C (`alerts`). Each node subscribes to one stream and publishes
+to the next (`migration/node.py`). The migration changes B's output schema.
+Rather than change B in place, a shadow runs beside it:
+
+- **D** is B's code, changed to write the new schema to its own stream. It
+  subscribes to A from `EARLIEST`, so it rebuilds B's state from production's
+  whole history, then follows production live.
+- **E** is C's code, changed to read the new schema.
+
+Production never knows. D and E are just more subscribers, and a stream never
+waits on a subscriber: the demo makes D slow on purpose, and production
+finishes long before it does.
+
+**The test is a join.** Every output row carries `order_offset`, the offset
+in A it came from, so old and new compare row for row rather than by time. A
+comparator watches the four outputs live, and DuckDB joins B against D and C
+against E. An empty diff means the migration does what production does. Once
+it's empty, the cutover is C reading D's stream, and B retires with its
+history still a queryable table.
+
 ## OpenTelemetry logs and traces, in a dashboard
 
 ```
