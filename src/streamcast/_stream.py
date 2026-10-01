@@ -778,6 +778,8 @@ class Stream:
         *,
         s3: S3Options | None = None,
         rebase_every: float = _live.REBASE_EVERY,
+        where: dict[str, object] | None = None,
+        start_offset: int | None = None,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -791,8 +793,20 @@ class Stream:
         `rebase_every` seconds the base is re-pinned and the rows it covers
         are dropped. A dropped connection reconnects with catch-up; a failure
         it cannot fix is raised by the next query. See `_live`.
+
+        `where=` narrows the view as `connect(where=)` narrows a subscription
+        — equality or membership over non-null scalars — on the server and on
+        the published tables alike, so every query sees only matching rows.
+        `start_offset=` is the lowest offset any query sees; `LATEST` is the
+        broker's frontier at open, a view of what happens from now.
         """
-        return await _live.live(broker, s3=s3, rebase_every=rebase_every)
+        return await _live.live(
+            broker,
+            s3=s3,
+            rebase_every=rebase_every,
+            where=where,
+            start_offset=start_offset,
+        )
 
     @property
     def metadata_uri(self) -> str | None:

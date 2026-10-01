@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -253,3 +254,126 @@ class TestWaitingForATime:
                         await asyncio.wait_for(live.wait_for(ts=1), timeout=5)
         finally:
             legacy.close()
+
+
+class TestNarrowing:
+    async def test_where_narrows_the_view_on_both_sides(self, stream):
+        """Published rows by `filters=`, broker rows by the subscription."""
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(
+                broker, where={"price": [101.0, 103.0, 106.0]}, rebase_every=3600
+            ) as live:
+                await live.wait_for(4)
+                await stream.send_many([row(5), row(6)])  # 105, 106
+                await live.wait_for(7)
+
+                assert await offsets(live) == [2, 4, 7]
+                # Narrowed on the wire too: only the matching tail is held.
+                assert held(live) == 2
+
+    async def test_where_refuses_what_the_two_sides_read_differently(self, stream):
+        async with served(stream) as (_server, broker):
+            with pytest.raises(ValueError, match="non-null scalars"):
+                await streamcast.Stream.live(broker, where={"price": None})
+
+            with pytest.raises(ValueError, match="does not declare"):
+                await streamcast.Stream.live(broker, where={"venue": "x"})
+
+    async def test_where_refuses_a_binary_column(self, tmp_path):
+        schema = {
+            "type": "object",
+            "properties": {
+                **SCHEMA["properties"],
+                "trace": {"type": ["string", "null"], "contentEncoding": "base16"},
+            },
+            "required": SCHEMA["required"],
+        }
+        binary = streamcast.Stream.new("trades", root=tmp_path, schema=schema)
+        try:
+            async with served(binary) as (_server, broker):
+                with pytest.raises(ValueError, match="binary column"):
+                    await streamcast.Stream.live(broker, where={"trace": "00ff"})
+        finally:
+            await binary.aclose()
+
+
+class TestStartingPoint:
+    async def test_from_an_offset(self, stream):
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(broker, start_offset=3) as live:
+                await live.wait_for(5)
+                assert await offsets(live) == [3, 4, 5]
+                assert await offsets_where(live, start_offset=1) == [3, 4, 5]
+
+    async def test_latest_is_from_now_and_stays_so_after_a_rebase(self, stream):
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(
+                broker, start_offset=streamcast.LATEST, rebase_every=3600
+            ) as live:
+                assert await offsets(live) == []
+
+                await stream.send(row(5))
+                await live.wait_for(6)
+                assert await offsets(live) == [6]
+
+                # Published now, so read from the tables — still from 6 on.
+                publish(stream)
+                await live.rebase()
+                assert held(live) == 0
+                assert await offsets(live) == [6]
+
+
+async def offsets_where(live: _live.Live, **kwargs: Any) -> list[int]:
+    table = await live.scan(columns=[_log.COLUMN], **kwargs)
+    return table.column(_log.COLUMN).to_pylist()
+
+
+class TestAMigrationUnderAnOpenView:
+    async def test_it_reads_across_the_seam_with_the_new_columns(self, tmp_path):
+        """Stop, migrate, restart on the same address; the view carries on.
+
+        One listening socket, bound for the whole test, with a `dup()` handed
+        to each server: the address never goes away, so a reconnect waits in
+        the socket's backlog for the new server instead of racing for a port.
+        """
+        v2 = {
+            "type": "object",
+            "properties": {
+                **SCHEMA["properties"],
+                "venue": {"type": ["string", "null"]},
+            },
+            "required": SCHEMA["required"],
+        }
+        listening = socket.socket()
+        listening.bind(("127.0.0.1", 0))
+        listening.listen()
+        port = listening.getsockname()[1]
+        broker = f"ws://127.0.0.1:{port}/trades"
+        try:
+            old = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+            await old.send_many([row(i) for i in range(3)])
+            first = await streamcast.serve(old, sock=listening.dup(), maintain=False)
+            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+                await live.wait_for(3)
+
+                first.close()
+                await first.wait_closed()
+                await old.aclose()
+
+                new = streamcast.Stream.migrate("trades", root=tmp_path, schema=v2)
+                await new.send_many([row(i) | {"venue": "x"} for i in range(3, 5)])
+                second = await streamcast.serve(
+                    new, sock=listening.dup(), maintain=False
+                )
+                try:
+                    await asyncio.wait_for(live.wait_for(5), timeout=10)
+                    table = await live.scan()
+                finally:
+                    second.close()
+                    await second.wait_closed()
+                    await new.aclose()
+
+            assert table.column(_log.COLUMN).to_pylist() == [1, 2, 3, 4, 5]
+            assert table.column("venue").to_pylist() == [None, None, None, "x", "x"]
+        finally:
+            listening.close()

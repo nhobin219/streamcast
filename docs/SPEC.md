@@ -997,6 +997,21 @@ they become Arrow when a query asks. Queries run in threads, so a slow
 aggregate stalls neither the loop nor the socket, and the server never drops
 the view for falling behind because of one (invariant 2).
 
+**Narrowing applies on both sides of the join.** `where=` goes to the
+subscription, so the server sends only matching rows, and the same terms go to
+the published base as `filters=`, which also skips retired logs that can't
+match. One view has to see one stream, so only terms both sides read the same
+way are taken: equality and membership over non-null scalars on scalar
+columns. `None` is "is null" to the subscription's Python comparison and
+matches nothing as SQL `= NULL`; a binary column is text in its encoding on
+the wire and bytes in the table. Both are refused at open.
+
+**A start offset bounds what a view sees, not what it holds.** `start_offset=`
+is the floor of every query, and `LATEST` is the broker's frontier at open. A
+view from now still drops rows as they are published and reads them from the
+tables above its start, so its memory is the publish lag like any other
+view's: there is no need for a row-count or time-window bound.
+
 **Waiting for a time is proven by a later row.** `wait_for(ts=T)` means every
 row stamped at or before T is visible. A view knows that only once it holds a
 row stamped after T: rows arrive in stamp order (while the server's clock is

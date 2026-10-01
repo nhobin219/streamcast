@@ -83,8 +83,17 @@ class Live:
         s3: S3Options | None,
         rebase_every: float,
         base: _snapshot.Snapshot,
+        *,
+        where: dict[str, object] | None = None,
+        start: int | None = None,
     ) -> None:
         self._broker = broker
+        # The subscription's filter, and the same terms for the published
+        # base — one narrowing, applied on both sides of the join.
+        self._where = where
+        self._filters: tuple[_manifest.Term, ...] = _terms(where)
+        # The lowest offset any query sees; None for everything published.
+        self._floor = start
         # Where the history is read, as the broker's latest greeting says.
         self._uri = greeting.metadata
         self._stream_id = greeting.stream_id
@@ -98,7 +107,9 @@ class Live:
         # Where the base's published rows end. Kept apart from the base's own
         # `end_offset`, which each query moves up to the newest row received.
         self._published_end = base.end_offset
-        self._end = base.end_offset
+        # Nothing below `start` is wanted, so the subscription begins there
+        # when it is above what is published.
+        self._end = max(base.end_offset, start or 0)
         self._lock = asyncio.Lock()
         self._advanced = asyncio.Condition()
         self._failure: BaseException | None = None
@@ -121,7 +132,11 @@ class Live:
         from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
 
         connecting = _client.connect(
-            self._broker, offset=self._end, catch_up=True, s3=self._s3
+            self._broker,
+            offset=self._end,
+            catch_up=True,
+            s3=self._s3,
+            where=self._where,
         )
         try:
             subscription = await connecting
@@ -130,7 +145,7 @@ class Live:
                 raise
 
             # Nothing in the log yet, so nothing to replay: from now is all.
-            subscription = await _client.connect(self._broker)
+            subscription = await _client.connect(self._broker, where=self._where)
 
         # The latest word on where the history is: a restarted broker may
         # serve a migrated stream, whose metadata the next rebase must read.
@@ -330,8 +345,8 @@ class Live:
             return await view.scan(
                 columns=columns,
                 where=where,
-                filters=filters,
-                start_offset=start_offset,
+                filters=(*self._filters, *filters),
+                start_offset=self._from(start_offset),
                 end_offset=end_offset,
             )
 
@@ -347,7 +362,10 @@ class Live:
         async with self._lock:
             view = self._view()
             return await view.sql(
-                query, filters=filters, start_offset=start_offset, end_offset=end_offset
+                query,
+                filters=(*self._filters, *filters),
+                start_offset=self._from(start_offset),
+                end_offset=end_offset,
             )
 
     def _check(self) -> None:
@@ -367,6 +385,13 @@ class Live:
                 _snapshot._tail_table(self._base.metadata.live_log, rows)  # noqa: SLF001
             )
 
+    def _from(self, start_offset: int | None) -> int | None:
+        """A query's lower bound, never below the view's own start."""
+        if self._floor is None:
+            return start_offset
+
+        return self._floor if start_offset is None else max(start_offset, self._floor)
+
     def _view(self) -> _snapshot.Snapshot:
         """The base, with the tail frozen at the newest row received. No await.
 
@@ -379,6 +404,53 @@ class Live:
         base._tail = pa.concat_tables(self._tail) if self._tail else None  # noqa: SLF001
         base.end_offset = max(self._end, self._published_end)
         return base
+
+
+def _terms(where: dict[str, object] | None) -> tuple[_manifest.Term, ...]:
+    """The subscription's filter as `filters=` terms, one per column."""
+    if not where:
+        return ()
+
+    return tuple(
+        (name, "in", list(value))
+        if isinstance(value, (list, tuple))
+        else (name, "==", value)
+        for name, value in where.items()
+    )
+
+
+def _check_where(broker: str, where: dict[str, object], schema: dict | None) -> None:
+    """Refuse what the two sides of the join would read differently.
+
+    The subscription compares in Python, the published base in SQL, and a
+    view must see one stream: so only terms both read the same way. `None`
+    is "is null" to the first and matches nothing (`= NULL`) to the second;
+    a binary column takes text in its encoding on the wire and holds bytes
+    in the table. Nested columns the subscription refuses anyway.
+    """
+    properties = (schema or {}).get("properties") or {}
+    for name, value in where.items():
+        spec = properties.get(name)
+        if spec is None:
+            msg = f"where names {name!r}, which {broker} does not declare"
+            raise ValueError(msg)
+
+        if spec.get("contentEncoding") is not None:
+            msg = (
+                f"where names binary column {name!r}; a live view's where= takes "
+                f"scalar columns only. Filter it in the query instead."
+            )
+            raise ValueError(msg)
+
+        values = list(value) if isinstance(value, (list, tuple)) else [value]
+        for item in values:
+            if item is None or not isinstance(item, (str, int, float, bool)):
+                msg = (
+                    f"where={{{name!r}: {value!r}}}: a live view's where= takes "
+                    f"non-null scalars, as equality or membership. Filter nulls "
+                    f"in the query instead."
+                )
+                raise ValueError(msg)
 
 
 def _require(broker: str, uri: str | None) -> str:
@@ -394,7 +466,12 @@ def _require(broker: str, uri: str | None) -> str:
 
 
 async def live(
-    broker: str, *, s3: S3Options | None = None, rebase_every: float = REBASE_EVERY
+    broker: str,
+    *,
+    s3: S3Options | None = None,
+    rebase_every: float = REBASE_EVERY,
+    where: dict[str, object] | None = None,
+    start_offset: int | None = None,
 ) -> Live:
     """See `Stream.live`."""
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
@@ -405,10 +482,22 @@ async def live(
     async with _client.connect(broker) as probe:
         greeting = probe.info
 
-    base = await _snapshot.snapshot(
-        _require(broker, greeting.metadata), s3=s3, stream_id=greeting.stream_id
-    )
-    view = Live(broker, greeting, s3, rebase_every, base)
+    uri = _require(broker, greeting.metadata)
+    if where:
+        _check_where(broker, where, greeting.schema)
+
+    start = start_offset
+    if start_offset == _snapshot.LATEST:
+        # From now: the broker's frontier as of the greeting. Earlier rows
+        # are never read, and later ones are, from the tables once published.
+        start = greeting.end_offset
+
+    elif start_offset is not None and start_offset < 0:
+        msg = f"start_offset={start_offset} is negative; LATEST means from now"
+        raise ValueError(msg)
+
+    base = await _snapshot.snapshot(uri, s3=s3, stream_id=greeting.stream_id)
+    view = Live(broker, greeting, s3, rebase_every, base, where=where, start=start)
     try:
         await view._start()  # noqa: SLF001
     except BaseException:
