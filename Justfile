@@ -211,6 +211,21 @@ demo-otel host="127.0.0.1" port="4318":
     # stream never does: 1 lets Ctrl-C return at once.
     HOST="{{host}}" PORT="{{port}}" SHUTDOWN_TIMEOUT=1 "$gui" >"$log" 2>&1 &
     gui_pid=$!
+    # otel-gui (2.1.0, and 3.0.0 unchanged) loads its trace and logs .proto
+    # files lazily into one shared protobufjs Root, on the first request to
+    # each. The exporter sends both at once, the two loads interleave, one
+    # resolves before resource.proto is parsed, and the throw escapes into a
+    # callback and kills the dashboard. An empty request to each, one after
+    # the other, does the loading before anything can race it.
+    for _ in $(seq 100); do
+        curl -fs -o /dev/null "http://127.0.0.1:{{port}}/" && break
+        kill -0 "$gui_pid" 2>/dev/null || { cat "$log" >&2; exit 1; }
+        sleep 0.1
+    done
+    for signal in traces logs; do
+        curl -fsS -o /dev/null -X POST -H 'Content-Type: application/x-protobuf' \
+            --data-binary '' "http://127.0.0.1:{{port}}/v1/$signal"
+    done
     uv run python -m examples.otel.demo --serve >>"$log" 2>&1 &
     broker=$!
     uv run python -m examples.otel.export --receiver "http://127.0.0.1:{{port}}" >>"$log" 2>&1 &
