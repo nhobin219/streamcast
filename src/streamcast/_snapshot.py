@@ -202,12 +202,18 @@ class Snapshot:
         count = self._manifest.column("record_count")[names.index(entry.name)].as_py()
         return None if count is None else int(count)
 
-    def _bounds(self, start: int | None, stop: int | None) -> str:
+    def _bounds(self, start: int | None, stop: int | None, *, stamped: bool) -> str:
+        """The snapshot's own limits, on columns one log is sure to have.
+
+        The offset always; the `as_of_ts` bound only on a log that carries
+        the stamp. `_pieces` keeps an unstamped log only when it lies wholly
+        before the point, so every one of its rows is inside it.
+        """
         terms = [f'"{_log.COLUMN}" < {min(stop or self.end_offset, self.end_offset)}']
         if start is not None:
             terms.append(f'"{_log.COLUMN}" >= {int(start)}')
 
-        if self._ts is not None:
+        if self._ts is not None and stamped:
             terms.append(f'"{_log.STAMP}" <= {int(self._ts)}')
 
         return " AND ".join(terms)
@@ -237,19 +243,50 @@ class Snapshot:
         )
         return [piece for piece in pieces if piece.entry.name in kept]
 
-    def _union(self, pieces: list[_Piece], where: str) -> str:
+    def _select(
+        self,
+        start: int | None,
+        stop: int | None,
+        where: str | None,
+        filters: Sequence[_manifest.Term],
+    ) -> str:
+        """The snapshot's rows in `[start, stop)` matching `where` and `filters`.
+
+        **The caller's conditions go OUTSIDE the union.** A log from before a
+        migration added a column has no such column, so a condition on it
+        inside that log's SELECT does not bind — the whole read fails. Over
+        the union, the column is NULL there, which is what the union promises
+        for every other read. The snapshot's own limits stay inside, where
+        they are sure to bind and push down into each table's scan.
+        """
+        pieces = self._relevant(start, stop, filters)
         parts = [
-            f"SELECT * FROM {self._open(piece).relation()} WHERE {where}"
+            f"SELECT * FROM {self._open(piece).relation()} "
+            f"WHERE {self._bounds(start, stop, stamped=_stamped(piece.entry))}"
             for piece in pieces
         ]
         if self._tail is not None:
+            # Broker rows: as of an offset only, so no stamp bound applies.
             self._connection.register("streamcast_tail", self._tail)
-            parts.append(f"SELECT * FROM streamcast_tail WHERE {where}")
+            parts.append(
+                f"SELECT * FROM streamcast_tail "
+                f"WHERE {self._bounds(start, stop, stamped=False)}"
+            )
 
         if not parts:
+            # Nothing to read, so nothing to filter: the caller's conditions
+            # would name columns this empty relation does not have.
             return "SELECT NULL::BIGINT AS litelink_offset WHERE FALSE"
 
-        return " UNION ALL BY NAME ".join(parts)
+        union = " UNION ALL BY NAME ".join(parts)
+        conditions = [_term_sql(term) for term in filters]
+        if where is not None:
+            conditions.append(f"({where})")
+
+        if not conditions:
+            return union
+
+        return f"SELECT * FROM ({union}) WHERE {' AND '.join(conditions)}"
 
     async def scan(
         self,
@@ -264,33 +301,49 @@ class Snapshot:
 
         `where` is SQL over the stream's columns. `filters` are
         `(column, operator, value)` terms, ANDed with `where`, and the ones
-        that let a sealed log be skipped without opening it: they are pruned
-        on the stream's manifest (#27) before any table is read.
+        that let a retired log be skipped without opening it: they are pruned
+        on the stream's manifest (#27) before any table is read. Only
+        `filters` prune; see `sql` for why `where` does not.
         """
 
         def run() -> pa.Table:
-            pieces = self._relevant(start_offset, end_offset, filters)
-            conditions = [self._bounds(start_offset, end_offset)]
-            if where is not None:
-                conditions.append(f"({where})")
-
-            conditions += [_term_sql(term) for term in filters]
             projection = (
                 "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
             )
-            union = self._union(pieces, " AND ".join(conditions))
+            rows = self._select(start_offset, end_offset, where, filters)
             return self._connection.execute(
-                f'SELECT {projection} FROM ({union}) ORDER BY "{_log.COLUMN}"'
+                f'SELECT {projection} FROM ({rows}) ORDER BY "{_log.COLUMN}"'
             ).to_arrow_table()
 
         return await asyncio.to_thread(run)
 
-    async def sql(self, query: str) -> pa.Table:
-        """`query` over the whole snapshot, which it reads as the table `log`."""
+    async def sql(
+        self,
+        query: str,
+        *,
+        filters: Sequence[_manifest.Term] = (),
+        start_offset: int | None = None,
+        end_offset: int | None = None,
+    ) -> pa.Table:
+        """`query` over the snapshot, which it reads as the table `log`.
+
+        `filters` and `[start_offset, end_offset)` narrow what `log` holds,
+        exactly as they narrow `scan`: rows outside them are not in it, and a
+        retired log they rule out is never opened. They are applied to the
+        rows too, so the answer never depends on what the statistics happened
+        to rule out.
+
+        **The query itself does not prune**, though a `WHERE` in it says the
+        same thing. Deriving terms from SQL means reading a predicate
+        correctly in every case — `OR`, casts, functions, NULL semantics —
+        and a misread does not fail: it drops a log that held matches and
+        answers short, with no symptom. Until that is done soundly (#57), the
+        pruning a caller wants is stated as `filters`.
+        """
 
         def run() -> pa.Table:
-            union = self._union(self._relevant(None, None), self._bounds(None, None))
-            self._connection.execute(f"CREATE OR REPLACE TEMP VIEW log AS {union}")
+            rows = self._select(start_offset, end_offset, None, filters)
+            self._connection.execute(f"CREATE OR REPLACE TEMP VIEW log AS {rows}")
             return self._connection.execute(query).to_arrow_table()
 
         return await asyncio.to_thread(run)

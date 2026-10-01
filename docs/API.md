@@ -1153,7 +1153,8 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
                                  broker=None, s3=None) -> Snapshot
 await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
                              filters=(), start_offset=None, end_offset=None) -> pa.Table
-await streamcast.Stream.sql(metadata_uri, query, *, <the same>) -> pa.Table
+await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
+                            start_offset=None, end_offset=None) -> pa.Table
 
 stream.metadata_uri -> str | None     # on the server
 sub.info.metadata -> str | None       # on a subscriber
@@ -1190,14 +1191,28 @@ carrying on live subscribes there.
 | | |
 |---|---|
 | `scan(columns=, where=, filters=, start_offset=, end_offset=)` | rows in `[start_offset, end_offset)`, oldest first, as one Arrow table |
-| `sql(query)` | `query` over the whole snapshot, which it reads as the table `log` |
+| `sql(query, filters=, start_offset=, end_offset=)` | `query` over the snapshot, which it reads as the table `log`, holding only the rows in `[start_offset, end_offset)` that match `filters` |
 | `rows(start, stop=None)` | one `(offset, row)` at a time, built exactly as a server replays them |
 | `close()` | or `async with` |
 
 `where` is SQL over the stream's columns. `filters` are `(column, operator, value)` terms,
-ANDed with `where`, and they are what let a retired log be skipped without being opened:
-they are pruned against `<stream>.manifest.parquet` first. Across a migration the logs read
-as one table with `UNION ALL BY NAME`, so a column a log lacked reads as null there.
+ANDed with `where`. Across a migration the logs read as one table with `UNION ALL BY
+NAME`, so a column a log lacked reads as null there, in a condition as in a result.
+
+**Only `filters` and the offsets prune.** They are checked against
+`<stream>.manifest.parquet` before any table is opened, so a retired log they rule out is
+never read, and they are applied to the rows too, so the answer never depends on what the
+statistics ruled out. A `where=`, or a `WHERE` inside `sql`'s query, filters the rows but
+skips no log. Deriving prune terms from SQL means reading every predicate correctly — `OR`,
+casts, functions, NULL semantics — and a misread doesn't fail: it drops a log that held
+matches and answers short. Until that is done soundly
+([#57](https://github.com/nhobin219/streamcast/issues/57)), state the pruning you want
+as `filters`:
+
+```python
+await snapshot.sql("SELECT side, sum(amount) FROM log WHERE price > 500 GROUP BY side",
+                   filters=[("price", ">", 500)])
+```
 
 **Correct or it raises `SnapshotUnavailable`.** A missing metadata file, a file whose
 `stream_id` is not the one the greeting named, a retired log whose table holds fewer rows

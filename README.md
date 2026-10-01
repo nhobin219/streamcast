@@ -108,7 +108,7 @@ streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3=None) -> Snapshot
     await snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=)
-    await snapshot.sql(query)                   # over the table `log`
+    await snapshot.sql(query, *, filters=, start_offset=, end_offset=)  # table `log`
 await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=True,

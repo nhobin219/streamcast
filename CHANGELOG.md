@@ -18,8 +18,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   not yet published, and `LATEST` for the broker's frontier), or `as_of_ts=`
   on `streamcast_ts`. A `Snapshot` has `scan`, `sql` (over the table `log`)
   and `rows`; `Stream.scan` and `Stream.sql` are the one-shot forms.
-  `filters=` terms prune whole retired logs on the manifest before any is
-  opened. Anything it cannot answer exactly raises `SnapshotUnavailable`.
+  `filters=` terms and `start_offset`/`end_offset`, on `scan` and `sql`,
+  prune whole retired logs on the manifest before any is opened. SQL is not
+  mined for terms yet (#57). Anything it cannot answer exactly raises `SnapshotUnavailable`.
 - **`Stream.metadata_uri`**: where a reader finds the stream's metadata file.
 - **`connect(metadata=)`**: the metadata file `catch_up` reads from, in place
   of the greeting's.

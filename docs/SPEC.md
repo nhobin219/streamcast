@@ -941,8 +941,19 @@ nothing downstream could tell missing rows from fenced ones; the count can.
 
 **The heavy work is the reader's.** Pruning, the table reads and the query
 run on the reader; the broker's cost is one greeting and, when asked, a
-bounded tail. `filters=` terms are pruned against the manifest first, so a
-retired log they exclude is never opened.
+bounded tail. `filters=` terms and offset bounds, on `scan` and `sql` alike,
+are pruned against the manifest first, so a retired log they exclude is never
+opened, and are applied to the rows as well, so the answer does not depend on
+what was pruned. SQL is not mined for terms: a misread predicate would drop a
+log that held matches and answer short, so that waits on a sound extractor
+(#57).
+
+**The caller's conditions apply over the union, not inside each log.** A log
+from before a migration added a column has no such column, so a condition on
+it inside that log's read would not bind. Over the union the column is NULL
+there, as in any other read. The snapshot's own limits (the offsets, and the
+`as_of_ts` bound on logs that carry the stamp) stay inside, where they always
+bind and push down.
 
 ### Catching up from the published tables
 

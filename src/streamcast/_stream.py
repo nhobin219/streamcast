@@ -748,8 +748,15 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3: S3Options | None = None,
+        filters: Sequence[_manifest.Term] = (),
+        start_offset: int | None = None,
+        end_offset: int | None = None,
     ) -> pa.Table:
-        """One `Snapshot.sql` — over the table `log` — then closed."""
+        """One `Snapshot.sql` — over the table `log` — then closed.
+
+        `filters` and the offsets narrow `log` and prune whole logs; the
+        query's own `WHERE` does not prune. See `Snapshot.sql`.
+        """
         async with await Stream.snapshot(
             metadata_uri,
             as_of_offset=as_of_offset,
@@ -757,7 +764,12 @@ class Stream:
             broker=broker,
             s3=s3,
         ) as snap:
-            return await snap.sql(query)
+            return await snap.sql(
+                query,
+                filters=filters,
+                start_offset=start_offset,
+                end_offset=end_offset,
+            )
 
     @property
     def metadata_uri(self) -> str | None:
