@@ -140,15 +140,31 @@ class TestCrossBoxRecovery:
 
 class TestItIsBestEffort:
     async def test_an_unreachable_bucket_does_not_stop_the_consumer(
-        self, serve, log, tmp_path, caplog
+        self, serve, log, tmp_path, caplog, monkeypatch
     ):
         """A disaster-recovery convenience is not a dependency of the stream.
 
         A consumer that could not reach the bucket and therefore refused to
         run would have traded an outage for a backup.
         """
+        # One attempt, not the S3 client's retries with backoff (~4 s against
+        # a closed port): what is under test is that a failure is logged
+        # rather than raised, not how often it is retried.
+        import pyarrow.fs as pafs
+
+        from streamcast import _remote
+
+        built = _remote.pafs.S3FileSystem
+        monkeypatch.setattr(
+            _remote.pafs,
+            "S3FileSystem",
+            lambda **options: built(
+                **options,
+                retry_strategy=pafs.AwsStandardS3RetryStrategy(max_attempts=1),
+            ),
+        )
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream) as uri:
+        async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 
             cursor = tmp_path / "trades.offset"

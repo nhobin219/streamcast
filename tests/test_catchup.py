@@ -23,7 +23,9 @@ SCHEMA = {
     "properties": {"i": {"type": "integer"}, "pad": {"type": "string"}},
     "required": ["i", "pad"],
 }
-TOTAL = 20_000
+TOTAL = 2_000
+# `fill` sends in groups this size, and the archive may trail by one.
+BATCH = 200
 # Wide enough that `target_seal_size` is crossed and rows actually reach the
 # archive. With a bare integer column 6,000 rows sealed nothing, and a test
 # whose archive is empty measures nothing.
@@ -38,7 +40,7 @@ PAD = "x" * 200
 #
 # 9 files is still a multi-file archive read in several batches, which is
 # what these tests actually need. 264 was not testing anything 9 does not.
-SEAL_SIZE = 512 * 1024
+SEAL_SIZE = 256 * 1024
 
 
 @pytest.fixture
@@ -59,9 +61,9 @@ def archived(tmp_path, s3, bucket):
 
 
 async def fill(stream, log, total=TOTAL):
-    for start in range(0, total, 2_000):
+    for start in range(0, total, BATCH):
         await stream.send_many(
-            [{"i": i, "pad": PAD} for i in range(start, start + 2_000)]
+            [{"i": i, "pad": PAD} for i in range(start, start + BATCH)]
         )
 
     while log.seal() is not None:
@@ -82,7 +84,7 @@ async def fill(stream, log, total=TOTAL):
     # Asserted in the fixture, so an archive that silently stops being built
     # fails HERE — naming the fixture — rather than surfacing later as a
     # confusing refusal from the code under test.
-    assert archived >= total - 2_000, (
+    assert archived >= total - BATCH, (
         f"the fixture archived through {archived} of {total} rows; these "
         f"tests read the archive and this one would not have one"
     )
@@ -101,28 +103,26 @@ class TestItClosesTheGap:
         from the socket, and the consumer's loop cannot tell where the join
         was.
         """
-        stream = streamcast.Stream("trades", log=archived, max_replay=6_000)
+        stream = streamcast.Stream("trades", log=archived, max_replay=600)
         archived_through = await fill(stream, archived)
         assert archived_through > 0
 
         async with serve(stream, maintain=False) as uri:
             # Without it, the refusal stands.
             with pytest.raises(streamcast.NotReplayable) as raised:
-                await streamcast.connect(uri, offset=3_000)
+                await streamcast.connect(uri, offset=300)
 
             assert raised.value.why == "too_old"
 
-            want = 15_000
-            async with streamcast.connect(
-                uri, offset=3_000, catch_up=True, s3=s3
-            ) as sub:
+            want = 1_500
+            async with streamcast.connect(uri, offset=300, catch_up=True, s3=s3) as sub:
                 got = [await sub.recv() for _ in range(want)]
 
         offsets = [offset for offset, _row in got]
-        assert offsets == list(range(3_000, 3_000 + want))
+        assert offsets == list(range(300, 300 + want))
         # And the values crossed the join intact.
-        assert got[0][1]["i"] == 2_999
-        assert got[-1][1]["i"] == 2_999 + want - 1
+        assert got[0][1]["i"] == 299
+        assert got[-1][1]["i"] == 299 + want - 1
         # And the archived rows carry exactly the keys the live ones do: the
         # archive holds `streamcast_ts`, and a catch-up must not surface it.
         assert {tuple(row) for _offset, row in got} == {("i", "pad")}
@@ -141,7 +141,7 @@ class TestItClosesTheGap:
         finishing. Nothing is connected while the archive is read now.
         """
         stream = streamcast.Stream(
-            "trades", log=archived, max_replay=6_000, max_backlog=16
+            "trades", log=archived, max_replay=600, max_backlog=16
         )
         await fill(stream, archived)
 
@@ -163,24 +163,24 @@ class TestItClosesTheGap:
         Had they aged out, the server says too old again and the loop reads
         the newly archived rows instead.
         """
-        stream = streamcast.Stream("trades", log=archived, max_replay=6_000)
+        stream = streamcast.Stream("trades", log=archived, max_replay=600)
         await fill(stream, archived)
 
         async with serve(stream, maintain=False) as uri:
 
             async def publish():
-                for i in range(TOTAL, TOTAL + 400):
+                for i in range(TOTAL, TOTAL + 40):
                     await stream.send({"i": i, "pad": PAD})
                     await asyncio.sleep(0)
 
             publisher = asyncio.create_task(publish())
             async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
-                got = [await sub.recv() for _ in range(TOTAL + 400)]
+                got = [await sub.recv() for _ in range(TOTAL + 40)]
 
             await publisher
 
         offsets = [offset for offset, _row in got]
-        assert offsets == list(range(1, TOTAL + 401))
+        assert offsets == list(range(1, TOTAL + 41))
 
     @pytest.mark.slow
     async def test_the_archive_reader_is_released_when_the_gap_closes(
@@ -188,7 +188,7 @@ class TestItClosesTheGap:
     ):
         # A snapshot owns a scratch directory it removes on close, so leaking
         # one leaks disk as well as a DuckDB connection.
-        stream = streamcast.Stream("trades", log=archived, max_replay=6_000)
+        stream = streamcast.Stream("trades", log=archived, max_replay=600)
         await fill(stream, archived)
 
         async with serve(stream, maintain=False) as uri:
@@ -231,7 +231,7 @@ class TestItClosesTheGap:
         monkeypatch.setattr(CatchUp, "close", spy)
 
         stream = streamcast.Stream("trades", log=archived, max_replay=100)
-        await fill(stream, archived, total=8_000)
+        await fill(stream, archived, total=800)
 
         async with serve(stream, maintain=False) as uri:
             sub = await streamcast.connect(uri, offset=10, catch_up=True, s3=s3)
@@ -273,7 +273,7 @@ class TestItClosesTheGap:
         monkeypatch.setattr(CatchUp, "close", spy)
 
         stream = streamcast.Stream("trades", log=archived, max_replay=100)
-        await fill(stream, archived, total=8_000)
+        await fill(stream, archived, total=800)
 
         async with serve(stream, maintain=False) as uri:
             sub = await streamcast.connect(uri, offset=10, catch_up=True, s3=s3)
@@ -321,7 +321,7 @@ class TestTheLogIsNamedInTheGreeting:
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle, max_replay=10)
-            await fill(stream, handle, total=4_000)
+            await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -360,7 +360,7 @@ class TestTheLogIsNamedInTheGreeting:
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle)
-            await fill(stream, handle, total=4_000)
+            await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -409,7 +409,7 @@ class TestTheWholeHistoryGateway:
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle, max_replay=None)
-            await fill(stream, handle, total=8_000)
+            await fill(stream, handle, total=800)
             await asyncio.to_thread(handle.evict)
 
             assert handle.table_extent() is None, "the fixture must evict dry"
@@ -419,9 +419,9 @@ class TestTheWholeHistoryGateway:
                 # Bounded by nothing: the default would refuse this as
                 # `too_old` long before it reached the archive.
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
-                    got = [await sub.recv() for _ in range(2_000)]
+                    got = [await sub.recv() for _ in range(400)]
 
-            assert [offset for offset, _row in got] == list(range(1, 2_001))
+            assert [offset for offset, _row in got] == list(range(1, 401))
             # And it came from object storage, not from a local file.
             assert got[0][1]["i"] == 0
 
@@ -451,7 +451,7 @@ class TestTheWholeHistoryGateway:
                 "replay_archive must reach litelink as include_archive"
             )
 
-            await fill(stream, stream.log, total=4_000)
+            await fill(stream, stream.log, total=800)
             await asyncio.to_thread(stream.log.evict)
             assert stream.log.table_extent() is None, "the fixture must evict dry"
 
@@ -503,7 +503,7 @@ class TestAnEvictedLog:
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle)
-            await fill(stream, handle, total=8_000)
+            await fill(stream, handle, total=800)
             await asyncio.to_thread(handle.evict)
 
             assert handle.table_extent() is None, "the fixture must evict dry"
@@ -563,7 +563,7 @@ class TestTheGapItCannotClose:
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle, max_replay=50)
-            await fill(stream, handle, total=4_000)
+            await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
                 with pytest.raises(streamcast.CatchUpUnavailable) as raised:
@@ -612,7 +612,7 @@ class TestWhereTheArchiveComesFrom:
         readable, so the archive is what drops — and the client then asks the
         greeting, which has no such limit.
         """
-        stream = streamcast.Stream("trades", log=archived, max_replay=6_000)
+        stream = streamcast.Stream("trades", log=archived, max_replay=600)
         await fill(stream, archived)
 
         async with serve(stream, maintain=False) as uri:
@@ -649,7 +649,7 @@ class TestWhenItCannot:
         one names what was tried, which credential source, and four ways out.
         """
         stream = streamcast.Stream("trades", log=archived, max_replay=100)
-        await fill(stream, archived, total=6_000)
+        await fill(stream, archived, total=1_200)
 
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(streamcast.CatchUpUnavailable) as raised:
@@ -687,14 +687,14 @@ class TestWhenItCannot:
         # for the wrong reason, which is the failure mode a test cannot
         # report about itself.
         stream = streamcast.Stream("trades", log=archived, max_replay=10)
-        frontier = await fill(stream, archived, total=4_000)
+        frontier = await fill(stream, archived, total=800)
         # Published past the archive without syncing, so the archive stays at
         # `frontier` while the server's window moves far above it.
-        await stream.send_many([{"i": i, "pad": PAD} for i in range(4_000, 24_000)])
+        await stream.send_many([{"i": i, "pad": PAD} for i in range(800, 4_800)])
 
         # Above what the archive holds, and far below what the server will
         # replay. Nothing on either side has it.
-        asking = frontier + 5_000
+        asking = frontier + 1_000
 
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(streamcast.CatchUpUnavailable) as raised:

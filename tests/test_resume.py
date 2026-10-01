@@ -140,8 +140,10 @@ class TestThePartition:
         queue.
         """
         stream = streamcast.Stream("trades", log=log)
-        total = 400
-        async with serve(stream) as uri:
+        # Long enough that the attach lands mid-publish (a yield per row), and
+        # no longer: each `send` is its own durable write.
+        total = 150
+        async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
             async def publish():

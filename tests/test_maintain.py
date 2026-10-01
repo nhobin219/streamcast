@@ -3,7 +3,9 @@
 Nothing here sealed before `_maintain` existed, and the reason it went
 unnoticed is worth knowing: litelink's `target_seal_size` defaults to 8 MiB,
 so a short test or a short demo never crosses it and every log looks fine.
-These tests deliberately cross it.
+These tests deliberately cross the threshold — a small one, set on the log,
+because what is under test is who calls `seal_due`, not where the line is,
+and crossing 8 MiB took 100,000 rows and most of these tests' run time.
 """
 
 from __future__ import annotations
@@ -17,9 +19,11 @@ import pytest
 import streamcast
 from streamcast._maintain import Maintain, Supervisor
 
-# ~140 bytes a row, so 100k rows is ~14 MB — comfortably past the 8 MiB
-# default at which litelink's policy says a seal is due.
+# ~140 bytes a row, so ROWS is ~560 KB — comfortably past SEAL_SIZE, at
+# which litelink's policy says a seal is due.
 PAD = "x" * 120
+SEAL_SIZE = 256 * 1024
+ROWS = 4_000
 
 SCHEMA = pa.schema(
     [
@@ -39,13 +43,17 @@ def rows(lo: int, hi: int) -> list[dict]:
 @pytest.fixture
 def wide_log(tmp_path):
     handle = litelink.new(
-        tmp_path / "data", "trades", schema=SCHEMA, sort_by=("event_ts",)
+        tmp_path / "data",
+        "trades",
+        schema=SCHEMA,
+        sort_by=("event_ts",),
+        config=litelink.LogConfig(target_seal_size=SEAL_SIZE),
     )
     with handle:
         yield handle
 
 
-async def fill(stream, total=100_000, chunk=2_000):
+async def fill(stream, total=ROWS, chunk=500):
     for start in range(0, total, chunk):
         await stream.send_many(rows(start, start + chunk))
         # A publisher yields between groups; see `Stream.send`.
@@ -70,7 +78,7 @@ class TestTheDefect:
         """The state this library shipped in, pinned.
 
         Not a litelink bug: `seal_due` respects the policy, and the policy is
-        satisfied here — 14 MB against an 8 MiB target. It simply never runs,
+        satisfied here — ~560 KB against a 256 KiB target. It simply never runs,
         because nothing calls it. The buffer grows for the life of the server
         and the DuckDB read cache mirrors it.
         """
@@ -92,7 +100,7 @@ class TestTheDefect:
             # table here means the maintainer, not an unmet threshold.
             # (`seal_due()` would answer it directly and must not be called —
             # it SEALS, which is the whole point of this test.)
-            assert wide_log.buffered_rows() == 100_000
+            assert wide_log.buffered_rows() == ROWS
             assert wide_log.table_files() == 0
 
     @pytest.mark.slow
@@ -105,7 +113,7 @@ class TestTheDefect:
             assert await settle(wide_log), "the maintainer sealed nothing"
 
             assert wide_log.table_files() >= 1
-            assert wide_log.buffered_rows() < 100_000
+            assert wide_log.buffered_rows() < ROWS
 
     @pytest.mark.slow
     async def test_a_replay_still_spans_the_seam_the_maintainer_made(self, wide_log):
@@ -115,9 +123,9 @@ class TestTheDefect:
         async with streamcast.serve(
             stream, "127.0.0.1", 0, maintain=Maintain(maintain_every=1.0)
         ) as server:
-            # The full 100k: 40,000 rows is 5.6 MB, under the 8 MiB target,
-            # so nothing would be due and this would assert on a seal the
-            # policy correctly declined to make.
+            # All of ROWS: fewer would leave the buffer under the target,
+            # with nothing due, and this would assert on a seal the policy
+            # correctly declined to make.
             await fill(stream)
             assert await settle(wide_log)
 
