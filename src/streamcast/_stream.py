@@ -157,6 +157,7 @@ class Stream:
         "_owned",
         "_replay_published",
         "_retired",
+        "_stream_id",
         "_s3",
         "_shape",
         "_stamped",
@@ -265,6 +266,10 @@ class Stream:
         # in, may not have it, and its shape is not this library's to change.
         self._stamped = log is not None and _log.stamped(log)
         self._floor = floor
+        # Read off the metadata file at `ensure_metadata`, which `serve` calls
+        # before the first subscribe; the greeting names it so a reader can
+        # check the file it opens is this stream's.
+        self._stream_id: str | None = None
         self._replay_published = replay_published
         self._retired = tuple(retired)
         self._s3 = s3
@@ -822,6 +827,7 @@ class Stream:
             return
 
         metadata = _metadata.ensure(self._name or log.name, log, self._s3)
+        self._stream_id = metadata.stream_id
         self._floor = _floor(metadata)
         self._retired = _retired(log.root, metadata)
 
@@ -1092,7 +1098,8 @@ class Stream:
                 replay=None,
                 durable=self._log is not None,
                 schema=self._shape,
-                log=self._log_info(),
+                metadata=self.metadata_uri,
+                stream_id=self._stream_id,
             )
         )
 
@@ -1203,7 +1210,8 @@ class Stream:
                     # a caller passed `log=` a handle they opened, and a
                     # subscriber that guessed asks the archive for a table
                     # that is not there.
-                    log=self._log_info(),
+                    metadata=self.metadata_uri,
+                    stream_id=self._stream_id,
                     where=dict(where) if where is not None else None,
                 )
             )
@@ -1216,21 +1224,6 @@ class Stream:
                 # otherwise, and under a reconnect storm that is an unbounded
                 # number of live scans against one log.
                 await replay.aclose()
-
-    def _log_info(self) -> tuple[str, str | None, tuple[str, ...]] | None:
-        """The greeting's `log`: name, archive, and the columns it owns.
-
-        The owned columns are named because the greeting's `schema` leaves them
-        out on purpose, and a reader of the table — `Stream.snapshot`, or any
-        Iceberg engine — needs to know which of its columns the server fills.
-        Per log, from the handle: a log older than `streamcast_ts` lacks it.
-        """
-        log = self._log
-        if log is None:
-            return None
-
-        owned = (_log.COLUMN, *_log.system(log.schema).names)
-        return log.name, _remote_published(log), owned
 
     async def _resolve(self, requested: int | None) -> tuple[WriteHandle, int] | None:
         """The log and offset a replay should start at, or None for live-only.
@@ -1278,12 +1271,7 @@ class Stream:
             # start, so an empty replay would pass for "nothing outstanding"
             # and the subscriber would receive a stream with the old log's
             # tail silently missing — invariant 4's hole at the join.
-            raise NotReplayable(
-                "evicted",
-                offset=requested,
-                earliest=self._floor,
-                archive=_remote_published(log),
-            )
+            raise NotReplayable("evicted", offset=requested, earliest=self._floor)
 
         if requested > frontier:
             raise NotReplayable("ahead", offset=requested, end_offset=frontier)
@@ -1316,17 +1304,7 @@ class Stream:
 
         if self._max_replay is not None and behind > self._max_replay:
             raise NotReplayable(
-                "too_old",
-                # Numbers FIRST, archive LAST, because `refusal` trims from
-                # the end to fit 123 bytes and a bucket URI plus these does
-                # not fit. The numbers are what makes the message readable;
-                # the archive has a second home in the greeting, so losing it
-                # here costs a client one extra round trip rather than the
-                # ability to recover. See `_catchup.details`.
-                offset=requested,
-                behind=behind,
-                max_replay=self._max_replay,
-                archive=_remote_published(log),
+                "too_old", offset=requested, behind=behind, max_replay=self._max_replay
             )
 
         return log, requested
@@ -1384,7 +1362,6 @@ class Stream:
                         "evicted",
                         offset=start,
                         earliest=frontier if first_local is None else first_local,
-                        archive=_remote_published(log),
                     )
 
             return _empty()
@@ -1392,9 +1369,7 @@ class Stream:
         offset, _frame = first
         if offset > start:
             await stream.aclose()
-            raise NotReplayable(
-                "evicted", offset=start, earliest=offset, archive=_remote_published(log)
-            )
+            raise NotReplayable("evicted", offset=start, earliest=offset)
 
         # Decoded from the frame, so a binary column is text again — and the
         # filter compares bytes. `inbound` turns it back, as the client does.
@@ -1499,16 +1474,6 @@ def _declaration(schema: Mapping[str, object]) -> pa.Schema:
         raise ValueError(msg)
 
     return declared
-
-
-def _remote_published(log: LogHandle) -> str | None:
-    """Where another machine reads `log`'s rows: its published prefix, if remote.
-
-    Every log publishes since litelink 0.6, by default to a directory inside
-    it. That one is on this machine's disk alone, so it is not an archive a
-    consumer elsewhere can catch up from, and is not offered as one.
-    """
-    return log.published if _metadata.remote(log.published) else None
 
 
 def _floor(metadata: _metadata.Metadata | None) -> int | None:

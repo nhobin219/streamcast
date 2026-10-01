@@ -1,11 +1,8 @@
-"""Reading the gap out of the archive when a consumer has fallen too far behind.
+"""Reading the gap from the published tables when a consumer has fallen too far behind.
 
-A server refuses `?offset=` that is further back than `max_replay`, and until
-this existed the answer was "read the log yourself" — which means the consumer
-has to know where the archive is, open litelink, scan it in batches without
-running out of memory, convert rows, and then work out where to resume the
-socket. That is orchestration nobody wants to write twice, so `catch_up=True`
-does it:
+A server refuses `?offset=` that is further back than `max_replay`, and
+`catch_up=True` reads what it will not serve from the stream's published
+tables, then picks the socket up where they end:
 
     async with streamcast.connect(uri, cursor=path, catch_up=True) as stream:
         async for offset, msg in stream:
@@ -14,40 +11,37 @@ does it:
 The consumer sees one stream. Underneath, the rows below the server's window
 come from object storage and the rest come from the socket.
 
-**No socket is held while the archive is read.** The first version of this
-opened the live connection at the archive's frontier first, reasoning that it
-closed the gap by construction. It does — and it also makes the server queue
-for a subscriber that will not read a message until it has streamed millions
-of rows out of object storage. `max_backlog` is 8,192, so the connection would
-be dropped with `TooSlow` before the catch-up finished: a recovery that
-guaranteed its own failure on exactly the consumers that needed it.
+**Built on `Stream.snapshot`.** A snapshot is the layer below: be correct or
+fail, reading to a fixed point. Catch-up is one user of it, and owns only what
+a snapshot does not — the retry loop and the live connection. The greeting
+names the stream's metadata file and id, and a snapshot of it is everything
+published, from the cursor up.
 
-So the archive is read with nothing connected, and the socket is opened after,
-at the offset the archive actually reached. That leaves a window — rows
-published while the gap was being read — and the server still holds those,
-because they are inside its replay window. If they are not, the archive has
-grown in the meantime, so the whole thing is a LOOP: read, try to connect,
-and if the server still says too old, read the newly archived rows and try
-again. It converges once the archive gets within the server's window, and
-`catch_up_retries` bounds it for when that never happens.
+**No socket is held while the tables are read.** A connection opened first
+would close the gap by construction — and make the server queue for a
+subscriber that will not read a message until it has streamed millions of
+rows out of object storage, so `max_backlog` would drop it before the catch-up
+finished (invariant 7). So the snapshot is read with nothing connected, and
+the socket opens after, at the offset the snapshot ended at. Rows published
+meanwhile are inside the server's replay window; if they are not, more has
+been published since, so the whole thing is a LOOP — read, connect, and if
+the server still says too old, read again from where this round stopped.
+`catch_up_retries` bounds it.
 
-**Memory is one batch.** The scan is a `RecordBatchReader` and every blocking
-call crosses into a thread, exactly as the server's replay does — a catch-up
-of ten million rows holds one batch, not ten million.
+**Memory is one batch.** `Snapshot.rows` streams through the same batch
+reader a server replays with, and every blocking call crosses into a thread.
 
-**What it cannot fix.** If the archive's frontier is itself below the server's
-window, there is a range nothing holds: the server has forgotten it and the
-archive never received it. That is reported with both numbers rather than
-half-served, because a consumer that silently resumed above the gap would have
-lost data and been told it recovered.
+**What it cannot fix.** If the published tables end below the server's
+window, a range exists that neither holds. That is reported with both
+numbers rather than half-served, because a consumer that silently resumed
+above the gap would have lost data and been told it recovered.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
-from streamcast import _log, _published
+from streamcast import _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
 
 if TYPE_CHECKING:
@@ -56,23 +50,23 @@ if TYPE_CHECKING:
     from litelink import S3Options
 
 # The `why` values a catch-up can answer. `not_durable`, `empty` and `ahead`
-# are not gaps in an archive — they are a stream with no log, a log with
-# nothing in it, and a cursor from the future — and no amount of reading
+# are not gaps in the published tables — they are a stream with no log, a log
+# with nothing in it, and a cursor from the future — and no amount of reading
 # object storage fixes any of them.
 RECOVERABLE: Final = frozenset({"too_old", "evicted"})
 
 CATCH_UP_RETRIES: Final = 3
-"""Rounds of read-the-archive-then-connect before giving up.
+"""Rounds of read-then-connect before giving up.
 
-Each round narrows the gap, because the archive grows while the last one was
-read. Three is enough for a server syncing on any ordinary interval and small
-enough that a stream published faster than it is archived fails quickly with
-a message saying so, rather than reading object storage for ever.
+Each round narrows the gap, because more is published while the last one was
+read. Three is enough for a stream publishing on any ordinary interval and
+small enough that one published faster than it is read fails quickly, with a
+message saying so, rather than reading object storage for ever.
 """
 
 
 class CatchUpUnavailable(StreamcastError):
-    """The gap cannot be read from object storage, and why.
+    """The gap cannot be read from the published tables, and why.
 
     Its own type because the caller's next move is specific and usually
     administrative — credentials, a bucket policy, an endpoint — rather than
@@ -81,9 +75,9 @@ class CatchUpUnavailable(StreamcastError):
 
 
 def _credentials_help(
-    archive: str, name: str, s3: S3Options | None, exc: object
+    location: str, name: str, s3: S3Options | None, exc: object
 ) -> str:
-    """What to actually do about a failed archive read.
+    """What to actually do about a failed read.
 
     Long on purpose. This fires on a box that is behind, at the moment its
     operator most needs to know whether the problem is a typo, a missing
@@ -103,18 +97,19 @@ def _credentials_help(
     )
 
     return (
-        f"cannot read stream {name!r} from {archive} to catch up.\n"
+        f"cannot read stream {name!r} from {location} to catch up.\n"
         f"\n"
         f"  tried:       {where}{region}\n"
         f"  credentials: {keyed}\n"
         f"  underlying:  {type(exc).__name__}: {str(exc)[:200]}\n"
         f"\n"
         f"This consumer has fallen further behind than the server will replay, "
-        f"so the missing rows can only come from the archive — and reading it "
-        f"needs credentials this process does not appear to have.\n"
+        f"so the missing rows can only come from the stream's published "
+        f"tables — and reading them needs credentials this process does not "
+        f"appear to have.\n"
         f"\n"
         f"  * On AWS, the usual fix is an instance role or profile that can "
-        f"GET and LIST under {archive}.\n"
+        f"GET and LIST where the stream publishes.\n"
         f"  * Elsewhere, set AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, "
         f"AWS_SECRET_ACCESS_KEY and AWS_REGION, or pass "
         f"streamcast.S3Options(...) as `s3=`.\n"
@@ -125,101 +120,23 @@ def _credentials_help(
     )
 
 
-class CatchUp:
-    """A bounded read of one stream's archive, and where to resume after it."""
-
-    __slots__ = ("_archive", "_name", "_reader", "_s3")
-
-    def __init__(self, archive: str, name: str, s3: S3Options | None) -> None:
-        self._archive = archive
-        self._name = name
-        self._s3 = s3
-        self._reader: _published.Table | None = None
-
-    async def open(self) -> int:
-        """Pin the published table and return the offset after its last row.
-
-        In a thread: opening resolves the table's current metadata and its
-        extent over the network, and on the event loop that is the consumer's
-        whole process stopped.
-
-        The credential failure is caught HERE rather than at the first batch,
-        because this is the call that touches the bucket first and the caller
-        should learn it cannot read before it has been told it is recovering.
-
-        **The published table only, never the WAL replica.** The band a
-        replica would add is the unsealed tail the server still holds and is
-        about to stream once this hands back to the socket; reading it here
-        would fetch a second copy of the next few seconds of the subscription.
-        """
-        try:
-            self._reader = await asyncio.to_thread(
-                _published.Table.open, self._archive, self._name, self._s3
-            )
-        except Exception as exc:
-            await self.close()
-            raise CatchUpUnavailable(
-                _credentials_help(self._archive, self._name, self._s3, exc)
-            ) from exc
-
-        extent = self._reader.extent
-        return 0 if extent is None else extent[1]
-
-    async def floor(self) -> int | None:
-        """The lowest offset the archive holds, or None if it will not say.
-
-        Read so that an archive which does not go back far enough fails at
-        `connect` rather than at the caller's first `recv` — the same reason
-        `open` is eager. None is not "holds nothing": it is the reader
-        declining to report an extent, and the check in `Catcher.stream`
-        covers that case from the rows themselves.
-        """
-        if self._reader is None:  # pragma: no cover — `open` comes first
-            msg = "open() before floor()"
-            raise RuntimeError(msg)
-
-        extent = self._reader.extent
-
-        return None if extent is None else extent[0]
-
-    def rows(self, start: int, stop: int) -> AsyncGenerator[tuple[int, dict], None]:
-        """`[start, stop)` from the archive, one batch in memory at a time.
-
-        The server's own batch reader, reused — so a caught-up row is built
-        exactly the way a replayed one is, from the same projection in the
-        same order.
-        """
-        if self._reader is None:  # pragma: no cover — `open` comes first
-            msg = "open() before rows()"
-            raise RuntimeError(msg)
-
-        return _log.rows(self._reader, start, stop)
-
-    async def close(self) -> None:
-        reader, self._reader = self._reader, None
-        if reader is not None:
-            # A pinned table holds a DuckDB connection, and a consumer that
-            # walks away mid-catch-up must not leak one per attempt.
-            await asyncio.to_thread(reader.close)
-
-
 class Catcher:
-    """Read the archive, connect, and go round again if still too far behind.
+    """Snapshot, connect, and go round again if still too far behind.
 
-    The loop is the whole design. Each round reads whatever the archive holds
-    above where the last one stopped, then asks the server to take over from
-    there. A round that fails has not wasted its work: the rows it yielded are
-    already delivered, and the next round starts above them.
+    Each round reads whatever is published above where the last one stopped,
+    then asks the server to take over from there. A round that fails has not
+    wasted its work: the rows it yielded are already delivered, and the next
+    round starts above them.
     """
 
     __slots__ = (
-        "_archive",
         "_first",
-        "_frontier",
         "_handshake",
         "_name",
         "_retries",
         "_s3",
+        "_stream_id",
+        "_uri",
         "connection",
         "info",
         "start",
@@ -227,14 +144,16 @@ class Catcher:
 
     def __init__(
         self,
-        archive: str,
+        uri: str,
+        stream_id: str | None,
         name: str,
         s3: S3Options | None,
         start: int,
         retries: int,
         handshake: Callable[[int], Awaitable[tuple[Any, Any]]],
     ) -> None:
-        self._archive = archive
+        self._uri = uri
+        self._stream_id = stream_id
         self._name = name
         self._s3 = s3
         self._retries = retries
@@ -242,53 +161,61 @@ class Catcher:
         self.start = start
         self.connection: Any = None
         self.info: Any = None
-        # The first round's reader, opened by `prepare` rather than inside
+        # The first round's snapshot, opened by `prepare` rather than inside
         # the loop — see there for why.
-        self._first: CatchUp | None = None
-        self._frontier = 0
+        self._first: _snapshot.Snapshot | None = None
+
+    async def _open(self) -> _snapshot.Snapshot:
+        try:
+            return await _snapshot.snapshot(
+                self._uri, s3=self._s3, stream_id=self._stream_id
+            )
+        except _snapshot.SnapshotUnavailable as exc:
+            raise CatchUpUnavailable(str(exc)) from exc
+        except Exception as exc:
+            raise CatchUpUnavailable(
+                _credentials_help(self._uri, self._name, self._s3, exc)
+            ) from exc
 
     async def prepare(self) -> None:
-        """Open the first reader NOW, before any rows are asked for.
+        """Open the first snapshot NOW, before any rows are asked for.
 
-        **So that an unreadable archive raises at `connect`.** The rows stream
+        **So that an unreadable stream raises at `connect`.** The rows stream
         lazily, which puts everything inside `stream` on the caller's first
         `recv` — and a consumer told its subscription was open, then handed an
         S3 credentials error minutes later from whatever line happened to read
         next, is exactly the failure the eager greeting exists to prevent.
-        Observed doing precisely that before this existed.
 
-        It settles the first round's frontier too, so "the archive does not
-        reach far enough" also lands at `connect`.
+        It settles the first round's extent too, so "the published tables do
+        not reach far enough", at either end, also lands at `connect`.
         """
-        self._first = CatchUp(self._archive, self._name, self._s3)
-        self._frontier = await self._first.open()
-        if self._frontier <= self.start:
-            await self._first.close()
-            self._first = None
-            raise _nothing_above(self._name, self._archive, self._frontier, self.start)
+        first = await self._open()
+        try:
+            if first.end_offset <= self.start:
+                raise _nothing_above(
+                    self._name, self._uri, first.end_offset, self.start
+                )
 
-        # And the other end of the range. An archive can end above the
-        # request and still not go back far enough to cover it, which is the
-        # case that used to be served silently from wherever the archive did
-        # start — 400 rows missing and a cursor advanced past them.
-        floor = await self._first.floor()
-        if floor is not None and floor > self.start:
-            await self._first.close()
-            self._first = None
-            raise _gap_below(self._name, self._archive, floor, self.start)
+            # And the other end: tables that end above the request and still do
+            # not go back far enough to cover it, which used to be served
+            # silently from wherever they did start — rows missing, and a
+            # cursor advanced past them.
+            floor = await first.floor()
+            if floor is not None and floor > self.start:
+                raise _gap_below(self._name, self._uri, floor, self.start)
+        except BaseException:
+            await first.close()
+            raise
+
+        self._first = first
 
     async def close(self) -> None:
-        """Release a reader `prepare` opened that `stream` never took.
+        """Release a snapshot `prepare` opened that `stream` never took.
 
-        `prepare` opens the first round's reader eagerly, so that a
-        credentials failure lands at `connect`. If the caller then closes the
-        subscription without ever calling `recv`, the generator below is never
-        STARTED — `aclose` on an unstarted generator runs no code, so the
-        `finally` that closes the reader never runs either, and a DuckDB
-        connection and the snapshot's scratch directory are left behind.
-
-        Idempotent, and a no-op in the ordinary case: `stream` clears `_first`
-        the moment it takes it, so only the never-read path has anything here.
+        A subscription closed before its first `recv` never STARTS the
+        generator below, and `aclose` on an unstarted generator runs no code —
+        so its `finally` never runs, and the snapshot's DuckDB connection is
+        left behind. Idempotent, and a no-op once `stream` has taken it.
         """
         first, self._first = self._first, None
         if first is not None:
@@ -301,53 +228,35 @@ class Catcher:
         """
         refused: NotReplayable | None = None
         # What the consumer actually asked for, kept because `self.start`
-        # advances as rows are delivered. The first row to come out of the
-        # archive is checked against THIS.
+        # advances as rows are delivered. The first row is checked against it.
         requested = self.start
         checked = False
         for _attempt in range(self._retries):
-            # Round one uses what `prepare` already opened, so the credential
-            # check and the first read are not two round trips.
-            reader = self._first or CatchUp(self._archive, self._name, self._s3)
-            frontier = self._frontier if self._first is not None else 0
+            # Round one uses what `prepare` opened, so the credential check
+            # and the first read are not two round trips.
+            snap = self._first or await self._open()
             self._first = None
             try:
-                if frontier == 0:
-                    frontier = await reader.open()
+                async for offset, row in snap.rows(self.start):
+                    if not checked:
+                        checked = True
+                        if offset > requested:
+                            # **The hole at the join, caught at the other end.**
+                            # `prepare` checks the tables' own extent; this is
+                            # the backstop for retention moving the floor up
+                            # between `prepare` and the read.
+                            raise _gap_below(self._name, self._uri, offset, requested)
 
-                if frontier > self.start:
-                    async for offset, row in reader.rows(self.start, frontier):
-                        if not checked:
-                            checked = True
-                            if offset > requested:
-                                # **The hole at the join, caught at the other
-                                # end.** `prepare` rules out an archive that
-                                # ENDS below the request; this rules out one
-                                # that STARTS above it. Measured before this
-                                # existed: a consumer asking for offset 100
-                                # against an archive floored at 500 was
-                                # handed 500 first and told nothing, losing
-                                # 400 messages and advancing its cursor past
-                                # them. `_stream._replay_from` pulls a row
-                                # early for exactly this reason on the server
-                                # side; the archive needed the same guard.
-                                #
-                                # `prepare` normally catches this first, from
-                                # the reader's own extent. This is the
-                                # backstop for a reader that will not report
-                                # one, and for retention moving the floor up
-                                # between `prepare` and the read.
-                                raise _gap_below(
-                                    self._name, self._archive, offset, requested
-                                )
+                    yield offset, row
+                    # Tracked per ROW, so a round that fails partway still
+                    # leaves the next one starting where this one stopped.
+                    self.start = offset + 1
 
-                        yield offset, row
-                        # Tracked per ROW, so a round that fails partway still
-                        # leaves the next one starting where this one stopped.
-                        self.start = offset + 1
-
+                # Past every row the snapshot held, which may be above the
+                # last row read: offsets are not dense across a restore fence.
+                self.start = max(self.start, snap.end_offset)
             finally:
-                await reader.close()
+                await snap.close()
 
             try:
                 self.connection, self.info = await self._handshake(self.start)
@@ -357,27 +266,26 @@ class Catcher:
                 if exc.why not in RECOVERABLE:
                     raise
 
-                # Still behind: the server moved on while the gap was being
-                # read. The archive will have moved with it, so go again.
+                # Still behind: the server moved on while the tables were
+                # read. More will have been published since, so go again.
                 refused = exc
 
         msg = (
             f"{self._name!r} could not be caught up in {self._retries} rounds: "
-            f"everything the archive holds was delivered, up to offset "
-            f"{self.start}, and the server still will not replay from there "
-            f"({refused}).\n"
+            f"everything published was delivered, up to offset {self.start}, and "
+            f"the server still will not replay from there ({refused}).\n"
             f"\n"
             f"Two things look like this and the fix differs:\n"
             f"\n"
-            f"  * The stream is published faster than its archive is synced, "
-            f"so the gap keeps moving. Sync more often, raise the server's "
+            f"  * The stream is written faster than it is published, so the gap "
+            f"keeps moving. Publish more often, raise the server's "
             f"`max_replay`, or pass a larger `catch_up_retries`.\n"
             f"  * The server was RESTORED onto another machine. litelink "
             f"fences offsets on a restore — 2**20 of them — so the range "
-            f"below its window was never issued and no archive will ever "
-            f"hold it. Only raising `max_replay` (or `None`) helps; syncing "
-            f"and retrying cannot. Restore a failed-over producer with "
-            f"`max_replay=None` if existing consumers must resume.\n"
+            f"below its window was never issued and no table will ever hold "
+            f"it. Only raising `max_replay` (or `None`) helps. Restore a "
+            f"failed-over producer with `max_replay=None` if existing "
+            f"consumers must resume.\n"
             f"\n"
             f"Either way the rows that DO exist were delivered, so a consumer "
             f"that has committed them can reconnect at offset={self.start} "
@@ -386,81 +294,59 @@ class Catcher:
         raise CatchUpUnavailable(msg)
 
 
-def _nothing_above(
-    name: str, archive: str, frontier: int, start: int
-) -> CatchUpUnavailable:
-    """The archive does not reach the offset being asked for.
+def _nothing_above(name: str, uri: str, end: int, start: int) -> CatchUpUnavailable:
+    """The published tables do not reach the offset being asked for.
 
-    A range exists that the server has forgotten and the archive never
-    received. Reported with both numbers rather than half-served, because a
-    consumer that silently resumed above it would have lost data and been told
-    it recovered.
+    A range exists that the server has forgotten and nothing has published.
+    Reported with both numbers rather than half-served, because a consumer that
+    silently resumed above it would have lost data and been told it recovered.
     """
     return CatchUpUnavailable(
-        f"{name!r} is behind the server's replay window and the archive at "
-        f"{archive} ends at offset {frontier}, which is not above the {start} "
+        f"{name!r} is behind the server's replay window, and its published "
+        f"tables ({uri}) end at offset {end}, which is not above the {start} "
         f"being asked for. The rows between are gone from both — neither "
-        f"holds them: the server has forgotten them and the archive never "
-        f"received them. Reconnect with offset=streamcast.EARLIEST to take "
-        f"what is left and accept the loss."
+        f"holds them: the server has forgotten them and they were never "
+        f"published. Reconnect with offset=streamcast.EARLIEST to take what "
+        f"is left and accept the loss."
     )
 
 
 def _gap_below(
-    name: str, archive: str, earliest: int, requested: int
+    name: str, uri: str, earliest: int, requested: int
 ) -> CatchUpUnavailable:
-    """The archive does not go back as far as the offset being asked for.
+    """The published tables do not go back as far as the offset being asked for.
 
     The server refused because its own tier had already dropped the rows, and
-    the archive turns out not to hold them either — so they are gone. Raised
-    rather than served from wherever the archive does start, because a
+    the published tables turn out not to hold them either — so they are gone.
+    Raised rather than served from wherever the tables do start, because a
     consumer handed a stream that silently begins above where it asked has
     lost data and been told it recovered.
     """
     return CatchUpUnavailable(
-        f"{name!r} asked to catch up from offset {requested}, but the archive "
-        f"at {archive} starts at {earliest} — the {earliest - requested} rows "
-        f"between are in neither the server nor the archive. They are gone. "
-        f"Reconnect with offset=streamcast.EARLIEST to take what is left and "
-        f"accept the loss, or with offset={earliest} to state that you know "
-        f"what is missing."
+        f"{name!r} asked to catch up from offset {requested}, but its published "
+        f"tables ({uri}) start at {earliest} — the {earliest - requested} rows "
+        f"between are in neither the server nor the published tables. They "
+        f"are gone. Reconnect with offset=streamcast.EARLIEST to take what is "
+        f"left and accept the loss, or with offset={earliest} to state that you "
+        f"know what is missing."
     )
 
 
-def from_refusal(exc: NotReplayable, configured: str | None) -> str | None:
-    """Where to read the gap, from the caller or from the refusal.
-
-    Explicit wins: a caller that named an archive meant that one, and it also
-    covers a server whose own is unreachable from here. Otherwise the refusal
-    may carry it — but only when it fitted, since `refusal` trims to 123 bytes
-    and the numbers are ordered ahead of it. `None` means ask the greeting.
-    """
-    if configured:
-        return configured
-
-    found = exc.fields.get("archive")
-
-    return found if isinstance(found, str) and found else None
-
-
 def nowhere_to_read(name: str) -> CatchUpUnavailable:
-    """Neither the caller, the refusal, nor the greeting named an archive."""
+    """The server names no metadata file: the stream has no log to read."""
     return CatchUpUnavailable(
         f"stream {name!r} is further behind than the server will replay, and "
-        f"there is no archive to read the gap from — the server has none "
-        f"configured. Either give the server an archive (litelink's "
-        f"`archive=`), raise its `max_replay`, or reconnect with "
+        f"it has no log, so there is nothing published to read the gap from. "
+        f"Raise the server's `max_replay`, or reconnect with "
         f"offset=streamcast.EARLIEST to take what it still holds and accept "
         f"the loss. `catch_up=False` turns this back into the plain refusal."
     )
 
 
 __all__ = [
-    "RECOVERABLE",
-    "CatchUp",
     "CATCH_UP_RETRIES",
+    "RECOVERABLE",
     "CatchUpUnavailable",
     "Catcher",
-    "from_refusal",
     "nowhere_to_read",
 ]

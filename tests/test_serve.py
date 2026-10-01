@@ -178,12 +178,10 @@ class TestWebsocketsCompatibility:
             info = json.loads(await raw.recv())
             assert info["streamcast"] == streamcast._protocol.VERSION
             assert info["stream"] == "trades"
-            # Enough to open the log without this library: `litelink.snapshot`
-            # takes the first two, and `owned` names the table's columns that
-            # the schema leaves out.
-            assert set(info["log"]) == {"name", "archive", "owned"}
-            assert info["log"]["owned"] == ["litelink_offset"]
-            assert info["log"]["name"] == log.name
+            # Enough to read the stream's history without this server: its
+            # metadata file, and the id that says the file is this stream's.
+            assert info["metadata"].endswith("/trades.metadata.json")
+            assert isinstance(info["stream_id"], str)
 
             # And every frame after it is a readable JSON row. No header to
             # slice, no payload kind, no library needed on this side.

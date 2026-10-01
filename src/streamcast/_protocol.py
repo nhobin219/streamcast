@@ -5,7 +5,7 @@ message after it is a two-element pair — the offset, then one row of the
 stream's table. How another language reads a row, binary columns included, is
 `docs/SPEC.md` §2, "Reading a row in another language":
 
-    {"streamcast":2,"stream":"trades","end_offset":1861,"log":{...},...}
+    {"streamcast":3,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
     [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]
 
 **The offset is POSITIONAL, and the row is untouched.** It is element 0 of
@@ -72,7 +72,7 @@ _DECODER: Final = msgspec.json.Decoder()
 #
 # There is no key name here on purpose. That is the point.
 
-VERSION: Final = 2
+VERSION: Final = 3
 """The protocol this build speaks. A greeting naming any other is refused.
 
 One number for the whole protocol rather than a feature list, because there is
@@ -199,49 +199,6 @@ def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
 
 
 @dataclass(frozen=True, slots=True)
-class LogInfo:
-    """Enough to open the stream's log without asking anyone.
-
-        reader = litelink.snapshot(info.log.name, archive=info.log.archive)
-
-    The NAME is the part that cannot be guessed. A stream serves at its own
-    name and its log has its own, and nothing makes them equal: `Stream.new`
-    feeds one through, but `Stream(log=handle)` takes a log the caller opened
-    and named. A subscriber that assumed `stream` was the log name asked the
-    archive for a table that was not there, and `catch_up` reported it as a
-    credentials problem.
-
-    Credentials are deliberately absent. They are the reader's own, resolved
-    from its environment the way litelink resolves them, and a server that
-    sent them would be handing every subscriber its own keys.
-    """
-
-    name: str
-    archive: str | None
-    """Where the log is archived, or None if it has none.
-
-    Published so a subscriber that falls behind the server's replay window
-    knows where to read the gap — see `_catchup`. It is here rather than only
-    in the refusal because a close frame has 123 bytes and a bucket URI plus
-    the numbers that diagnose the refusal do not both fit; the refusal carries
-    it too, last, so the numbers win when something has to go.
-    """
-
-    owned: tuple[str, ...] = ()
-    """The table's columns that neither `schema` nor a frame will show.
-
-    `litelink_offset`, which a frame carries as its offset instead, and
-    `streamcast_ts` on a log that has it. Named here because `schema` is the
-    APPLICATION's shape and leaves them out on purpose, so a subscriber reading
-    the table directly would otherwise learn about them only by opening it.
-
-    Per log, not per server: a log created before streamcast owned a column
-    does not have it, and this says so rather than the server's version.
-    Empty from a server that predates the field.
-    """
-
-
-@dataclass(frozen=True, slots=True)
 class Greeting:
     """What the server says before the first message, and the only reply there is.
 
@@ -274,12 +231,23 @@ class Greeting:
     A loop that must terminate on a count wants an unfiltered subscription.
     """
 
-    log: LogInfo | None
-    """The log behind this stream, or None if it has none.
+    metadata: str | None
+    """Where the stream's metadata file is, or None for a stream with no log.
 
-    `durable` answers whether there is one; this says which, so a subscriber
-    can read it directly rather than through the socket — the whole history
-    with `litelink.snapshot`, or any Iceberg engine pointed at the archive.
+    What `Stream.snapshot` opens to read the stream's history without this
+    server — every log, where each is published, and what each holds. An
+    `s3://` URI beside the published tables, or for a stream without one a
+    `file://` path on the server's machine, readable there and nowhere else.
+    Credentials are the reader's own; a server that sent them would be
+    handing every subscriber its keys.
+    """
+
+    stream_id: str | None
+    """The stream's id, as its metadata file records it, or None with no log.
+
+    A reader checks the file it opens against this: a `file://` path that
+    exists on two machines can be two streams, and reading the other one
+    would return its history without a word.
     """
 
     schema: dict[str, object] | None
@@ -318,15 +286,14 @@ def greeting(
     replay: tuple[int, int] | None,
     durable: bool,
     schema: dict[str, object] | None = None,
-    log: tuple[str, str | None, tuple[str, ...]] | None = None,
+    metadata: str | None = None,
+    stream_id: str | None = None,
     where: dict[str, object] | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
-    `log` is the log's `(name, archive, owned)`, or None for a stream with none. A
-    nested object rather than flat keys, so the things a subscriber needs to
-    open the log arrive together and `null` says plainly that there is
-    nothing to open.
+    `metadata` and `stream_id` say where the stream's history can be read
+    from, and which stream it is; both None for a stream with no log.
 
     `where` is the filter the server is applying, echoed back. It is what lets
     a subscriber confirm the server understood the predicate rather than
@@ -341,11 +308,8 @@ def greeting(
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
             "schema": schema,
-            "log": (
-                None
-                if log is None
-                else {"name": log[0], "archive": log[1], "owned": list(log[2])}
-            ),
+            "metadata": metadata,
+            "stream_id": stream_id,
             "where": where,
         }
     ).decode()
@@ -382,23 +346,8 @@ def parse_greeting(frame: str | bytes) -> Greeting:
     replay = fields.get("replay")
     schema = fields.get("schema")
 
-    # A log with no name is not a log this can open, so it is not one worth
-    # reporting: `None` says "nothing to read directly", which is also what a
-    # stream without a log says.
-    raw = fields.get("log")
-    log = None
-    if isinstance(raw, dict) and isinstance(raw.get("name"), str):
-        archive = raw.get("archive")
-        owned = raw.get("owned")
-        log = LogInfo(
-            name=raw["name"],
-            archive=archive if isinstance(archive, str) else None,
-            owned=(
-                tuple(c for c in owned if isinstance(c, str))
-                if isinstance(owned, list)
-                else ()
-            ),
-        )
+    metadata = fields.get("metadata")
+    stream_id = fields.get("stream_id")
 
     return Greeting(
         version=version,
@@ -406,7 +355,8 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         end_offset=None if fields["end_offset"] is None else int(fields["end_offset"]),
         replay=(int(replay[0]), int(replay[1])) if replay is not None else None,
         schema=schema if isinstance(schema, dict) else None,
-        log=log,
+        metadata=metadata if isinstance(metadata, str) else None,
+        stream_id=stream_id if isinstance(stream_id, str) else None,
         where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
     )
@@ -658,7 +608,6 @@ __all__ = [
     "parse_publish_reply",
     "Greeting",
     "Publish",
-    "LogInfo",
     "decode",
     "encode",
     "encode_projected",

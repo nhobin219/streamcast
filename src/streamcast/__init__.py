@@ -111,7 +111,7 @@ from streamcast._errors import (
     TooSlow,
 )
 from streamcast._maintain import Maintain
-from streamcast._protocol import EARLIEST, Greeting, LogInfo
+from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
@@ -135,7 +135,6 @@ __all__ = [
     "Close",
     "Cursor",
     "Greeting",
-    "LogInfo",
     "Maintain",
     "S3Options",
     "NotReplayable",

@@ -18,7 +18,7 @@ import pytest
 import websockets
 
 import streamcast
-from streamcast import _log
+from streamcast import _log, _snapshot
 from tests.conftest import SCHEMA, trade
 
 SCHEMA_JSON: dict[str, Any] = streamcast.from_arrow(SCHEMA)
@@ -117,8 +117,10 @@ class TestItIsNeverSent:
     async def test_the_greeting_names_the_columns_the_log_owns(self, serve, stamped):
         stream = streamcast.Stream("trades", log=stamped)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is not None
-            assert sub.info.log.owned == ("litelink_offset", _log.STAMP)
+            # In the stream's metadata, per log: the greeting names the file.
+            assert sub.info.metadata is not None
+            found = _snapshot.metadata(sub.info.metadata, None, sub.info.stream_id)
+            assert _log.STAMP in found.live_log.system_schema["properties"]  # ty: ignore[unsupported-operator]
 
     async def test_a_filter_cannot_name_it(self, serve, stamped):
         # It is not a column a subscriber can see, so it is not one it can
@@ -225,9 +227,7 @@ class TestLogsWithoutIt:
             assert stream.log is not None
             assert _log.STAMP not in stream.log.schema.names
             assert await stream.send(trade(0)) == 1
-            info = stream._log_info()
-            assert info is not None
-            assert info[2] == ("litelink_offset",)
+            assert not _log.stamped(stream.log)
         finally:
             await stream.aclose()
 
@@ -237,5 +237,6 @@ class TestLogsWithoutIt:
 
         assert _log.STAMP not in log.schema.names
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is not None
-            assert sub.info.log.owned == ("litelink_offset",)
+            assert sub.info.metadata is not None
+            found = _snapshot.metadata(sub.info.metadata, None, sub.info.stream_id)
+            assert found.live_log.system_schema["properties"] == {}

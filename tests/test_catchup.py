@@ -13,8 +13,8 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _log, _published
-from streamcast._catchup import CatchUp
+from streamcast import _log, _snapshot
+from streamcast._snapshot import Snapshot
 
 pytestmark = pytest.mark.replication
 
@@ -228,13 +228,13 @@ class TestItClosesTheGap:
         same guard; this one was missing until it was looked for.
         """
         closed: list[int] = []
-        original = CatchUp.close
+        original = Snapshot.close
 
         async def spy(self):
             closed.append(1)
             await original(self)
 
-        monkeypatch.setattr(CatchUp, "close", spy)
+        monkeypatch.setattr(Snapshot, "close", spy)
 
         stream = streamcast.Stream("trades", log=archived, max_replay=100)
         await fill(stream, archived, total=800)
@@ -270,13 +270,13 @@ class TestItClosesTheGap:
         it. Found by reading, not by a failing test.
         """
         closed: list[int] = []
-        original = CatchUp.close
+        original = Snapshot.close
 
         async def spy(self):
             closed.append(1)
             await original(self)
 
-        monkeypatch.setattr(CatchUp, "close", spy)
+        monkeypatch.setattr(Snapshot, "close", spy)
 
         stream = streamcast.Stream("trades", log=archived, max_replay=100)
         await fill(stream, archived, total=800)
@@ -334,10 +334,11 @@ class TestTheLogIsNamedInTheGreeting:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
                     assert sub.info.stream == "trades"
-                    assert sub.info.log is not None
-                    assert sub.info.log.name == "raw_trades_v2", (
-                        "the greeting must publish the LOG's name, not the "
-                        "stream's, or a reader cannot open it"
+                    assert sub.info.metadata is not None
+                    found = _snapshot.metadata(sub.info.metadata, s3)
+                    assert found.live_log.name == "raw_trades_v2", (
+                        "the metadata must name the LOG, not the stream, or a "
+                        "reader cannot open it"
                     )
 
                 async with streamcast.connect(
@@ -350,13 +351,12 @@ class TestTheLogIsNamedInTheGreeting:
     async def test_the_greeting_is_enough_to_open_the_log_directly(
         self, tmp_path, s3, bucket, serve
     ):
-        """The point of publishing it: a subscriber reads the log itself.
+        """The point of publishing it: a subscriber reads the history itself.
 
-        Name and archive are what an Iceberg engine needs — the table sits at
-        `<archive>/<name>` — so a consumer that wants the whole history goes
-        straight to object storage instead of through the socket. Credentials stay the
-        reader's own; a server that sent them would be handing every
-        subscriber its keys.
+        The greeting's metadata URI is all `Stream.snapshot` needs, so a
+        consumer that wants the whole history goes straight to object storage
+        instead of through the socket. Credentials stay the reader's own; a
+        server that sent them would be handing every subscriber its keys.
         """
         handle = litelink.new(
             tmp_path / "data",
@@ -374,20 +374,13 @@ class TestTheLogIsNamedInTheGreeting:
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
-                    info = sub.info.log
+                    info = sub.info
 
-            assert info is not None
-            assert info.archive is not None
+            assert info.metadata is not None
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
-            reader = await asyncio.to_thread(
-                _published.Table.open, info.archive, info.name, s3
-            )
-            try:
-                assert reader.extent is not None
-                assert reader.extent[1] > 1
-            finally:
-                await asyncio.to_thread(reader.close)
+            table = await streamcast.Stream.scan(info.metadata, s3=s3)
+            assert table.num_rows == 800
 
 
 class TestTheWholeHistoryGateway:
@@ -529,14 +522,8 @@ class TestAnEvictedLog:
 
                 # And the consumer's move from here works, which is the whole
                 # reason this is a refusal with a named remedy rather than an
-                # error: nothing ages out of the archive, so an offset the
-                # local tier has dropped is still there.
-                #
-                # The refusal's own `archive` field is trimmed away here — a
-                # bucket URI does not fit in a 123-byte close reason beside
-                # the numbers — so this exercises the greeting as the
-                # fallback source for it too.
-                assert raised.value.fields.get("archive") is None
+                # error: nothing ages out of the published table, so an
+                # offset the local tier has dropped is still there.
                 async with streamcast.connect(
                     uri, offset=1, catch_up=True, s3=s3
                 ) as sub:
@@ -582,75 +569,73 @@ class TestTheGapItCannotClose:
                     await streamcast.connect(uri, offset=100, catch_up=True, s3=s3)
 
         message = str(raised.value)
-        assert "in neither the server nor the archive" in message
+        assert "in neither the server nor the published tables" in message
         # Both ends of the missing range, and how many rows it is.
         assert "500" in message, message
         assert "100" in message, message
         assert "400" in message, message
 
 
-class TestWhereTheArchiveComesFrom:
-    async def test_the_greeting_publishes_the_log(self, serve, archived, s3):
-        """Name and archive together, which is what opening one needs."""
+class TestWhereTheHistoryIsRead:
+    async def test_the_greeting_names_the_metadata_and_the_stream(
+        self, serve, archived, s3
+    ):
+        """The file and the id that says it is this stream's."""
         stream = streamcast.Stream("trades", log=archived)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is not None
-            assert sub.info.log.archive == archived.published
-            assert sub.info.log.name == archived.name
+            assert sub.info.metadata == f"{archived.published}/trades.metadata.json"
+            found = _snapshot.metadata(sub.info.metadata, s3)
+            assert sub.info.stream_id == found.stream_id
 
-    async def test_a_stream_without_a_log_publishes_none(self, serve):
+    async def test_a_stream_without_a_log_names_none(self, serve):
         stream = streamcast.Stream("live")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert sub.info.log is None
+            assert sub.info.metadata is None
+            assert sub.info.stream_id is None
             assert sub.info.durable is False
 
-    async def test_an_explicit_archive_wins(self, serve, archived, s3):
-        # A caller that named one meant that one — it also covers a server
-        # whose own archive is unreachable from this box.
-        from streamcast._catchup import from_refusal
-
-        exc = streamcast.NotReplayable("too_old", archive="s3://from-server/x")
-        assert from_refusal(exc, "s3://from-caller/y") == "s3://from-caller/y"
-        assert from_refusal(exc, None) == "s3://from-server/x"
-        assert from_refusal(streamcast.NotReplayable("too_old"), None) is None
-
     @pytest.mark.slow
-    async def test_it_recovers_when_the_refusal_could_not_carry_it(
-        self, serve, archived, s3, monkeypatch
+    async def test_the_refusal_names_no_location_and_catch_up_needs_none(
+        self, serve, archived, s3
     ):
-        """A long bucket URI does not fit beside the numbers in 123 bytes.
+        """A close reason has 123 bytes, and a bucket URI is not in it.
 
-        The numbers are ordered first because they are what makes the refusal
-        readable, so the archive is what drops — and the client then asks the
-        greeting, which has no such limit.
+        The numbers are what make a refusal readable; where to read the gap
+        is the greeting's to say, and the greeting has no such limit.
         """
         stream = streamcast.Stream("trades", log=archived, max_replay=600)
         await fill(stream, archived)
 
         async with serve(stream, maintain=False) as uri:
-            # Simulate the trim: a refusal that carries no archive at all.
-            from streamcast import _stream as stream_module
+            with pytest.raises(streamcast.NotReplayable) as raised:
+                await streamcast.connect(uri, offset=1)
 
-            original = stream_module.NotReplayable
-
-            def without_archive(why, **fields):
-                fields.pop("archive", None)
-                return original(why, **fields)
-
-            monkeypatch.setattr(stream_module, "NotReplayable", without_archive)
-
+            assert "archive" not in raised.value.fields
             async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
                 assert (await sub.recv())[0] == 1
 
+    async def test_an_explicit_metadata_uri_wins(self, serve, archived, s3, tmp_path):
+        """A caller that named a file meant that one, not the greeting's."""
+        stream = streamcast.Stream("trades", log=archived, max_replay=10)
+        await fill(stream, archived, total=800)
+
+        async with serve(stream, maintain=False) as uri:
+            missing = (tmp_path / "elsewhere.metadata.json").as_uri()
+            with pytest.raises(streamcast.CatchUpUnavailable, match="elsewhere"):
+                await streamcast.connect(
+                    uri, offset=1, catch_up=True, s3=s3, metadata=missing
+                )
+
 
 class TestWhenItCannot:
-    async def test_no_archive_anywhere_says_so(self, serve, log):
-        # A log with no archive configured: there is nothing to read.
+    async def test_nothing_published_says_so(self, serve, log):
+        # A local-only log whose rows are all still buffered: its metadata is
+        # readable on this machine, and its published table holds nothing.
         stream = streamcast.Stream("trades", log=log, max_replay=2)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(20)])
 
-            with pytest.raises(streamcast.CatchUpUnavailable, match="no archive"):
+            with pytest.raises(streamcast.CatchUpUnavailable, match="neither holds"):
                 await streamcast.connect(uri, offset=1, catch_up=True)
 
     @pytest.mark.slow
@@ -764,12 +749,14 @@ def test_nothing_is_connected_while_the_archive_is_read():
     ), "the socket is opened before the archive is read"
 
 
-def test_the_reader_crosses_into_a_thread():
-    # Pinning the published table reads its hint, schema and extent over the
-    # network — seconds — and on the event loop that is the consumer's whole
-    # process stopped.
+def test_the_reads_cross_into_a_thread():
+    # Resolving the metadata and pinning the live log read over the network —
+    # seconds — and on the event loop that is the consumer's whole process
+    # stopped.
     import inspect
 
-    source = inspect.getsource(CatchUp.open)
-    assert "asyncio.to_thread(\n                _published.Table.open" in source
-    assert "asyncio.to_thread" in inspect.getsource(CatchUp.close)
+    from streamcast import _snapshot as snapshot_module
+
+    source = inspect.getsource(snapshot_module.snapshot)
+    assert source.count("asyncio.to_thread") >= 2
+    assert "asyncio.to_thread" in inspect.getsource(Snapshot.close)

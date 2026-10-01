@@ -287,6 +287,22 @@ class Snapshot:
                 if start <= offset < high:
                     yield offset, record
 
+    async def floor(self) -> int | None:
+        """The lowest offset the snapshot holds, or None if it holds none.
+
+        Opens the oldest log with rows and no other: offsets increase across
+        logs, so the first table with an extent is the answer.
+        """
+        for piece in self._pieces:
+            table = await asyncio.to_thread(self._open, piece)
+            if table.extent is not None:
+                return table.extent[0]
+
+        if self._tail is not None and self._tail.num_rows:
+            return int(self._tail.column(_log.COLUMN)[0].as_py())
+
+        return None
+
     async def close(self) -> None:
         await asyncio.to_thread(self._connection.close)
 
@@ -411,25 +427,22 @@ def _assemble(
     try:
         pieces = _pieces(found, as_of_ts)
         live = next((p for p in pieces if p.entry is found.live_log), None)
-        if live is None:
-            published_end = found.live_log.start_offset
-        else:
-            table = (
-                _published.Table.open(
+        published_end = found.live_log.start_offset
+        if live is not None:
+            if _has_table(found.live_log, s3):
+                live.table = _published.Table.open(
                     found.live_log.published or "",
                     found.live_log.name,
                     s3,
                     shared=connection,
                 )
-                if _has_table(found.live_log, s3)
-                else None
-            )
-            live.table = table
-            published_end = (
-                table.extent[1]
-                if table is not None and table.extent is not None
-                else found.live_log.start_offset
-            )
+                if live.table.extent is not None:
+                    published_end = live.table.extent[1]
+            else:
+                # Nothing published yet: the live log holds nothing a reader
+                # here can see, and is not a piece to open.
+                pieces.remove(live)
+                live = None
 
         if as_of_ts is not None and live is not None and live.table is not None:
             newest = connection.execute(
