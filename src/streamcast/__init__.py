@@ -110,6 +110,7 @@ from streamcast._errors import (
     StreamNotFound,
     TooSlow,
 )
+from streamcast._live import Live
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
@@ -130,6 +131,7 @@ __all__ = [
     "MAX_BACKLOG",
     "MAX_REPLAY",
     "CatchUpUnavailable",
+    "Live",
     "Snapshot",
     "SnapshotUnavailable",
     "Close",
