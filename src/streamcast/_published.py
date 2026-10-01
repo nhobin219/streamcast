@@ -48,14 +48,14 @@ def _quoted(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def connection(uri: str, s3: S3Options | None) -> duckdb.DuckDBPyConnection:
-    """A DuckDB connection that can read the table at `uri`.
+def connection(s3: S3Options | None, *, remote: bool) -> duckdb.DuckDBPyConnection:
+    """A DuckDB connection that can read published tables.
 
-    `httpfs` and credentials only for an `s3://` table: a local one needs
-    neither, and a machine reading only local tables never loads them.
+    `httpfs` and credentials only when `remote`, for `s3://` tables: a local
+    one needs neither, and a machine reading only local tables never loads them.
     """
     connected = duckdb_connection()
-    if uri.startswith("s3://"):
+    if remote:
         load_extension(connected, "httpfs", remote=True)
         connected.execute(secret_sql((s3 or S3Options()).resolved()))
 
@@ -71,7 +71,7 @@ class Table:
     row a server replays (I6).
     """
 
-    __slots__ = ("_connection", "_metadata", "extent", "name", "schema")
+    __slots__ = ("_connection", "_owned", "extent", "metadata", "name", "schema")
 
     def __init__(
         self,
@@ -80,24 +80,41 @@ class Table:
         metadata: str,
         schema: pa.Schema,
         extent: tuple[int, int] | None,
+        *,
+        owned: bool = True,
     ) -> None:
         self.name = name
         self._connection = connection
-        self._metadata = metadata
+        self._owned = owned
+        self.metadata = metadata
+        """The pinned `metadata.json`: what every query on this table reads."""
         self.schema = schema
         self.extent = extent
         """`[start, end)` of the offsets this snapshot holds, or None if it holds none."""
 
     @classmethod
-    def open(cls, published: str, name: str, s3: S3Options | None) -> Table:
+    def open(
+        cls,
+        published: str,
+        name: str,
+        s3: S3Options | None,
+        *,
+        shared: duckdb.DuckDBPyConnection | None = None,
+    ) -> Table:
         """The table for log `name` under the `published` prefix, as it is now.
 
         Blocking — a hint read, a schema read and an extent query, each a GET
         or more against an `s3://` table — so a caller on an event loop runs it
         in a thread.
+
+        `shared` is a connection to read through rather than a new one, which
+        is how a snapshot reads all of a stream's logs on one connection; it
+        is the caller's to close.
         """
         uri = f"{published.rstrip('/')}/{name}"
-        connected = connection(uri, s3)
+        connected = (
+            connection(s3, remote=uri.startswith("s3://")) if shared is None else shared
+        )
         try:
             table = path(uri)
             hint = connected.execute(
@@ -114,11 +131,13 @@ class Table:
                 f'SELECT min("{COLUMN}"), max("{COLUMN}") FROM {scan}'
             ).fetchone() or (None, None)
         except BaseException:
-            connected.close()
+            if shared is None:
+                connected.close()
+
             raise
 
         extent = None if low is None or high is None else (int(low), int(high) + 1)
-        return cls(name, connected, metadata, schema, extent)
+        return cls(name, connected, metadata, schema, extent, owned=shared is None)
 
     def scan(
         self,
@@ -142,14 +161,19 @@ class Table:
             terms.append(f"({where})")
 
         query = (
-            f"SELECT {projection} FROM iceberg_scan({_quoted(self._metadata)})"
+            f"SELECT {projection} FROM {self.relation()}"
             + (f" WHERE {' AND '.join(terms)}" if terms else "")
             + f' ORDER BY "{COLUMN}"'
         )
         return self._connection.execute(query).to_arrow_reader()
 
+    def relation(self) -> str:
+        """The pinned snapshot as a DuckDB table function, for composing queries."""
+        return f"iceberg_scan({_quoted(self.metadata)})"
+
     def close(self) -> None:
-        self._connection.close()
+        if self._owned:
+            self._connection.close()
 
 
 __all__ = ["Table", "connection", "path"]

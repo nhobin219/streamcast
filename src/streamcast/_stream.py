@@ -36,7 +36,15 @@ from typing import TYPE_CHECKING, Final
 import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _filter, _log, _manifest, _metadata, _replicate, _schema
+from streamcast import (
+    _filter,
+    _log,
+    _manifest,
+    _metadata,
+    _replicate,
+    _schema,
+    _snapshot,
+)
 from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
@@ -661,6 +669,101 @@ class Stream:
         )
 
     # -- identity ----------------------------------------------------------
+
+    # -- reading a stream's history -------------------------------------------
+
+    @staticmethod
+    async def snapshot(
+        metadata_uri: str,
+        *,
+        as_of_offset: int | None = None,
+        as_of_ts: int | None = None,
+        broker: str | None = None,
+        s3: S3Options | None = None,
+    ) -> _snapshot.Snapshot:
+        """A stream's history as of one point, read from its published tables.
+
+            snapshot = await Stream.snapshot(uri)                          # all published
+            snapshot = await Stream.snapshot(uri, as_of_offset=123)        # that point
+            snapshot = await Stream.snapshot(uri, as_of_ts=t)              # by streamcast_ts
+            snapshot = await Stream.snapshot(uri, as_of_offset=LATEST, broker=ws)
+
+        `metadata_uri` is the stream's metadata file: `Stream.metadata_uri` on
+        the server, or the greeting's on a subscriber. A `Snapshot` reads, it
+        does not write: `scan`, `sql` and `rows`, then `close` (or
+        `async with`). See `_snapshot` for what each point means, when the
+        broker is consulted, and what is refused rather than answered short.
+        """
+        return await _snapshot.snapshot(
+            metadata_uri,
+            as_of_offset=as_of_offset,
+            as_of_ts=as_of_ts,
+            broker=broker,
+            s3=s3,
+        )
+
+    @staticmethod
+    async def scan(
+        metadata_uri: str,
+        *,
+        as_of_offset: int | None = None,
+        as_of_ts: int | None = None,
+        broker: str | None = None,
+        s3: S3Options | None = None,
+        columns: Sequence[str] | None = None,
+        where: str | None = None,
+        filters: Sequence[_manifest.Term] = (),
+        start_offset: int | None = None,
+        end_offset: int | None = None,
+    ) -> pa.Table:
+        """One `Snapshot.scan` on a snapshot opened for it, then closed."""
+        async with await Stream.snapshot(
+            metadata_uri,
+            as_of_offset=as_of_offset,
+            as_of_ts=as_of_ts,
+            broker=broker,
+            s3=s3,
+        ) as snap:
+            return await snap.scan(
+                columns=columns,
+                where=where,
+                filters=filters,
+                start_offset=start_offset,
+                end_offset=end_offset,
+            )
+
+    @staticmethod
+    async def sql(
+        metadata_uri: str,
+        query: str,
+        *,
+        as_of_offset: int | None = None,
+        as_of_ts: int | None = None,
+        broker: str | None = None,
+        s3: S3Options | None = None,
+    ) -> pa.Table:
+        """One `Snapshot.sql` — over the table `log` — then closed."""
+        async with await Stream.snapshot(
+            metadata_uri,
+            as_of_offset=as_of_offset,
+            as_of_ts=as_of_ts,
+            broker=broker,
+            s3=s3,
+        ) as snap:
+            return await snap.sql(query)
+
+    @property
+    def metadata_uri(self) -> str | None:
+        """Where a reader finds this stream's metadata, or None with no log.
+
+        The copy beside its published tables when they are on `s3://`, else
+        the local file as an absolute `file://` URI — readable on this machine
+        only, which the `stream_id` check catches anywhere else.
+        """
+        if self._log is None:
+            return None
+
+        return _metadata.uri(self._name, self._log)
 
     @property
     def name(self) -> str:

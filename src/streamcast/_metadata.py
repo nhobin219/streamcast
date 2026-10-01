@@ -384,6 +384,17 @@ def default_published(log: LogHandle) -> bool:
     )
 
 
+def uri(stream: str, log: LogHandle) -> str:
+    """Where a reader finds `stream`'s metadata: the copy beside its published
+    tables if they are remote, else this file, as an absolute `file://` URI —
+    absolute because a relative root means nothing on another machine, or in
+    another working directory."""
+    if remote(log.published):
+        return _uri(log.published, stream)
+
+    return path(log.root, stream).resolve().as_uri()
+
+
 def _uri(archive: str, stream: str) -> str:
     return f"{archive.rstrip('/')}/{stream}.metadata.json"
 
