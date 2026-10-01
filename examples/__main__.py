@@ -142,6 +142,10 @@ DEMOS: dict[str, Demo] = {
                 8766,
             ),
             Process("producer", module("examples.otel.services")),
+            # Real-time analytics over `/spans` with `Stream.live`, printed on
+            # an interval. Before the exporter, which stays last: the last
+            # process is the one whose options `just demo otel --help` shows.
+            Process("analytics", module("examples.otel.analytics")),
             Process("exporter", module("examples.otel.export")),
         ],
     ),

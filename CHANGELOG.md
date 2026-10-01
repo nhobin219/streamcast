@@ -7,6 +7,22 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`examples/otel/analytics.py`**, in `just demo otel`: real-time analytics
+  with `Stream.live`. Every few seconds one SQL query over the live view of
+  `spans` prints each service's recent error rate against its long-term
+  rate, and p95 latency, flagging a service running hot.
+
+### Fixed
+
+- **A snapshot or live view with no rows yet answers queries.** Its `log`
+  table had only `litelink_offset`, so any query naming one of the stream's
+  columns failed to bind. It now has the stream's columns, as the live log
+  declares them, and the answer is empty.
+
 ## 0.10.0 — 2026-10-01
 
 ### Added

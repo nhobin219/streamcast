@@ -351,6 +351,26 @@ class TestConditionsAcrossTheSeam:
         assert offsets(table) == [1, 2, 3, 4, 5]
 
 
+class TestAnEmptyStream:
+    async def test_a_query_over_nothing_published_is_an_empty_answer(
+        self, tmp_path, serve
+    ):
+        """Not a binder error on the first column the query names."""
+        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+        uri = stream.metadata_uri
+        assert uri is not None
+        await served_once(stream, serve)
+
+        result = await streamcast.Stream.sql(
+            uri, "SELECT count(*) AS n, max(price) AS top FROM log WHERE price > 1"
+        )
+        assert result.to_pylist() == [{"n": 0, "top": None}]
+
+        table = await streamcast.Stream.scan(uri, where="price > 1")
+        assert table.num_rows == 0
+        assert {"litelink_offset", "streamcast_ts", "price"} <= set(table.column_names)
+
+
 class TestTheMetadata:
     async def test_another_streams_file_at_the_same_path_is_refused(
         self, tmp_path, serve
