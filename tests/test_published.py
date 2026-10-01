@@ -27,14 +27,6 @@ def published_log(root, rows: int) -> litelink.WriteHandle:
     return log
 
 
-def test_litelinks_provisioning_is_still_where_this_reads_it():
-    """Private in litelink 0.6 (litelink#108). Fail here, by name, if it moves."""
-    from litelink import _read
-
-    for name in ("duckdb_connection", "load_extension", "secret_sql"):
-        assert callable(getattr(_read, name)), f"litelink._read.{name} moved"
-
-
 class TestTheConnection:
     """One database per process and credential set; a connection per reader."""
 
@@ -70,9 +62,12 @@ class TestTheConnection:
             for connected in (first, second, again):
                 connected.close()
 
-    def test_the_ambient_chain_is_resolved_again_per_connection(
-        self, monkeypatch, tmp_path
-    ):
+    def test_the_ambient_chain_refreshes_itself(self, monkeypatch, tmp_path):
+        """A database outlives an STS session, so its chain secret must renew.
+
+        litelink creates it with `REFRESH auto`; this pins that the shared
+        database got that secret, not one that resolves once and expires.
+        """
         # No keys in the environment, so the secret is the chain — and a
         # credentials file of the test's own for the chain to find: DuckDB
         # refuses to create a chain secret that resolves to nothing, and a
@@ -84,25 +79,18 @@ class TestTheConnection:
         credentials.write_text(
             "[default]\naws_access_key_id = chain\naws_secret_access_key = chain\n"
         )
-        config = tmp_path / "config"
-        config.write_text("[default]\nregion = us-east-1\n")
         monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
-        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
 
         chain = litelink.S3Options(endpoint="http://chain:9")
-        first = _published.connection(chain, remote=True)
+        connected = _published.connection(chain, remote=True)
         try:
-            # Gone from the database, as an expired one effectively is ...
-            first.execute("DROP SECRET litelink_s3")
-            second = _published.connection(chain, remote=True)
-            try:
-                # ... and back, because the next reader re-created it.
-                secrets = "SELECT provider FROM duckdb_secrets()"
-                assert second.execute(secrets).fetchall() == [("credential_chain",)]
-            finally:
-                second.close()
+            [(provider, described)] = connected.execute(
+                "SELECT provider, secret_string FROM duckdb_secrets()"
+            ).fetchall()
+            assert provider == "credential_chain"
+            assert "'refresh': auto" in described
         finally:
-            first.close()
+            connected.close()
 
 
 class TestALocalTable:
