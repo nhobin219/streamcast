@@ -707,6 +707,94 @@ The band the WAL would add is the one the server is about to send anyway.
 Neither is automatic. Both are keywords on `connect`, because a consumer that would rather
 fail loudly than resume from a copy that lags should be able to say so.
 
+## Reading a stream
+
+A subscription delivers rows one at a time, in order. To ask a question of a stream —
+an aggregate, a join, a scan of last Tuesday — read it as a table instead. There are two
+readers, and both present every log the stream has been through (migrations included) as
+one table, `log`, with the same `scan` and `sql`:
+
+| | `Stream.snapshot` | `Stream.live` |
+|---|---|---|
+| **answers as of** | one fixed point, chosen when it opens | the newest row, at every query |
+| **reads** | the published tables | the published tables, plus the broker's rows as they arrive |
+| **needs the server** | no — offline unless you ask for rows it has not published | yes, always |
+| **holds in memory** | the query's result (and the broker's rows, if you asked for them) | the rows not yet published |
+| **addressed by** | the stream's metadata file | the broker's URI |
+
+### Snapshot: a fixed point, offline
+
+A snapshot reads the stream's **published tables** — ordinary Iceberg tables — on your
+machine, with your credentials. Give it the metadata file and it never touches the
+server:
+
+```python
+s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
+
+async with await streamcast.Stream.snapshot(
+    "s3://market-data/prod/trades.metadata.json", s3=s3
+) as snapshot:
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await snapshot.scan(columns=["price"], filters=[("price", ">", 85_000.0)])
+
+# One-shot forms, for a single question:
+await streamcast.Stream.sql("s3://market-data/prod/trades.metadata.json", "SELECT ...")
+```
+
+For a stream that publishes to S3, the metadata file sits beside the published tables, at
+`<published>/<stream>.metadata.json`. The server knows it as `stream.metadata_uri`, and
+every subscriber is told it in the greeting, as `sub.info.metadata`. A stream that
+publishes to a local directory names its `file://` metadata file on the server, which
+reads only on that machine; publish to `s3://` to read from anywhere.
+
+**Pick the point** with at most one of:
+
+```python
+await streamcast.Stream.snapshot(uri)                      # everything published
+await streamcast.Stream.snapshot(uri, as_of_offset=1861)   # up to and including an offset
+await streamcast.Stream.snapshot(uri, as_of_ts=t)          # stamped at or before t (µs)
+await streamcast.Stream.snapshot(uri, as_of_offset=streamcast.LATEST,
+                                 broker="ws://localhost:8765/trades")   # to the frontier
+```
+
+The last is the one that goes online: rows the server has not published yet are only on
+the server, so a point past the published end needs `broker=`, and is refused without it.
+Everything else is a read of files.
+
+**Correct or it raises.** A point the tables cannot answer, a metadata file that belongs to
+another stream, a range neither the tables nor the broker holds: each raises
+`SnapshotUnavailable` with the numbers, never a short answer.
+
+**Pruning** comes from `filters=` and offset bounds, which rule out whole logs on the
+stream's statistics before any is opened. A `WHERE` inside your SQL filters rows but
+skips nothing ([#57](https://github.com/nhobin219/streamcast/issues/57)).
+
+### Live: always online
+
+`Stream.live` is a snapshot kept current, and it is **online by design**: it takes only the
+broker's address, because a view of the stream *now* has to be listening to it.
+
+```python
+async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
+    await live.wait_for(offset)          # until that row is visible to a query
+    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+```
+
+It reads the greeting for where the stream is published, snapshots that, and subscribes
+from where the snapshot ends — so there is no gap and no duplicate at the join. Every
+query answers as of the newest row received.
+
+- **Memory is the publish lag, not the stream's age.** Every `rebase_every` seconds (10 by
+  default), and after every reconnect, the view re-pins to what is published now and drops
+  the rows it covers.
+- **Queries never stall the socket.** Rows are appended as they arrive and become a table
+  only when a query asks, and queries run in a thread.
+- **It reconnects, and it raises.** A dropped connection resumes from the last row, with
+  catch-up. Anything a reconnect cannot fix is raised by the next query, so a view that has
+  stopped listening never answers as if it had not.
+
+For an offline read, or a fixed point you can come back to, use a snapshot.
+
 ## Chaining
 
 Each stage is a server, so a pipeline is servers end to end and every hop is independently
