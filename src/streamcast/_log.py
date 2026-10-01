@@ -152,13 +152,13 @@ def columns(log: Readable) -> tuple[str, ...]:
     Read once at `Stream` construction and held, because it fixes the key
     order of every frame — and a replayed row must serialise to the same bytes
     as the live one it repeats (I6). litelink's own column is NOT among them:
-    the offset is element 0 of the pair `encode` writes, never a key in the
+    the offset is element 0 of the triple `encode` writes, never a key in the
     message, so there is one statement of "the offset comes first" instead of
     two — and none of them is a column name a subscriber has to know.
 
     The `SYSTEM` columns are not among them either, for the same reason: they
-    are the server's, not the application's, and a replayed frame must carry
-    exactly the keys the live one did (I6).
+    are the server's, not the application's. `streamcast_ts` is element 1 of
+    the frame, beside the row rather than in it.
     """
     return tuple(name for name in log.schema.names if name not in SYSTEM)
 
@@ -237,8 +237,11 @@ def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
 
 async def rows(
     log: Readable, start: int, stop: int, *, published: bool = False
-) -> AsyncGenerator[tuple[int, dict[str, object]], None]:
-    """`(offset, row)` for `[start, stop)`, oldest first.
+) -> AsyncGenerator[tuple[int, int | None, dict[str, object]], None]:
+    """`(offset, ts, row)` for `[start, stop)`, oldest first.
+
+    `ts` is the stored `streamcast_ts`, or None on a log created before the
+    column existed — exactly what the live frame for that row carried (I10).
 
     **Every blocking call is in a thread**, which is not an optimisation. A
     replay is DuckDB reading Parquet — measured at 2.11 us per row warm and
@@ -258,7 +261,8 @@ async def rows(
     serve.
     """
     declared = columns(log)
-    names = (COLUMN, *declared)
+    stamped = STAMP in log.schema.names
+    names = (COLUMN, STAMP, *declared) if stamped else (COLUMN, *declared)
     # **Local tiers only, unless the stream says otherwise** (`published`,
     # which is `Stream`'s `replay_published`). litelink's own default is to
     # read the published table too, so this is passed on every read rather
@@ -283,10 +287,10 @@ async def rows(
             if batch is None:
                 return
 
-            # **Arrow builds the dicts; popping the offset leaves the message.**
-            # `to_pylist()` is one C call for the whole batch, and because the
-            # projection put litelink's column first, `pop` off the front
-            # leaves exactly the key order the live path produces. Measured at
+            # **Arrow builds the dicts; popping the system columns leaves the
+            # message.** `to_pylist()` is one C call for the whole batch, and
+            # because the projection put them first, `pop` off the front leaves
+            # exactly the key order the live path produces. Measured at
             # 1.00 us a row, against 1.50 for selecting the columns twice and
             # 2.58 for rebuilding each dict in Python.
             #
@@ -310,7 +314,8 @@ async def rows(
             # duplicate means a log written by something else.
             for message in batch.to_pylist(maps_as_pydicts="strict"):
                 offset = message.pop(COLUMN)
-                yield offset, message
+                ts = message.pop(STAMP) if stamped else None
+                yield offset, ts, message
 
     finally:
         # Releases the DuckDB result the scan is holding. A subscriber that
@@ -410,19 +415,19 @@ async def replay(
     caller drops it if it does not match; see `_prepend`.
     """
     first = True
-    async for offset, message in rows(log, start, stop, published=published):
+    async for offset, ts, message in rows(log, start, stop, published=published):
         # `where` reads the stored values and `outbound` converts a copy for
         # the wire, in that order: a filter on a binary column compares bytes,
         # exactly as it does against a live row.
         if first:
             first = False
             wire = message if outbound is None else outbound(message)
-            yield offset, _encode_projected(offset, wire)
+            yield offset, _encode_projected(offset, ts, wire)
             continue
 
         if where is None or where(message):
             wire = message if outbound is None else outbound(message)
-            yield offset, _encode_projected(offset, wire)
+            yield offset, _encode_projected(offset, ts, wire)
 
 
 __all__ = [

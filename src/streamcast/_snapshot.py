@@ -18,9 +18,8 @@ greeting, and is otherwise consulted only for rows no table holds yet.
   log's published end, the rest is read from `broker`, and refused without
   it. `LATEST` is the broker's frontier as of connect.
 * `as_of_ts=T`: every row whose `streamcast_ts` is at most T. Published rows
-  only — a row read from the broker carries no `streamcast_ts`, which is never
-  on the wire — so a T past what the live log has published is refused rather
-  than answered short. Exact except across a server clock step, which can put
+  only: the broker is consulted as of an offset, not a time, so a T past what
+  the live log has published is refused rather than answered short. Exact except across a server clock step, which can put
   two rows out of order by timestamp while their offsets stay monotonic.
 
 **Be correct or fail.** The reader never guesses: a missing or unreadable
@@ -350,8 +349,8 @@ class Snapshot:
 
     async def rows(
         self, start: int, stop: int | None = None
-    ) -> AsyncGenerator[tuple[int, dict[str, object]], None]:
-        """`(offset, row)` for `[start, stop)`, oldest first, one batch at a time.
+    ) -> AsyncGenerator[tuple[int, int | None, dict[str, object]], None]:
+        """`(offset, ts, row)` for `[start, stop)`, oldest first, a batch at a time.
 
         Built by `_log.rows`, the function a server replays with, so a row
         read here is the row a subscriber would have been sent (I6). For a
@@ -360,14 +359,15 @@ class Snapshot:
         high = min(stop or self.end_offset, self.end_offset)
         for piece in self._relevant(start, high):
             table = await asyncio.to_thread(self._open, piece)
-            async for offset, row in _log.rows(table, start, high):
-                yield offset, row
+            async for offset, ts, row in _log.rows(table, start, high):
+                yield offset, ts, row
 
         if self._tail is not None:
             for record in self._tail.to_pylist():
                 offset = record.pop(_log.COLUMN)
+                ts = record.pop(_log.STAMP)
                 if start <= offset < high:
-                    yield offset, record
+                    yield offset, ts, record
 
     async def floor(self) -> int | None:
         """The lowest offset the snapshot holds, or None if it holds none.
@@ -614,11 +614,11 @@ async def _with_tail(
 
                 records: list[dict[str, Any]] = []
                 while start < end:
-                    offset, row = await sub.recv()
+                    offset, ts, row = await sub.recv()
                     if offset is None or offset >= end:
                         break
 
-                    records.append({_log.COLUMN: offset, **row})
+                    records.append({_log.COLUMN: offset, _log.STAMP: ts, **row})
                     start = offset + 1
 
         except NotReplayable as refused:
@@ -640,9 +640,19 @@ async def _with_tail(
 
 
 def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
-    """The broker's rows as Arrow, typed as the live log declares them."""
+    """The broker's rows as Arrow, typed as the live log declares them.
+
+    With `streamcast_ts` from each frame, so a tail row carries the stamp a
+    published one does — null where the log has none.
+    """
     declared = _schema.to_arrow(live.schema)
-    schema = pa.schema([pa.field(_log.COLUMN, pa.int64(), nullable=False), *declared])
+    schema = pa.schema(
+        [
+            pa.field(_log.COLUMN, pa.int64(), nullable=False),
+            pa.field(_log.STAMP, pa.int64()),
+            *declared,
+        ]
+    )
     return pa.Table.from_pylist(records, schema=schema)
 
 

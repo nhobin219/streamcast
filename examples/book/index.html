@@ -71,7 +71,7 @@ function connect() {
       greeted = true;
       return show("live");
     }
-    const [offset, row] = frame;
+    const [offset, _ts, row] = frame;
     apply(offset, row);
     show("live");
   };

@@ -111,9 +111,10 @@ class TestTheBroker:
                 )
 
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
-                offset, row = await asyncio.wait_for(sub.recv(), 5)
+                offset, ts, row = await asyncio.wait_for(sub.recv(), 5)
 
         assert (offset, row["order_id"], row["deleted"]) == (1, 7, True)
+        assert isinstance(ts, int)
 
 
 class TestTheBook:

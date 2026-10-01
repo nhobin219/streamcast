@@ -144,8 +144,10 @@ class TestTheSchemaIsTheCallers:
         row = trade(0)
         offset = await stream.send(row)
         # Built from the log's schema, not from the dict the caller passed.
-        assert encode(offset, row, tuple(SCHEMA.names)) == encode(
-            offset, dict(reversed(list(row.items()))), tuple(SCHEMA.names)
+        ts = stream._wire_ts(1_790_038_800_124_001_000)  # noqa: SLF001
+        assert ts is None, "`log` is unstamped"
+        assert encode(offset, ts, row, tuple(SCHEMA.names)) == encode(
+            offset, ts, dict(reversed(list(row.items()))), tuple(SCHEMA.names)
         )
 
     async def test_a_row_the_schema_refuses_broadcasts_nothing(self, log):
@@ -175,7 +177,7 @@ async def test_repr_says_what_it_is(log):
 
 
 def test_the_message_never_carries_an_offset_column(log):
-    """The frame is `[offset, msg]`; `msg` is the publisher's row, period.
+    """The frame is `[offset, ts, msg]`; `msg` is the publisher's row, period.
 
     litelink's column lives in the TABLE, where it belongs — the caller never
     declares it and litelink refuses a schema that does (I11) — and it never
@@ -185,9 +187,10 @@ def test_the_message_never_carries_an_offset_column(log):
     assert COLUMN not in SCHEMA.names
     assert COLUMN in log.scan().read_all().schema.names
 
-    frame = encode(1861, trade(0), tuple(SCHEMA.names))
-    offset, message = decode(frame)
+    frame = encode(1861, 1_790_038_800_124_001, trade(0), tuple(SCHEMA.names))
+    offset, ts, message = decode(frame)
     assert offset == 1861
+    assert ts == 1_790_038_800_124_001
     assert set(message) <= set(SCHEMA.names)
     assert COLUMN not in message
     assert "offset" not in message

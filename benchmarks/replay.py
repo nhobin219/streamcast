@@ -37,7 +37,7 @@ import pyarrow as pa
 from litelink import OFFSET as COLUMN
 
 import streamcast
-from streamcast._log import _next_batch, columns, replay
+from streamcast._log import STAMP, _next_batch, columns, replay, with_system
 from streamcast._protocol import encode_projected
 
 SCHEMA = pa.schema(
@@ -81,7 +81,7 @@ async def main() -> None:
     root = Path(tempfile.mkdtemp())
     config = litelink.LogConfig(target_seal_size=args.seal, compact_min_files=2)
     with litelink.new(
-        root, "trades", schema=SCHEMA, sort_by=("event_ts",), config=config
+        root, "trades", schema=with_system(SCHEMA), sort_by=("event_ts",), config=config
     ) as log:
         stream = streamcast.Stream("trades", log=log)
         for start in range(0, args.rows, 500):
@@ -121,7 +121,7 @@ async def main() -> None:
         )
 
         # --- where the warm time goes ---------------------------------------
-        names = (COLUMN, *columns(log))
+        names = (COLUMN, STAMP, *columns(log))
 
         started = time.perf_counter()
         reader = log.scan(columns=names, start_offset=1, end_offset=args.rows + 1)
@@ -133,7 +133,7 @@ async def main() -> None:
         scan = time.perf_counter() - started
 
         # The path `_log.replay` actually takes: Arrow builds each dict in C,
-        # and popping the offset off the front leaves the message.
+        # and popping the offset and the stamp off the front leaves the message.
         started = time.perf_counter()
         pulled = [b.to_pylist() for b in batches]
         topy = time.perf_counter() - started
@@ -142,7 +142,9 @@ async def main() -> None:
         total = 0
         for rows in pulled:
             for message in rows:
-                total += len(encode_projected(message.pop(COLUMN), message))
+                offset = message.pop(COLUMN)
+                ts = message.pop(STAMP)
+                total += len(encode_projected(offset, ts, message))
 
         enc = time.perf_counter() - started
 

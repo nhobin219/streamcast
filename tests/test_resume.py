@@ -27,11 +27,11 @@ async def collect(subscription, count):
 
 
 def prices(received):
-    return [row["price"] for _offset, row in received]
+    return [row["price"] for _offset, _ts, row in received]
 
 
 def offsets(received):
-    return [offset for offset, _row in received]
+    return [offset for offset, _ts, _row in received]
 
 
 class TestReplay:
@@ -90,12 +90,12 @@ class TestReplay:
                 got = await collect(sub, 70)
 
         assert offsets(got) == list(range(1, 71))
-        assert got[0][1]["price"] == 85_565.0
-        assert got[-1][1]["price"] == 85_565.0 + 69
+        assert got[0][2]["price"] == 85_565.0
+        assert got[-1][2]["price"] == 85_565.0 + 69
         # A nullable column the caller omitted survives both tiers the same
         # way — NULL in Parquet, null on the wire, None in the subscriber.
-        assert got[0][1]["tag"] == "t0"
-        assert got[1][1]["tag"] is None
+        assert got[0][2]["tag"] == "t0"
+        assert got[1][2]["tag"] is None
 
     async def test_a_replayed_row_is_byte_identical_to_the_live_one(self, serve, log):
         """I6, across the one boundary where it could break.
@@ -118,13 +118,15 @@ class TestReplay:
                 replayed = await collect(back, 6)
 
         assert replayed == live_rows
+        # `log` predates the stamp column, so neither side carries one.
+        assert {ts for _offset, ts, _message in live_rows} == {None}
 
         # And the frames, not only what they decode to. Key order is the thing
         # that could differ, and dict equality would not catch it.
         declared = columns(log)
-        for offset, message in live_rows:
-            assert encode(offset, message, declared) == encode(
-                offset, dict(reversed(list(message.items()))), declared
+        for offset, ts, message in live_rows:
+            assert encode(offset, ts, message, declared) == encode(
+                offset, ts, dict(reversed(list(message.items()))), declared
             )
 
 

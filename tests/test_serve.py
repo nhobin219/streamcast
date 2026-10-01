@@ -18,7 +18,7 @@ from tests.conftest import trade
 
 
 async def drain(subscription, count):
-    """The next `count` messages, as `(offset, message)` pairs."""
+    """The next `count` messages, as `(offset, ts, message)` triples."""
     return [await subscription.recv() for _ in range(count)]
 
 
@@ -43,8 +43,12 @@ class TestLiveFanOut:
         # Identical bytes to everyone (I6): same offsets, same rows, same
         # order, with no per-consumer view anywhere in the path.
         first = received[0]
-        assert [offset for offset, _row in first] == list(range(1, 21))
-        assert [row["price"] for _o, row in first] == [85_565.0 + i for i in range(20)]
+        assert [offset for offset, _ts, _row in first] == list(range(1, 21))
+        # `log` predates the stamp column, so nothing it carries has one.
+        assert all(ts is None for _o, ts, _row in first)
+        assert [row["price"] for _o, _ts, row in first] == [
+            85_565.0 + i for i in range(20)
+        ]
         for one in received[1:]:
             assert one == first
 
@@ -58,16 +62,18 @@ class TestLiveFanOut:
                 assert sub.info.end_offset == 2
                 assert sub.info.replay is None
                 await stream.send(trade(1))
-                offset, row = await sub.recv()
+                offset, ts, row = await sub.recv()
                 assert offset == 2
+                assert ts is None  # `log` is unstamped
                 assert row["price"] == 85_566.0
 
     async def test_a_row_arrives_as_the_row_that_was_sent(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send(trade(4))
-            offset, row = await sub.recv()
+            offset, ts, row = await sub.recv()
             assert offset == 1
+            assert ts is None  # `log` is unstamped
             # EXACTLY the row that was published — no offset key, nothing
             # injected — so a subscriber can forward or store it whole.
             assert row == trade(4)
@@ -80,8 +86,8 @@ class TestLiveFanOut:
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send_many([trade(i) for i in range(3)])
             got = await drain(sub, 3)
-            assert [o for o, _ in got] == [1, 2, 3]
-            assert [r["side"] for _, r in got] == [0, 1, 0]
+            assert [o for o, _ts, _ in got] == [1, 2, 3]
+            assert [r["side"] for _, _ts, r in got] == [0, 1, 0]
 
     async def test_the_subscriber_count_tracks_attach_and_detach(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
@@ -117,8 +123,8 @@ class TestRouting:
             ):
                 await trades.send(trade(1))
                 await quotes.send(trade(2))
-                assert (await t.recv())[1]["price"] == 85_566.0
-                assert (await q.recv())[1]["price"] == 85_567.0
+                assert (await t.recv())[2]["price"] == 85_566.0
+                assert (await q.recv())[2]["price"] == 85_567.0
 
     async def test_an_unnamed_stream_is_served_at_the_root(self, serve):
         stream = streamcast.Stream()
@@ -186,8 +192,9 @@ class TestWebsocketsCompatibility:
             # And every frame after it is a readable JSON row. No header to
             # slice, no payload kind, no library needed on this side.
             await stream.send(trade(0))
-            offset, row = json.loads(await raw.recv())
+            offset, ts, row = json.loads(await raw.recv())
             assert offset == 1
+            assert ts is None  # `log` is unstamped
             assert row == trade(0)
 
     async def test_the_subscription_exposes_the_connection_it_does_not_wrap(
@@ -210,7 +217,7 @@ class TestWebsocketsCompatibility:
                 # Everything already delivered still arrives; the loop then
                 # ends rather than raising, because 1001 is a server finishing
                 # with this connection on purpose.
-                assert [offset async for offset, _row in sub] == [1, 2]
+                assert [offset async for offset, _ts, _row in sub] == [1, 2]
 
 
 class TestLeaks:

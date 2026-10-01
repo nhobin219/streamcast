@@ -146,8 +146,9 @@ class TestInvariant10:
         async with serve(stream, maintain=False) as uri, websockets.connect(uri) as raw:
             await raw.recv()
             await stream.send(row())
-            _offset, message = json.loads(await raw.recv())
+            _offset, ts, message = json.loads(await raw.recv())
 
+        assert isinstance(ts, int)
         assert message["trace_id"] == TRACE.hex()
         assert message["blob"] == "AP8A"  # base64 of 00 ff 00
         assert message["attrs"] == {"k": "v", "a": None, "n": "0"}
@@ -307,8 +308,9 @@ class TestTheClient:
         async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(row())
-                _offset, got = await sub.recv()
+                _offset, ts, got = await sub.recv()
 
+        assert isinstance(ts, int)
         assert got == row()
 
     async def test_it_matches_what_catch_up_reads_from_the_published_table(
@@ -324,13 +326,14 @@ class TestTheClient:
         async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(row(4))
-                _offset, from_socket = await sub.recv()
+                _offset, socket_ts, from_socket = await sub.recv()
 
             from_published = [
-                message async for _o, message in _log.rows(stream.log, 1, 2)
+                (ts, message) async for _o, ts, message in _log.rows(stream.log, 1, 2)
             ]
 
-        assert from_published == [from_socket]
+        assert from_published == [(socket_ts, from_socket)]
+        assert isinstance(socket_ts, int)
 
 
 class TestWhere:
@@ -341,16 +344,17 @@ class TestWhere:
             async with streamcast.connect(uri, where={"trace_id": TRACE.hex()}) as sub:
                 await stream.send({**row(1), "trace_id": other})
                 await stream.send(row(2))
-                offset, got = await sub.recv()
+                offset, ts, got = await sub.recv()
 
             assert offset == 2
+            assert isinstance(ts, int)
             assert got["trace_id"] == TRACE
 
             # And on replay, through the same predicate.
             async with streamcast.connect(
                 uri, offset=1, where={"trace_id": [TRACE.hex()]}
             ) as sub:
-                offset, _got = await sub.recv()
+                offset, _ts, _got = await sub.recv()
 
             assert offset == 2
 
@@ -368,7 +372,7 @@ class TestWhere:
             async with streamcast.connect(
                 uri, offset=1, where={"trace_id": TRACE.hex()}
             ) as sub:
-                first, _row = await sub.recv()
+                first, _ts, _row = await sub.recv()
 
         assert first == 1
 

@@ -103,7 +103,11 @@ async def test_a_browser_websocket_reads_and_writes_a_stream(tmp_path, serve, no
 
     assert seen["textFrames"] is True, "a browser gets a Blob for a binary frame"
     assert seen["ack"] == {"ok": [3]}
-    assert seen["rows"] == [
+    # `[offset, ts, msg]`: the stamp is the server's, beside the row.
+    stamps = [ts for _offset, ts, _msg in seen["rows"]]
+    assert all(isinstance(ts, int) for ts in stamps), stamps
+    assert stamps == sorted(stamps)
+    assert [[offset, msg] for offset, _ts, msg in seen["rows"]] == [
         [1, plain(row(1))],
         [2, plain(row(2))],
         [3, plain(published)],

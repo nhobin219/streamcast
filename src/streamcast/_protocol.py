@@ -1,21 +1,22 @@
 """Everything that crosses the wire, and nothing that does not.
 
 **Every frame is a text frame of JSON.** The greeting is one, and every
-message after it is a two-element pair — the offset, then one row of the
-stream's table. How another language reads a row, binary columns included, is
-`docs/SPEC.md` §2, "Reading a row in another language":
+message after it is a three-element array — the offset, the time the server
+took the row, then the row itself. How another language reads a row, binary
+columns included, is `docs/SPEC.md` §2, "Reading a row in another language":
 
-    {"streamcast":3,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
-    [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015}]
+    {"streamcast":4,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
+    [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0}]
 
-**The offset is POSITIONAL, and the row is untouched.** It is element 0 of
-the pair rather than a key in the object, so `msg` is exactly what the
-publisher sent: no offset column, no injected metadata, nothing to strip
-before forwarding it or appending it to another stream. litelink's own column
-is called `litelink_offset` and that name never reaches a subscriber — it is
-projected off in `_log` and re-attached here by position. A subscriber reads
-`offset, msg = frame`; it does not read a name it would then have to know
-belongs to a library it is not importing.
+**The server's fields are POSITIONAL, and the row is untouched.** The offset
+and the stamp are elements 0 and 1 rather than keys in the object, so `msg` is
+exactly what the publisher sent: no offset column, no injected metadata,
+nothing to strip before forwarding it or appending it to another stream.
+litelink's `litelink_offset` and streamcast's `streamcast_ts` are stored as
+columns and never reach a subscriber by name — they are projected off in
+`_log` and re-attached here by position. A subscriber reads
+`offset, ts, msg = frame`; it does not read names it would then have to know
+belong to libraries it is not importing.
 
 There is no binary framing, no length header and no payload kind, and an
 earlier version of this file had all three. They existed to carry an opaque
@@ -23,7 +24,7 @@ blob — a whole upstream frame stored verbatim — which is the design litelink
 own example warns against in as many words: *"the reason to declare a schema
 rather than store the frame whole"*. Once the log is a typed table per stream,
 a message IS a row, and a row is a JSON object. The header held the offset the
-pair now carries positionally, and nothing read it (see `_subscriber`).
+frame now carries positionally, and nothing read it (see `_subscriber`).
 
 What that buys is not just simplicity. `wscat ws://localhost:8765/trades?offset=0`
 now prints the stream, readably, with no client library at all — and a
@@ -59,20 +60,20 @@ if TYPE_CHECKING:
 _ENCODER: Final = msgspec.json.Encoder()
 _DECODER: Final = msgspec.json.Decoder()
 
-# A data frame is a PAIR, `[offset, msg]`, and the two halves are different
-# kinds of thing: the offset is the server's framing, and `msg` is the
+# A data frame is `[offset, ts, msg]`, and the parts are different
+# kinds of thing: the offset and the stamp are the server's framing, and `msg` is the
 # publisher's row, untouched.
 #
 # Two earlier versions put the offset INSIDE the object — first as
 # `litelink_offset`, then as `offset` — and both were wrong for the same
-# reason. A subscriber consumes the offset positionally (`offset, msg = ...`
-# in Python, `const [offset, msg] = JSON.parse(f)` in JS), so the key name was
+# reason. A subscriber consumes the offset positionally (`offset, ts, msg = ...`
+# in Python, `const [offset, ts, msg] = JSON.parse(f)` in JS), so the key name was
 # a contract nobody wanted, argued about twice; and injecting it meant `msg`
 # was never quite the row that was published. It is now, exactly.
 #
 # There is no key name here on purpose. That is the point.
 
-VERSION: Final = 3
+VERSION: Final = 4
 """The protocol this build speaks. A greeting naming any other is refused.
 
 One number for the whole protocol rather than a feature list, because there is
@@ -112,10 +113,11 @@ PUBLISH: Final = Publish()
 
 def encode(
     offset: int | None,
+    ts: int | None,
     row: Mapping[str, object],
     columns: tuple[str, ...] | None,
 ) -> bytes:
-    """One message, as the `[offset, msg]` bytes every subscriber gets.
+    """One message, as the `[offset, ts, msg]` bytes every subscriber gets.
 
     Encoded ONCE per message by the server and handed to every subscriber's
     queue, which is why this takes a row rather than a connection: fan-out is
@@ -143,59 +145,74 @@ def encode(
     would hand a subscriber an integer that looks exactly like a resume cursor
     and is not one. `null` cannot be mistaken for that — arithmetic on it
     fails where `7 + 1` quietly succeeds against a server that has restarted.
+
+    **`ts` is `streamcast_ts`**: when the server took the row, in UTC
+    microseconds — the value the log stores, from the same clock reading, so
+    a replay sends what the live frame did (I10). A stream with no log sends
+    it too: the server took the row at that time whether or not it kept it.
+    It is `null` only for a row replayed from a log created before the column
+    existed, which never recorded one.
     """
     if columns is None:
         message: dict[str, object] = dict(row)
     else:
         message = {name: row.get(name) for name in columns}
 
-    return _ENCODER.encode((offset, message))
+    return _ENCODER.encode((offset, ts, message))
 
 
-def encode_projected(offset: int | None, message: Mapping[str, object]) -> bytes:
+def encode_projected(
+    offset: int | None, ts: int | None, message: Mapping[str, object]
+) -> bytes:
     """The same frame, for a message whose keys are ALREADY in wire order.
 
-    The replay path only. A scan projected into `(litelink_offset, *columns)`
-    hands back batches in that order, so Arrow's `to_pylist()` builds each
-    dict in C and popping the offset off the front leaves exactly the message
-    the live path would have built — 1.00 us a row against 2.58 for rebuilding
-    each dict in Python.
+    The replay path only. A scan projected into
+    `(litelink_offset, streamcast_ts, *columns)` hands back batches in that
+    order, so Arrow's `to_pylist()` builds each dict in C and popping the two
+    system columns off the front leaves exactly the message the live path
+    would have built — 1.00 us a row against 2.58 for rebuilding each dict in
+    Python.
 
     A second entry point into one encoder rather than a second encoder, so
     there is still one answer to "what does a frame look like". `_log.replay`
     checks the batch's column order against what it projected before using
     this, because the saving is sound only while that holds.
     """
-    return _ENCODER.encode((offset, message))
+    return _ENCODER.encode((offset, ts, message))
 
 
-def decode(frame: str | bytes) -> tuple[int | None, dict[str, object]]:
-    """The inverse: `(offset, msg)`.
+def decode(frame: str | bytes) -> tuple[int | None, int | None, dict[str, object]]:
+    """The inverse: `(offset, ts, msg)`.
 
-    `None` is a legitimate offset — a stream with no log. Everything else here
+    `None` is a legitimate offset — a stream with no log — and a legitimate
+    `ts`, for a row from a log that predates the stamp. Everything else here
     is a peer that is not a streamcast server, which is why each shape gets
     its own message rather than one "malformed frame".
     """
     try:
-        pair = _DECODER.decode(frame)
+        triple = _DECODER.decode(frame)
     except msgspec.DecodeError as exc:
         msg = f"a data frame is not JSON: {frame[:120]!r}"
         raise ProtocolError(msg) from exc
 
-    if not isinstance(pair, list) or len(pair) != 2:
-        msg = f"a data frame is not an [offset, msg] pair: {frame[:120]!r}"
+    if not isinstance(triple, list) or len(triple) != 3:
+        msg = f"a data frame is not an [offset, ts, msg] triple: {frame[:120]!r}"
         raise ProtocolError(msg)
 
-    offset, message = pair
+    offset, ts, message = triple
     if offset is not None and not isinstance(offset, int):
         msg = f"a frame's offset is {type(offset).__name__}, not an integer or null"
+        raise ProtocolError(msg)
+
+    if ts is not None and not isinstance(ts, int):
+        msg = f"a frame's ts is {type(ts).__name__}, not an integer or null"
         raise ProtocolError(msg)
 
     if not isinstance(message, dict):
         msg = f"a frame's message is {type(message).__name__}, not an object"
         raise ProtocolError(msg)
 
-    return offset, message
+    return offset, ts, message
 
 
 @dataclass(frozen=True, slots=True)

@@ -141,26 +141,30 @@ def test_the_wire_key_order_comes_from_one_place():
 
     The live path projects the caller's dict through `Stream._columns`; the
     replay path gets its order from the scan's projection and pops the offset
-    off the front. Both must resolve to the log's declared column order.
+    and the stamp off the front. Both must resolve to the log's declared column order.
     """
     from streamcast import _protocol
 
     encode_src = inspect.getsource(_protocol.encode)
-    # The frame is a PAIR, so the offset is never a key in the message.
-    assert "_ENCODER.encode((offset, message))" in encode_src
+    # The frame is `[offset, ts, msg]`, so neither the offset nor the stamp
+    # is ever a key in the message.
+    assert "_ENCODER.encode((offset, ts, message))" in encode_src
     assert "{name: row.get(name) for name in columns}" in encode_src
 
     stream_src = inspect.getsource(_stream.Stream.__init__)
     assert "_log.columns(log)" in stream_src
 
     replay_src = inspect.getsource(_log.rows)
-    assert "names = (COLUMN, *declared)" in replay_src
+    assert (
+        "names = (COLUMN, STAMP, *declared) if stamped else (COLUMN, *declared)"
+        in replay_src
+    )
     # The order check is what makes popping the front sound.
     assert "tuple(batch.schema.names) != names" in replay_src
 
 
 def test_the_offset_is_never_a_key_in_the_message():
-    """Non-negotiable: the server sends `offset, msg`, and `msg` is the row.
+    """Non-negotiable: the server sends `offset, ts, msg`, and `msg` is the row.
 
     Checked against the source as well as behaviour, because a future
     convenience — "let us put the offset back in so subscribers can store one

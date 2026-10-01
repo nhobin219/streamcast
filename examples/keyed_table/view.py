@@ -139,7 +139,7 @@ class View:
                 await self._apply_all(sub)
 
     async def _apply_all(self, sub: streamcast.Subscription) -> None:
-        async for offset, row in sub:
+        async for offset, _ts, row in sub:
             # None only on a stream without a log, which has no past to
             # resume from and so nothing a view could be current to.
             assert offset is not None

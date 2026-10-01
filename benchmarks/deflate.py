@@ -21,9 +21,16 @@ ROW = {
     "trade_id": 624438572,
     "kind": "trade",
 }
+TS = 1790038800124001
 ENCODER = msgspec.json.Encoder()
 FRAMES = [
-    ENCODER.encode((1861 + i, {**ROW, "price": 85565.0 + i, "trade_id": 624438572 + i}))
+    ENCODER.encode(
+        (
+            1861 + i,
+            TS + i,
+            {**ROW, "price": 85565.0 + i, "trade_id": 624438572 + i},
+        )
+    )
     for i in range(2000)
 ]
 
@@ -31,7 +38,7 @@ FRAMES = [
 def encode_cost():
     t0 = time.perf_counter()
     for i in range(2000):
-        ENCODER.encode((1861 + i, ROW))
+        ENCODER.encode((1861 + i, TS + i, ROW))
 
     return (time.perf_counter() - t0) / 2000 * 1e6
 

@@ -1,18 +1,20 @@
 """`connect` — the subscriber end, and where a close code becomes an exception.
 
     async with streamcast.connect("ws://localhost:8765/trades", offset=123) as stream:
-        async for offset, message in stream:
+        async for offset, ts, message in stream:
             ...
 
-**The one deviation from `websockets` is the pair.** Iterating a
+**The one deviation from `websockets` is the triple.** Iterating a
 `websockets` connection yields a message; iterating this yields
-`(offset, row)`, because the offset is the only thing that makes a reconnect a
-resume rather than a restart, and a subscriber that has to ask for it
-separately will forget to.
+`(offset, ts, row)`, because the offset is the only thing that makes a
+reconnect a resume rather than a restart, and a subscriber that has to ask for
+it separately will forget to. `ts` is `streamcast_ts`, when the server took the
+row, carried the same way and for the same reason: it is the server's, so it
+is beside the row, not in it.
 
 `row` is a `dict` over the stream's declared columns — the same row the
 publisher sent and the same row the log holds, and **nothing else**: the
-offset is the other half of the pair, not a key in it, so the row can be
+offset and stamp travel beside it, not as keys in it, so the row can be
 logged, forwarded or appended to another stream whole. It is not a blob to
 parse either: the server's table is typed, so the parsing happened once at the
 publisher rather than once per subscriber.
@@ -291,7 +293,7 @@ class Subscription:
             while True:
                 try:
                     async with streamcast.connect(uri, offset=offset) as stream:
-                        async for offset, message in stream:
+                        async for offset, ts, message in stream:
                             handle(message)
 
                 except (ConnectionClosed, OSError, streamcast.TooSlow):
@@ -322,8 +324,13 @@ class Subscription:
         details, and anything else this class deliberately does not wrap."""
         return self._live()
 
-    async def recv(self) -> tuple[int | None, dict[str, object]]:
-        """The next `(offset, row)`.
+    async def recv(self) -> tuple[int | None, int | None, dict[str, object]]:
+        """The next `(offset, ts, row)`.
+
+        `ts` is `streamcast_ts`, when the server took the row, in UTC
+        microseconds — on a live frame, a replayed one and a caught-up one
+        alike. None only for a row from a log created before the column
+        existed.
 
         Raises the refusal the server closed with, or `ConnectionClosed` as
         `websockets` raised it when the close carries no refusal.
@@ -337,11 +344,11 @@ class Subscription:
         if self._prelude is not None:
             caught = await anext(self._prelude, None)
             if caught is not None:
-                offset, row = caught
+                offset, ts, row = caught
                 self._offset = offset
                 self._unsaved = offset
 
-                return offset, row
+                return offset, ts, row
 
             # Exhausted, which means `Catcher.stream` returned — and it does
             # not return until it has a live connection. Everything below the
@@ -365,7 +372,7 @@ class Subscription:
 
             raise refusal from None
 
-        offset, row = decode(frame)
+        offset, ts, row = decode(frame)
         # Binary columns arrive as text in their encoding, and a row that
         # came out of the published tables by catch-up carries bytes: decoded here so
         # the consumer cannot tell which source a row came from.
@@ -417,12 +424,12 @@ class Subscription:
         self._offset = offset
         self._unsaved = offset
 
-        return offset, row
+        return offset, ts, row
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> tuple[int | None, dict[str, object]]:
+    async def __anext__(self) -> tuple[int | None, int | None, dict[str, object]]:
         """Stops on an ordinary close; raises on anything else.
 
         Same contract as iterating a `websockets` connection — a normal
@@ -553,7 +560,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     with; the subscription resumes one above it and saves as it goes.
 
         async with streamcast.connect(uri, cursor=".trades.offset") as sub:
-            async for offset, msg in sub:
+            async for offset, ts, msg in sub:
                 handle(msg)
 
     That is the whole recovery story — stop the consumer, start it again, and

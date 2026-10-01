@@ -119,9 +119,10 @@ class TestOnTheWire:
                 await stream.send({**GOOD, "price": math.nan})
 
             await stream.send({**GOOD, "event_ts": 2})
-            offset, row = await sub.recv()
+            offset, ts, row = await sub.recv()
 
         assert offset is None
+        assert isinstance(ts, int), "a stream with no log still stamps its rows"
         assert row["event_ts"] == 2, "the refused row was never fanned out"
 
     async def test_the_greeting_publishes_the_schema(self, serve):
@@ -136,8 +137,9 @@ class TestOnTheWire:
         async with serve(stream) as uri, websockets.connect(uri) as raw:
             await raw.recv()
             await stream.send({"price": 1.0, "event_ts": 3})
-            _offset, message = json.loads(await raw.recv())
+            _offset, ts, message = json.loads(await raw.recv())
 
+        assert isinstance(ts, int)
         assert list(message) == list(SCHEMA["properties"])
         assert message["tag"] is None, (
             "an omitted nullable column is null, as a log stores it"
@@ -150,9 +152,11 @@ class TestOnTheWire:
             async with websockets.connect(uri) as raw, streamcast.connect(uri) as sub:
                 await raw.recv()
                 await stream.send({**GOOD, "trace_id": trace})
-                _offset, on_the_wire = json.loads(await raw.recv())
-                _offset, decoded = await sub.recv()
+                _offset, wire_ts, on_the_wire = json.loads(await raw.recv())
+                _offset, ts, decoded = await sub.recv()
 
+        assert isinstance(ts, int)
+        assert ts == wire_ts, "one frame, encoded once, to every subscriber"
         assert on_the_wire["trace_id"] == trace.hex()
         assert decoded["trace_id"] == trace
 
@@ -184,6 +188,7 @@ class TestWithoutASchema:
         stream = streamcast.Stream("relay")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send({"x": math.nan})
-            _offset, row = await asyncio.wait_for(sub.recv(), 5)
+            _offset, ts, row = await asyncio.wait_for(sub.recv(), 5)
 
+        assert isinstance(ts, int)
         assert row == {"x": None}

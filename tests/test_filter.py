@@ -60,7 +60,7 @@ class TestTheLivePath:
         stream, uri = served
         async with streamcast.connect(uri, where={"ticker": "AAPL"}) as sub:
             await stream.send_many([trade(i) for i in range(9)])
-            got = [(await sub.recv())[1] for _ in range(3)]
+            got = [(await sub.recv())[2] for _ in range(3)]
 
         assert [row["ticker"] for row in got] == ["AAPL"] * 3
         assert [row["qty"] for row in got] == [100, 103, 106]
@@ -69,7 +69,7 @@ class TestTheLivePath:
         stream, uri = served
         async with streamcast.connect(uri, where={"ticker": ["AAPL", "NVDA"]}) as sub:
             await stream.send_many([trade(i) for i in range(9)])
-            got = [(await sub.recv())[1]["ticker"] for _ in range(6)]
+            got = [(await sub.recv())[2]["ticker"] for _ in range(6)]
 
         assert got == ["AAPL", "NVDA"] * 3
 
@@ -78,7 +78,7 @@ class TestTheLivePath:
         where = {"ticker": "AAPL", "client_id": 0}
         async with streamcast.connect(uri, where=where) as sub:
             await stream.send_many([trade(i) for i in range(9)])
-            first = (await sub.recv())[1]
+            first = (await sub.recv())[2]
 
         assert (first["ticker"], first["client_id"]) == ("AAPL", 0)
 
@@ -106,7 +106,7 @@ class TestTheLivePath:
         ):
             await stream.send_many([trade(i) for i in range(9)])
             wide = [(await everything.recv())[0] for _ in range(9)]
-            some = [(await narrow.recv())[1]["ticker"] for _ in range(3)]
+            some = [(await narrow.recv())[2]["ticker"] for _ in range(3)]
 
         assert wide == list(range(1, 10)), "the unfiltered subscriber lost rows"
         assert some == ["AAPL"] * 3
@@ -139,7 +139,7 @@ class TestTheReplayAgrees:
         async with streamcast.connect(
             uri, offset=streamcast.EARLIEST, where={"ticker": "AAPL"}
         ) as sub:
-            got = [(await sub.recv())[1]["ticker"] for _ in range(3)]
+            got = [(await sub.recv())[2]["ticker"] for _ in range(3)]
 
         assert got == ["AAPL"] * 3
 
@@ -211,9 +211,10 @@ class TestTheReplayAgrees:
         await stream.send_many([trade(i) for i in range(3)])
 
         async with streamcast.connect(uri, offset=1, where={"ticker": "MSFT"}) as sub:
-            offset, row = await sub.recv()
+            offset, ts, row = await sub.recv()
 
         assert (offset, row["ticker"]) == (2, "MSFT"), "row 1 leaked past the filter"
+        assert isinstance(ts, int)
 
 
 class TestTheGreeting:

@@ -5,7 +5,7 @@ A server refuses `?offset=` that is further back than `max_replay`, and
 tables, then picks the socket up where they end:
 
     async with streamcast.connect(uri, cursor=path, catch_up=True) as stream:
-        async for offset, msg in stream:
+        async for offset, ts, msg in stream:
             ...
 
 The consumer sees one stream. Underneath, the rows below the server's window
@@ -222,7 +222,7 @@ class Catcher:
         if first is not None:
             await first.close()
 
-    async def stream(self) -> AsyncGenerator[tuple[int, dict], None]:
+    async def stream(self) -> AsyncGenerator[tuple[int, int | None, dict], None]:
         """Yield the gap, and leave `connection` set when it returns.
 
         Nothing is connected while rows are being yielded. That is the point.
@@ -238,7 +238,7 @@ class Catcher:
             snap = self._first or await self._open()
             self._first = None
             try:
-                async for offset, row in _rows(snap, self.start):
+                async for offset, ts, row in _rows(snap, self.start):
                     if not checked:
                         checked = True
                         if offset > requested:
@@ -248,7 +248,7 @@ class Catcher:
                             # between `prepare` and the read.
                             raise _gap_below(self._name, self._uri, offset, requested)
 
-                    yield offset, row
+                    yield offset, ts, row
                     # Tracked per ROW, so a round that fails partway still
                     # leaves the next one starting where this one stopped.
                     self.start = offset + 1
@@ -309,7 +309,7 @@ async def _refusing(read: Awaitable[Any]) -> Any:
 
 async def _rows(
     snap: _snapshot.Snapshot, start: int
-) -> AsyncGenerator[tuple[int, dict], None]:
+) -> AsyncGenerator[tuple[int, int | None, dict], None]:
     """`snap.rows(start)`, refusing as `_refusing` does."""
     try:
         async with aclosing(snap.rows(start)) as rows:

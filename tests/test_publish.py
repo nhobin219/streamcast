@@ -27,9 +27,10 @@ class TestItPublishes:
             async with streamcast.connect(uri) as sub:
                 async with streamcast.publish(uri) as producer:
                     offset = await producer.send(trade(0))
-                    delivered, row = await sub.recv()
+                    delivered, ts, row = await sub.recv()
 
         assert offset == 1
+        assert ts is None, "`log` is unstamped"
         assert delivered == offset, "the publisher and the subscriber agree"
         assert row == trade(0), "and the row is untouched"
 
@@ -289,7 +290,7 @@ class TestTheProducerCursor:
                 async with streamcast.connect(uri, offset=start) as sub:
                     lo, hi = sub.info.replay or (0, 0)
                     for _ in range(hi - lo):
-                        _offset, row = await sub.recv()
+                        _offset, _ts, row = await sub.recv()
                         if row["publisher"] == "a":
                             landed = max(landed or -1, int(row["seq"]))  # ty: ignore[invalid-argument-type]
 

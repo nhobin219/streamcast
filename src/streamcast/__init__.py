@@ -27,8 +27,8 @@ fan-out is identical, offsets are `null`, and `?offset=` is refused.
 **`serve` and `connect` are the `websockets` API, with three deviations.** They
 have the same shapes and pass their keywords through, and `serve` returns an
 object that proxies `websockets.Server`. What differs: iterating a
-subscription yields `(offset, row)` rather than `message`, because the offset
-is what makes a reconnect a resume; a subscription is read-only, with no
+subscription yields `(offset, ts, row)` rather than `message`, because the
+offset is what makes a reconnect a resume; a subscription is read-only, with no
 `send` rather than a `send` that raises; and `compression` defaults to None
 here where `websockets` defaults to `"deflate"`, because permessage-deflate
 compresses once per subscriber a frame this encodes once.
@@ -65,7 +65,7 @@ per consumer.
     async with streamcast.connect(
         "ws://localhost:8765/trades", cursor=".trades.offset", catch_up=True
     ) as sub:
-        async for offset, msg in sub:
+        async for offset, ts, msg in sub:
             ...
 
 **`serve` starts everything the stream needs.** A log that nobody seals grows
@@ -88,9 +88,9 @@ then picks the socket up where they ended.
 ``EARLIEST`` is the offset that means "everything the log still holds".
 
 Every frame on the wire is a text frame of JSON — the greeting, then an
-``[offset, msg]`` pair per message — so ``wscat ws://localhost:8765/trades?offset=0`` is a working
+``[offset, ts, msg]`` triple per message — so ``wscat ws://localhost:8765/trades?offset=0`` is a working
 subscriber with no client library at all. **``msg`` is the row the publisher
-sent and nothing else**: no offset key, no injected metadata, so a subscriber
+sent and nothing else**: no offset or timestamp key, no injected metadata, so a subscriber
 can log it, forward it or append it to another stream whole.
 """
 

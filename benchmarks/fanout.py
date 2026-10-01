@@ -93,6 +93,7 @@ async def main() -> None:
         "side": 0,
         "tag": "x" * args.payload,
     }
+    ts = 1_790_038_800_124_001  # streamcast_ts: when the server took the row
     print(
         f"{args.messages:,} rows, {args.payload} B in the string column, "
         f"{args.subscribers} subscribers\n"
@@ -101,7 +102,7 @@ async def main() -> None:
     # --- encode: once per message, whatever the subscriber count ------------
     started = time.perf_counter()
     for offset in range(args.messages):
-        encode(offset, row, COLUMNS)
+        encode(offset, ts, row, COLUMNS)
 
     _report("encode (msgspec)", time.perf_counter() - started, args.messages)
 
@@ -110,7 +111,7 @@ async def main() -> None:
 
     started = time.perf_counter()
     for offset in range(args.messages):
-        json.dumps((offset, row)).encode()
+        json.dumps((offset, ts, row)).encode()
 
     _report("encode (stdlib json)", time.perf_counter() - started, args.messages)
 
@@ -177,7 +178,7 @@ async def main() -> None:
         async def read(subscription):
             latencies = []
             for _ in range(total):
-                _offset, received = await subscription.recv()
+                _offset, _ts, received = await subscription.recv()
                 latencies.append(time.perf_counter_ns() - int(received["tag"]))
 
             return latencies

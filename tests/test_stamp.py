@@ -1,8 +1,9 @@
-"""`streamcast_ts`: stamped on every row a server stores, and never sent.
+"""`streamcast_ts`: stamped on every row a server stores, and never a key.
 
 The one column streamcast owns, on litelink's terms for its own offset — the
-writer fills it, the table holds it, and nothing on the wire or in the shape a
-subscriber is told mentions it. Invariant 10 is the one it could break: a
+writer fills it, the table holds it, and it reaches a subscriber only
+positionally, as the `ts` of `[offset, ts, msg]`: no row and no shape a
+subscriber is told names it. Invariant 10 is the one it could break: a
 replayed frame has to carry exactly the keys the live one did.
 """
 
@@ -87,11 +88,14 @@ class TestItIsNeverSent:
 
         async with serve(stream) as uri, websockets.connect(uri + "?offset=1") as raw:
             greeting = json.loads(await raw.recv())
-            _offset, replayed = json.loads(await raw.recv())
+            _offset, replayed_ts, replayed = json.loads(await raw.recv())
             await stream.send(trade(2))
-            _offset, live = json.loads(await raw.recv())
+            _offset, live_ts, live = json.loads(await raw.recv())
 
         advertised = list(greeting["schema"]["properties"])
+        # The stamp travels beside the row, positionally, never as a key.
+        assert isinstance(replayed_ts, int)
+        assert isinstance(live_ts, int)
         assert _log.STAMP not in advertised
         assert _log.STAMP not in replayed
         assert _log.STAMP not in live
