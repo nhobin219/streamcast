@@ -38,6 +38,7 @@ from websockets.frames import CloseCode
 
 from streamcast import (
     _filter,
+    _live,
     _log,
     _manifest,
     _metadata,
@@ -770,6 +771,28 @@ class Stream:
                 start_offset=start_offset,
                 end_offset=end_offset,
             )
+
+    @staticmethod
+    async def live(
+        broker: str,
+        *,
+        s3: S3Options | None = None,
+        rebase_every: float = _live.REBASE_EVERY,
+    ) -> _live.Live:
+        """A stream's history kept current in memory: `scan` and `sql` as of now.
+
+            async with await Stream.live("ws://broker:8765/trades") as live:
+                await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+                await live.wait_for(offset)     # until that row is visible
+
+        The published tables as a base, and the broker's rows appended as they
+        arrive. The broker is the only address: its greeting names where the
+        history is published, read again at every reconnect. Memory holds only what is not yet published: every
+        `rebase_every` seconds the base is re-pinned and the rows it covers
+        are dropped. A dropped connection reconnects with catch-up; a failure
+        it cannot fix is raised by the next query. See `_live`.
+        """
+        return await _live.live(broker, s3=s3, rebase_every=rebase_every)
 
     @property
     def metadata_uri(self) -> str | None:

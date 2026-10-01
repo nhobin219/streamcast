@@ -970,6 +970,38 @@ there, as in any other read. The snapshot's own limits (the offsets, and the
 `as_of_ts` bound on logs that carry the stamp) stay inside, where they always
 bind and push down.
 
+### Keeping it current: `Stream.live`
+
+A `Live` is a snapshot kept moving: the published tables as a base, the
+broker's rows appended in memory as they arrive, and every query answered as
+of the newest row received. It is built entirely from what exists, and takes
+only the broker's address: the greeting names the metadata file and the
+stream's id, read again at every reconnect, because a live view wants the
+stream as the broker serves it now. Opening it is one connection for the
+greeting, a published snapshot of that file, and a subscription at the
+snapshot's `end_offset` with `catch_up=True` — the join catch-up already makes without a gap or a
+duplicate. A query freezes the tail at the newest row and runs the snapshot's
+own read, with the tail as one more piece, so `scan` and `sql` mean the same
+thing on both.
+
+**Memory is the publish lag, not the stream's age.** Every `rebase_every`
+seconds, and after every reconnect, a fresh published snapshot replaces the
+base and the tail rows it now covers are dropped. A row that arrives below the
+base's end, or below the newest row received, is dropped on arrival, so
+nothing is counted twice. Rebasing after a reconnect is what picks up a
+migration: a restart is when one happens, and its new log is in the fresh
+metadata.
+
+**Reading never waits on a query.** The receiving task only appends dicts;
+they become Arrow when a query asks. Queries run in threads, so a slow
+aggregate stalls neither the loop nor the socket, and the server never drops
+the view for falling behind because of one (invariant 2).
+
+**A broken view raises.** A closed connection, `TooSlow` or a network error
+reconnects from the last row received, with catch-up, under a capped backoff.
+Anything else is kept and raised by the next query, so the view never answers
+from data it has stopped receiving.
+
 ### Catching up from the published tables
 
 `too_old` and `evicted` are the two refusals that mean *the rows exist, just not

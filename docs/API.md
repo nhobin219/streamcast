@@ -1232,6 +1232,34 @@ tables, which reads from anywhere. Without one, every log publishes under its ow
 directory and the URI is the local `file://` file, which reads only on the server's
 machine. On another machine the read says so and suggests an `s3://` location.
 
+### Keeping it current: `Stream.live`
+
+```python
+await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0) -> Live
+
+async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
+    await live.wait_for(offset)                  # until that row is visible
+    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await live.scan(columns=["price"], filters=[("price", ">", 500.0)])
+    live.end_offset                              # one above the newest row a query sees
+```
+
+A `Live` is a `Snapshot` kept moving: the published tables as a base, and the broker's
+rows appended in memory as they arrive, so every `scan` and `sql` answers as of the newest
+row received. They take the same arguments as on a `Snapshot`, and the rows read the same
+— the broker's carry their `streamcast_ts` like published ones.
+
+| | |
+|---|---|
+| **open** | one connection for the greeting, a published snapshot of the metadata file it names, then a subscription at the snapshot's end with `catch_up=True`: no gap and no duplicate at the join |
+| **where** | the broker is the only address. Its greeting names the metadata file and the stream's id, read again at every reconnect, so the view follows the stream as the broker serves it now. A stream with no log has nothing published and raises `ValueError` |
+| **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped |
+| **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
+| **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |
+| **failures** | anything reconnecting can't fix is kept and raised by the next query or `wait_for`, so a broken view never answers from stale data |
+
+Queries run one at a time: each reads one DuckDB connection, which cannot run two.
+
 ## On the wire
 
 Every frame is a text frame of JSON. The greeting, then a **three-element array** per
