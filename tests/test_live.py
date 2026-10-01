@@ -72,9 +72,8 @@ async def stream(tmp_path) -> AsyncIterator[streamcast.Stream]:
 
 class TestItIsCurrent:
     async def test_published_and_broker_rows_read_as_one_table(self, stream):
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(uri, broker=broker) as live:
+            async with await streamcast.Stream.live(broker) as live:
                 await live.wait_for(5)
                 assert await offsets(live) == [1, 2, 3, 4, 5]
 
@@ -84,9 +83,8 @@ class TestItIsCurrent:
                 assert live.end_offset == 9
 
     async def test_sql_sees_what_scan_sees(self, stream):
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(uri, broker=broker) as live:
+            async with await streamcast.Stream.live(broker) as live:
                 await live.wait_for(5)
                 result = await live.sql(
                     "SELECT count(*) AS n, max(price) AS top FROM log"
@@ -94,22 +92,24 @@ class TestItIsCurrent:
                 assert result.to_pylist() == [{"n": 5, "top": 104.0}]
 
     async def test_broker_rows_carry_their_stamps(self, stream):
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(uri, broker=broker) as live:
+            async with await streamcast.Stream.live(broker) as live:
                 await live.wait_for(5)
                 table = await live.scan(columns=[_log.COLUMN, _log.STAMP])
 
         assert all(ts is not None for ts in table.column(_log.STAMP).to_pylist())
 
+    async def test_a_stream_with_no_log_has_no_history_to_keep(self):
+        live_only = streamcast.Stream("trades", schema=SCHEMA)
+        async with served(live_only) as (_server, broker):
+            with pytest.raises(ValueError, match="no log"):
+                await streamcast.Stream.live(broker)
+
 
 class TestMemory:
     async def test_a_rebase_drops_what_is_now_published(self, stream):
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
-                uri, broker=broker, rebase_every=3600
-            ) as live:
+            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
                 await live.wait_for(5)
                 before = await offsets(live)
                 assert held(live) == 2  # offsets 4 and 5: not yet published
@@ -125,11 +125,8 @@ class TestMemory:
 
         Such a row then arrives late, and the base already has it.
         """
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
-                uri, broker=broker, rebase_every=3600
-            ) as live:
+            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
                 await live.wait_for(5)
                 publish(stream)
                 await live.rebase()
@@ -143,11 +140,8 @@ class TestMemory:
     async def test_a_row_received_twice_is_kept_once(self, stream):
         """Not yet published, so only the receive guard stands between it and a
         duplicate in the tail."""
-        uri = stream.metadata_uri
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
-                uri, broker=broker, rebase_every=3600
-            ) as live:
+            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
                 await live.wait_for(5)
                 await live._append(5, 1, row(4))  # noqa: SLF001 — a repeat
 
@@ -157,11 +151,8 @@ class TestMemory:
 
 class TestReconnecting:
     async def test_a_dropped_connection_comes_back_without_a_gap(self, stream):
-        uri = stream.metadata_uri
         async with served(stream) as (server, broker):
-            async with await streamcast.Stream.live(
-                uri, broker=broker, rebase_every=3600
-            ) as live:
+            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
                 await live.wait_for(5)
                 original = live._base  # noqa: SLF001
                 for connection in list(server.connections):
@@ -180,9 +171,8 @@ class TestReconnecting:
     async def test_a_failure_it_cannot_fix_is_raised_by_the_next_query(
         self, stream, monkeypatch
     ):
-        uri = stream.metadata_uri
         async with served(stream) as (server, broker):
-            async with await streamcast.Stream.live(uri, broker=broker) as live:
+            async with await streamcast.Stream.live(broker) as live:
                 await live.wait_for(5)
 
                 async def refused() -> None:

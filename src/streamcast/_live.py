@@ -1,13 +1,20 @@
 """A stream's history, kept current in memory: `Stream.live` (#59).
 
-    async with await streamcast.Stream.live(metadata_uri, broker=uri) as live:
+    async with await streamcast.Stream.live("ws://broker:8765/trades") as live:
         await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
 
 A `Snapshot` is a fixed point. A `Live` is the same reader kept moving: the
 published tables as a base, and the broker's rows appended in memory as they
 arrive, so every `scan` and `sql` answers as of the last row received.
 
-**Built from what exists.** Opening it is a published snapshot and then a
+**The broker is the only address.** Its greeting names the stream's metadata
+file and id, and a live view always wants the stream as the broker serves it
+now — so the view reads them from the greeting, at open and again at every
+reconnect, rather than taking a location the caller could get wrong or that
+could go stale.
+
+**Built from what exists.** Opening it is one connection
+for the greeting, a published snapshot of the file it names, and then a
 subscription at the snapshot's `end_offset` with `catch_up=True` — the join
 catch-up already makes without a gap or a duplicate (I1, I4, I7). A query
 freezes the tail at the last row received and runs the snapshot's own read
@@ -50,6 +57,7 @@ if TYPE_CHECKING:
     from litelink import S3Options
 
     from streamcast import _manifest
+    from streamcast._protocol import Greeting
 
 REBASE_EVERY: Final = 10.0
 """Seconds between rebases: how long a published row is also held in memory."""
@@ -70,14 +78,16 @@ class Live:
 
     def __init__(
         self,
-        metadata_uri: str,
         broker: str,
+        greeting: Greeting,
         s3: S3Options | None,
         rebase_every: float,
         base: _snapshot.Snapshot,
     ) -> None:
-        self._uri = metadata_uri
         self._broker = broker
+        # Where the history is read, as the broker's latest greeting says.
+        self._uri = greeting.metadata
+        self._stream_id = greeting.stream_id
         self._s3 = s3
         self._rebase_every = rebase_every
         self._base = base
@@ -109,20 +119,22 @@ class Live:
         from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
 
         connecting = _client.connect(
-            self._broker,
-            offset=self._end,
-            catch_up=True,
-            metadata=self._uri,
-            s3=self._s3,
+            self._broker, offset=self._end, catch_up=True, s3=self._s3
         )
         try:
-            return await connecting
+            subscription = await connecting
         except NotReplayable as refused:
             if refused.why != "empty":
                 raise
 
             # Nothing in the log yet, so nothing to replay: from now is all.
-            return await _client.connect(self._broker)
+            subscription = await _client.connect(self._broker)
+
+        # The latest word on where the history is: a restarted broker may
+        # serve a migrated stream, whose metadata the next rebase must read.
+        self._uri = subscription.info.metadata
+        self._stream_id = subscription.info.stream_id
+        return subscription
 
     async def close(self) -> None:
         for task in self._tasks:
@@ -206,7 +218,9 @@ class Live:
 
     async def rebase(self) -> None:
         """Re-pin to what is published now, and drop the tail rows it covers."""
-        fresh = await _snapshot.snapshot(self._uri, s3=self._s3)
+        fresh = await _snapshot.snapshot(
+            _require(self._broker, self._uri), s3=self._s3, stream_id=self._stream_id
+        )
         async with self._lock:
             # Converted against the old base first, so a pending row is judged
             # by the base it arrived under; the cut below then trims it.
@@ -310,16 +324,34 @@ class Live:
         return base
 
 
+def _require(broker: str, uri: str | None) -> str:
+    if uri is None:
+        msg = (
+            f"{broker} serves a stream with no log: nothing is published, so "
+            f"there is no history to keep current. Subscribe with "
+            f"streamcast.connect instead."
+        )
+        raise ValueError(msg)
+
+    return uri
+
+
 async def live(
-    metadata_uri: str,
-    *,
-    broker: str,
-    s3: S3Options | None = None,
-    rebase_every: float = REBASE_EVERY,
+    broker: str, *, s3: S3Options | None = None, rebase_every: float = REBASE_EVERY
 ) -> Live:
     """See `Stream.live`."""
-    base = await _snapshot.snapshot(metadata_uri, s3=s3)
-    view = Live(metadata_uri, broker, s3, rebase_every, base)
+    from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
+
+    # One connection for the greeting, closed before the tables are read:
+    # nothing is held open while they are (I7). The subscription that stays
+    # open is made at the snapshot's end, in `_start`.
+    async with _client.connect(broker) as probe:
+        greeting = probe.info
+
+    base = await _snapshot.snapshot(
+        _require(broker, greeting.metadata), s3=s3, stream_id=greeting.stream_id
+    )
+    view = Live(broker, greeting, s3, rebase_every, base)
     try:
         await view._start()  # noqa: SLF001
     except BaseException:

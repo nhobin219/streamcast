@@ -1235,9 +1235,9 @@ machine. On another machine the read says so and suggests an `s3://` location.
 ### Keeping it current: `Stream.live`
 
 ```python
-await streamcast.Stream.live(metadata_uri, *, broker, s3=None, rebase_every=10.0) -> Live
+await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0) -> Live
 
-async with await streamcast.Stream.live(sub.info.metadata, broker=uri) as live:
+async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
     await live.scan(columns=["price"], filters=[("price", ">", 500.0)])
@@ -1251,7 +1251,8 @@ row received. They take the same arguments as on a `Snapshot`, and the rows read
 
 | | |
 |---|---|
-| **open** | a published snapshot, then a subscription at its end with `catch_up=True`: no gap and no duplicate at the join |
+| **open** | one connection for the greeting, a published snapshot of the metadata file it names, then a subscription at the snapshot's end with `catch_up=True`: no gap and no duplicate at the join |
+| **where** | the broker is the only address. Its greeting names the metadata file and the stream's id, read again at every reconnect, so the view follows the stream as the broker serves it now. A stream with no log has nothing published and raises `ValueError` |
 | **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped |
 | **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
 | **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |

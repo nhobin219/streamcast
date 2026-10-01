@@ -974,9 +974,12 @@ bind and push down.
 
 A `Live` is a snapshot kept moving: the published tables as a base, the
 broker's rows appended in memory as they arrive, and every query answered as
-of the newest row received. It is built entirely from what exists. Opening it
-is a published snapshot and then a subscription at the snapshot's `end_offset`
-with `catch_up=True` — the join catch-up already makes without a gap or a
+of the newest row received. It is built entirely from what exists, and takes
+only the broker's address: the greeting names the metadata file and the
+stream's id, read again at every reconnect, because a live view wants the
+stream as the broker serves it now. Opening it is one connection for the
+greeting, a published snapshot of that file, and a subscription at the
+snapshot's `end_offset` with `catch_up=True` — the join catch-up already makes without a gap or a
 duplicate. A query freezes the tail at the newest row and runs the snapshot's
 own read, with the tail as one more piece, so `scan` and `sql` mean the same
 thing on both.
