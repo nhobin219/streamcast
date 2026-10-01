@@ -1167,11 +1167,37 @@ stream.metadata_uri -> str | None     # on the server
 sub.info.metadata -> str | None       # on a subscriber
 ```
 
+A subscription delivers rows one at a time, in order. To ask a question of a stream — an
+aggregate, a join, a scan of last Tuesday — read it as a table. There are two readers, and
+both present every log the stream has been through (migrations included) as one table,
+`log`, with the same `scan` and `sql`:
+
+| | `Stream.snapshot` | `Stream.live` |
+|---|---|---|
+| **answers as of** | one fixed point, chosen when it opens | the newest row, at every query |
+| **reads** | the published tables | the published tables, plus the broker's rows as they arrive |
+| **needs the server** | no — offline unless asked for rows not yet published | yes, always |
+| **holds in memory** | the query's result (and the broker's rows, if asked for them) | the rows not yet published |
+| **addressed by** | the stream's metadata file | the broker's URI |
+
 A stream is a sequence of logs — one per schema, after `Stream.migrate` — and its
 metadata file says which, in order, where each is published, and the offsets and
 `streamcast_ts` range each holds. `Stream.snapshot` reads that file and then the published
-tables, on the reader's own machine with its own credentials. The broker is consulted only
-for rows no table holds yet, and only when asked.
+tables, on the reader's own machine with its own credentials. **Given the S3 metadata file,
+it never touches the server**:
+
+```python
+s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
+
+async with await streamcast.Stream.snapshot(
+    "s3://market-data/prod/trades.metadata.json", s3=s3
+) as snapshot:
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+```
+
+The broker is consulted only for rows no table holds yet, and only when asked: a point
+past the published end needs `broker=`, and is refused without it. Every other read is a
+read of files.
 
 ```python
 async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
@@ -1206,19 +1232,34 @@ carrying on live subscribes there.
 ANDed with `where`. Across a migration the logs read as one table with `UNION ALL BY
 NAME`, so a column a log lacked reads as null there, in a condition as in a result.
 
-**Only `filters` and the offsets prune.** They are checked against
-`<stream>.manifest.parquet` before any table is opened, so a retired log they rule out is
-never read, and they are applied to the rows too, so the answer never depends on what the
-statistics ruled out. A `where=`, or a `WHERE` inside `sql`'s query, filters the rows but
-skips no log. Deriving prune terms from SQL means reading every predicate correctly — `OR`,
-casts, functions, NULL semantics — and a misread doesn't fail: it drops a log that held
-matches and answers short. Until that is done soundly
-([#57](https://github.com/nhobin219/streamcast/issues/57)), state the pruning you want
-as `filters`:
+**`filters=` and `where=` both filter rows, but only `filters=` can skip a log.** The
+result is the same either way; what differs is how much gets read.
+
+- **`filters=`** is a list of `(column, operator, value)` terms — `==`, `<`, `<=`, `>`, `>=`,
+  `in` — ANDed together. Because each term is that simple, it can be checked against every
+  log's per-column min and max (`<stream>.manifest.parquet`) *before the log is opened*: a
+  log whose prices all sit below 85,000 is never read. The terms are then applied to the
+  rows too, so what you get never depends on what was skipped. Numeric and boolean columns
+  skip; others still filter, they just can't rule out a log.
+- **`where=`** (and a `WHERE` in `sql`'s query) is any SQL expression: arithmetic, `OR`,
+  functions, other columns. It is applied to the rows of every log in range, and skips
+  none. Reading arbitrary SQL well enough to rule logs out is easy to get subtly wrong —
+  an `OR` or a cast misread drops a log that held matches, and the answer comes back short
+  with nothing to show for it — so it isn't attempted
+  ([#57](https://github.com/nhobin219/streamcast/issues/57)).
+
+So state the cheap, prunable part of a predicate as `filters=` and the rest as `where=`.
+Offset bounds (`start_offset=`, `end_offset=`) skip logs the same way `filters=` does.
+Within a log, DuckDB's own Parquet statistics still prune files for both.
 
 ```python
-await snapshot.sql("SELECT side, sum(amount) FROM log WHERE price > 500 GROUP BY side",
-                   filters=[("price", ">", 500)])
+await snapshot.scan(
+    columns=["event_ts", "price"],
+    filters=[("price", ">", 85_000.0)],            # skips whole logs that can't match
+    where="side = 1 AND amount * price > 1000",    # any SQL, applied to rows
+)
+await snapshot.sql("SELECT max(price) FROM log WHERE side = 1",
+                   filters=[("price", ">", 85_000.0)])   # narrows the table `log`
 ```
 
 **Correct or it raises `SnapshotUnavailable`.** A missing metadata file, a file whose
@@ -1245,9 +1286,11 @@ async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     live.end_offset                              # one above the newest row a query sees
 ```
 
-A `Live` is a `Snapshot` kept moving: the published tables as a base, and the broker's
-rows appended in memory as they arrive, so every `scan` and `sql` answers as of the newest
-row received. They take the same arguments as on a `Snapshot`, and the rows read the same
+A `Live` is a `Snapshot` kept moving — **real-time analytics on a stream in one line**:
+the published tables as a base, and the broker's rows appended in memory as they arrive,
+so every `scan` and `sql` answers as of the newest row received. It is **online by
+design**: it takes only the broker's address, because a view of the stream *now* has to be
+listening to it. For an offline read, or a fixed point to come back to, use a snapshot. They take the same arguments as on a `Snapshot`, and the rows read the same
 — the broker's carry their `streamcast_ts` like published ones.
 
 | | |

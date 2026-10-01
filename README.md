@@ -709,127 +709,33 @@ fail loudly than resume from a copy that lags should be able to say so.
 
 ## Reading a stream
 
-A subscription delivers rows one at a time, in order. To ask a question of a stream —
-an aggregate, a join, a scan of last Tuesday — read it as a table instead. There are two
-readers, and both present every log the stream has been through (migrations included) as
-one table, `log`, with the same `scan` and `sql`:
+A subscription delivers rows one at a time. To ask a question of a stream — an aggregate,
+a join, a scan of last Tuesday — read it as a table, `log`, that spans every log the
+stream has been through.
 
-| | `Stream.snapshot` | `Stream.live` |
-|---|---|---|
-| **answers as of** | one fixed point, chosen when it opens | the newest row, at every query |
-| **reads** | the published tables | the published tables, plus the broker's rows as they arrive |
-| **needs the server** | no — offline unless you ask for rows it has not published | yes, always |
-| **holds in memory** | the query's result (and the broker's rows, if you asked for them) | the rows not yet published |
-| **addressed by** | the stream's metadata file | the broker's URI |
-
-### Snapshot: a fixed point, offline
-
-A snapshot reads the stream's **published tables** — ordinary Iceberg tables — on your
-machine, with your credentials. Give it the metadata file and it never touches the
+**`Stream.snapshot` reads a fixed point, offline.** Given the stream's metadata file on S3,
+it reads the published tables on your machine with your credentials, and never touches the
 server:
 
 ```python
-s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
-
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades.metadata.json", s3=s3
+    "s3://market-data/prod/trades.metadata.json"
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
-    await snapshot.scan(
-        columns=["event_ts", "price"],
-        filters=[("price", ">", 85_000.0)],   # skips whole logs that can't match
-        where="side = 1 AND amount * price > 1000",   # any SQL, applied to rows
-    )
-    # The same split for SQL: `filters=` narrows the table `log` the query sees.
-    await snapshot.sql(
-        "SELECT max(price) FROM log WHERE side = 1", filters=[("price", ">", 85_000.0)]
-    )
-
-# One-shot forms, for a single question:
-await streamcast.Stream.sql("s3://market-data/prod/trades.metadata.json", "SELECT ...")
 ```
 
-For a stream that publishes to S3, the metadata file sits beside the published tables, at
-`<published>/<stream>.metadata.json`. The server knows it as `stream.metadata_uri`, and
-every subscriber is told it in the greeting, as `sub.info.metadata`. A stream that
-publishes to a local directory names its `file://` metadata file on the server, which
-reads only on that machine; publish to `s3://` to read from anywhere.
-
-**Pick the point** with at most one of:
-
-```python
-await streamcast.Stream.snapshot(uri)                      # everything published
-await streamcast.Stream.snapshot(uri, as_of_offset=1861)   # up to and including an offset
-await streamcast.Stream.snapshot(uri, as_of_ts=t)          # stamped at or before t (µs)
-await streamcast.Stream.snapshot(uri, as_of_offset=streamcast.LATEST,
-                                 broker="ws://localhost:8765/trades")   # to the frontier
-```
-
-The last is the one that goes online: rows the server has not published yet are only on
-the server, so a point past the published end needs `broker=`, and is refused without it.
-Everything else is a read of files.
-
-**Correct or it raises.** A point the tables cannot answer, a metadata file that belongs to
-another stream, a range neither the tables nor the broker holds: each raises
-`SnapshotUnavailable` with the numbers, never a short answer.
-
-**`filters=` and `where=` both filter rows, but only `filters=` can skip a log.** The
-result is the same either way; what differs is how much gets read.
-
-- **`filters=`** is a list of `(column, operator, value)` terms — `==`, `<`, `<=`, `>`, `>=`,
-  `in` — ANDed together. Because each term is that simple, it can be checked against every
-  log's per-column min and max (`<stream>.manifest.parquet`) *before the log is opened*: a
-  log whose prices all sit below 85,000 is never read. The terms are then applied to the
-  rows too, so what you get never depends on what was skipped. Numeric and boolean columns
-  skip; others still filter, they just can't rule out a log.
-- **`where=`** (and a `WHERE` in your SQL) is any SQL expression: arithmetic, `OR`,
-  functions, other columns. It is applied to the rows of every log in range, and skips
-  none. Reading arbitrary SQL well enough to rule logs out is easy to get subtly wrong —
-  an `OR` or a cast misread drops a log that held matches, and the answer comes back short
-  with nothing to show for it — so it isn't attempted
-  ([#57](https://github.com/nhobin219/streamcast/issues/57)).
-
-So state the cheap, prunable part of a predicate as `filters=` and the rest as `where=`, as
-above. Offset bounds (`start_offset=`, `end_offset=`) skip logs the same way `filters=`
-does. Within a log, DuckDB's own Parquet statistics still prune files for both.
-
-### Live: always online
-
-`Stream.live` is a snapshot kept current: **real-time analytics on a stream in one line**.
-The aggregate you would run over yesterday's history runs over everything up to the row
-that arrived a moment ago, with the same `scan` and `sql`, `filters=` and `where=`. It is
-**online by design**: it takes only the broker's address, because a view of the stream
-*now* has to be listening to it.
+**`Stream.live` is real-time analytics on a stream in one line.** It is a snapshot kept
+current with the broker's rows as they arrive, so every query answers as of the row that
+arrived a moment ago. It is online by design — it takes only the broker's address, because
+a view of the stream *now* has to be listening to it:
 
 ```python
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
-    await live.wait_for(offset)          # until that row is visible to a query
-    await live.wait_for(ts=t)            # until every row stamped by t (µs) is
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
-    await live.scan(filters=[("price", ">", 85_000.0)], where="side = 1")
 ```
 
-It reads the greeting for where the stream is published, snapshots that, and subscribes
-from where the snapshot ends — so there is no gap and no duplicate at the join. Every
-query answers as of the newest row received.
-
-- **Memory is the publish lag, not the stream's age.** Every `rebase_every` seconds (10 by
-  default), and after every reconnect, the view re-pins to what is published now and drops
-  the rows it covers.
-- **Queries never stall the socket.** Rows are appended as they arrive and become a table
-  only when a query asks, and queries run in a thread.
-- **`wait_for` takes a point, as a snapshot does: an offset or a time.** An offset is
-  exact: that row has arrived. A time is known complete only once a row stamped *after* it
-  arrives, because rows arrive in stamp order and only a later one proves nothing earlier
-  is still coming. **On a quiet stream that can take a while, and `wait_for(ts=)` waits
-  until it does**, even though every earlier row is already there; wrap it in
-  `asyncio.timeout(...)` where the stream can go idle. Published rows count, so a time the
-  tables have already passed returns at once.
-- **It reconnects, and it raises.** A dropped connection resumes from the last row, with
-  catch-up. Anything a reconnect cannot fix is raised by the next query, so a view that has
-  stopped listening never answers as if it had not.
-
-For an offline read, or a fixed point you can come back to, use a snapshot.
+Choosing a point, pruning with `filters=` against `where=`, memory, reconnects and
+`wait_for` are in [`docs/API.md`](docs/API.md#reading-a-streams-history).
 
 ## Chaining
 
