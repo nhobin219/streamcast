@@ -142,137 +142,20 @@ rustfs-stop:
 check-all: lint format-check typecheck
     STREAMCAST_REQUIRE_S3=1 STREAMCAST_REQUIRE_NODE=1 uv run pytest
 
-# START HERE. A live public feed through a server, in one process: Bitstamp
-# publishes BTC/USD trades over an unauthenticated websocket, so there is
-# nothing to configure and no credentials to set.
+# START HERE. Every demo, by name: `just demo` alone lists them. A demo
+# is a producer, a broker and a subscriber, each its own process, and this
+# starts all of them. The first to try is Bitstamp's BTC/USD trades, over an
+# unauthenticated websocket, so there is nothing to configure.
 #
-#   just demo              terminal 1: the server, logging every trade
-#   just demo-consumer     terminal 2 (and 3, and 4): a resuming subscriber
+#   just demo trades                 terminal 1: broker, producer, consumer
+#   just demo consumer --label two   terminal 2 (and 3, and 4): one more consumer
 #
 # Stop a consumer, leave it stopped for a while, start it again, and watch it
-# replay what it missed before it goes live.
-
-# Run the server against a live public websocket feed.
+# replay what it missed before it goes live. See examples/README.md.
+#
+# Run a demo with all its processes; with no name, list them.
 demo *args:
-    uv run python examples/server.py {{args}}
-
-# Subscribe to the demo server, resuming from where it stopped.
-demo-consumer *args:
-    uv run python examples/consumer.py {{args}}
-
-# The same stream mounted in a FastAPI service, on the port it already has.
-demo-fastapi *args:
-    uv run uvicorn examples.fastapi_app:app --port 8000 {{args}}
-
-# A live-only server — no log, no litelink, no replay. The other end of the
-# range, and the shape to reach for when the stream is a cache nobody resumes.
-demo-live *args:
-    uv run python examples/server.py --no-log {{args}}
-
-# Two simulated services log and trace through the OTel SDK; the records and
-# spans are published to two streams; `examples/otel/export.py` follows both
-# and re-exports them as OTLP to
-# otel-gui (https://github.com/metafab/otel-gui), a local dashboard. The first
-# run downloads otel-gui's release for this platform, checks its SHA-256, and
-# caches it. Everything stays on this machine; Ctrl-C stops all three.
-#
-# OpenTelemetry logs and traces through streams, live in otel-gui's dashboard.
-demo-otel host="127.0.0.1" port="4318":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    version=2.1.0
-    case "$(uname -s)-$(uname -m)" in
-        Linux-x86_64)             asset=otel-gui-linux-x64 ;;
-        Linux-aarch64|Linux-arm64) asset=otel-gui-linux-arm64 ;;
-        Darwin-x86_64)            asset=otel-gui-macos-x64 ;;
-        Darwin-arm64)             asset=otel-gui-macos-arm64 ;;
-        *) echo "no otel-gui build for $(uname -s)-$(uname -m); see https://github.com/metafab/otel-gui" >&2; exit 1 ;;
-    esac
-    cache="${XDG_CACHE_HOME:-$HOME/.cache}/streamcast/otel-gui-$version"
-    gui="$cache/$asset/otel-gui"
-    if [ ! -x "$gui" ]; then
-        echo "downloading otel-gui $version ($asset)"
-        mkdir -p "$cache"
-        url="https://github.com/metafab/otel-gui/releases/download/v$version/$asset.tar.gz"
-        curl -fsSL -o "$cache/$asset.tar.gz" "$url"
-        curl -fsSL -o "$cache/$asset.tar.gz.sha256" "$url.sha256"
-        if command -v sha256sum >/dev/null; then
-            (cd "$cache" && sha256sum -c "$asset.tar.gz.sha256")
-        else
-            (cd "$cache" && shasum -a 256 -c "$asset.tar.gz.sha256")
-        fi
-        tar -xzf "$cache/$asset.tar.gz" -C "$cache"
-    fi
-    log="$(mktemp -t streamcast-otel-XXXXXX.log)"
-    # HOST and SHUTDOWN_TIMEOUT are not in otel-gui's README, but its server
-    # honours both (SvelteKit's node adapter). 127.0.0.1 keeps the dashboard
-    # off the network. On a signal it waits SHUTDOWN_TIMEOUT seconds (30 by
-    # default) for open connections to close, and an open dashboard's live
-    # stream never does: 1 lets Ctrl-C return at once.
-    HOST="{{host}}" PORT="{{port}}" SHUTDOWN_TIMEOUT=1 "$gui" >"$log" 2>&1 &
-    gui_pid=$!
-    # otel-gui (2.1.0, and 3.0.0 unchanged) loads its trace and logs .proto
-    # files lazily into one shared protobufjs Root, on the first request to
-    # each. The exporter sends both at once, the two loads interleave, one
-    # resolves before resource.proto is parsed, and the throw escapes into a
-    # callback and kills the dashboard. An empty request to each, one after
-    # the other, does the loading before anything can race it.
-    for _ in $(seq 100); do
-        curl -fs -o /dev/null "http://127.0.0.1:{{port}}/" && break
-        kill -0 "$gui_pid" 2>/dev/null || { cat "$log" >&2; exit 1; }
-        sleep 0.1
-    done
-    for signal in traces logs; do
-        curl -fsS -o /dev/null -X POST -H 'Content-Type: application/x-protobuf' \
-            --data-binary '' "http://127.0.0.1:{{port}}/v1/$signal"
-    done
-    uv run python -m examples.otel.demo --serve >>"$log" 2>&1 &
-    broker=$!
-    uv run python -m examples.otel.export --receiver "http://127.0.0.1:{{port}}" >>"$log" 2>&1 &
-    exporter=$!
-    # SIGTERM, not SIGINT: bash starts background jobs with SIGINT ignored, so
-    # Ctrl-C reaches only this script. Both Python pieces unwind on SIGTERM as
-    # on Ctrl-C, and the broker stops its maintainer rather than orphaning it.
-    trap 'kill "$exporter" "$broker" "$gui_pid" 2>/dev/null || true; wait' EXIT
-    echo "dashboard: http://{{host}}:{{port}}   (logs: $log)   Ctrl-C to stop"
-    wait "$broker"
-
-# Orders written as a keyed table log, and a subscriber that keeps the table
-# in SQLite: the last row by id, where not deleted. It is stopped partway and resumes from its own stored offset.
-#
-# A keyed table log of orders, kept as a table in SQLite.
-demo-keyed-table:
-    uv run python -m examples.keyed_table.orders
-
-# Branches: each client forks main's view into a private database, writes to
-# its own branch_id, and commits with one send_many onto main.
-#
-# Branches: every client its own database, committed with one send_many.
-demo-branches:
-    uv run python -m examples.keyed_table.branches
-
-# A pipeline A -> B -> C, and a migration of B tested against its live and
-# historical data by a shadow D -> E beside it, diffed old against new.
-# `just demo-migration --bug` deploys a migration that is wrong.
-#
-# A schema migration, tested against live production data in a shadow.
-demo-migration *args:
-    uv run python -m examples.migration.demo {{args}}
-
-# The OTel example once, start to finish, printing what each part saw.
-demo-otel-once:
-    uv run python -m examples.otel.demo
-
-# Delete what the demo captured.
-demo-clean root="streamcast-data":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -e "{{root}}" ]; then
-        echo "nothing at {{root}}"
-    else
-        echo "removing {{root}} ($(du -sh "{{root}}" | cut -f1))"
-        rm -rf "{{root}}"
-    fi
+    uv run python -m examples {{args}}
 
 # What the fan-out costs per subscriber, and where it stops being free.
 bench *args:
