@@ -11,7 +11,10 @@ Linux only: `PR_SET_PDEATHSIG` has no portable equivalent (see `_process`).
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import errno
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -91,17 +94,44 @@ def identify(pid: int) -> Child | None:
     return None if fields is None else Child(pid, int(fields[19]), command)
 
 
-def state(child: Child) -> str | None:
-    """`child`'s state letter, or None once it is gone.
+# **Death by event, not by sampling.** A pidfd is a handle on one process —
+# never another that later reuses its pid — and it becomes readable when that
+# process has exited, every thread of it. Waiting on pidfds makes "the child
+# died" a fact the kernel reports, where reading `/proc/<pid>/stat` until a
+# deadline had to judge state letters: it once read litestream's leader in `X`
+# (dead, its threads still exiting) as a survivor. The deadline now bounds
+# only a child that really does not die.
+#
+# Through `syscall` rather than `os.pidfd_open`, which some Python builds
+# leave out; both numbers are the same on every Linux architecture (5.3+).
+_PIDFD_OPEN = 434
+_PIDFD_SEND_SIGNAL = 424
+_LIBC = ctypes.CDLL(None, use_errno=True)
 
-    Gone means exited, a zombie awaiting a reaper, or its pid now someone
-    else's: a different start time is a different process.
-    """
+
+def pidfd(child: Child) -> int | None:
+    """A pidfd on `child`, or None if it is already gone."""
+    fd = _LIBC.syscall(_PIDFD_OPEN, ctypes.c_int(child.pid), ctypes.c_uint(0))
+    if fd < 0:
+        err = ctypes.get_errno()
+        if err == errno.ESRCH:
+            return None
+
+        raise OSError(err, os.strerror(err))
+
+    # Opened by pid, so check it is still the process `identify` named: a
+    # different start time is a different process, and that one is gone.
     fields = stat(child.pid)
-    if fields is None or int(fields[19]) != child.started or fields[0] == "Z":
+    if fields is None or int(fields[19]) != child.started:
+        os.close(fd)
         return None
 
-    return fields[0]
+    return fd
+
+
+def kill(fd: int) -> None:
+    """SIGKILL through the pidfd: never another process that reused the pid."""
+    _LIBC.syscall(_PIDFD_SEND_SIGNAL, fd, signal.SIGKILL, None, 0)
 
 
 def kill_the_server(root: Path, bucket: str = "-") -> tuple[list[Child], list[str]]:
@@ -127,9 +157,12 @@ def kill_the_server(root: Path, bucket: str = "-") -> tuple[list[Child], list[st
 
             spawned = now
 
-        # Identified while the server lives, so each child is named by what
-        # it was even if it exits before the check below.
+        # Identified, and a pidfd opened on each, while the server lives: a
+        # child is then named by what it was and watched as that process,
+        # even if it exits before the wait below.
         found = [identify(pid) for pid in spawned]
+        known = [child for child in found if child is not None]
+        handles = {child: pidfd(child) for child in known}
         server.send_signal(signal.SIGKILL)
         server.wait()
     finally:
@@ -137,19 +170,24 @@ def kill_the_server(root: Path, bucket: str = "-") -> tuple[list[Child], list[st
             server.kill()
             server.wait()
 
-    known = [child for child in found if child is not None]
     # Generous: SIGKILL is immediate, but a child in uninterruptible I/O on a
-    # loaded runner finishes that first.
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and any(state(c) for c in known):
-        time.sleep(0.1)
+    # loaded runner finishes that first. Only a child that never dies waits it out.
+    alive = {fd: child for child, fd in handles.items() if fd is not None}
+    poller = select.poll()
+    for fd in alive:
+        poller.register(fd, select.POLLIN)
 
-    survivors = [(child, state(child)) for child in known]
-    running = [f"{c.command}(state {s})" for c, s in survivors if s is not None]
-    for child, letter in survivors:  # leave nothing behind, whatever is asserted
-        if letter is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(child.pid, signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while alive and (remaining := deadline - time.monotonic()) > 0:
+        for fd, _event in poller.poll(remaining * 1_000):
+            poller.unregister(fd)
+            os.close(fd)
+            del alive[fd]
+
+    running = [child.command for child in alive.values()]
+    for fd in alive:  # leave nothing behind, whatever is asserted
+        kill(fd)
+        os.close(fd)
 
     return known, running
 
