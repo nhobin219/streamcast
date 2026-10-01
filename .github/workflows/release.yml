@@ -118,8 +118,9 @@ jobs:
                   ) as sub:
                       got = [await sub.recv() for _ in range(50)]
 
-                  assert [o for o, _ in got] == list(range(1, 51)), got[:3]
-                  assert got[7][1]["price"] == 7.0, got[7]
+                  assert [o for o, _, _ in got] == list(range(1, 51)), got[:3]
+                  assert all(isinstance(ts, int) for _, ts, _ in got), got[:3]
+                  assert got[7][2]["price"] == 7.0, got[7]
 
                   # The log is a queryable table, which is the reason litelink
                   # is underneath this. A wheel that served rows over a log
