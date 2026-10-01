@@ -71,7 +71,15 @@ class Table:
     row a server replays (I6).
     """
 
-    __slots__ = ("_connection", "_owned", "extent", "metadata", "name", "schema")
+    __slots__ = (
+        "_connection",
+        "_owned",
+        "extent",
+        "metadata",
+        "name",
+        "record_count",
+        "schema",
+    )
 
     def __init__(
         self,
@@ -81,6 +89,7 @@ class Table:
         schema: pa.Schema,
         extent: tuple[int, int] | None,
         *,
+        record_count: int = 0,
         owned: bool = True,
     ) -> None:
         self.name = name
@@ -91,6 +100,8 @@ class Table:
         self.schema = schema
         self.extent = extent
         """`[start, end)` of the offsets this snapshot holds, or None if it holds none."""
+        self.record_count = record_count
+        """How many rows it holds. Below `extent`'s width across a restore fence."""
 
     @classmethod
     def open(
@@ -127,9 +138,9 @@ class Table:
             metadata = f"{table}/metadata/{hint[0].strip()}.metadata.json"
             scan = f"iceberg_scan({_quoted(metadata)})"
             schema = connected.execute(f"SELECT * FROM {scan} LIMIT 0").arrow().schema
-            low, high = connected.execute(
-                f'SELECT min("{COLUMN}"), max("{COLUMN}") FROM {scan}'
-            ).fetchone() or (None, None)
+            low, high, count = connected.execute(
+                f'SELECT min("{COLUMN}"), max("{COLUMN}"), count(*) FROM {scan}'
+            ).fetchone() or (None, None, 0)
         except BaseException:
             if shared is None:
                 connected.close()
@@ -137,7 +148,15 @@ class Table:
             raise
 
         extent = None if low is None or high is None else (int(low), int(high) + 1)
-        return cls(name, connected, metadata, schema, extent, owned=shared is None)
+        return cls(
+            name,
+            connected,
+            metadata,
+            schema,
+            extent,
+            record_count=int(count),
+            owned=shared is None,
+        )
 
     def scan(
         self,

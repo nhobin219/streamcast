@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import litelink
+import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import LATEST, SnapshotUnavailable, _metadata
+from streamcast import LATEST, SnapshotUnavailable, _manifest, _metadata
 
 V1: dict[str, Any] = {
     "type": "object",
@@ -231,6 +232,27 @@ class TestAMigratedStream:
 
         with pytest.raises(SnapshotUnavailable, match="published rows up to"):
             await streamcast.Stream.snapshot(uri, as_of_ts=max(stamps) + 1)
+
+    async def test_a_retired_log_published_short_is_refused(self, tmp_path, serve):
+        stream = await stream_of(tmp_path, 5)
+        await stream.aclose()
+        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        uri = migrated.metadata_uri
+        assert uri is not None
+        await served_once(migrated, serve)
+        # The manifest says the first log held one row more than its table does.
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        index = manifest.schema.get_field_index("record_count")
+        counts = [count + 1 for count in manifest.column(index).to_pylist()]
+        _manifest.save(
+            tmp_path,
+            "trades",
+            manifest.set_column(index, "record_count", pa.array(counts, pa.int64())),
+        )
+
+        with pytest.raises(SnapshotUnavailable, match="holds 5 of the 6 rows"):
+            await streamcast.Stream.scan(uri)
 
 
 class TestTheMetadata:

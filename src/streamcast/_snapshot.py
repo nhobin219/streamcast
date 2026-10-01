@@ -167,11 +167,40 @@ class Snapshot:
                 msg = f"log {piece.entry.name} has no published location"
                 raise SnapshotUnavailable(msg)
 
-            piece.table = _published.Table.open(
+            table = _published.Table.open(
                 published, piece.entry.name, self._s3, shared=self._connection
             )
+            expected = self._recorded(piece.entry)
+            if expected is not None and table.record_count < expected:
+                # **A retired log published short is a hole, not a smaller log.**
+                # Its rows end below the next log's start, and a reader carrying
+                # on from `end_offset` — catch-up does exactly that, stepping
+                # over restore fences — would step over the missing rows the
+                # same way and never know. The manifest's count is the whole
+                # log's, read at retirement, so it is what a complete table holds.
+                msg = (
+                    f"log {piece.entry.name!r} is published short: its table "
+                    f"holds {table.record_count} of the {expected} rows it had "
+                    f"when it was retired. Publish it in full (the maintainer "
+                    f"does, at its next sweep) and read again."
+                )
+                raise SnapshotUnavailable(msg)
+
+            piece.table = table
 
         return piece.table
+
+    def _recorded(self, entry: Entry) -> int | None:
+        """A retired log's row count as the manifest has it, or None if unknown."""
+        if self._manifest is None or entry is self.metadata.live_log:
+            return None
+
+        names = self._manifest.column(_manifest.KEY).to_pylist()
+        if entry.name not in names:
+            return None
+
+        count = self._manifest.column("record_count")[names.index(entry.name)].as_py()
+        return None if count is None else int(count)
 
     def _bounds(self, start: int | None, stop: int | None) -> str:
         terms = [f'"{_log.COLUMN}" < {min(stop or self.end_offset, self.end_offset)}']

@@ -39,6 +39,7 @@ above the gap would have lost data and been told it recovered.
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Final
 
 from streamcast import _snapshot
@@ -200,7 +201,7 @@ class Catcher:
             # not go back far enough to cover it, which used to be served
             # silently from wherever they did start — rows missing, and a
             # cursor advanced past them.
-            floor = await first.floor()
+            floor = await _refusing(first.floor())
             if floor is not None and floor > self.start:
                 raise _gap_below(self._name, self._uri, floor, self.start)
         except BaseException:
@@ -237,7 +238,7 @@ class Catcher:
             snap = self._first or await self._open()
             self._first = None
             try:
-                async for offset, row in snap.rows(self.start):
+                async for offset, row in _rows(snap, self.start):
                     if not checked:
                         checked = True
                         if offset > requested:
@@ -292,6 +293,31 @@ class Catcher:
             f"once the server will serve it."
         )
         raise CatchUpUnavailable(msg)
+
+
+async def _refusing(read: Awaitable[Any]) -> Any:
+    """`read`, with a snapshot's refusal reported as catch-up's.
+
+    A table is opened when it is first read, not when the snapshot is taken,
+    so a refusal — a retired log published short — can surface from any read.
+    """
+    try:
+        return await read
+    except _snapshot.SnapshotUnavailable as exc:
+        raise CatchUpUnavailable(str(exc)) from exc
+
+
+async def _rows(
+    snap: _snapshot.Snapshot, start: int
+) -> AsyncGenerator[tuple[int, dict], None]:
+    """`snap.rows(start)`, refusing as `_refusing` does."""
+    try:
+        async with aclosing(snap.rows(start)) as rows:
+            async for item in rows:
+                yield item
+
+    except _snapshot.SnapshotUnavailable as exc:
+        raise CatchUpUnavailable(str(exc)) from exc
 
 
 def _nothing_above(name: str, uri: str, end: int, start: int) -> CatchUpUnavailable:

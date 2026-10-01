@@ -397,6 +397,62 @@ class TestServingAMigratedStream:
         finally:
             await stream.aclose()
 
+    async def test_catch_up_reads_below_the_seam_from_the_retired_log(
+        self, tmp_path, serve
+    ):
+        """The refusal above, closed: a retired log is published in full."""
+        await seeded(tmp_path)
+        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        try:
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri, offset=2, catch_up=True) as sub:
+                    caught_up = [await sub.recv() for _ in range(4)]
+                    await stream.send(row(5, venue="x"))
+                    live = await sub.recv()
+
+            assert [offset for offset, _ in caught_up] == [2, 3, 4, 5]
+            assert [message["price"] for _, message in caught_up] == [
+                101.0,
+                102.0,
+                103.0,
+                104.0,
+            ]
+            assert live[0] == 6
+            assert live[1]["venue"] == "x"
+        finally:
+            await stream.aclose()
+
+    async def test_a_retired_log_published_short_is_refused_not_stepped_over(
+        self, tmp_path, serve
+    ):
+        """Catch-up steps to the snapshot's end, so a short table is a hole.
+
+        Two rows fewer in the table than the manifest says the log held: the
+        shape of a log retired before every row was published.
+        """
+        await seeded(tmp_path)
+        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        manifest = _manifest.load(tmp_path, "trades")
+        assert manifest is not None
+        counts = manifest.column("record_count").to_pylist()
+        _manifest.save(
+            tmp_path,
+            "trades",
+            manifest.set_column(
+                manifest.schema.get_field_index("record_count"),
+                "record_count",
+                pa.array([count + 2 for count in counts], pa.int64()),
+            ),
+        )
+        try:
+            async with serve(stream, maintain=False) as uri:
+                with pytest.raises(
+                    streamcast.CatchUpUnavailable, match="holds 5 of the 7 rows"
+                ):
+                    await streamcast.connect(uri, offset=2, catch_up=True)
+        finally:
+            await stream.aclose()
+
     async def test_earliest_on_a_fresh_seam_is_where_the_log_begins(
         self, tmp_path, serve
     ):
@@ -459,7 +515,7 @@ class TestTheManifest:
         assert metadata is not None
         assert metadata.manifest == "trades.manifest.parquet"
         assert (tmp_path / metadata.manifest).exists(), (
-            "relative to the metadata file, so the same pointer serves the archive"
+            "relative to the metadata file, so one pointer serves the published copy"
         )
 
     async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
@@ -523,7 +579,7 @@ class TestTheManifest:
         await seeded(tmp_path)
 
         def refuse(self, **_):
-            raise OSError("the archive is unreachable")
+            raise OSError("the published table is unreachable")
 
         monkeypatch.setattr(litelink.WriteHandle, "column_statistics", refuse)
         with pytest.raises(OSError, match="unreachable"):
@@ -595,7 +651,7 @@ def test_extending_replaces_a_row_rather_than_duplicating_it():
 
 
 @pytest.mark.replication
-class TestTheArchive:
+class TestThePublishedCopy:
     async def test_the_metadata_is_published_beside_the_logs(
         self, tmp_path, s3, bucket
     ):
