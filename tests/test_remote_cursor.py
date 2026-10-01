@@ -148,7 +148,7 @@ class TestItIsBestEffort:
         run would have traded an outage for a backup.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream) as uri:
+        async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 
             cursor = tmp_path / "trades.offset"

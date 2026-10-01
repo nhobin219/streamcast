@@ -13,7 +13,9 @@ skips without either.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -22,6 +24,8 @@ import pytest
 
 import streamcast
 from streamcast import _metadata
+
+from .conftest import filesystem
 
 pytestmark = pytest.mark.replication
 
@@ -54,10 +58,14 @@ def litestream() -> Path:
 
 
 def ship(config: str, s3: litelink.S3Options, binary: Path) -> None:
-    """Run the sidecar once, so a replica exists to restore from.
+    """Run the sidecar until the replica holds every database, then stop it.
 
-    `-exec` bounds its life: it replicates, runs the command, and exits. The
-    alternative is starting a daemon and guessing when to stop it.
+    **Polled, not slept.** litestream does no final sync when an `-exec`
+    command exits — measured: `-exec true` left nothing to restore — so a
+    fixed sleep has to guess how long the first snapshot takes, which is
+    seconds wasted on a fast box and a flake on a slow one. Nothing writes
+    while this runs, so each database's snapshot (litestream's level 9)
+    holds its whole state, and every one of them existing is the condition.
     """
     environment = dict(os.environ)
     resolved = s3.resolved()
@@ -65,13 +73,40 @@ def ship(config: str, s3: litelink.S3Options, binary: Path) -> None:
         environment["LITESTREAM_ACCESS_KEY_ID"] = resolved.access_key
         environment["LITESTREAM_SECRET_ACCESS_KEY"] = resolved.secret_key
 
-    subprocess.run(
-        [str(binary), "replicate", "-config", config, "-exec", "sleep 4"],
+    # Only a database that exists has anything to snapshot: a log that has
+    # archived nothing has no `archive.db` yet, and waiting on its replica
+    # would wait for ever.
+    replicas = [
+        f"{bucket}/{path}/0009"
+        for local, bucket, path in re.findall(
+            r"- path: (\S+)\n\s+replica:\n(?:\s+\S.*\n)*?\s+bucket: (\S+)\n"
+            r"\s+path: (\S+)",
+            Path(config).read_text(),
+        )
+        if Path(local).exists()
+    ]
+    assert replicas, f"no database to replicate in {config}"
+    fs = filesystem(s3)
+    sidecar = subprocess.Popen(  # noqa: S603
+        [str(binary), "replicate", "-config", config],
         env=environment,
-        check=False,
-        capture_output=True,
-        timeout=90,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            fs.invalidate_cache()
+            if all(fs.exists(replica) and fs.ls(replica) for replica in replicas):
+                return
+
+            time.sleep(0.1)
+
+        msg = f"litestream shipped no snapshot of {replicas} within 60s"
+        raise AssertionError(msg)
+    finally:
+        sidecar.terminate()
+        sidecar.wait(timeout=10)
 
 
 def produce(root: Path, bucket: str, s3: litelink.S3Options, count: int = 200):
