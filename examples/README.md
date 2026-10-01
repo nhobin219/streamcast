@@ -131,6 +131,46 @@ log, and what closes the log on the way out.
 
 Needs the extra: `pip install 'streamcast[asgi]'`.
 
+## The latest state, and branches
+
+```
+just demo-latest       # open orders, kept in SQLite by a subscriber
+just demo-branches     # every client its own database, committed with one send_many
+```
+
+A stream is append-only, so "the current state" is something a subscriber
+builds: the last row for each key, minus the keys whose last row retracts
+them. `state/view.py` keeps that for a stream of orders, in SQLite, one
+statement per row. Two conventions carry it, and neither is a library
+feature: `order_id` is the key because the schema says so, and a row with
+`deleted: true` is a tombstone. There is no `Stream.delete`.
+
+**The view is its own cursor.** It writes the offset it has applied in the
+same transaction as the row, so a view reopened after a crash resumes at
+exactly the next row. `state/latest.py` stops one partway, publishes more,
+and reopens it. It then asks the log the same question, as one window
+function over `litelink_offset`, and gets the same book.
+
+**Branches** (`state/branches.py`) add a `branch_id` column. Production
+writes to `main`. A branch is a client's private database:
+
+1. `View.fork()` copies main's view at the offset it has applied.
+2. A live subscription with `where={"branch_id": "<branch>"}` keeps the copy
+   current with the branch's own rows.
+3. The client writes to its branch freely, and no other view moves.
+4. **A commit is one `send_many`**: the branch's rows again, with
+   `branch_id: "main"`. One transaction, so main's view gets the whole change
+   as one contiguous run of offsets, or none of it.
+
+There is no merge engine: last row by id wins in offset order, as for any
+other write.
+
+A branch can also **track main**. With `where={"branch_id": ["main",
+"<branch>"]}` it follows production live and keeps its own writes on top.
+That is how to try a new system against live data: a migration or a new
+service reads everything production does, writes only to its branch, and
+production never sees a row of it.
+
 ## OpenTelemetry logs and traces, in a dashboard
 
 ```

@@ -9,6 +9,15 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **`examples/state/`**, **`just demo-latest`** and **`just demo-branches`**:
+  a latest-state subscriber, which keeps open orders in SQLite with the
+  offset it applied in the same transaction, so it resumes on its own. Also
+  branches built on it: each client forks main's view into a private
+  database, follows its own `branch_id`, and commits with one `send_many`
+  onto main.
+
 ### Fixed
 
 - **`just demo-otel`** no longer loses its dashboard on the first export.
