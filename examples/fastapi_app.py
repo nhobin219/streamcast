@@ -1,7 +1,7 @@
 """A FastAPI service that also serves a stream, on the port it already has.
 
-    just demo-fastapi                                    # terminal 1
-    just demo-consumer --uri ws://127.0.0.1:8000/streams/trades   # terminal 2
+    just demo fastapi                                    # terminal 1
+    just demo consumer --uri ws://127.0.0.1:8000/streams/trades   # terminal 2
 
 **You do not call `serve()`.** `serve` and `asgi` are two transports for the
 same `Stream`, and a mounted app uses one of them:

@@ -1,7 +1,7 @@
 """A live public feed, fanned out to everything on this box.
 
     just demo                  # this, against Bitstamp BTC/USD trades
-    just demo-consumer         # in another terminal, and a third, and a fourth
+    just demo consumer         # in another terminal, and a third, and a fourth
 
 Bitstamp publishes trades over an unauthenticated websocket, so there is
 nothing to configure and no credentials to set. This holds **one** connection
@@ -10,7 +10,7 @@ idea, and the reason it is not six connections to Bitstamp.
 
 Every trade goes into a litelink log before any subscriber sees it, so a
 consumer that stops and starts again resumes from where it left off rather
-than from now. Stop `demo-consumer`, leave it stopped, start it again, and
+than from now. Stop `just demo consumer`, leave it stopped, start it again, and
 watch it replay the gap.
 
 **The schema below is this demo's, not streamcast's**, and it is JSON Schema
@@ -167,7 +167,7 @@ async def main() -> None:
         where = "durable" if stream.durable else "live-only"
         print(f"serving {CHANNEL} ({where}) at ws://{args.host}:{args.port}/trades")
         print(f"  resuming from offset {stream.end_offset}")
-        print("  subscribe:  just demo-consumer")
+        print("  subscribe:  just demo consumer")
 
         stopping = asyncio.Event()
         loop = asyncio.get_running_loop()

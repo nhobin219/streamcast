@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC/USD order book</title>
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js"></script>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #fff; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #1c1c1e; } }
+  body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  #grid { height: calc(100vh - 110px); }
+</style>
+</head>
+<body>
+<h1>BTC/USD order book, from a stream</h1>
+<p id="status">connecting…</p>
+<div id="grid"></div>
+<script>
+// A streamcast subscriber in the browser, and nothing else. The stream is
+// Bitstamp's live BTC/USD orders written as a keyed table log, and this page
+// keeps the table it stands for — the last row by order_id, where not
+// deleted — as the rows arrive. No server code builds this view.
+agGrid.ModuleRegistry.registerModules([agGrid.AllCommunityModule]);
+const flash = { enableCellChangeFlash: true };
+const grid = agGrid.createGrid(document.getElementById("grid"), {
+  getRowId: (p) => String(p.data.order_id),
+  columnDefs: [
+    { field: "price", width: 130, sort: "desc", ...flash, valueFormatter: (p) => p.value.toFixed(2) },
+    { field: "side", width: 90, cellStyle: (p) => ({ color: p.value === "buy" ? "#1a8f3c" : "#c9372c" }) },
+    { field: "amount", width: 130, ...flash, valueFormatter: (p) => p.value.toFixed(8) },
+    { field: "order_id", headerName: "order", width: 190 },
+    { field: "offset", headerName: "last row", width: 110, ...flash },
+  ],
+  animateRows: true,
+});
+
+const open = new Set();   // order ids the grid holds
+let applied = 0;          // the last offset applied: where to resume
+const status = document.getElementById("status");
+const show = (state) => {
+  status.textContent =
+    `${state} · ${open.size} open orders placed since the demo started · applied through offset ${applied}`;
+};
+
+function apply(offset, row) {
+  const id = row.order_id;
+  if (row.deleted) {
+    // Batched: the feed changes the book around a hundred times a second.
+    if (open.delete(id)) grid.applyTransactionAsync({ remove: [{ order_id: id }] });
+  } else {
+    const data = { ...row, offset };
+    grid.applyTransactionAsync(open.has(id) ? { update: [data] } : { add: [data] });
+    open.add(id);
+  }
+  applied = offset;
+}
+
+function connect() {
+  // From the start (offset 0, EARLIEST), or after the last row applied: a
+  // reconnect misses nothing and repeats nothing.
+  const socket = new WebSocket(`ws://${location.host}/orders?offset=${applied ? applied + 1 : 0}`);
+  let greeted = false;
+  socket.onmessage = (event) => {
+    const frame = JSON.parse(event.data);
+    if (!greeted) {  // the first frame is the greeting, with the schema
+      greeted = true;
+      return show("live");
+    }
+    const [offset, row] = frame;
+    apply(offset, row);
+    show("live");
+  };
+  socket.onclose = () => {
+    show("reconnecting");
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

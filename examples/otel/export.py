@@ -1,6 +1,6 @@
 """Re-export the OTel streams as OTLP, to any OpenTelemetry receiver.
 
-    just demo-otel        # the broker, this exporter and otel-gui's dashboard
+    just demo otel        # the broker, this exporter and otel-gui's dashboard
 
 A streamcast subscriber on one side and OpenTelemetry's own OTLP exporters on
 the other. It turns each row of `logs.py`'s and `spans.py`'s schemas back into

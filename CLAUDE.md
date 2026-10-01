@@ -22,6 +22,7 @@ just test tests/test_resume.py -k partition
 just bench              # fan-out and publish throughput
 just bench-replay       # replay cost, and which layer it is spent in
 just demo               # a live public feed through a server
+just demo --list        # every runnable demo; `just demo NAME` runs one
 just rustfs             # an S3 endpoint, so the replication tier runs
 just check-all          # every gate with replication and Node REQUIRED, as CI runs it
 ```

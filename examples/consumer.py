@@ -1,6 +1,6 @@
 """A consumer that resumes, and the whole of what that costs.
 
-    just demo-consumer
+    just demo consumer
 
 Run several. Stop one with Ctrl-C, leave it stopped while trades keep
 arriving, and start it again: it asks for the offset after the last one it

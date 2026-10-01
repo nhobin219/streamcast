@@ -11,20 +11,30 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- **`examples/keyed_table/`**, **`just demo-keyed-table`** and
-  **`just demo-branches`**: orders written as a keyed table log (each row a
+- **`examples/keyed_table/`**: orders written as a keyed table log (each row a
   whole record, keyed by id, with a `deleted` flag), and a subscriber that
   keeps the table in SQLite: the last row by id, where not deleted. It writes
   the offset it applied in the same transaction, so it resumes on its own.
   Also branches built on it: each client forks main's view into a private
   database, follows its own `branch_id`, and commits with one `send_many`
   onto main.
-- **`examples/migration/`** and **`just demo-migration`**: a pipeline of
-  streams, A -> B -> C, and a schema migration of B tested in a shadow,
-  D -> E, against production's live and historical data without production
-  waiting on it. Old and new are diffed with one DuckDB join on the source
-  offset each row carries; `--bug` shows a wrong migration named order by
-  order.
+- **`just demo book`**: Bitstamp's live BTC/USD order book relayed as a keyed
+  table log, and a browser page, served from the stream's own port, that
+  subscribes and keeps the table in AG Grid as rows arrive.
+- **`examples/migration/`**: a pipeline of streams, A -> B -> C, and a
+  schema migration of B tested in a shadow, D -> E, against production's live
+  and historical data without production waiting on it. Old and new are
+  diffed with one DuckDB join on the source offset each row carries; `--bug`
+  shows a wrong migration named order by order.
+
+### Changed
+
+- **`just demo NAME`** replaces the `demo-*` recipes: `just demo consumer`,
+  `just demo live`, `just demo fastapi`, `just demo otel`, `just demo clean`.
+  With no name it is still the server, and `just demo --list` shows every
+  runnable demo. Each is a module under `examples/`, and `examples/__main__.py`
+  maps names to them. The OTel dashboard demo is now one Python process
+  (`examples/otel/dashboard.py`) rather than a shell recipe.
 
 ### Fixed
 
@@ -35,10 +45,10 @@ there was nothing to have changed from. Everything above it is ordinary.
   mid-transaction and printed a traceback. The maintainer and the litestream
   sidecar now run in sessions of their own, so only the server hears the
   terminal, and it stops them.
-- **`just demo-otel`** no longer loses its dashboard on the first export.
+- **`just demo otel`** no longer loses its dashboard on the first export.
   otel-gui loads its trace and logs protobuf definitions lazily into one
   shared root, and the exporter's first traces and logs requests arrive
-  together; the interleaved loads crash otel-gui. The recipe now sends one
+  together; the interleaved loads crash otel-gui. The demo now sends one
   empty request to each, in turn, before the exporter starts.
 
 ## 0.9.0 — 2026-09-30

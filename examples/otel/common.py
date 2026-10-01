@@ -131,6 +131,11 @@ def publish(
     the loop and the thread waits for the stream's acknowledgement. That makes
     a flush mean the rows are DURABLE, not merely sent.
     """
+    if loop.is_closed():
+        # A provider flushing at interpreter exit, after the loop has gone:
+        # nothing can be published, and the SDK wants a result, not a raise.
+        return False
+
     sent = asyncio.run_coroutine_threadsafe(publication.send_many(rows), loop)
     try:
         sent.result(timeout=10)

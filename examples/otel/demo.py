@@ -198,10 +198,10 @@ def orders_forever(exporters: Exporters, stop: threading.Event) -> None:
             )
 
     finally:
-        # Detach only: on Ctrl-C the publications may already be closed, so
-        # a last flush could not land. The last half-second is dropped.
-        checkout.detach()
-        payments.detach()
+        # `serve_forever` joins this thread before it closes the publications,
+        # so the last batches flush into an open stream.
+        checkout.shutdown()
+        payments.shutdown()
 
 
 # -- the broker -------------------------------------------------------------------
@@ -231,8 +231,8 @@ async def exporting(base: str):  # noqa: ANN201
 async def serve_forever(port: int) -> None:
     """The broker on `port`, with the two services placing orders until Ctrl-C.
 
-    What `just demo-otel` runs: `examples/otel/export.py` follows both
-    streams and re-exports each row as OTLP to otel-gui.
+    What `just demo otel` runs, with `export.py` following both streams and
+    re-exporting each row as OTLP to otel-gui.
     """
     with tempfile.TemporaryDirectory() as directory:
         server = await streamcast.serve(
@@ -243,9 +243,20 @@ async def serve_forever(port: int) -> None:
         print(f"broker on {base}/logs and {base}/spans — Ctrl-C to stop", flush=True)
         try:
             async with exporting(base) as exporters:
-                await asyncio.to_thread(orders_forever, exporters, stop)
+                # A thread of its own, joined on the way out: cancelling a
+                # `to_thread` would leave the services running past the
+                # publications they flush into.
+                services = threading.Thread(
+                    target=orders_forever, args=(exporters, stop)
+                )
+                services.start()
+                try:
+                    await asyncio.Event().wait()  # until cancelled
+                finally:
+                    stop.set()
+                    await asyncio.to_thread(services.join)
+
         finally:
-            stop.set()
             server.close()
             await server.wait_closed()
 
@@ -366,10 +377,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--port", type=int, default=8766)
     arguments = parser.parse_args()
-    # Started in the background, as `just demo-otel` starts it, a script
-    # inherits SIGINT ignored; and a supervisor stops it with SIGTERM. Both
-    # become KeyboardInterrupt, so every stop unwinds the same way — the
-    # broker stopping its maintainer rather than orphaning it.
+    # Started as a background job by a shell, a script inherits SIGINT
+    # ignored; and a supervisor stops it with SIGTERM. Both become
+    # KeyboardInterrupt, so every stop unwinds the same way — the broker
+    # stopping its maintainer rather than orphaning it.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     if arguments.serve:
