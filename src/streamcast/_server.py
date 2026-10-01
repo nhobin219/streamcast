@@ -1,5 +1,12 @@
 """`serve` — a `Stream` behind a WebSocket port.
 
+**A log-backed pub/sub broker.** Publishers and subscribers are both clients of
+this process, which owns the log, assigns every offset and is litelink's single
+writer. Routing is exact-match on `Stream.name`: there is no topic tree and no
+wildcard subscription, because a subscriber resumes by offset and an offset
+belongs to one log — a subscription spanning streams would need a cursor per
+stream, which is a different resume story than the one `_stream` enforces.
+
 Thin on purpose. Everything that decides what a subscriber receives is in
 `_stream`; this routes a path to a stream, turns a refusal into a close code,
 and hands the rest straight to `websockets`. The whole handler is forty lines
