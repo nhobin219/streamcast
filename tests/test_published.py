@@ -70,9 +70,24 @@ class TestTheConnection:
             for connected in (first, second, again):
                 connected.close()
 
-    def test_the_ambient_chain_is_resolved_again_per_connection(self, monkeypatch):
+    def test_the_ambient_chain_is_resolved_again_per_connection(
+        self, monkeypatch, tmp_path
+    ):
+        # No keys in the environment, so the secret is the chain — and a
+        # credentials file of the test's own for the chain to find: DuckDB
+        # refuses to create a chain secret that resolves to nothing, and a
+        # test must not depend on the machine's ~/.aws.
         for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
             monkeypatch.delenv(name, raising=False)
+
+        credentials = tmp_path / "credentials"
+        credentials.write_text(
+            "[default]\naws_access_key_id = chain\naws_secret_access_key = chain\n"
+        )
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = us-east-1\n")
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
 
         chain = litelink.S3Options(endpoint="http://chain:9")
         first = _published.connection(chain, remote=True)
