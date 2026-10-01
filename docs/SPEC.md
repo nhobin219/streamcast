@@ -997,6 +997,15 @@ they become Arrow when a query asks. Queries run in threads, so a slow
 aggregate stalls neither the loop nor the socket, and the server never drops
 the view for falling behind because of one (invariant 2).
 
+**Waiting for a time is proven by a later row.** `wait_for(ts=T)` means every
+row stamped at or before T is visible. A view knows that only once it holds a
+row stamped after T: rows arrive in stamp order (while the server's clock is
+monotonic), so a later one proves nothing earlier is still coming. On a quiet
+stream that row may be long in coming, and the wait lasts until it does; the
+caller bounds it. Published rows count, so a time the tables have already
+passed needs no new row. A server that sent its clock periodically would let
+an idle stream prove time passing without a row (#63).
+
 **A broken view raises.** A closed connection, `TooSlow` or a network error
 reconnects from the last row received, with catch-up, under a capped backoff.
 Anything else is kept and raised by the next query, so the view never answers

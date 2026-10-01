@@ -1239,6 +1239,7 @@ await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
+    await live.wait_for(ts=t)                    # until every row stamped by t is
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
     await live.scan(columns=["price"], filters=[("price", ">", 500.0)])
     live.end_offset                              # one above the newest row a query sees
@@ -1256,6 +1257,7 @@ row received. They take the same arguments as on a `Snapshot`, and the rows read
 | **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped |
 | **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
 | **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |
+| **`wait_for`** | exactly one of `offset` (that row has arrived) or `ts=` (every row stamped at or before it has). A time is proven only by a row stamped after it, so on a quiet stream `wait_for(ts=)` waits for the next row: bound it with `asyncio.timeout` where the stream can go idle. Published rows count. Refused on a log without `streamcast_ts` |
 | **failures** | anything reconnecting can't fix is kept and raised by the next query or `wait_for`, so a broken view never answers from stale data |
 
 Queries run one at a time: each reads one DuckDB connection, which cannot run two.

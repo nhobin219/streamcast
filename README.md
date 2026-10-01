@@ -111,7 +111,7 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
     await snapshot.sql(query, *, filters=, start_offset=, end_offset=)  # table `log`
 await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
 await streamcast.Stream.live(broker, *, s3=None) -> Live   # kept current
-    await live.scan(...) · await live.sql(query) · await live.wait_for(offset)
+    await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
                  publish=False, ...) -> Server
@@ -804,6 +804,7 @@ that arrived a moment ago, with the same `scan` and `sql`, `filters=` and `where
 ```python
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)          # until that row is visible to a query
+    await live.wait_for(ts=t)            # until every row stamped by t (µs) is
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
     await live.scan(filters=[("price", ">", 85_000.0)], where="side = 1")
 ```
@@ -817,6 +818,13 @@ query answers as of the newest row received.
   the rows it covers.
 - **Queries never stall the socket.** Rows are appended as they arrive and become a table
   only when a query asks, and queries run in a thread.
+- **`wait_for` takes a point, as a snapshot does: an offset or a time.** An offset is
+  exact: that row has arrived. A time is known complete only once a row stamped *after* it
+  arrives, because rows arrive in stamp order and only a later one proves nothing earlier
+  is still coming. **On a quiet stream that can take a while, and `wait_for(ts=)` waits
+  until it does**, even though every earlier row is already there; wrap it in
+  `asyncio.timeout(...)` where the stream can go idle. Published rows count, so a time the
+  tables have already passed returns at once.
 - **It reconnects, and it raises.** A dropped connection resumes from the last row, with
   catch-up. Anything a reconnect cannot fix is raised by the next query, so a view that has
   stopped listening never answers as if it had not.

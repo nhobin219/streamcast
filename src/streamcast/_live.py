@@ -52,7 +52,7 @@ from streamcast import _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from litelink import S3Options
 
@@ -102,6 +102,8 @@ class Live:
         self._lock = asyncio.Lock()
         self._advanced = asyncio.Condition()
         self._failure: BaseException | None = None
+        # The newest `streamcast_ts` received, for `wait_for(ts=)`.
+        self._newest_ts: int | None = None
         self._subscription: Any = None
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -200,6 +202,9 @@ class Live:
 
         self._pending.append({_log.COLUMN: offset, _log.STAMP: ts, **row})
         self._end = offset + 1
+        if ts is not None and (self._newest_ts is None or ts > self._newest_ts):
+            self._newest_ts = ts
+
         await self._wake()
 
     async def _wake(self) -> None:
@@ -249,11 +254,63 @@ class Live:
         """One above the newest row a query can see."""
         return self._end
 
-    async def wait_for(self, offset: int) -> None:
-        """Return once `offset` is visible to a query, or raise why it never will be."""
+    async def wait_for(
+        self, offset: int | None = None, *, ts: int | None = None
+    ) -> None:
+        """Return once a point is visible to a query, or raise why it never will be.
+
+        Exactly one of them, as with `Snapshot`'s `as_of_offset` and `as_of_ts`:
+
+        * `offset`: that row has arrived, so a query sees every row up to it.
+        * `ts`: every row stamped at or before `ts` (UTC microseconds) has
+          arrived. The view knows that only once it holds a row stamped AFTER
+          `ts` — rows arrive in stamp order, so a later one proves nothing
+          earlier is still on its way. **On a quiet stream that row may not
+          come for a long time, and this waits until it does**, even though
+          every earlier row is already here: bound it with
+          `asyncio.timeout(...)` where the stream can go idle. Exact only
+          while the server's clock is monotonic, as `as_of_ts` is. Refused on
+          a log created before `streamcast_ts` existed, which has no stamps
+          to wait on.
+        """
+        if (offset is None) == (ts is None):
+            msg = "pass offset or ts, not both and not neither"
+            raise ValueError(msg)
+
+        if offset is not None:
+            await self._until(lambda: self._end > offset)
+            return
+
+        assert ts is not None  # narrowed by the check above
+        if not _snapshot._stamped(self._base.metadata.live_log):  # noqa: SLF001
+            msg = (
+                f"{self._broker} serves a log without streamcast_ts, so there is "
+                f"no time to wait for; wait for an offset instead"
+            )
+            raise ValueError(msg)
+
+        if self._past(ts):
+            return
+
+        # Nothing received since opening is past `ts`, but the published rows
+        # may be: an idle stream asked about an hour ago is already complete.
+        newest = (
+            (await self.sql(f'SELECT max("{_log.STAMP}") AS newest FROM log'))
+            .column("newest")[0]
+            .as_py()
+        )
+        if newest is not None and newest > ts:
+            return
+
+        await self._until(lambda: self._past(ts))
+
+    def _past(self, ts: int) -> bool:
+        return self._newest_ts is not None and self._newest_ts > ts
+
+    async def _until(self, reached: Callable[[], bool]) -> None:
         async with self._advanced:
             await self._advanced.wait_for(
-                lambda: self._end > offset or self._failure is not None
+                lambda: reached() or self._failure is not None
             )
 
         self._check()

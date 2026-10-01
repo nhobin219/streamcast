@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import litelink
 import pytest
 
 import streamcast
@@ -189,3 +191,65 @@ class TestReconnecting:
 
                 with pytest.raises(RuntimeError, match="stopped"):
                     await live.scan()
+
+
+class TestWaitingForATime:
+    """`wait_for(ts=T)`: every row stamped at or before T is visible.
+
+    Known only once a row stamped after T is here — the documented sharp
+    edge on a quiet stream. Every wait below is bounded, so a regression
+    fails rather than hangs.
+    """
+
+    async def test_it_returns_once_a_later_row_arrives(self, stream):
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(broker) as live:
+                await live.wait_for(5)
+                now = time.time_ns() // 1_000
+                waiting = asyncio.create_task(live.wait_for(ts=now))
+                for _ in range(20):
+                    await asyncio.sleep(0)
+
+                # Nothing stamped after `now` exists yet, so nothing proves it.
+                assert not waiting.done()
+
+                await stream.send(row(5))
+                await asyncio.wait_for(waiting, timeout=5)
+
+    async def test_published_rows_past_it_need_no_new_row(self, tmp_path):
+        # Everything published, nothing more sent: an idle stream asked about
+        # a time its published rows have already passed.
+        idle = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        await idle.send_many([row(i) for i in range(3)])
+        publish(idle)
+        try:
+            async with served(idle) as (_server, broker):
+                async with await streamcast.Stream.live(broker) as live:
+                    await asyncio.wait_for(live.wait_for(ts=0), timeout=5)
+        finally:
+            await idle.aclose()
+
+    async def test_one_point_or_the_other(self, stream):
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(broker) as live:
+                with pytest.raises(ValueError, match="not both"):
+                    await live.wait_for(5, ts=1)
+
+                with pytest.raises(ValueError, match="not neither"):
+                    await live.wait_for()
+
+    async def test_a_log_without_stamps_has_no_time_to_wait_for(self, tmp_path):
+        legacy = litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(SCHEMA))
+        unstamped = streamcast.Stream("trades", log=legacy)
+        await unstamped.send_many([row(i) for i in range(3)])
+        while legacy.seal() is not None:
+            pass
+
+        legacy.publish(push_unsettled=True)
+        try:
+            async with served(unstamped) as (_server, broker):
+                async with await streamcast.Stream.live(broker) as live:
+                    with pytest.raises(ValueError, match="without streamcast_ts"):
+                        await asyncio.wait_for(live.wait_for(ts=1), timeout=5)
+        finally:
+            legacy.close()

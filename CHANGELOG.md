@@ -25,7 +25,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   (#59), found from the broker's greeting. The published tables plus the
   broker's rows as they arrive, so `scan` and `sql` answer as of the newest
   row received, and
-  `wait_for(offset)` waits for a row to be visible. Memory holds only what is
+  `wait_for(offset)` or `wait_for(ts=)` waits until that point is visible —
+  a time once a row stamped after it arrives, so on a quiet stream it waits
+  for the next row. Memory holds only what is
   not yet published: the base is re-pinned every `rebase_every` seconds and
   after every reconnect. Dropped connections reconnect with catch-up; a
   failure that can't be fixed is raised by the next query.
