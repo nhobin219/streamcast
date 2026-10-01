@@ -44,7 +44,8 @@ just demo NAME [ARGS]      # run one, with all its processes
 `just demo` starts a demo's processes in order, waiting for each one that
 listens to answer, and prints their output in one terminal with each line
 labelled by its role. Ctrl-C stops them all, last started first. ARGS go to
-the demo's subscriber (`just demo trades --label two`). Every process is a module
+the demo's subscriber (`just demo trades --label two`), and `just demo NAME
+--help` prints what they can be. Every process is a module
 with its own `--help`, so any one runs alone with `uv run python -m`.
 `examples/__main__.py` holds the list.
 

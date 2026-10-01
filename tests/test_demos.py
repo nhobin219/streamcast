@@ -60,6 +60,16 @@ class TestTheRunner:
         assert refused.value.code == 2
         assert "no demo called" in capsys.readouterr().err
 
+    def test_help_after_a_name_is_its_subscribers_options(self, capfd):
+        demos.main(["trades", "--help"])
+        out = capfd.readouterr().out
+        assert "ARGS go to its consumer" in out
+        assert "--label" in out
+
+    def test_a_subscriber_without_options_says_so(self, capsys):
+        demos.main(["book", "--help"])
+        assert "its page takes no arguments" in capsys.readouterr().out
+
     def test_arguments_go_to_the_subscriber(self, monkeypatch):
         ran: list[tuple[str, list[str]]] = []
         monkeypatch.setattr(

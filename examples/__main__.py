@@ -36,6 +36,7 @@ class Process:
     role: str
     argv: list[str]
     port: int | None = None  # wait for this to answer before starting the next
+    options: bool = True  # whether its own --help describes what ARGS can be
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ DEMOS: dict[str, Demo] = {
                     "examples/book",
                 ),
                 8768,
+                options=False,
             ),
         ],
     ),
@@ -149,6 +151,17 @@ HINTS = {
     "otel": "open http://127.0.0.1:4318/",
 }
 STORED = ("streamcast-data", "streamcast-book", "streamcast-otel")
+
+
+def options(name: str, demo: Demo) -> None:
+    """What `just demo NAME ARGS` can pass: the subscriber's own options."""
+    subscriber = demo.processes[-1]
+    if not subscriber.options:
+        print(f"just demo {name}: its {subscriber.role} takes no arguments")
+        return
+
+    print(f"just demo {name} [ARGS]: ARGS go to its {subscriber.role}\n", flush=True)
+    subprocess.run([*subscriber.argv, "--help"], check=False)  # noqa: S603
 
 
 def listing() -> str:
@@ -258,6 +271,10 @@ def main(argv: list[str]) -> None:
     if name not in DEMOS:
         print(f"no demo called {name!r}; name one\n\n{listing()}", file=sys.stderr)
         raise SystemExit(2)
+
+    if "-h" in args or "--help" in args:
+        options(name, DEMOS[name])
+        return
 
     if name in HINTS:
         print(HINTS[name], flush=True)

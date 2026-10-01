@@ -133,7 +133,7 @@ def handle(label: str, offset: int | None, row: dict, *, replayed: bool) -> None
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--uri", default="ws://127.0.0.1:8765/trades")
     parser.add_argument("--label", default="consumer")
     parser.add_argument(
