@@ -111,7 +111,7 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
     await snapshot.sql(query, *, filters=, start_offset=, end_offset=)  # table `log`
 await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
 await streamcast.Stream.live(broker, *, s3=None) -> Live   # kept current
-    await live.scan(...) · await live.sql(query) · await live.wait_for(offset)
+    await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
                  publish=False, ...) -> Server
@@ -706,6 +706,44 @@ The band the WAL would add is the one the server is about to send anyway.
 
 Neither is automatic. Both are keywords on `connect`, because a consumer that would rather
 fail loudly than resume from a copy that lags should be able to say so.
+
+## Reading a stream
+
+A subscription delivers rows one at a time. To ask a question of a stream — an aggregate,
+a join, a scan of last Tuesday — read it as a table, `log`, that spans every log the
+stream has been through.
+
+**`Stream.snapshot` reads a fixed point.** Given the stream's metadata file on S3, it reads
+the published tables on your machine with your credentials, offline — or, given `broker=`,
+it also takes the rows the server has not published yet, up to an offset or the latest:
+
+```python
+async with await streamcast.Stream.snapshot(
+    "s3://market-data/prod/trades.metadata.json"
+) as snapshot:
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+
+# The same, completed from the server up to its newest row.
+async with await streamcast.Stream.snapshot(
+    "s3://market-data/prod/trades.metadata.json",
+    as_of_offset=streamcast.LATEST,
+    broker="ws://localhost:8765/trades",
+) as snapshot:
+    ...
+```
+
+**`Stream.live` is real-time analytics on a stream in one line.** It is a snapshot kept
+current with the broker's rows as they arrive, so every query answers as of the row that
+arrived a moment ago. It is online by design — it takes only the broker's address, because
+a view of the stream *now* has to be listening to it:
+
+```python
+async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
+    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+```
+
+Choosing a point, pruning with `filters=` against `where=`, memory, reconnects and
+`wait_for` are in [`docs/API.md`](docs/API.md#reading-a-streams-history).
 
 ## Chaining
 
