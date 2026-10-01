@@ -168,3 +168,31 @@ def test_the_sidecar_dies_with_a_killed_server(tmp_path, s3, bucket):  # noqa: A
     # The maintainer and litestream.
     assert len(spawned) == 2
     assert survivors == []
+
+
+def test_a_terminals_ctrl_c_reaches_the_server_not_its_children(tmp_path):
+    """Ctrl-C goes to a terminal's whole foreground process group.
+
+    A child in the server's group is interrupted at the same moment the
+    server starts stopping it: the maintainer, already in its last seal pass
+    when the server's SIGTERM arrived, abandoned that pass mid-transaction.
+    The server owns its children's lifetimes, so they are in sessions of
+    their own and only the server hears the terminal.
+    """
+    # Its own session, as a shell starts a job: the group a terminal signals.
+    server = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", SERVER, str(tmp_path), "-"],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert server.stdout is not None
+        assert server.stdout.readline().strip() == "ready"
+        spawned = children(server.pid)
+        assert spawned, "expected the maintainer"
+        group = os.getpgid(server.pid)
+        assert all(os.getpgid(child) != group for child in spawned)
+    finally:
+        server.kill()
+        server.wait()

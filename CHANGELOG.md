@@ -28,6 +28,13 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- **Ctrl-C on a server in a terminal could cut the maintainer's last seal
+  short.** The terminal signals its whole foreground process group, and the
+  maintainer was in it: interrupted at once, then sent SIGTERM by the stopping
+  server while already in its final seal pass, it abandoned that pass
+  mid-transaction and printed a traceback. The maintainer and the litestream
+  sidecar now run in sessions of their own, so only the server hears the
+  terminal, and it stops them.
 - **`just demo-otel`** no longer loses its dashboard on the first export.
   otel-gui loads its trace and logs protobuf definitions lazily into one
   shared root, and the exporter's first traces and logs requests arrive

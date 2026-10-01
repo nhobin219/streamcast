@@ -44,9 +44,18 @@ def _die_with(parent: int) -> None:  # pragma: no cover — runs between fork an
 
 
 def popen(argv: Sequence[str]) -> subprocess.Popen[bytes]:
-    """Start `argv` as a child the kernel kills when this process dies."""
+    """Start `argv` as a child the kernel kills when this process dies.
+
+    **In a session of its own**, so a terminal's signals reach the server and
+    not its children. Ctrl-C goes to the whole foreground process group: a
+    child in it is interrupted at the same moment the server starts stopping
+    it, and the maintainer, already in its last seal pass when the server's
+    SIGTERM arrived, abandoned that pass mid-transaction. The server owns its
+    children's lifetimes, and stops them itself.
+    """
     parent = os.getpid()
     return subprocess.Popen(  # noqa: S603
         argv,
         preexec_fn=(lambda: _die_with(parent)) if sys.platform == "linux" else None,  # noqa: PLW1509
+        start_new_session=True,
     )
