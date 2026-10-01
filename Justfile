@@ -237,10 +237,10 @@ demo-otel host="127.0.0.1" port="4318":
     echo "dashboard: http://{{host}}:{{port}}   (logs: $log)   Ctrl-C to stop"
     wait "$broker"
 
-# A subscriber that keeps the open orders in SQLite: last row per id, minus
-# tombstones. It is stopped partway and resumes from its own stored offset.
+# Orders written as a keyed table log, and a subscriber that keeps the table
+# in SQLite: the last row by id, where not deleted. It is stopped partway and resumes from its own stored offset.
 #
-# A latest-state subscriber: open orders kept in SQLite.
+# A keyed table log of orders, kept as a table in SQLite.
 demo-latest:
     uv run python -m examples.state.latest
 

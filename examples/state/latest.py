@@ -1,9 +1,10 @@
-"""The latest-state subscriber: an order book kept current from a stream.
+"""A keyed table log of orders, and a subscriber that keeps the table.
 
     uv run python -m examples.state.latest
 
-A stream of order events — new, amended, cancelled, filled — and a subscriber
-that keeps the open orders in SQLite (`view.py`). Along the way:
+Orders are written as a keyed table log (`view.py`): new, amended, cancelled
+and filled, each row an order's whole state, a tombstone to close one. A
+subscriber keeps the open orders in SQLite. Along the way:
 
 1. **The view resumes on its own.** It is stopped partway, as a crash would
    stop it, while orders keep arriving. Reopened, it reads its own offset and

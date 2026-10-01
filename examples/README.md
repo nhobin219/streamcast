@@ -131,19 +131,20 @@ log, and what closes the log on the way out.
 
 Needs the extra: `pip install 'streamcast[asgi]'`.
 
-## The latest state, and branches
+## A keyed table log, and branches
 
 ```
 just demo-latest       # open orders, kept in SQLite by a subscriber
 just demo-branches     # every client its own database, committed with one send_many
 ```
 
-A stream is append-only, so "the current state" is something a subscriber
-builds: the last row for each key, minus the keys whose last row retracts
-them. `state/view.py` keeps that for a stream of orders, in SQLite, one
-statement per row. Two conventions carry it, and neither is a library
-feature: `order_id` is the key because the schema says so, and a row with
-`deleted: true` is a tombstone. There is no `Stream.delete`.
+What state a stream holds is the application's to define. These examples
+use a common shape, the **keyed table log**: each row is the whole state of
+one record, keyed by an id, with a `deleted` flag. Written that way, the
+table the log stands for is "the last row by id, where not deleted", and a
+subscriber can keep it as it reads. streamcast knows nothing of keys or
+deletes; this schema defines both. `state/view.py` keeps that table for a
+log of orders, in SQLite, one statement per row.
 
 **The view is its own cursor.** It writes the offset it has applied in the
 same transaction as the row, so a view reopened after a crash resumes at

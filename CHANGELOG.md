@@ -12,9 +12,10 @@ there was nothing to have changed from. Everything above it is ordinary.
 ### Added
 
 - **`examples/state/`**, **`just demo-latest`** and **`just demo-branches`**:
-  a latest-state subscriber, which keeps open orders in SQLite with the
-  offset it applied in the same transaction, so it resumes on its own. Also
-  branches built on it: each client forks main's view into a private
+  orders written as a keyed table log (each row a whole record, keyed by id,
+  with a `deleted` flag), and a subscriber that keeps the table in SQLite:
+  the last row by id, where not deleted. It writes the offset it applied in
+  the same transaction, so it resumes on its own. Also branches built on it: each client forks main's view into a private
   database, follows its own `branch_id`, and commits with one `send_many`
   onto main.
 

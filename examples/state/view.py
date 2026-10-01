@@ -1,20 +1,18 @@
-"""The latest state of every order, kept in SQLite by a subscriber.
+"""A keyed table log of orders, kept as a table in SQLite by a subscriber.
 
-A stream is append-only: an order that is amended is a second row, and an
-order that is cancelled is a third. The current book is the LAST row for each
-order id, without the ones whose last row retracts them. This file keeps that
-book as a subscriber reads, one SQL statement per row.
+What state a stream holds is the application's to define. This one writes a
+common shape, the keyed table log:
 
-**Two conventions, not features.** streamcast has neither a key nor a delete:
+* **Each row is an order's whole state**, not a patch. An amended order is a
+  second row, carrying every field again.
+* **`order_id` is the key**, because this schema says so. streamcast has no
+  keys; the offset is a row's only identity.
+* **`deleted: true` retracts an order**, the standard log-compaction
+  tombstone. It is a row like any other; streamcast has no delete.
 
-* `order_id` is the key because this schema says so. Nothing in a stream is a
-  primary key; the offset is its only identity.
-* `deleted: true` is a tombstone, the standard log-compaction shape. A row
-  that retracts an order is a row like any other, and there is no
-  `Stream.delete` to look for.
-
-Each row carries the order's whole state rather than a patch, so applying one
-is an upsert, never a merge.
+Given that shape, the table the log stands for is "the last row by id, where
+not deleted", and this file keeps it as a subscriber reads: an upsert per
+row, or a delete for a tombstone.
 
 **The view is its own cursor.** The offset it has applied is written in the
 SAME transaction as the row, so the two cannot disagree: a view reopened after
