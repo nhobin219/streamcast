@@ -21,6 +21,13 @@ there was nothing to have changed from. Everything above it is ordinary.
   `filters=` terms and `start_offset`/`end_offset`, on `scan` and `sql`,
   prune whole retired logs on the manifest before any is opened. SQL is not
   mined for terms yet (#57). Anything it cannot answer exactly raises `SnapshotUnavailable`.
+- **`Stream.live(metadata_uri, broker=...)`**: a stream's history kept
+  current in memory (#59). The published tables plus the broker's rows as
+  they arrive, so `scan` and `sql` answer as of the newest row received, and
+  `wait_for(offset)` waits for a row to be visible. Memory holds only what is
+  not yet published: the base is re-pinned every `rebase_every` seconds and
+  after every reconnect. Dropped connections reconnect with catch-up; a
+  failure that can't be fixed is raised by the next query.
 - **`Stream.metadata_uri`**: where a reader finds the stream's metadata file.
 - **`connect(metadata=)`**: the metadata file `catch_up` reads from, in place
   of the greeting's.

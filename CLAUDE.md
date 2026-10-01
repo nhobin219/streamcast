@@ -155,6 +155,7 @@ src/streamcast/
     _manifest.py    per-log statistics, and pruning whole logs on them — soundly
     _published.py   one published table, read with DuckDB as another machine reads it
     _snapshot.py    Stream.snapshot — a stream's history as of one point, anywhere
+    _live.py        Stream.live — a snapshot kept current with the broker's rows
     _catchup.py     reading the gap from the published tables when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
