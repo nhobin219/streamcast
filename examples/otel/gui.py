@@ -1,23 +1,19 @@
-"""The OTel demo, live in a dashboard: `just demo otel`.
+"""otel-gui, the dashboard `just demo otel` exports to.
 
-Three things on this machine, all stopped by Ctrl-C:
+    just demo otel    # this, a broker, the services, and the OTLP exporter
 
-* **[otel-gui](https://github.com/metafab/otel-gui)**, a local OTLP
-  dashboard. The first run downloads its release for this platform, checks
-  its SHA-256 against the published one, and caches it.
-* **The broker**, with two services logging and tracing into it
-  (`demo.serve_forever`).
-* **The exporter** (`export.main`), which follows both streams and re-exports
-  them as OTLP to otel-gui.
+[otel-gui](https://github.com/metafab/otel-gui) is a local OTLP receiver
+with a dashboard for logs, traces and the service map. The first run
+downloads its release for this platform, checks its SHA-256 against the
+published one, and caches it. It listens on 127.0.0.1, and Ctrl-C stops it.
 
-The broker and the exporter share this process and its event loop; otel-gui
-is the one child. Everything listens on 127.0.0.1.
+It is not one of the example's roles: it is where the subscriber,
+`export.py`, sends what it reads, as any OTLP receiver would be.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import hashlib
 import os
@@ -30,9 +26,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import IO
-
-from examples.otel import demo, export
 
 VERSION = "2.1.0"
 ASSETS = {
@@ -42,7 +35,6 @@ ASSETS = {
     ("Darwin", "x86_64"): "otel-gui-macos-x64",
     ("Darwin", "arm64"): "otel-gui-macos-arm64",
 }
-BROKER_PORT = 8766
 
 
 def otel_gui() -> Path:
@@ -122,19 +114,9 @@ def warm(port: int) -> None:
         urllib.request.urlopen(request, timeout=5).close()  # noqa: S310
 
 
-async def pipeline(port: int) -> None:
-    """The broker with its traffic, and the exporter, until cancelled."""
-    async with asyncio.TaskGroup() as group:
-        group.create_task(demo.serve_forever(BROKER_PORT))
-        group.create_task(
-            export.main(f"ws://127.0.0.1:{BROKER_PORT}", f"http://127.0.0.1:{port}")
-        )
-
-
 def main(host: str, port: int) -> None:
     executable = otel_gui()
-    log_path = Path(tempfile.mkstemp(prefix="streamcast-otel-", suffix=".log")[1])
-    log: IO[str]
+    log_path = Path(tempfile.mkstemp(prefix="otel-gui-", suffix=".log")[1])
     with log_path.open("w") as log:
         # HOST and SHUTDOWN_TIMEOUT are not in otel-gui's README, but its
         # server honours both (SvelteKit's node adapter). 127.0.0.1 keeps the
@@ -151,25 +133,19 @@ def main(host: str, port: int) -> None:
             },
             stdout=log,
             stderr=subprocess.STDOUT,
-            # Its own session, so the terminal's Ctrl-C reaches only this
-            # process: the exporter flushes to a dashboard still up, and the
-            # `finally` below stops it last.
+            # Its own session, so a terminal's Ctrl-C reaches only this
+            # process, and the `finally` below stops it.
             start_new_session=True,
         )
         try:
             ready(port, gui, log_path)
             warm(port)
             print(
-                f"dashboard: http://{host}:{port}   (logs: {log_path})   Ctrl-C to stop",
-                flush=True,
+                f"dashboard: http://{host}:{port}   (its log: {log_path})", flush=True
             )
-            # The pipeline's chatter goes to the log; the terminal keeps the URL.
-            with (
-                contextlib.redirect_stdout(log),
-                contextlib.suppress(KeyboardInterrupt),
-            ):
-                asyncio.run(pipeline(port))
-
+            gui.wait()
+        except KeyboardInterrupt:
+            pass
         finally:
             gui.terminate()
             try:
@@ -188,7 +164,6 @@ if __name__ == "__main__":
         "--port", type=int, default=4318, help="OTLP/HTTP's standard port"
     )
     arguments = parser.parse_args()
-    # SIGTERM stops it as Ctrl-C does, so every exit stops otel-gui and the
-    # broker's maintainer rather than orphaning them.
+    # SIGTERM stops it as Ctrl-C does, so every exit stops otel-gui too.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     main(arguments.host, arguments.port)

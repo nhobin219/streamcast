@@ -37,6 +37,8 @@ const grid = agGrid.createGrid(document.getElementById("grid"), {
   animateRows: true,
 });
 
+// The broker this page subscribes to: `?broker=ws://host:port`, or the demo's.
+const broker = new URLSearchParams(location.search).get("broker") || "ws://127.0.0.1:8767";
 const open = new Set();   // order ids the grid holds
 let applied = 0;          // the last offset applied: where to resume
 const status = document.getElementById("status");
@@ -61,7 +63,7 @@ function apply(offset, row) {
 function connect() {
   // From the start (offset 0, EARLIEST), or after the last row applied: a
   // reconnect misses nothing and repeats nothing.
-  const socket = new WebSocket(`ws://${location.host}/orders?offset=${applied ? applied + 1 : 0}`);
+  const socket = new WebSocket(`${broker}/orders?offset=${applied ? applied + 1 : 0}`);
   let greeted = false;
   socket.onmessage = (event) => {
     const frame = JSON.parse(event.data);

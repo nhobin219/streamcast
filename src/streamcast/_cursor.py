@@ -2,7 +2,7 @@
 
 `streamcast.connect(uri, cursor=path)` loads it, resumes one above it, and
 saves it as the consumer goes — which is the loop every consumer writes
-identically, and `examples/consumer.py` wrote by hand before this existed.
+identically, and `examples/trades/consumer.py` wrote by hand before this existed.
 
 **A file, not SQLite.** The question was raised and it is a reasonable one:
 SQLite would make the write atomic and durable without thinking about it. The

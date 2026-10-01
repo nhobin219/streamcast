@@ -1,31 +1,51 @@
-"""`just demo`: the name each runnable demo goes by, and the book demo's parts.
+"""`just demo`: every demo's processes, the broker they share, the book's parts.
 
-The demos themselves run against live public feeds, so what is tested here is
-everything that does not need one: that every name maps to a module that
-exists, and that the order book's conversion and page are what the browser
-expects.
+The demos run against live public feeds, so what is tested here is everything
+that does not need one: that each demo is a broker plus clients made of
+modules that exist, that the runner refuses a port already taken, and that
+the generic broker serves what a producer publishes to a subscriber.
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
-import urllib.request
+import socket
+import sys
 
 import pytest
-import websockets
 
 import streamcast
 from examples import __main__ as demos
-from examples.keyed_table import book
+from examples import broker
+from examples.book import producer as book
 
 
-class TestTheNames:
+def modules(demo: demos.Demo) -> list[str]:
+    """The module each process runs, for the ones `-m` runs."""
+    return [step.argv[step.argv.index("-m") + 1] for step in demo.processes]
+
+
+class TestEachDemo:
     @pytest.mark.parametrize("name", sorted(demos.DEMOS))
-    def test_each_name_runs_a_module_that_exists(self, name):
-        module, _, _ = demos.DEMOS[name]
-        assert importlib.util.find_spec(module) is not None
+    def test_runs_modules_that_exist(self, name):
+        for module in modules(demos.DEMOS[name]):
+            assert importlib.util.find_spec(module) is not None, module
 
+    @pytest.mark.parametrize("name", sorted(set(demos.DEMOS) - {"consumer"}))
+    def test_is_a_broker_and_its_clients(self, name):
+        roles = [step.role for step in demos.DEMOS[name].processes]
+        assert "broker" in roles
+        # Started before anything that connects to it.
+        assert roles.index("broker") < roles.index("producer")
+
+    def test_waits_on_distinct_ports(self):
+        for demo in demos.DEMOS.values():
+            ports = [step.port for step in demo.processes if step.port is not None]
+            assert len(ports) == len(set(ports))
+
+
+class TestTheRunner:
     @pytest.mark.parametrize("flag", ["--list", "-l", "list"])
     def test_the_list_names_every_demo(self, flag, capsys):
         demos.main([flag])
@@ -39,15 +59,50 @@ class TestTheNames:
         assert refused.value.code == 2
         assert "no demo called 'nope'" in capsys.readouterr().err
 
-    def test_flags_without_a_name_go_to_the_server(self, monkeypatch):
+    def test_arguments_go_to_the_subscriber(self, monkeypatch):
         ran: list[tuple[str, list[str]]] = []
         monkeypatch.setattr(
-            demos.runpy,
-            "run_module",
-            lambda module, **_: ran.append((module, demos.sys.argv[1:])),
+            demos, "run", lambda demo, args: ran.append((demo.about, args))
         )
-        demos.main(["--no-log"])
-        assert ran == [("examples.server", ["--no-log"])]
+        demos.main(["--label", "b"])
+        assert ran == [(demos.DEMOS["server"].about, ["--label", "b"])]
+
+    def test_a_port_already_taken_stops_it_before_it_starts(self, capsys):
+        with socket.socket() as holder:
+            holder.bind(("127.0.0.1", 0))
+            holder.listen()
+            port = holder.getsockname()[1]
+            demo = demos.Demo(
+                "x", [demos.Process("broker", [sys.executable, "-c", "pass"], port)]
+            )
+            demos.run(demo, [])
+
+        assert f"port {port} is already in use" in capsys.readouterr().err
+
+
+class TestTheBroker:
+    def test_a_schema_is_a_file_or_a_python_attribute(self):
+        trades = broker.schema("examples/trades/schema.json")
+        assert "trade_id" in trades["properties"]
+        assert broker.schema("examples.book.producer:EVENTS") == book.EVENTS
+
+    async def test_a_producer_publishes_through_it_to_a_subscriber(self, tmp_path):
+        stream = streamcast.Stream.new(
+            "orders", root=tmp_path, schema=broker.schema("examples/book/schema.json")
+        )
+        async with streamcast.serve(
+            stream, "127.0.0.1", 0, publish=True, maintain=False
+        ) as server:
+            uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"
+            async with streamcast.publish(uri) as publication:
+                await publication.send(
+                    book.row("order_deleted", {"id": 7, "microtimestamp": "1"})
+                )
+
+            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                offset, row = await asyncio.wait_for(sub.recv(), 5)
+
+        assert (offset, row["order_id"], row["deleted"]) == (1, 7, True)
 
 
 class TestTheBook:
@@ -73,27 +128,7 @@ class TestTheBook:
         assert row["side"] == side
         assert (row["price"] is None) is deleted
 
-    async def test_the_page_and_the_stream_share_one_port(self, tmp_path):
-        stream = streamcast.Stream.new("orders", root=tmp_path, schema=book.SCHEMA)
-        async with streamcast.serve(
-            stream, "127.0.0.1", 0, process_request=book.page, maintain=False
-        ) as server:
-            port = server.sockets[0].getsockname()[1]
-
-            def get() -> tuple[str, str]:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as response:  # noqa: S310
-                    return response.headers["Content-Type"], response.read().decode()
-
-            # On a thread: the server answers on this test's event loop.
-            content_type, body = await asyncio.to_thread(get)
-            assert content_type == "text/html; charset=utf-8"
-            assert "createGrid" in body
-
-            await stream.send(
-                book.row("order_deleted", {"id": 1, "microtimestamp": "1"})
-            )
-            async with websockets.connect(
-                f"ws://127.0.0.1:{port}/orders?offset=0"
-            ) as ws:
-                await ws.recv()  # the greeting
-                assert '"order_id":1' in str(await ws.recv())
+    def test_the_page_subscribes_to_the_broker_it_is_given(self):
+        page = open("examples/book/index.html").read()  # noqa: PTH123, SIM115
+        assert 'get("broker") || "ws://127.0.0.1:8767"' in page
+        assert "${broker}/orders?offset=" in page

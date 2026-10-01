@@ -1,11 +1,12 @@
-"""A consumer that resumes, and the whole of what that costs.
+"""A subscriber that resumes, and the whole of what that costs.
 
-    just demo consumer
+    just demo                       # a broker, the producer, and this
+    just demo consumer --label b    # another one, in a second terminal
 
 Run several. Stop one with Ctrl-C, leave it stopped while trades keep
 arriving, and start it again: it asks for the offset after the last one it
-processed and the server replays the gap out of the log before switching it to
-live. The line it prints says which messages were replayed and which arrived
+processed and the broker replays the gap out of the log before switching it
+to live. The line it prints says which messages were replayed and which arrived
 live, because that is the thing worth seeing.
 
 The recovery loop is the four lines around `offset`:
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 from pathlib import Path
 
 import websockets
@@ -55,10 +57,14 @@ async def run(
     guarantees it (`_cursor`: the file advances only when the loop comes back
     for another message, and not at all if the handler raised).
     """
+    resume = True
     while True:
         try:
             async with streamcast.connect(
-                uri, cursor=cursor, cursor_uri=cursor_uri, catch_up=catch_up
+                uri,
+                cursor=cursor if resume else None,
+                cursor_uri=cursor_uri if resume else None,
+                catch_up=catch_up and resume,
             ) as stream:
                 replay = stream.info.replay
                 behind = 0 if replay is None else replay[1] - replay[0]
@@ -86,6 +92,13 @@ async def run(
             print(f"[{label}] {exc}")
 
         except streamcast.NotReplayable as exc:
+            if exc.why == "not_durable" and resume:
+                # A live-only stream keeps no log, so there is no offset to
+                # resume from. Following it from now is all it offers.
+                print(f"[{label}] this stream keeps no log: following it live")
+                resume = False
+                continue
+
             # A retry cannot fix this one. `--catch-up` can, for the two that
             # are a gap rather than a misunderstanding — see the message.
             print(f"[{label}] cannot resume ({exc.why}): {exc}")
@@ -164,6 +177,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

@@ -1,80 +1,250 @@
-"""Every demo, by name.
+"""Every demo, by name, with all of its processes: `just demo NAME`.
 
-    just demo                        # a live public feed through a server
-    just demo consumer --label a     # a resuming subscriber, in another terminal
+    just demo                        # a broker, the trades producer, a consumer
+    just demo consumer --label b     # one more consumer, in another terminal
     just demo otel                   # OpenTelemetry, live in a dashboard
     just demo --list                 # every demo, and what it shows
 
-`just demo NAME ARGS` is `uv run python -m examples NAME ARGS`. Each demo is a
-module with its own `--help`; this file only maps names to them. Arguments
-that start with `-` and no name go to the default, so `just demo --no-log`
-still means the server.
+Every example has the same three roles, each its own process: a **producer**
+client publishes rows, a **broker** serves the streams, and a **subscriber**
+client reads them. A demo here is the list of those processes. This runs
+them in order, waiting for each one that listens to answer before starting
+the next, prints their output in one terminal with each line labelled by its
+role, and stops them all, last started first, on Ctrl-C.
+
+Each process is a module with its own `--help`, so any one of them runs on its
+own with `uv run python -m`. `just demo NAME ARGS` passes ARGS to the demo's
+last process, its subscriber; arguments that start with `-` and no name go to
+the default demo.
 """
 
 from __future__ import annotations
 
-import runpy
+import os
 import shutil
+import signal
+import socket
+import subprocess
 import sys
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT = "server"
 
-# name: (module, the arguments it always gets, what it shows)
-DEMOS: dict[str, tuple[str, list[str], str]] = {
-    "server": (
-        "examples.server",
-        [],
-        "a live public feed (Bitstamp BTC/USD) through a server, with a log",
+@dataclass(frozen=True)
+class Process:
+    role: str
+    argv: list[str]
+    port: int | None = None  # wait for this to answer before starting the next
+
+
+@dataclass(frozen=True)
+class Demo:
+    about: str
+    processes: list[Process] = field(default_factory=list)
+
+
+def module(name: str, *args: str) -> list[str]:
+    return [sys.executable, "-u", "-m", name, *args]
+
+
+TRADES = "trades=examples/trades/schema.json"
+
+
+def trades(
+    *broker: str, port: int = 8765, uri: str = "ws://127.0.0.1:8765/trades"
+) -> list[Process]:
+    """The trades demo's three processes: broker, producer, consumer."""
+    return [
+        Process("broker", module("examples.broker", "--stream", TRADES, *broker), port),
+        Process("producer", module("examples.trades.producer", "--uri", uri)),
+        Process(
+            "consumer",
+            module("examples.trades.consumer", "--uri", uri, "--label", "one"),
+        ),
+    ]
+
+
+DEMOS: dict[str, Demo] = {
+    "server": Demo(
+        "Bitstamp's BTC/USD trades: a producer, a broker with a log, a consumer",
+        trades("--sort-by", "trades=event_ts"),
     ),
-    "consumer": (
-        "examples.consumer",
-        [],
-        "a subscriber that resumes where it stopped; run several",
+    "consumer": Demo(
+        "one more consumer of the server demo: stop it, restart it, watch it replay",
+        [Process("consumer", module("examples.trades.consumer"))],
     ),
-    "live": (
-        "examples.server",
-        ["--no-log"],
-        "the same server with no log: live-only, nothing to replay",
+    "live": Demo(
+        "the server demo with a live-only broker: no log, nothing to replay",
+        trades("--no-log"),
     ),
-    "fastapi": (
-        "uvicorn",
-        ["examples.fastapi_app:app", "--port", "8000"],
-        "the same stream mounted in a FastAPI app",
+    "fastapi": Demo(
+        "the server demo with the broker mounted in a FastAPI app",
+        [
+            Process(
+                "broker",
+                module("uvicorn", "examples.fastapi_app:app", "--port", "8770"),
+                8770,
+            ),
+            *trades(uri="ws://127.0.0.1:8770/streams/trades")[1:],
+        ],
     ),
-    "book": (
-        "examples.keyed_table.book",
-        [],
+    "book": Demo(
         "Bitstamp's live order book as a keyed table log, kept by a browser page",
+        [
+            Process(
+                "broker",
+                module(
+                    "examples.broker",
+                    "--stream",
+                    "orders=examples/book/schema.json",
+                    "--port",
+                    "8767",
+                    "--root",
+                    "streamcast-book",
+                ),
+                8767,
+            ),
+            Process("producer", module("examples.book.producer")),
+            Process(
+                "page",
+                module(
+                    "http.server",
+                    "8768",
+                    "--bind",
+                    "127.0.0.1",
+                    "--directory",
+                    "examples/book",
+                ),
+                8768,
+            ),
+        ],
     ),
-    "otel": (
-        "examples.otel.dashboard",
-        [],
+    "otel": Demo(
         "OpenTelemetry logs and traces through streams, in otel-gui",
+        [
+            Process("otel-gui", module("examples.otel.gui"), 4318),
+            Process(
+                "broker",
+                module(
+                    "examples.broker",
+                    "--stream",
+                    "logs=examples.otel.logs:SCHEMA",
+                    "--stream",
+                    "spans=examples.otel.spans:SCHEMA",
+                    "--port",
+                    "8766",
+                    "--root",
+                    "streamcast-otel",
+                ),
+                8766,
+            ),
+            Process("producer", module("examples.otel.services")),
+            Process("exporter", module("examples.otel.export")),
+        ],
     ),
 }
+HINTS = {
+    "book": "open http://127.0.0.1:8768/",
+    "otel": "open http://127.0.0.1:4318/",
+}
+STORED = ("streamcast-data", "streamcast-book", "streamcast-otel")
 
 
 def listing() -> str:
     width = max(len(name) for name in DEMOS) + 2
-    lines = [f"  {name:<{width}}{about}" for name, (_, _, about) in DEMOS.items()]
-    lines.append(f"  {'clean':<{width}}delete what the server demo captured (--root)")
+    lines = [f"  {name:<{width}}{demo.about}" for name, demo in DEMOS.items()]
+    lines.append(f"  {'clean':<{width}}delete what the demos stored")
     return (
-        "just demo [NAME] [ARGS]   (no NAME: server; NAME --help for its options)\n\n"
+        "just demo [NAME] [ARGS]   (no NAME: server; ARGS go to its subscriber)\n\n"
         + "\n".join(lines)
     )
 
 
-def clean(args: list[str]) -> None:
-    root = Path(
-        args[args.index("--root") + 1] if "--root" in args else "streamcast-data"
-    )
-    if not root.exists():
-        print(f"nothing at {root}")
-        return
+def clean() -> None:
+    for root in map(Path, STORED):
+        if root.exists():
+            print(f"removing {root}")
+            shutil.rmtree(root)
 
-    print(f"removing {root}")
-    shutil.rmtree(root)
+
+def listening(port: int) -> bool:
+    """Whether something already accepts connections on `port`."""
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def answering(port: int, process: subprocess.Popen[str], timeout: float = 30) -> bool:
+    """Whether `port` accepts a connection before `process` exits or time runs out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process.poll() is None:
+        if listening(port):
+            return True
+
+        time.sleep(0.1)
+
+    return False
+
+
+def labelled(role: str, width: int, process: subprocess.Popen[str]) -> None:
+    """Copy a process's output to ours, each line led by its role."""
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(f"[{role:>{width}}] {line}", end="", flush=True)
+
+
+def run(demo: Demo, args: list[str]) -> None:
+    width = max(len(step.role) for step in demo.processes)
+    started: list[subprocess.Popen[str]] = []
+    try:
+        for index, step in enumerate(demo.processes):
+            extra = args if index == len(demo.processes) - 1 else []
+            if step.port is not None and listening(step.port):
+                print(
+                    f"port {step.port} is already in use, so the {step.role} "
+                    "cannot listen there; stop whatever holds it",
+                    file=sys.stderr,
+                )
+                return
+
+            process = subprocess.Popen(  # noqa: S603
+                [*step.argv, *extra],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                # Its own session, so a terminal's Ctrl-C reaches only this
+                # runner, which stops each process in order below.
+                start_new_session=True,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            started.append(process)
+            threading.Thread(
+                target=labelled, args=(step.role, width, process), daemon=True
+            ).start()
+            if step.port is not None and not answering(step.port, process):
+                print(f"{step.role} did not start; stopping", file=sys.stderr)
+                return
+
+        for process in started:
+            process.wait()
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        # Last started first: subscribers, then producers, then the broker.
+        # SIGINT, as a terminal's Ctrl-C would send: `asyncio.run` turns it
+        # into a clean cancellation, where SIGTERM interrupts mid-call.
+        for process in reversed(started):
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
 
 
 def main(argv: list[str]) -> None:
@@ -83,21 +253,23 @@ def main(argv: list[str]) -> None:
         return
 
     if not argv or argv[0].startswith("-"):
-        argv = [DEFAULT, *argv]
+        argv = ["server", *argv]
 
     name, args = argv[0], argv[1:]
-
     if name == "clean":
-        clean(args)
+        clean()
         return
 
     if name not in DEMOS:
         print(f"no demo called {name!r}\n\n{listing()}", file=sys.stderr)
         raise SystemExit(2)
 
-    module, fixed, _ = DEMOS[name]
-    sys.argv = [module, *fixed, *args]
-    runpy.run_module(module, run_name="__main__", alter_sys=True)
+    if name in HINTS:
+        print(HINTS[name], flush=True)
+
+    # SIGTERM stops a demo as Ctrl-C does: every process, in order.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    run(DEMOS[name], args)
 
 
 if __name__ == "__main__":

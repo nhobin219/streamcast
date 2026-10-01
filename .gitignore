@@ -17,6 +17,10 @@ wheels/
 # Demo capture roots. A streamcast log is a litelink log — a SQLite buffer, a
 # file:// warehouse and two catalog databases. Never commit a database.
 streamcast-data/
+streamcast-book/
+streamcast-otel/
+# The demo consumers' cursors, one per `--label`.
+.*.offset
 *.db
 *.db-wal
 *.db-shm

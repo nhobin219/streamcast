@@ -18,9 +18,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   Also branches built on it: each client forks main's view into a private
   database, follows its own `branch_id`, and commits with one `send_many`
   onto main.
-- **`just demo book`**: Bitstamp's live BTC/USD order book relayed as a keyed
-  table log, and a browser page, served from the stream's own port, that
-  subscribes and keeps the table in AG Grid as rows arrive.
+- **`just demo book`**: a producer publishing Bitstamp's live BTC/USD order
+  book as a keyed table log, and a static browser page that subscribes and
+  keeps the table in AG Grid as rows arrive.
 - **`examples/migration/`**: a pipeline of streams, A -> B -> C, and a
   schema migration of B tested in a shadow, D -> E, against production's live
   and historical data without production waiting on it. Old and new are
@@ -29,12 +29,18 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
-- **`just demo NAME`** replaces the `demo-*` recipes: `just demo consumer`,
-  `just demo live`, `just demo fastapi`, `just demo otel`, `just demo clean`.
-  With no name it is still the server, and `just demo --list` shows every
-  runnable demo. Each is a module under `examples/`, and `examples/__main__.py`
-  maps names to them. The OTel dashboard demo is now one Python process
-  (`examples/otel/dashboard.py`) rather than a shell recipe.
+- **The examples are rewritten as producer, broker and subscriber**, each its
+  own process, because that is the shape to copy. `examples/broker.py` is one
+  generic broker (`--stream NAME=SCHEMA`); `examples/trades/` holds the
+  Bitstamp producer and the resuming consumer that replace `server.py` and
+  `consumer.py`; `fastapi_app.py` is a broker only, with the producer
+  publishing to its mount; and the OTel services are a producer of their
+  own (`otel/services.py`).
+- **`just demo NAME`** replaces the `demo-*` recipes and starts every process
+  a demo has, in one terminal with each line labelled by its role, stopping
+  them all on Ctrl-C. `just demo --list` shows every runnable demo; with no
+  name it is the server demo, and `just demo consumer` adds one more
+  consumer from a second terminal.
 
 ### Fixed
 

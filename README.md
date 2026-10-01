@@ -494,7 +494,7 @@ adds Starlette and nothing else.
 `Stream` holds the offsets, the log and the fan-out either way.
 [`examples/fastapi_app.py`](examples/fastapi_app.py) is the whole thing as a running
 service: `just demo fastapi`, then point a consumer at
-`ws://127.0.0.1:8000/streams/trades`.
+`ws://127.0.0.1:8770/streams/trades`.
 
 **`async with streams` is not optional.** Starlette does not run a mounted sub-app's
 lifespan, so an app that left the maintainers to `lifespan` events would start none of them

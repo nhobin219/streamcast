@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "properties": {
+    "order_id": {
+      "type": "integer"
+    },
+    "side": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "price": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "amount": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "event_ts": {
+      "type": "integer",
+      "description": "microseconds, as the feed sends them"
+    },
+    "deleted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "order_id",
+    "event_ts",
+    "deleted"
+  ]
+}

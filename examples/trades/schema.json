@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "event_ts": {
+      "type": "integer",
+      "description": "microseconds, as the feed sends them"
+    },
+    "trade_id": {
+      "type": "integer"
+    },
+    "price": {
+      "type": "number"
+    },
+    "amount": {
+      "type": "number"
+    },
+    "side": {
+      "type": "integer",
+      "format": "int32",
+      "description": "0 buy, 1 sell, as the feed spells it"
+    }
+  },
+  "required": [
+    "event_ts",
+    "trade_id",
+    "price",
+    "amount",
+    "side"
+  ]
+}

@@ -1,74 +1,93 @@
 # examples
 
-Two kinds of example live here:
-- **Demos you run**, with `just demo`. Most run against live public feeds from
-  Bitstamp, so there is nothing to configure and no credentials to set.
-- **Patterns you read**: the code is the point, showing how a pattern is
-  hooked up. Each runs end to end in its test, and runs by hand with
-  `uv run python -m examples.<path>`.
+Every example has the same three roles, each a separate process, because
+that is the shape to copy:
+
+- a **producer** is a client that publishes rows (`streamcast.publish`);
+- the **broker** serves the streams: it holds each stream's log and fans
+  rows out (`streamcast.serve`, or `asgi` mounted in an app);
+- a **subscriber** is a client that reads them (`streamcast.connect`).
+
+The broker has no application code. What a row means is the producer's
+business, and what to do with it is the subscriber's. `broker.py` is one
+generic broker that every demo uses: `--stream NAME=SCHEMA` declares a stream
+from its JSON Schema file (or a `module:ATTRIBUTE` built in Python), and that
+is all it is told.
+
+There are two kinds of example:
+- **Demos you run**, with `just demo`, which starts every process a demo has.
+  Most run against live public feeds from Bitstamp, so there is nothing to
+  configure and no credentials to set.
+- **Patterns you read**, where the code is the point: `keyed_table/`,
+  `migration/` and the one-shot `otel/demo.py`. They put the three roles in
+  one process, talking over sockets as separate processes would, so a test
+  can run each end to end. `uv run python -m examples.<path>` runs one by
+  hand.
 
 ## Running a demo
 
 ```
 just demo --list           # every runnable demo, and what it shows
-just demo NAME [ARGS]      # run one; with no NAME, the server
-just demo NAME --help      # its options
+just demo NAME [ARGS]      # run one; with no NAME, the server demo
 ```
 
-| `just demo` | what it shows |
-|---|---|
-| *(no name)*, `server` | Bitstamp's BTC/USD trades through a server, with a log to replay from |
-| `consumer` | a subscriber that resumes where it stopped; run several |
-| `live` | the same server with no log: live-only, nothing to replay |
-| `fastapi` | the same stream mounted in a FastAPI app |
-| `book` | Bitstamp's live order book as a keyed table log, kept by a browser page |
-| `otel` | OpenTelemetry logs and traces through streams, in a local dashboard |
-| `clean` | delete what the server demo captured |
+| `just demo` | its processes | what it shows |
+|---|---|---|
+| *(no name)*, `server` | broker, `trades/producer.py`, `trades/consumer.py` | Bitstamp's BTC/USD trades, with a log to replay from |
+| `consumer` | `trades/consumer.py` | one more subscriber for the server demo, in a second terminal |
+| `live` | as `server`, with a live-only broker | no log: nothing to replay |
+| `fastapi` | `fastapi_app.py` as the broker, then as `server` | the broker mounted in a FastAPI app |
+| `book` | broker, `book/producer.py`, `book/index.html` | Bitstamp's live order book as a keyed table log, kept by a browser page |
+| `otel` | otel-gui, broker, `otel/services.py`, `otel/export.py` | OpenTelemetry logs and traces through streams, in a dashboard |
+| `clean` | | delete what the demos stored |
 
-`just demo NAME ARGS` is `uv run python -m examples NAME ARGS`;
-`examples/__main__.py` maps each name to its module.
+`just demo` starts a demo's processes in order, waiting for each one that
+listens to answer, and prints their output in one terminal with each line
+labelled by its role. Ctrl-C stops them all, last started first. ARGS go to
+the demo's subscriber (`just demo --label two`). Every process is a module
+with its own `--help`, so any one runs alone with `uv run python -m`.
+`examples/__main__.py` holds the list.
 
 ## Start here
 
 ```
-just demo              # terminal 1: the server
-just demo consumer     # terminal 2, and 3, and 4
+just demo                        # terminal 1: broker, producer, consumer
+just demo consumer --label two   # terminal 2: one more consumer, and 3, and 4
 ```
 
-`server.py` holds **one** connection to Bitstamp and serves every consumer on the
-box from it. That is the whole idea, and the reason it is not one connection per
-consumer. The loop is a parse and a send:
+`trades/producer.py` holds **one** connection to Bitstamp and publishes every
+trade to the broker, which serves every consumer on the box from its log.
+That is the whole idea, and the reason it is not one connection to Bitstamp
+per consumer. The producer's loop is a parse and a publish:
 
 ```python
-frame = json.loads(await feed.recv())
-if frame.get("event") != "trade":
-    continue                       # acks and heartbeats are not rows
-
-await stream.send(row(frame["data"]))
+frame = json.loads(message)
+if frame.get("event") == "trade":    # acks and heartbeats are not rows
+    await publication.send(row(frame["data"]))
 ```
 
-**The parse happens once, here.** Consumers receive the row, not the frame — six
-consumers used to mean six JSON parses of the same bytes, and now it means none.
-The schema in `server.py` is the demo's, not streamcast's: every field worth a
-column gets one, which is what makes the log a table rather than a pile of
-frames.
+**The parse happens once, in the producer.** Consumers receive the row, not
+the frame. The schema (`trades/schema.json`) is the demo's, not
+streamcast's: every field worth a column gets one, which is what makes the
+log a table rather than a pile of frames.
 
-`send` returns once the row is durable, and it never awaits a consumer — so a
-dashboard that stops reading cannot slow the strategy sitting beside it.
+`publish` returns once the broker has the row durably, and the broker never
+awaits a consumer, so a dashboard that stops reading cannot slow the strategy
+sitting beside it.
 
 ## The thing worth watching
 
-Stop a consumer with Ctrl-C. Leave it stopped while trades keep arriving. Start it
-again:
+Start a second consumer with `just demo consumer --label two`, stop it with
+Ctrl-C, leave it stopped while trades keep arriving, and start it again:
 
 ```
-[one] connected at offset 4192, replaying 137 missed
-[one] replay     4055     85,565.00  0.15000000  buy
+[two] connected at offset 4192, replaying 137 missed
+[two] replay     4055     85,565.00  0.15000000  buy
 ...
-[one]  live      4192     85,571.50  0.02410000  sell
+[two]  live      4192     85,571.50  0.02410000  sell
 ```
 
-It asked for the offset after the last one it processed, the server replayed the
+It asked for the offset after the last one it processed, the broker replayed the
 gap out of the log, and then it went live — with no gap and no duplicate at the
 join. The cursor is a file here; in a real consumer it is whatever you already
 persist.
@@ -76,9 +95,9 @@ persist.
 `--from-start` ignores the cursor and replays everything the log still holds.
 
 `--catch-up` is the case one step past that — a consumer so far behind that the
-server refuses, and the rows it wants are only in the log's archive. This demo
+broker refuses, and the rows it wants are only in the log's archive. This demo
 cannot show it: the log has no `archive=`, because that would mean credentials,
-and the point here is that there are none. `consumer.py` takes the flag anyway,
+and the point here is that there are none. `trades/consumer.py` takes the flag anyway,
 so a real deployment is the same script.
 
 ## Live-only, for contrast
@@ -87,16 +106,16 @@ so a real deployment is the same script.
 just demo live
 ```
 
-The same server with no litelink log. Fan-out works identically; `?offset=` is
-refused outright with a message saying why, and a consumer that restarts starts
-from now. Right when the stream is a cache nobody resumes — wrong the first time
+The same demo with a broker that keeps no litelink log. Fan-out works
+identically; `?offset=` is refused outright with a message saying why, so the
+consumer follows from now, and one that restarts starts from now again. Right when the stream is a cache nobody resumes — wrong the first time
 a consumer restarts and you wanted the last ten minutes.
 
 ## Run several consumers
 
 ```
-just demo consumer --label a
-just demo consumer --label b
+just demo consumer --label a     # in one terminal
+just demo consumer --label b     # and another
 ```
 
 Each keeps its own cursor (`.a.offset`, `.b.offset`) and each receives the
@@ -106,7 +125,7 @@ other never notices.
 ## Cleaning up
 
 ```
-just demo clean        # the captured log
+just demo clean        # the logs the demos stored
 rm .*.offset           # the consumer cursors
 ```
 
@@ -127,12 +146,13 @@ with litelink.open("streamcast-data", "trades", read_only=True) as log:
 
 ## Mounted in a FastAPI service
 
-`fastapi_app.py` is the same stream served by an app you already have, instead of by
-`serve()` on a port of its own.
+`fastapi_app.py` is the broker role played by an app you already have,
+instead of by `serve()` on a port of its own. The trades producer publishes
+to it and a consumer subscribes from it, both at
+`ws://127.0.0.1:8770/streams/trades`; nothing in the app writes rows.
 
 ```
-just demo fastapi                                                  # terminal 1
-just demo consumer --uri ws://127.0.0.1:8000/streams/trades        # terminal 2
+just demo fastapi
 ```
 
 **You do not call `serve()`.** `serve` and `asgi` are two transports for one `Stream`,
@@ -148,7 +168,7 @@ and the transport only carries frames. Which is why `/health` in that file reads
 `trades.end_offset` directly without asking the websocket layer anything.
 
 Three lines in the file are the whole of it: build the stream with `Stream.new`, wrap it
-with `asgi(...)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
+with `asgi(..., publish=True)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
 `async with streams` in the lifespan is **not** optional — Starlette does not run a
 mounted sub-app's lifespan, so that block is what starts the maintainer which seals the
 log, and what closes the log on the way out.
@@ -174,13 +194,13 @@ for a log of orders, in SQLite, one statement per row.
 **`just demo book` runs it live.** Bitstamp's BTC/USD order book changes
 about a hundred times a second, and its feed is already a keyed table log:
 an order created or changed is its whole current state, and an order deleted
-is a tombstone. `keyed_table/book.py` relays it into a stream and serves
-`keyed_table/book.html` from the stream's own port. The page is the
-subscriber: it keeps "the last row by id, where not deleted" in AG Grid as
-rows arrive, with no server code building the view. A reload replays the
-stream and rebuilds the same book, and a dropped connection resumes after the
-last row the page applied. It shows the orders placed since the demo
-started, since one resting before then appears only if it changes.
+is a tombstone. `book/producer.py` publishes it to the broker's `orders`
+stream, and `book/index.html`, a static page, is the subscriber: it keeps
+"the last row by id, where not deleted" in AG Grid as rows arrive, with no
+server code building the view. A reload replays the stream and rebuilds the
+same book, and a dropped connection resumes after the last row the page
+applied. It shows the orders placed since the demo started, since one resting
+before then appears only if it changes.
 
 **The view is its own cursor.** It writes the offset it has applied in the
 same transaction as the row, so a view reopened after a crash resumes at
@@ -241,7 +261,7 @@ history still a queryable table.
 ## OpenTelemetry logs and traces, in a dashboard
 
 ```
-just demo otel                        # the broker, an OTLP exporter, and otel-gui's dashboard
+just demo otel                        # otel-gui, a broker, the services, and the OTLP exporter
 uv run python -m examples.otel.demo   # the same pipeline once, printing what each part saw
 ```
 
@@ -261,7 +281,8 @@ marked failed with an `order failed` warning.
 | `otel/spans.py` | the span's schema, its row conversion, and `StreamSpanExporter` |
 | `otel/demo.py` | the two services, the broker, and the one-shot demo |
 | `otel/export.py` | rows back to OTel records and spans, out through OTel's OTLP exporters |
-| `otel/dashboard.py` | `just demo otel`: otel-gui, the broker and the exporter, in one process |
+| `otel/services.py` | the producer: two services logging and tracing through OTel, publishing to the broker |
+| `otel/gui.py` | otel-gui, downloaded, checked and run: where `export.py` sends what it reads |
 
 **None of this is in streamcast.** The schemas and conversions are built from
 the column types any stream can declare: trace and span ids as hex binary,
