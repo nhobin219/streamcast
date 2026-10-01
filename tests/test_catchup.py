@@ -13,7 +13,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _log
+from streamcast import _log, _published
 from streamcast._catchup import CatchUp
 
 pytestmark = pytest.mark.replication
@@ -51,7 +51,7 @@ def archived(tmp_path, s3, bucket):
         # Stamped, because that is the shape `Stream.new` creates and so the
         # shape an archive a consumer catches up from actually has.
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
-        archive=bucket,
+        published=bucket,
         s3=s3,
         config=litelink.LogConfig(
             target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
@@ -79,14 +79,14 @@ async def fill(stream, log, total=TOTAL):
     # empty archive without saying so. A test fixture wants the whole log in
     # the archive at whatever size it was given; the cost is undersized
     # objects, which no test cares about.
-    await asyncio.to_thread(log.sync, push_unsettled=True)
+    await asyncio.to_thread(log.publish, push_unsettled=True)
 
     # Several files, or the multi-batch archive read these tests rely on is
     # not happening. Asserted here for the same reason as the line below.
-    assert total < TOTAL or log.table_files() >= 5, (
-        f"{log.table_files()} files; the archive these tests read is one file"
+    assert total < TOTAL or log.staging_files() >= 5, (
+        f"{log.staging_files()} files; the archive these tests read is one file"
     )
-    archived = log.archived_through()
+    archived = log.published_through()
     # Asserted in the fixture, so an archive that silently stops being built
     # fails HERE — naming the fixture — rather than surfacing later as a
     # confusing refusal from the code under test.
@@ -110,8 +110,8 @@ class TestItClosesTheGap:
         was.
         """
         stream = streamcast.Stream("trades", log=archived, max_replay=600)
-        archived_through = await fill(stream, archived)
-        assert archived_through > 0
+        published_through = await fill(stream, archived)
+        assert published_through > 0
 
         async with serve(stream, maintain=False) as uri:
             # Without it, the refusal stands.
@@ -321,7 +321,7 @@ class TestTheLogIsNamedInTheGreeting:
             tmp_path / "data",
             "raw_trades_v2",  # deliberately not "trades"
             schema=streamcast.to_arrow(SCHEMA),
-            archive=bucket,
+            published=bucket,
             s3=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
@@ -352,9 +352,9 @@ class TestTheLogIsNamedInTheGreeting:
     ):
         """The point of publishing it: a subscriber reads the log itself.
 
-        Name and archive are what `litelink.snapshot` takes, so a consumer
-        that wants the whole history — or any Iceberg engine — goes straight
-        to object storage instead of through the socket. Credentials stay the
+        Name and archive are what an Iceberg engine needs — the table sits at
+        `<archive>/<name>` — so a consumer that wants the whole history goes
+        straight to object storage instead of through the socket. Credentials stay the
         reader's own; a server that sent them would be handing every
         subscriber its keys.
         """
@@ -362,7 +362,7 @@ class TestTheLogIsNamedInTheGreeting:
             tmp_path / "data",
             "raw_trades_v2",
             schema=streamcast.to_arrow(SCHEMA),
-            archive=bucket,
+            published=bucket,
             s3=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
@@ -381,10 +381,11 @@ class TestTheLogIsNamedInTheGreeting:
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
             reader = await asyncio.to_thread(
-                litelink.snapshot, info.name, archive=info.archive, s3=s3
+                _published.Table.open, info.archive, info.name, s3
             )
             try:
-                assert await asyncio.to_thread(reader.end_offset) > 1
+                assert reader.extent is not None
+                assert reader.extent[1] > 1
             finally:
                 await asyncio.to_thread(reader.close)
 
@@ -410,22 +411,22 @@ class TestTheWholeHistoryGateway:
             tmp_path / "data",
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
-            archive=bucket,
+            published=bucket,
             s3=s3,
-            include_archive=True,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
                 compact_min_files=KEEP_FILES,
-                local_retention=timedelta(0),
+                staging_retention=timedelta(0),
             ),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle, max_replay=None)
+            stream = streamcast.Stream(
+                "trades", log=handle, max_replay=None, replay_published=True
+            )
             await fill(stream, handle, total=800)
             await asyncio.to_thread(handle.evict)
 
-            assert handle.table_extent() is None, "the fixture must evict dry"
-            assert handle.include_archive is True
+            assert handle.staging_extent() is None, "the fixture must evict dry"
 
             async with serve(stream, maintain=False) as uri:
                 # Bounded by nothing: the default would refuse this as
@@ -438,36 +439,33 @@ class TestTheWholeHistoryGateway:
             assert got[0][1]["i"] == 0
 
     async def test_the_factory_takes_it_too(self, tmp_path, s3, bucket, serve):
-        """`Stream.new(replay_archive=True)`, rather than opening the handle.
+        """`Stream.new(replay_published=True)`, rather than opening the handle.
 
-        The parameter is named for the replay, not for the tier: `archive=`
+        The parameter is named for the replay, not for the tier: `published=`
         sits beside it and already means "where", so two near-identical names
-        would be the kind a caller sets one of while meaning the other. It is
-        litelink's `include_archive` on the way in.
+        would be the kind a caller sets one of while meaning the other. Each
+        replay passes it to litelink's reads as `published=`.
         """
         stream = streamcast.Stream.new(
             "trades",
             root=tmp_path / "data",
             schema=SCHEMA,
-            archive=bucket,
+            published=bucket,
             s3=s3,
-            replay_archive=True,
+            replay_published=True,
             max_replay=None,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
                 compact_min_files=KEEP_FILES,
-                local_retention=timedelta(0),
+                staging_retention=timedelta(0),
             ),
         )
         try:
             assert stream.log is not None
-            assert stream.log.include_archive is True, (
-                "replay_archive must reach litelink as include_archive"
-            )
 
             await fill(stream, stream.log, total=800)
             await asyncio.to_thread(stream.log.evict)
-            assert stream.log.table_extent() is None, "the fixture must evict dry"
+            assert stream.log.staging_extent() is None, "the fixture must evict dry"
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
@@ -506,14 +504,14 @@ class TestAnEvictedLog:
             tmp_path / "data",
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
-            archive=bucket,
+            published=bucket,
             s3=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
                 compact_min_files=KEEP_FILES,
                 # Evict on upload: the local tier is emptied as soon as the
                 # archive has the rows, which is the state under test.
-                local_retention=timedelta(0),
+                staging_retention=timedelta(0),
             ),
         )
         with handle:
@@ -521,10 +519,7 @@ class TestAnEvictedLog:
             await fill(stream, handle, total=800)
             await asyncio.to_thread(handle.evict)
 
-            assert handle.table_extent() is None, "the fixture must evict dry"
-            # The handle reads local files only, so it reports what it can
-            # actually serve rather than what the archive still holds.
-            assert handle.include_archive is False
+            assert handle.staging_extent() is None, "the fixture must evict dry"
 
             async with serve(stream, maintain=False) as uri:
                 with pytest.raises(streamcast.NotReplayable) as raised:
@@ -570,7 +565,7 @@ class TestTheGapItCannotClose:
             tmp_path / "data",
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
-            archive=bucket,
+            published=bucket,
             s3=s3,
             # Nothing below 500 exists in ANY tier.
             start_offset=500,
@@ -600,7 +595,7 @@ class TestWhereTheArchiveComesFrom:
         stream = streamcast.Stream("trades", log=archived)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             assert sub.info.log is not None
-            assert sub.info.log.archive == archived.archive
+            assert sub.info.log.archive == archived.published
             assert sub.info.log.name == archived.name
 
     async def test_a_stream_without_a_log_publishes_none(self, serve):
@@ -723,7 +718,7 @@ class TestWhenItCannot:
         # stopped and where the consumer asked from.
         #
         # `frontier + 1`, and the off-by-one is the two APIs meaning
-        # different things: `archived_through()` is the LAST offset archived,
+        # different things: `published_through()` is the LAST offset archived,
         # inclusive, while the reader's `end_offset()` — which the message
         # prints — is the offset AFTER it, exclusive. Same boundary, and
         # asserting the raw number caught the difference.
@@ -770,10 +765,11 @@ def test_nothing_is_connected_while_the_archive_is_read():
 
 
 def test_the_reader_crosses_into_a_thread():
-    # `litelink.snapshot` resolves a catalog over the network — seconds — and
-    # on the event loop that is the consumer's whole process stopped.
+    # Pinning the published table reads its hint, schema and extent over the
+    # network — seconds — and on the event loop that is the consumer's whole
+    # process stopped.
     import inspect
 
     source = inspect.getsource(CatchUp.open)
-    assert source.count("asyncio.to_thread") == 2
+    assert "asyncio.to_thread(\n                _published.Table.open" in source
     assert "asyncio.to_thread" in inspect.getsource(CatchUp.close)

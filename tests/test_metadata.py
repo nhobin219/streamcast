@@ -7,6 +7,7 @@ uploads it, and refuses to start when it cannot.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from typing import Any
@@ -146,15 +147,32 @@ class TestMigrationUpdatesIt:
 
 class TestItNamesTheLiveLog:
     async def test_serving_a_sealed_log_is_refused(self, tmp_path, serve):
-        """A sealed log is never written to again, and serve is what writes."""
+        """A sealed log is never written to again, and serve is what writes.
+
+        litelink refuses a writer on a log `migrate` retired. A log sealed by
+        a migration under litelink 0.5 was never retired and still opens, so
+        `serve` checks the metadata too: here, a log it does not name as live.
+        """
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         await stream.send(row(0))
         await stream.aclose()
         await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
 
-        with litelink.open(tmp_path, "trades") as sealed:
-            with pytest.raises(ValueError, match="live log is 'trades-v2'"):
-                async with serve(streamcast.Stream("trades", log=sealed)):
+        with pytest.raises(litelink.RetiredError):
+            litelink.open(tmp_path, "trades")
+
+        metadata = _metadata.load(tmp_path, "trades")
+        assert metadata is not None
+        _metadata.save(
+            tmp_path,
+            dataclasses.replace(
+                metadata,
+                live_log=dataclasses.replace(metadata.live_log, name="trades-v3"),
+            ),
+        )
+        with litelink.open(tmp_path, "trades-v2") as unnamed:
+            with pytest.raises(ValueError, match="live log is 'trades-v3'"):
+                async with serve(streamcast.Stream("trades", log=unnamed)):
                     pass
 
     async def test_a_handed_in_live_log_learns_its_seam(self, tmp_path, serve):
@@ -183,7 +201,7 @@ class TestItNamesTheLiveLog:
 class TestTheArchiveCopy:
     async def test_serve_uploads_it(self, tmp_path, serve, s3, bucket):
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, archive=bucket, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3=s3
         )
         try:
             async with serve(stream, maintain=False, replicate=False):
@@ -199,7 +217,7 @@ class TestTheArchiveCopy:
         self, tmp_path, serve, s3, bucket, monkeypatch
     ):
         first = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, archive=bucket, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3=s3
         )
         async with serve(first, maintain=False, replicate=False):
             pass
@@ -228,7 +246,7 @@ class TestTheArchiveCopy:
     ):
         missing = f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/prefix"
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, archive=missing, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=missing, s3=s3
         )
         try:
             with pytest.raises(FileNotFoundError, match="does not exist"):

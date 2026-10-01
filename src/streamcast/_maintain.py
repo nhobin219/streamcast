@@ -142,8 +142,11 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
                 log.seal_due()
                 if time.monotonic() >= due[name]:
                     log.maintain()
-                    if log.archive:
-                        log.sync()
+                    # Every log publishes since litelink 0.6 — to an `s3://`
+                    # prefix, or by default a directory beside it — and must:
+                    # eviction never deletes an unpublished file, so a log
+                    # that never published would never free its disk.
+                    log.publish()
 
                     due[name] = time.monotonic() + plan.maintain_every
 

@@ -47,7 +47,7 @@ dependencies = [
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.5.1,<0.6",
+    "litelink>=0.6.0,<0.7",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

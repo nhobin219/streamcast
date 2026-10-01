@@ -47,15 +47,13 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
-import litelink
-
-from streamcast import _log
+from streamcast import _log, _published
 from streamcast._errors import NotReplayable, StreamcastError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
-    from litelink import RemoteReadHandle, S3Options
+    from litelink import S3Options
 
 # The `why` values a catch-up can answer. `not_durable`, `empty` and `ahead`
 # are not gaps in an archive — they are a stream with no log, a log with
@@ -136,58 +134,36 @@ class CatchUp:
         self._archive = archive
         self._name = name
         self._s3 = s3
-        self._reader: RemoteReadHandle | None = None
+        self._reader: _published.Table | None = None
 
     async def open(self) -> int:
-        """Assemble the reader and return the offset after its last row.
+        """Pin the published table and return the offset after its last row.
 
-        In a thread: `litelink.snapshot` resolves a catalog and reads table
-        metadata over the network, which is seconds, and on the event loop
-        that is the consumer's whole process stopped.
+        In a thread: opening resolves the table's current metadata and its
+        extent over the network, and on the event loop that is the consumer's
+        whole process stopped.
 
         The credential failure is caught HERE rather than at the first batch,
         because this is the call that touches the bucket first and the caller
         should learn it cannot read before it has been told it is recovering.
 
-        **`include_archive` is left at its default of False, so this reads the
-        archive and not the replicated WAL.** Three reasons, and the first is
-        decisive:
-
-        * **The band it would add is the server's to send.** A WAL replica
-          carries the buffer — the unsealed tail and the range between
-          `archived_through` and the frontier. That is exactly what the
-          server still holds and is about to stream once this hands back to
-          the socket. Restoring it here would fetch a second copy of the next
-          few seconds of the subscription.
-        * **It fails outright on a log with no replica**, and
-          `wal_replication` is opt-in, so most logs have none. litelink
-          measures `include_wal=True` raising in 0.10 s where archive-only
-          served 3,870 rows. A catch-up that worked only for replicated logs
-          would fail for the common case at the moment it was needed.
-        * **It needs the litestream binary on the CONSUMER.** Today a
-          catching-up consumer needs S3 read access and nothing else — no
-          subprocess, no scratch directory, no binary to provision on every
-          box that might fall behind. litelink measures a 1.9 MB buffer
-          taking 7.2 s to restore at 60-75 ms RTT, of which ~0.2 s is
-          transfer; the rest is a LIST plus ~20 serial GETs whose count grows
-          with the log's AGE rather than its size.
-
-        A consumer that genuinely wants the whole history with no server in
-        the picture is not doing a catch-up: it wants `litelink.snapshot`
-        directly, with `include_wal=True` if it has the binary. The greeting
-        publishes what it needs to do that (`info.log`).
+        **The published table only, never the WAL replica.** The band a
+        replica would add is the unsealed tail the server still holds and is
+        about to stream once this hands back to the socket; reading it here
+        would fetch a second copy of the next few seconds of the subscription.
         """
         try:
             self._reader = await asyncio.to_thread(
-                litelink.snapshot, self._name, archive=self._archive, s3=self._s3
+                _published.Table.open, self._archive, self._name, self._s3
             )
-            return await asyncio.to_thread(self._reader.end_offset)
-
         except Exception as exc:
             await self.close()
             raise CatchUpUnavailable(
                 _credentials_help(self._archive, self._name, self._s3, exc)
             ) from exc
+
+        extent = self._reader.extent
+        return 0 if extent is None else extent[1]
 
     async def floor(self) -> int | None:
         """The lowest offset the archive holds, or None if it will not say.
@@ -202,7 +178,7 @@ class CatchUp:
             msg = "open() before floor()"
             raise RuntimeError(msg)
 
-        extent = (await asyncio.to_thread(self._reader.coverage)).archive
+        extent = self._reader.extent
 
         return None if extent is None else extent[0]
 
@@ -222,8 +198,8 @@ class CatchUp:
     async def close(self) -> None:
         reader, self._reader = self._reader, None
         if reader is not None:
-            # A snapshot owns a scratch directory it removes on close, so
-            # leaking one leaks disk as well as a DuckDB connection.
+            # A pinned table holds a DuckDB connection, and a consumer that
+            # walks away mid-catch-up must not leak one per attempt.
             await asyncio.to_thread(reader.close)
 
 

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import litelink
 import pyarrow as pa
-from litelink.log import OFFSET as COLUMN
+from litelink import OFFSET as COLUMN
 
 import streamcast
 from streamcast._log import _next_batch, columns, replay
@@ -92,7 +92,7 @@ async def main() -> None:
         while log.seal() is not None:
             pass
 
-        print(f"{args.rows:,} rows, {log.table_files()} parquet file(s)\n")
+        print(f"{args.rows:,} rows, {log.staging_files()} parquet file(s)\n")
 
         # --- cold vs warm, at full size ------------------------------------
         cold = await drain(log, args.rows)

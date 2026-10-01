@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import _log, _manifest, _metadata
+from streamcast import _log, _manifest, _metadata, _schema
 from streamcast._server import _supervisors
 
 V1: dict[str, Any] = {
@@ -88,9 +88,16 @@ class TestTheSeam:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        with litelink.open(tmp_path, "trades") as old:
-            assert old.coverage().buffered is None, "rows left in the buffer"
-            assert old.table_extent() == (1, 5)
+        # Retired: litelink itself refuses a writer from here on.
+        with pytest.raises(litelink.RetiredError):
+            litelink.open(tmp_path, "trades")
+
+        # And every row is in its published table, none left local.
+        with litelink.open(tmp_path, "trades", read_only=True) as old:
+            coverage = old.coverage()
+            assert coverage.buffer is None, "rows left in the buffer"
+            assert coverage.staging is None, "rows left in the staging table"
+            assert coverage.published == (1, 6)
 
     async def test_the_metadata_records_both_logs(self, tmp_path):
         await seeded(tmp_path)
@@ -566,11 +573,16 @@ def test_extending_replaces_a_row_rather_than_duplicating_it():
         "properties": {"x": {"type": "integer"}},
         "required": ["x"],
     }
-    entry = _metadata.Entry("trades", 1, 3, schema, NO_SYSTEM)
-    stats = _manifest.LogStatistics(2, {"x": _manifest.ColumnStatistics(1, 2, 0, 2)})
+    stats = litelink.TierStatistics(
+        tier=None,
+        record_count=2,
+        file_count=1,
+        columns={"x": litelink.ColumnStatistics(1, 2, 0, 2, None)},
+    )
+    entry = _manifest.entry("trades", 1, 3, _schema.to_arrow(schema), stats)
 
-    once = _manifest.extend(None, entry, stats)
-    twice = _manifest.extend(once, entry, stats)
+    once = _manifest.extend(None, entry)
+    twice = _manifest.extend(once, entry)
 
     assert twice["log"].to_pylist() == ["trades"]
     assert twice == once
@@ -582,7 +594,7 @@ class TestTheArchive:
         self, tmp_path, s3, bucket
     ):
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=V1, archive=bucket, s3=s3
+            "trades", root=tmp_path, schema=V1, published=bucket, s3=s3
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
@@ -590,7 +602,7 @@ class TestTheArchive:
         migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2, s3=s3)
         try:
             assert migrated.log is not None
-            assert migrated.log.archive == bucket
+            assert migrated.log.published == bucket
         finally:
             await migrated.aclose()
 
@@ -606,10 +618,10 @@ class TestTheArchive:
         with filesystem.open_input_file(key) as source:
             assert pq.read_table(source) == _manifest.load(tmp_path, "trades")
 
-        # And the retired log is in the archive whole, not just its settled
-        # prefix: nothing will push its tail later.
-        with litelink.open(tmp_path, "trades") as old:
-            assert old.archived_through() == 5
+        # And the retired log is in its published table whole, not just its
+        # settled prefix: nothing will push its tail later.
+        with litelink.open(tmp_path, "trades", read_only=True) as old:
+            assert old.published_through() == 5
 
     async def test_a_stream_that_never_migrated_has_no_metadata_there(
         self, tmp_path, s3, bucket

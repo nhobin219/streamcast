@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -70,7 +71,7 @@ from litelink._replication import litestream_binary
 from streamcast._process import popen
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from litelink import WriteHandle
 
@@ -235,6 +236,12 @@ class Sidecar:
         ever writes something else, this fails here with the file named,
         instead of handing litestream a config that silently replicates less
         than it should.
+
+        **Each log's `socket:` block is left out.** litelink gives every log
+        its own control socket, for `retire()` to flush the replica through,
+        and one litestream can listen on one. A server never retires a log —
+        `Stream.migrate` does, offline, through `retiring` below — so the
+        process a server runs needs none.
         """
         lines = ["dbs:"]
         for name, config in self._logs:
@@ -242,15 +249,16 @@ class Sidecar:
                 continue
 
             body = config.read_text().splitlines()
-            if not body or body[0].strip() != "dbs:":
+            if "dbs:" not in (line.strip() for line in body):
                 msg = (
-                    f"{config} does not start with 'dbs:'; litelink's "
-                    f"replication config format changed and the merge in "
+                    f"{config} has no 'dbs:' list; litelink's replication "
+                    f"config format changed and the merge in "
                     f"streamcast._replicate must change with it"
                 )
                 raise SidecarUnavailable(msg)
 
-            lines.extend(body[1:])
+            start = [line.strip() for line in body].index("dbs:")
+            lines.extend(body[start + 1 :])
 
         self._config.write_text("\n".join(lines) + "\n")
 
@@ -372,4 +380,66 @@ class Sidecar:
         shutil.rmtree(self._workdir, ignore_errors=True)
 
 
-__all__ = ["Sidecar", "SidecarUnavailable"]
+@contextlib.contextmanager
+def retiring(log: WriteHandle, binary: str | None = None) -> Iterator[None]:
+    """A litestream for `log` alone, for as long as its `retire()` runs.
+
+    `retire()` on a log with `wal_replication` flushes the replica through
+    the log's own sidecar's control socket, and refuses rather than start a
+    litestream of its own. `Stream.migrate` runs with the server stopped, so
+    there is no sidecar: this is it, on the log's own config, socket and all.
+
+    **Under the same lock a server's sidecar takes**, so a migration beside a
+    server that is still running is refused rather than becoming two
+    litestream processes on one database — the thing litestream forbids.
+    """
+    config = Path(log.write_replication_config())
+    socket = _socket(config)
+    with (config.parent / "litestream.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            msg = (
+                f"{log.name} is being replicated by a running server; stop it "
+                f"before migrating the stream"
+            )
+            raise RuntimeError(msg) from None
+
+        process = popen(
+            [litestream_binary(binary), "replicate", "-config", str(config)]
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while not socket.exists():
+                if process.poll() is not None or time.monotonic() > deadline:
+                    msg = f"litestream for {log.name} did not open {socket}"
+                    raise SidecarUnavailable(msg)
+
+                time.sleep(0.05)
+
+            yield
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=_STOP_GRACE)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def _socket(config: Path) -> Path:
+    """The control socket a log's config names: `socket:` then its `path:`."""
+    lines = [line.strip() for line in config.read_text().splitlines()]
+    if "socket:" not in lines:
+        msg = f"{config} names no control socket; litelink 0.6 writes one"
+        raise SidecarUnavailable(msg)
+
+    for line in lines[lines.index("socket:") + 1 :]:
+        if line.startswith("path:"):
+            return Path(line.removeprefix("path:").strip())
+
+    msg = f"{config} has a socket: block with no path"
+    raise SidecarUnavailable(msg)
+
+
+__all__ = ["Sidecar", "SidecarUnavailable", "retiring"]

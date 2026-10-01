@@ -263,6 +263,23 @@ def save(root: str | os.PathLike[str], metadata: Metadata) -> None:
         os.close(directory)
 
 
+def remote(published: str) -> bool:
+    """Whether a published location is off this machine, and so gets a copy.
+
+    Every log has a published table since litelink 0.6: an `s3://` prefix,
+    or by default a local directory inside the log. A local one is on this
+    disk already, beside the metadata file, so there is nothing to upload.
+    """
+    return not published.startswith("file://")
+
+
+def default_published(log: LogHandle) -> bool:
+    """Whether `log` publishes to litelink's local default, inside its own directory."""
+    return (
+        log.published.rstrip("/") == (Path(log.root) / log.name / "published").as_uri()
+    )
+
+
 def _uri(archive: str, stream: str) -> str:
     return f"{archive.rstrip('/')}/{stream}.metadata.json"
 
@@ -317,8 +334,8 @@ def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
         )
         raise ValueError(msg)
 
-    if log.archive:
-        sync(found, log.archive, s3)
+    if remote(log.published):
+        sync(found, log.published, s3)
 
     return found
 

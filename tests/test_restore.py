@@ -115,7 +115,7 @@ def produce(root: Path, bucket: str, s3: litelink.S3Options, count: int = 200):
         root,
         "trades",
         schema=streamcast.to_arrow(SCHEMA),
-        archive=bucket,
+        published=bucket,
         s3=s3,
         config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
     )
@@ -136,7 +136,7 @@ class TestItStandsUpElsewhere:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
             before = handle.end_offset()
 
@@ -144,10 +144,10 @@ class TestItStandsUpElsewhere:
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
-            replay_archive=True,
+            replay_published=True,
         )
         try:
             assert revived.log is not None
@@ -193,7 +193,7 @@ class TestItStandsUpElsewhere:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
 
             # A consumer reads part of the stream and records where it got to.
             async with serve(stream, maintain=False) as uri:
@@ -223,10 +223,10 @@ class TestItStandsUpElsewhere:
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
-            replay_archive=True,
+            replay_published=True,
             max_replay=None,
         )
         try:
@@ -280,17 +280,17 @@ class TestTheFenceIsNotDistance:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         # NOT `max_replay=None`. The default bound, which is the point.
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
-            replay_archive=True,
+            replay_published=True,
         )
         try:
             async with serve(revived, maintain=False) as uri:
@@ -345,16 +345,16 @@ class TestCatchUpOnTopOfIt:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
-            replay_archive=True,
+            replay_published=True,
         )
         try:
             async with serve(revived, maintain=False) as uri:
@@ -391,19 +391,19 @@ class TestWhatItCostsToSkipHydrate:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
         )
         try:
             assert revived.log is not None
-            assert revived.log.table_extent() is None, (
+            assert revived.log.staging_extent() is None, (
                 "the local table comes back empty; its Parquet was on the "
                 "machine that is gone"
             )
@@ -420,20 +420,20 @@ class TestWhatItCostsToSkipHydrate:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
             hydrate=timedelta(hours=1),
         )
         try:
             assert revived.log is not None
-            assert revived.log.table_extent() is not None, (
+            assert revived.log.staging_extent() is not None, (
                 "hydrate must re-register archived files into the local table"
             )
         finally:
@@ -457,13 +457,13 @@ class TestTheServerStartsWhatItNeeds:
                 pass
 
             handle.maintain()
-            handle.sync(push_unsettled=True)
+            handle.publish(push_unsettled=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
         )
@@ -473,7 +473,7 @@ class TestTheServerStartsWhatItNeeds:
                 "a restored producer must still replicate its WAL, or the "
                 "next failover has nothing to restore from"
             )
-            assert revived.log.archive == bucket
+            assert revived.log.published == bucket
         finally:
             await revived.aclose()
 
@@ -491,7 +491,7 @@ class TestAMigratedStream:
             "trades",
             root=tmp_path / "box_a",
             schema=SCHEMA,
-            archive=bucket,
+            published=bucket,
             s3=s3,
             config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
         )
@@ -516,7 +516,7 @@ class TestAMigratedStream:
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
-            archive=bucket,
+            published=bucket,
             s3=s3,
             binary=str(litestream),
         )

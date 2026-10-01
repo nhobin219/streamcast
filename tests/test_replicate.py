@@ -40,7 +40,7 @@ def shipped(tmp_path, s3, bucket):
         schema=SCHEMA,
         sort_by=("event_ts",),
         config=litelink.LogConfig(wal_replication=True),
-        archive=bucket,
+        published=bucket,
         s3=s3,
     )
     with handle:
@@ -57,7 +57,7 @@ def two_shipped(tmp_path, s3, bucket):
             schema=SCHEMA,
             sort_by=("event_ts",),
             config=litelink.LogConfig(wal_replication=True),
-            archive=bucket,
+            published=bucket,
             s3=s3,
         )
         for name in ("trades", "quotes")

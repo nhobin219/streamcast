@@ -64,7 +64,7 @@ async def settle(log, *, want_files=1, timeout=20.0):
     """Wait for the maintainer to do something, or give up."""
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if log.table_files() >= want_files:
+        if log.staging_files() >= want_files:
             return True
 
         await asyncio.sleep(0.25)
@@ -101,7 +101,7 @@ class TestTheDefect:
             # (`seal_due()` would answer it directly and must not be called —
             # it SEALS, which is the whole point of this test.)
             assert wide_log.buffered_rows() == ROWS
-            assert wide_log.table_files() == 0
+            assert wide_log.staging_files() == 0
 
     @pytest.mark.slow
     async def test_with_one_the_buffer_drains_into_parquet(self, wide_log):
@@ -112,7 +112,7 @@ class TestTheDefect:
             await fill(stream)
             assert await settle(wide_log), "the maintainer sealed nothing"
 
-            assert wide_log.table_files() >= 1
+            assert wide_log.staging_files() >= 1
             assert wide_log.buffered_rows() < ROWS
 
     @pytest.mark.slow

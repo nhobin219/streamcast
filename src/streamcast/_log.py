@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 
@@ -53,17 +53,38 @@ import pyarrow as pa
 # would be a second home for the fact, and its failure mode is a scan for a
 # column that is not there. It is NOT what goes on the wire — see
 # `_protocol.OFFSET`, which this module aliases it to.
-from litelink.log import OFFSET as COLUMN
+from litelink import OFFSET as COLUMN
 
 from streamcast import _schema
 from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 
     from litelink import LogHandle, WriteHandle
 
     from streamcast._filter import Predicate
+
+
+class Readable(Protocol):
+    """What a replay reads from: a litelink handle, or a pinned published table.
+
+    `rows` and `columns` need the table's columns and a batch reader over an
+    offset range, and nothing else — which is what lets a catch-up read the
+    published table through the same function a server replays with (I6).
+    """
+
+    @property
+    def schema(self) -> pa.Schema: ...
+
+    def scan(
+        self,
+        *,
+        columns: Sequence[str] | None = None,
+        start_offset: int | None = None,
+        end_offset: int | None = None,
+        published: bool = True,
+    ) -> pa.RecordBatchReader: ...
 
 
 STAMP: Final = "streamcast_ts"
@@ -125,7 +146,7 @@ _SYSTEM_ARROW: Final = _schema.to_arrow(
 )
 
 
-def columns(log: LogHandle) -> tuple[str, ...]:
+def columns(log: Readable) -> tuple[str, ...]:
     """The stream's declared columns, in the order the wire uses.
 
     Read once at `Stream` construction and held, because it fixes the key
@@ -215,7 +236,7 @@ def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
 
 
 async def rows(
-    log: LogHandle, start: int, stop: int
+    log: Readable, start: int, stop: int, *, published: bool = False
 ) -> AsyncGenerator[tuple[int, dict[str, object]], None]:
     """`(offset, row)` for `[start, stop)`, oldest first.
 
@@ -238,21 +259,23 @@ async def rows(
     """
     declared = columns(log)
     names = (COLUMN, *declared)
-    # **Which tiers this reads was decided when the handle was built.** A
-    # server opens its log without `include_archive`, so this is local files
-    # and the buffer; `_catchup` passes a `snapshot`, which is the archive by
-    # construction. One function serves both because neither decides anything
-    # here.
+    # **Local tiers only, unless the stream says otherwise** (`published`,
+    # which is `Stream`'s `replay_published`). litelink's own default is to
+    # read the published table too, so this is passed on every read rather
+    # than left to it.
     #
-    # A server's log is opened local-only on purpose. Serving a replay out of
-    # object storage means a long network read held on a worker thread while
-    # the subscriber's socket sits attached — the server queues for a consumer
-    # that is not reading, and `max_backlog` drops it. That is the exact
-    # failure `_catchup` avoids by doing the same read CLIENT-side with
-    # nothing connected, so a request below the local floor is refused and the
-    # consumer is pointed there.
+    # Local on purpose. Serving a replay out of object storage means a long
+    # network read held on a worker thread while the subscriber's socket sits
+    # attached — the server queues for a consumer that is not reading, and
+    # `max_backlog` drops it. That is the exact failure catch-up avoids by
+    # doing the same read CLIENT-side with nothing connected, so a request
+    # below the local floor is refused and the consumer is pointed there.
     reader = await asyncio.to_thread(
-        log.scan, columns=names, start_offset=start, end_offset=stop
+        log.scan,
+        columns=names,
+        start_offset=start,
+        end_offset=stop,
+        published=published,
     )
     try:
         while True:
@@ -297,7 +320,7 @@ async def rows(
         reader.close()
 
 
-def rows_from(log: LogHandle, offset: int) -> int:
+def rows_from(log: LogHandle, offset: int, *, published: bool = False) -> int:
     """How many rows the log actually holds from `offset` onward, inclusive.
 
     **`max_replay` bounds the WORK a replay costs, and that work is rows.**
@@ -318,58 +341,41 @@ def rows_from(log: LogHandle, offset: int) -> int:
     # report "19 messages behind" for a subscribe that would have read 20.
     quoted = f'SELECT count(*) AS n FROM log WHERE "{COLUMN}" >= {int(offset)}'
 
-    return int(log.sql(quoted).read_all()["n"][0].as_py())
+    return int(log.sql(quoted, published=published).read_all()["n"][0].as_py())
 
 
-def earliest(log: LogHandle) -> int | None:
-    """The lowest offset this handle can serve, or None if it holds nothing.
+def earliest(log: LogHandle, *, published: bool = False) -> int | None:
+    """The lowest offset a replay from `log` can serve, or None if it holds nothing.
 
-    "This handle", not "this log": which tiers it reads is fixed when it is
-    built, so the archive may hold far older rows than this reports. Those are
-    what `catch_up` is for — see `_catchup`.
+    `published` is the stream's `replay_published`: whether a replay may read
+    the published table, below the local tiers. litelink's `coverage()`
+    partitions the log into the published-only range, the staging table and
+    the buffer, so this is the lowest start among the tiers a replay reads —
+    and with `published=False`, `coverage` leaves the published tier unasked
+    rather than reading its manifests.
 
-    **Three tiers, and `coverage()` reports two of them.** That is not a bug
-    in litelink — `coverage()` answers "what can this reader serve" for a
-    reader assembled from an archive and a replica, where the local Iceberg
-    table is empty by construction. A server reads its OWN log, where that
-    table is the tier holding almost everything, and `coverage()` alone
-    returns nothing the moment a seal empties the buffer. Measured: 60 rows
-    sealed into 4 Parquet files, `coverage()` reporting `archive=None,
-    buffered=None`, and every `offset=EARLIEST` subscribe refused as "this
-    stream's log holds no rows yet".
-
-    So `table_extent()` is asked as well, and the answer is the lowest of
-    whichever tiers hold anything. Called once per subscribe that asks for
-    EARLIEST and never otherwise: the extents resolve from table statistics,
-    which is cheap against local files and a metadata GET against an archive,
-    and neither is a thing to do per message.
+    Called once per subscribe that asks for EARLIEST and never otherwise, in a
+    thread: a log with no stored published row yet reads the published
+    table's manifests to answer.
     """
-    coverage = log.coverage()
-    tiers = [log.table_extent(), coverage.buffered]
-    # **Only the tiers this handle actually reads.** litelink fixes that at
-    # assembly — `include_archive` — and a server opens its log without it, so
-    # the archive is not among them. Counting it would make `EARLIEST` resolve
-    # below what the very next scan can return, and the subscribe would be
-    # refused `evicted` for an offset the server had just called its earliest.
-    if log.include_archive:
-        tiers.append(coverage.archive)
+    coverage = log.coverage(published=published)
+    tiers = [coverage.staging, coverage.buffer]
+    if published:
+        tiers.append(coverage.published)
 
     lows = [extent[0] for extent in tiers if extent is not None]
-    if not lows:
-        return None
-
-    return min(lows)
+    return min(lows) if lows else None
 
 
 def lowest(log: LogHandle) -> int | None:
     """The lowest offset `log` holds in ANY tier, or None if it holds nothing.
 
-    Unlike `earliest`, which answers for the tiers this handle reads, this
-    counts the archive whether or not the handle reads it: it describes the
-    log, for the stream's metadata file, rather than what a replay from it can reach.
+    Unlike `earliest`, which answers for what a replay reaches, this counts
+    the published table always: it describes the log, for the stream's
+    metadata file.
     """
     coverage = log.coverage()
-    tiers = [log.table_extent(), coverage.buffered, coverage.archive]
+    tiers = [coverage.published, coverage.staging, coverage.buffer]
     lows = [extent[0] for extent in tiers if extent is not None]
 
     return min(lows) if lows else None
@@ -381,6 +387,8 @@ async def replay(
     stop: int,
     where: Predicate | None = None,
     outbound: Callable[[Mapping[str, object]], dict[str, object]] | None = None,
+    *,
+    published: bool = False,
 ) -> AsyncGenerator[tuple[int, bytes], None]:
     """`rows`, encoded — what a subscriber's pump sends.
 
@@ -402,7 +410,7 @@ async def replay(
     caller drops it if it does not match; see `_prepend`.
     """
     first = True
-    async for offset, message in rows(log, start, stop):
+    async for offset, message in rows(log, start, stop, published=published):
         # `where` reads the stored values and `outbound` converts a copy for
         # the wire, in that order: a filter on a binary column compares bytes,
         # exactly as it does against a live row.

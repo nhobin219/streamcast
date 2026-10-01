@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final
 import litelink
 from websockets.frames import CloseCode
 
-from streamcast import _filter, _log, _manifest, _metadata, _schema
+from streamcast import _filter, _log, _manifest, _metadata, _replicate, _schema
 from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from os import PathLike
 
     import pyarrow as pa
-    from litelink import Row, S3Options, TierStatistics, WriteHandle
+    from litelink import LogHandle, Row, S3Options, TierStatistics, WriteHandle
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
@@ -147,6 +147,7 @@ class Stream:
         "_max_replay",
         "_name",
         "_owned",
+        "_replay_published",
         "_retired",
         "_s3",
         "_shape",
@@ -169,6 +170,7 @@ class Stream:
         retired: Sequence[tuple[Path, str]] = (),
         s3: S3Options | None = None,
         schema: Mapping[str, object] | None = None,
+        replay_published: bool = False,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -192,6 +194,9 @@ class Stream:
         `s3` is what `serve` uploads the stream's metadata file with, when the
         log has an archive. None resolves from the environment, as litelink
         does. It is kept, not used here: this initialiser does no I/O.
+
+        `replay_published` says whether a replay may read the log's published
+        table, below what the server holds locally; see `Stream.new`.
 
         `schema` is for a stream WITHOUT a log: declared in JSON Schema, as
         `Stream.new` takes it, and held to exactly the rule a log would hold
@@ -252,6 +257,7 @@ class Stream:
         # in, may not have it, and its shape is not this library's to change.
         self._stamped = log is not None and _log.stamped(log)
         self._floor = floor
+        self._replay_published = replay_published
         self._retired = tuple(retired)
         self._s3 = s3
         # Closed by `aclose` only when this object owns it. A log the caller
@@ -307,11 +313,11 @@ class Stream:
         schema: Mapping[str, object],
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
-        archive: str | None = None,
+        published: str | None = None,
         s3: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
-        replay_archive: bool = False,
+        replay_published: bool = False,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -332,14 +338,14 @@ class Stream:
         The returned `Stream` OWNS its log and closes it in `aclose`. Pass
         `log=` to the initialiser instead when the handle is yours to keep.
 
-        `replay_archive` is NOT part of `config`: litelink persists a
+        `replay_published` is NOT part of `config`: litelink persists a
         `LogConfig` in the log's `meta` table, so a field there would be
         durable policy shared by every process that opens the log, and one
         caller's `set_config` would change another's read tier. Which tiers a
         handle reads is a property of that handle, so it is passed and not
         stored — reopen with it to get it again.
 
-        **`replay_archive=True` with `max_replay=None` makes the server a
+        **`replay_published=True` with `max_replay=None` makes the server a
         complete gateway to the log.** Together they mean no subscribe is ever
         refused for reaching too far back: the server reads whatever the
         archive holds and streams it as ordinary JSON frames. A client in any
@@ -365,9 +371,8 @@ class Stream:
             schema=schema,
             sort_by=sort_by,
             config=config,
-            archive=archive,
+            published=published,
             s3=s3,
-            replay_archive=replay_archive,
         )
 
         return cls(
@@ -379,6 +384,7 @@ class Stream:
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3=s3,  # ty: ignore[invalid-argument-type]
+            replay_published=replay_published,
         )
 
     @classmethod
@@ -393,7 +399,7 @@ class Stream:
         s3: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
-        replay_archive: bool = False,
+        replay_published: bool = False,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -448,8 +454,16 @@ class Stream:
         declared = _declaration(schema)
         metadata = _metadata.load(root, name)
         current = name if metadata is None else metadata.current.name
+        retired = False
         try:
-            old = litelink.open(root, current, include_archive=replay_archive)
+            old: LogHandle | None = litelink.open(root, current)
+        except litelink.RetiredError:
+            # **A migration that died after retiring this log** and before
+            # committing the metadata. The retire is done and cannot be undone
+            # — litelink refuses a writer on the log from here on — so this
+            # run carries on from creating, or adopting, its successor.
+            old = litelink.open(root, current, read_only=True)
+            retired = True
         except FileNotFoundError:
             msg = (
                 f"there is no stream {name!r} at {root} to migrate. "
@@ -466,7 +480,9 @@ class Stream:
             _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
 
             if (
-                list(_log.declared(old.schema)) == list(declared)
+                not retired
+                and isinstance(old, litelink.WriteHandle)
+                and list(_log.declared(old.schema)) == list(declared)
                 and _log.is_current(old)
                 and (sort_by is None or tuple(sort_by) == old.sort_by)
             ):
@@ -486,8 +502,10 @@ class Stream:
                     floor=_floor(metadata),
                     retired=_retired(root, metadata),
                     s3=s3,  # ty: ignore[invalid-argument-type]
+                    replay_published=replay_published,
                 )
 
+            retired_schema = old.schema
             new_log, sealed = _seal_and_succeed(
                 old,
                 root,
@@ -496,7 +514,7 @@ class Stream:
                 sort_by=sort_by,
                 config=config,
                 s3=s3,
-                replay_archive=replay_archive,
+                retired=retired,
             )
         finally:
             if old is not None:
@@ -509,20 +527,26 @@ class Stream:
         # The retired log's statistics join the manifest, which is written
         # BEFORE `metadata.json`: the metadata is the commit, and it must
         # never point at a manifest that does not exist yet (#27).
+        retired = metadata.sealed_logs[-1]
         manifest = _manifest.extend(
             _manifest.load(root, name),
-            metadata.sealed_logs[-1],
-            _manifest.from_litelink(sealed),
+            _manifest.entry(
+                retired.name,
+                retired.start_offset,
+                retired.end_offset,
+                retired_schema,
+                sealed,
+            ),
         )
         metadata = dataclasses.replace(metadata, manifest=_manifest.name(name))
         try:
             _manifest.save(root, name, manifest)
-            if new_log.archive:
-                _manifest.publish(new_log.archive, name, manifest, s3)  # ty: ignore[invalid-argument-type]
+            if _metadata.remote(new_log.published):
+                _manifest.publish(new_log.published, name, manifest, s3)  # ty: ignore[invalid-argument-type]
 
             _metadata.save(root, metadata)
-            if new_log.archive:
-                _metadata.publish(metadata, new_log.archive, s3)  # ty: ignore[invalid-argument-type]
+            if _metadata.remote(new_log.published):
+                _metadata.publish(metadata, new_log.published, s3)  # ty: ignore[invalid-argument-type]
 
         except BaseException:
             new_log.close()
@@ -537,6 +561,7 @@ class Stream:
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3=s3,  # ty: ignore[invalid-argument-type]
+            replay_published=replay_published,
         )
 
     @classmethod
@@ -545,23 +570,23 @@ class Stream:
         name: str = "",
         *,
         root: str | PathLike[str],
-        archive: str,
+        published: str,
         s3: object | None = None,
         binary: str | None = None,
         hydrate: timedelta | None = None,
-        replay_archive: bool = False,
+        replay_published: bool = False,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
         """Stand a stream up on a box that never held its log.
 
             stream = streamcast.Stream.restore(
-                "trades", root="data", archive="s3://market-data/prod"
+                "trades", root="data", published="s3://market-data/prod"
             )
 
         Producer-side failover, and the counterpart to `connect(cursor=)` on
         the consumer side. `Stream.new` needs the log to be here already;
-        this rebuilds it from the archive and the replicated WAL, then hands
+        this rebuilds it from the published table and the replicated WAL, then hands
         back a stream ready to `serve` and `send` to.
 
         **Offsets are fenced, not reissued, and that is what makes the move
@@ -581,29 +606,28 @@ class Stream:
         `hydrate` is a `timedelta` and has no default, because it costs S3
         egress and the right window is the caller's to choose. Without it the
         local table comes back EMPTY — the Parquet is on the dead machine —
-        so the stream serves from the buffer and the archive, and a local-only
-        read sees nothing. Pass `hydrate=timedelta(days=7)` to bring a week of
-        files back down, or `replay_archive=True` to serve from the archive
-        instead of copying it.
+        so a local-only replay sees nothing below the buffer. Pass
+        `hydrate=timedelta(days=7)` to bring a week of files back down, or
+        `replay_published=True` to serve from the published table instead of
+        copying it.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
         being reused; nothing stops the machine you are failing over FROM if
         it is still alive. litelink cannot detect a live writer on another
         host — measured: a restore against a live primary succeeds, both
-        handles append, and both sync to the same archive. Stop the old
+        handles append, and both publish to the same table. Stop the old
         producer first. See `docs/SPEC.md`.
         """
         # **The metadata first**, because it says which log is current. Without
         # it this would rebuild a migrated stream's FIRST log and serve that as
         # though nothing had happened since.
-        metadata = _metadata.fetch(archive, name, s3)  # ty: ignore[invalid-argument-type]
+        metadata = _metadata.fetch(published, name, s3)  # ty: ignore[invalid-argument-type]
         log = litelink.restore(
             root,
             name if metadata is None else metadata.current.name,
-            archive=archive,
+            published=published,
             s3=s3,  # ty: ignore[invalid-argument-type]
             binary=binary,
-            include_archive=replay_archive,
         )
         if hydrate is not None:
             # After the handle exists and before anyone serves from it, so a
@@ -622,6 +646,7 @@ class Stream:
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3=s3,  # ty: ignore[invalid-argument-type]
+            replay_published=replay_published,
         )
 
     def __repr__(self) -> str:
@@ -1098,7 +1123,7 @@ class Stream:
             return None
 
         owned = (_log.COLUMN, *_log.system(log.schema).names)
-        return log.name, log.archive, owned
+        return log.name, _remote_published(log), owned
 
     async def _resolve(self, requested: int | None) -> tuple[WriteHandle, int] | None:
         """The log and offset a replay should start at, or None for live-only.
@@ -1124,7 +1149,9 @@ class Stream:
             # thread because `coverage()` resolves offset extents from table
             # statistics — local file reads, and a metadata GET when the log
             # has been evicted to its archive.
-            first = await asyncio.to_thread(_log.earliest, log)
+            first = await asyncio.to_thread(
+                partial(_log.earliest, log, published=self._replay_published)
+            )
             if first is None:
                 # A migrated stream's new log is empty until its first send,
                 # and the stream is not: its history is in the retired logs.
@@ -1145,7 +1172,10 @@ class Stream:
             # and the subscriber would receive a stream with the old log's
             # tail silently missing — invariant 4's hole at the join.
             raise NotReplayable(
-                "evicted", offset=requested, earliest=self._floor, archive=log.archive
+                "evicted",
+                offset=requested,
+                earliest=self._floor,
+                archive=_remote_published(log),
             )
 
         if requested > frontier:
@@ -1154,7 +1184,7 @@ class Stream:
         behind = frontier - requested
         # **None means no bound, and `too_old` then never fires.** The
         # request is served from wherever the log can serve it, which on a
-        # log opened with `replay_archive=True` is the whole history out of
+        # log opened with `replay_published=True` is the whole history out of
         # object storage. That is the setting that makes a plain WebSocket
         # client in any language able to replay a stream from the beginning
         # with no litelink, no credentials and no dependency on this repo —
@@ -1171,7 +1201,11 @@ class Stream:
             # Only reached when the free check has already failed, so an
             # ordinary subscribe never pays for it — and a subscribe about to
             # be REFUSED can afford 30 ms to find out whether it should be.
-            behind = await asyncio.to_thread(_log.rows_from, log, requested)
+            behind = await asyncio.to_thread(
+                partial(
+                    _log.rows_from, log, requested, published=self._replay_published
+                )
+            )
 
         if self._max_replay is not None and behind > self._max_replay:
             raise NotReplayable(
@@ -1185,7 +1219,7 @@ class Stream:
                 offset=requested,
                 behind=behind,
                 max_replay=self._max_replay,
-                archive=log.archive,
+                archive=_remote_published(log),
             )
 
         return log, requested
@@ -1211,36 +1245,48 @@ class Stream:
         resuming with nothing outstanding, and it is the common case for a
         reconnect that lost the connection rather than the race.
         """
-        stream = _log.replay(log, start, frontier, where, self._codec.outbound)
-        try:
-            first = await anext(stream, None)
-
-        except ValueError as exc:
-            # **litelink refuses a local-only read of a log it has evicted
-            # dry**, rather than serving the buffer alone. A server opens its
-            # log local-only on purpose (see `_log.rows`), so this is what a
-            # fully evicted log looks like from here: nothing local left to
-            # replay, and every row in the archive.
-            #
-            # That is exactly `evicted`, and the consumer's move is the one
-            # `evicted` already names. Letting the `ValueError` out would make
-            # it a 500 on a stream that is working perfectly.
-            if "holds no local files" not in str(exc):
-                raise
-
-            await stream.aclose()
-            raise NotReplayable(
-                "evicted", offset=start, earliest=frontier, archive=log.archive
-            ) from exc
-
+        stream = _log.replay(
+            log,
+            start,
+            frontier,
+            where,
+            self._codec.outbound,
+            published=self._replay_published,
+        )
+        # A log evicted below `start` holds nothing local there, and a local
+        # read leaves those rows out rather than refusing; the first row's
+        # offset is then above the request, and is refused just below.
+        first = await anext(stream, None)
         if first is None:
+            # **Nothing local in `[start, frontier)`: two causes, one a hole.**
+            # A log evicted below `start` holds those rows in its published
+            # table only, and a local replay leaves them out rather than
+            # refusing — serving that as an empty replay would hand the
+            # subscriber a stream silently missing them (invariant 4). A
+            # restored log's fence is the other cause: offsets that were never
+            # issued, where an empty replay is the right answer. The
+            # published table tells them apart. A rare path, so `coverage()`
+            # may read its manifests.
+            if start < frontier and not self._replay_published:
+                held = (await asyncio.to_thread(log.coverage)).published
+                if held is not None and held[1] > start:
+                    first_local = await asyncio.to_thread(
+                        partial(_log.earliest, log, published=False)
+                    )
+                    raise NotReplayable(
+                        "evicted",
+                        offset=start,
+                        earliest=frontier if first_local is None else first_local,
+                        archive=_remote_published(log),
+                    )
+
             return _empty()
 
         offset, _frame = first
         if offset > start:
             await stream.aclose()
             raise NotReplayable(
-                "evicted", offset=start, earliest=offset, archive=log.archive
+                "evicted", offset=start, earliest=offset, archive=_remote_published(log)
             )
 
         # Decoded from the frame, so a binary column is text again — and the
@@ -1270,9 +1316,8 @@ def _open_or_create(
     schema: Mapping[str, object],
     sort_by: Sequence[str] | None,
     config: object | None,
-    archive: str | None,
+    published: str | None,
     s3: object | None,
-    replay_archive: bool = False,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
     """The log for this stream, created if it is not there yet, and its metadata.
 
@@ -1294,11 +1339,7 @@ def _open_or_create(
     metadata = _metadata.load(root, name)
     current = name if metadata is None else metadata.current.name
     try:
-        # litelink's spelling on the way in. It is `include_archive` there
-        # because it governs which tiers any READ includes; here it governs
-        # what a replay may reach, which is the only read this opens a log
-        # for — and `archive=` next to it already means "where".
-        log = litelink.open(root, current, include_archive=replay_archive)
+        log = litelink.open(root, current)
     except FileNotFoundError:
         if metadata is not None:
             msg = (
@@ -1313,16 +1354,14 @@ def _open_or_create(
             schema=_log.with_system(declared),
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
-            archive=archive,
+            published=published,
             s3=s3,  # ty: ignore[invalid-argument-type]
-            include_archive=replay_archive,
         ), None
 
     # Compared WITHOUT `streamcast_ts`, so a log created before the column
-    # existed still opens: it keeps its shape and is simply never stamped.
-    # Adding the column to it is not done here — litelink's `add_column` is
-    # one-way across a detach (litelink#29), which is not a side effect an
-    # `open` should have.
+    # existed still opens: it keeps its shape and is simply never stamped. A
+    # log's columns are fixed for its life; `Stream.migrate` is how a stream
+    # gains one.
     if list(_log.declared(log.schema)) != list(declared):
         # Read BEFORE closing. `log.schema` goes to the buffer's `meta` table,
         # so building this message after `close()` raises "Cannot operate on a
@@ -1353,6 +1392,16 @@ def _declaration(schema: Mapping[str, object]) -> pa.Schema:
         raise ValueError(msg)
 
     return declared
+
+
+def _remote_published(log: LogHandle) -> str | None:
+    """Where another machine reads `log`'s rows: its published prefix, if remote.
+
+    Every log publishes since litelink 0.6, by default to a directory inside
+    it. That one is on this machine's disk alone, so it is not an archive a
+    consumer elsewhere can catch up from, and is not offered as one.
+    """
+    return log.published if _metadata.remote(log.published) else None
 
 
 def _floor(metadata: _metadata.Metadata | None) -> int | None:
@@ -1388,7 +1437,7 @@ def _retired(
 
 
 def _seal_and_succeed(
-    old: WriteHandle,
+    old: LogHandle,
     root: str | PathLike[str],
     name: str,
     *,
@@ -1396,7 +1445,7 @@ def _seal_and_succeed(
     sort_by: Sequence[str] | None,
     config: object | None,
     s3: object | None,
-    replay_archive: bool,
+    retired: bool = False,
 ) -> tuple[WriteHandle, TierStatistics]:
     """Seal `old` for good, then create the log that follows it.
 
@@ -1408,18 +1457,27 @@ def _seal_and_succeed(
     unreachable — leaves the stream exactly as it was, one log, current, with
     its rows merely sealed earlier than the maintainer would have.
     """
-    while old.seal() is not None:
-        pass
+    # litelink's own end-of-life: every buffered row sealed, everything
+    # published IN FULL, the staging table evicted, and the log refusing any
+    # append from here — from this handle or any that opens it later. It is
+    # resumable, so a migration that died partway finishes it on the rerun.
+    if retired:
+        pass  # a rerun after a migration that died once the log was retired
+    elif not isinstance(
+        old, litelink.WriteHandle
+    ):  # pragma: no cover — opened as a writer
+        msg = f"{old.name} must be opened as a writer to retire it"
+        raise TypeError(msg)
+    elif old.config.wal_replication:
+        with _replicate.retiring(old):
+            old.retire()
+    else:
+        old.retire()
 
-    if old.archive:
-        # Compacted, then pushed IN FULL. A plain `sync` holds back the
-        # trailing run for later compaction, and there is no later for a log
-        # nothing writes to again.
-        old.maintain()
-        old.sync(push_unsettled=True)
-
-    # The whole log, every tier: a sealed log's rows may be local, archived
-    # beyond the local table, or both, and the manifest describes all of them.
+    # The whole log (`tier=None`). After `retire` everything is in the
+    # published table, so this is the same answer `tier="published"` would
+    # give — but None is the one that means "the whole log" whatever litelink
+    # later does with tiers.
     statistics = old.column_statistics()
 
     start = old.end_offset()
@@ -1430,9 +1488,11 @@ def _seal_and_succeed(
             schema=_log.with_system(declared),
             sort_by=old.sort_by if sort_by is None else sort_by,
             config=old.config if config is None else config,  # ty: ignore[invalid-argument-type]
-            archive=old.archive,
+            # The same published location, unless it was litelink's local
+            # default, which lives INSIDE the old log's directory: the new log
+            # gets its own default rather than a table nested in a retired log.
+            published=None if _metadata.default_published(old) else old.published,
             s3=s3,  # ty: ignore[invalid-argument-type]
-            include_archive=replay_archive,
             start_offset=start,
         )
     except FileExistsError:
@@ -1441,7 +1501,7 @@ def _seal_and_succeed(
         # made and nothing has written to it; anything else is a log with
         # rows the metadata does not account for, which is not a decision to
         # make on the caller's behalf.
-        orphan = litelink.open(root, name, include_archive=replay_archive)
+        orphan = litelink.open(root, name)
         if (
             orphan.end_offset() == start
             and _log.lowest(orphan) is None
