@@ -311,7 +311,7 @@ class TestTheClient:
 
         assert got == row()
 
-    async def test_it_matches_what_catch_up_reads_from_the_archive(
+    async def test_it_matches_what_catch_up_reads_from_the_published_table(
         self, tmp_path, serve
     ):
         """Catch-up hands the consumer `_log.rows` output; the socket, a frame.
@@ -326,11 +326,11 @@ class TestTheClient:
                 await stream.send(row(4))
                 _offset, from_socket = await sub.recv()
 
-            from_archive = [
+            from_published = [
                 message async for _o, message in _log.rows(stream.log, 1, 2)
             ]
 
-        assert from_archive == [from_socket]
+        assert from_published == [from_socket]
 
 
 class TestWhere:

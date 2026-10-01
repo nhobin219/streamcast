@@ -31,8 +31,9 @@ Stream            send · send_many · end_offset · subscribers · durable · a
 
 `SCHEMA` and `EARLIEST` are exported because they appear in calls you write: the first
 is what a streamcast log is created with, the second is the offset that means
-"everything you still have". `Greeting`, `Close` and the five exception types are
-exported because they appear in what you catch and inspect.
+"everything you still have". `LATEST` is the snapshot point that means "the broker's
+frontier". `Greeting`, `Close`, `Snapshot` and the exception types are exported because
+they appear in what you catch and inspect.
 
 ## The API is `websockets`, with three deviations
 
@@ -79,8 +80,8 @@ streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
                   max_backlog=8192, max_replay=100_000)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
-                      sort_by=None, config=None, archive=None, s3=None,
-                      replay_archive=False,
+                      sort_by=None, config=None, published=None, s3=None,
+                      replay_published=False,
                       max_backlog=8192, max_replay=100_000)
 ```
 
@@ -90,7 +91,7 @@ home — routing and the greeting both read it, so they cannot disagree.
 **Two ways to give it a log, and they are separate calls.** `Stream.new(root=, schema=)`
 creates or opens one — `new` the first time, `open` every time after, which is the
 try/except every caller otherwise writes — and takes litelink's own `new()` keywords
-(`sort_by`, `config`, `archive`, `s3`) with the stream's name fed through. The plain
+(`sort_by`, `config`, `published`, `s3`) with the stream's name fed through. The plain
 initialiser takes a handle you already opened.
 
 The split follows litelink, whose own handles say it outright: *"the initialiser takes
@@ -144,7 +145,7 @@ wrote down.
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
 how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused
-as `too_old`. With `replay_archive=True` that makes the server a complete gateway to the
+as `too_old`. With `replay_published=True` that makes the server a complete gateway to the
 log — any language can replay the whole stream over a plain WebSocket, with no litelink and
 no credentials of its own. The cost is that a long replay accumulates live messages behind
 it and `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
@@ -232,8 +233,8 @@ TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECU
 ### The metadata file
 
 Before it listens, `serve` writes `root/<stream>.metadata.json` for every stream with a log
-that doesn't have one yet, and, when the log has an archive, makes sure
-`<archive>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
+that doesn't have one yet, and, when the log publishes to S3, makes sure
+`<published>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
 something changed. **If either fails, `serve` raises instead of starting.** The file is
 what lets anything other than this server read the stream (#32), so a broken one is found
 at deploy. The ASGI app does the same when its lifespan starts.
@@ -304,7 +305,7 @@ start; there is no second process to remember.
 ```python
 log = litelink.new(root, "trades", schema=SCHEMA,
                    config=litelink.LogConfig(wal_replication=True),
-                   archive="s3://bucket/prefix")
+                   published="s3://bucket/prefix")
 
 async with streamcast.serve(streamcast.Stream("trades", log=log), host, port):
     ...        # sealing, compaction, and WAL shipping all running
@@ -557,7 +558,7 @@ arithmetic.
 ```python
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    s3=None, upload_every=30.0, catch_up=False,
-                   catch_up_retries=3, archive=None,
+                   catch_up_retries=3, metadata=None,
                    **websockets_kwargs) -> Subscription
 ```
 
@@ -614,21 +615,21 @@ for what a bare code cannot say.
 
 `info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
-a server restart), `schema` (the stream's columns as JSON Schema), `log`, `stream`,
-`version`.
+a server restart), `schema` (the stream's columns as JSON Schema), `metadata`,
+`stream_id`, `stream`, `version`.
 
-**`info.log` is enough to open the log yourself** — `name` and `archive`, which is what
-`litelink.snapshot` takes, and `owned`, the table's columns that `schema` leaves out
-(`litelink_offset`, and `streamcast_ts` on a log that has it):
+**`info.metadata` is enough to read the stream's history yourself.** It is the URI of the
+stream's metadata file, which is what [`Stream.snapshot`](#reading-a-streams-history)
+takes, and `stream_id` is the id that file records:
 
 ```python
-reader = litelink.snapshot(sub.info.log.name, archive=sub.info.log.archive)
+table = await streamcast.Stream.scan(sub.info.metadata, as_of_offset=sub.info.end_offset)
 ```
 
-`None` when the stream has no log. The **name** is the part that cannot be guessed: a
-stream serves at its own name and its log has its own, and `Stream(log=handle)` takes one
-the caller named. Credentials are never published — they are the reader's own, resolved
-from its environment the way litelink resolves them.
+Both are `None` when the stream has no log. Credentials are never published — they are
+the reader's own, resolved from its environment the way litelink resolves them. A stream
+that publishes to a local directory names a `file://` URI, which reads only on the
+server's machine; anywhere else the read says so.
 
 ### `where=` — filtering a subscription
 
@@ -744,8 +745,8 @@ sub.commit(offset)    # ...at an offset you actually committed
 ### `catch_up` — when the server will not replay that far back
 
 A consumer that has been down long enough falls past `max_replay`, and the server refuses
-with `NotReplayable(why="too_old")`. The rows are not gone — they are in the log's archive
-— but getting them means knowing where that is, opening litelink, scanning it without
+with `NotReplayable(why="too_old")`. The rows are not gone — they are in the stream's
+published tables — but getting them means knowing where those are, reading them without
 running out of memory, and working out where to resume the socket. `catch_up=True` does
 all of it:
 
@@ -758,15 +759,19 @@ async with streamcast.connect(uri, cursor=".trades.offset", catch_up=True) as st
 The consumer sees one stream. Underneath, rows below the server's window come from object
 storage and the rest from the socket.
 
-**Nothing is connected while the archive is read**, and that is the part that matters.
+It is built on [`Stream.snapshot`](#reading-a-streams-history): each round takes a
+snapshot of everything published above the consumer's offset, streams its rows, and
+connects at the offset the snapshot ended at.
+
+**Nothing is connected while the tables are read**, and that is the part that matters.
 Holding the socket open through the read would make the server queue for a subscriber that
 will not take a message until it has pulled millions of rows out of S3 — and `max_backlog`
 is 8,192, so it would be dropped with `TooSlow` before the catch-up finished, failing
 exactly the consumers that need it. Tested at `max_backlog=16`, catching up 20,000 rows.
 
-So it is a **loop**: read the archive, try to connect at the offset it reached, and if the
-server has moved on far enough to refuse again, read the newly archived rows and try once
-more. It converges when the archive gets inside the server's window.
+So it is a **loop**: read the published tables, try to connect at the offset they reached,
+and if the server has moved on far enough to refuse again, read the newly published rows
+and try once more. It converges when the published tables get inside the server's window.
 `catch_up_retries` (default 3) bounds it for when that never happens, and the failure says
 which of three things to change.
 
@@ -774,16 +779,16 @@ which of three things to change.
 |---|---|
 | `catch_up=False` *(default)* | the plain `NotReplayable` refusal; handle the gap yourself |
 | `catch_up_retries=3` | rounds of read-then-connect before giving up |
-| `archive="s3://bucket/prefix"` | override where to read; otherwise taken from the refusal, or from the greeting |
+| `metadata="s3://bucket/prefix/trades.metadata.json"` | the metadata file to read from; otherwise the greeting's |
 | `s3=streamcast.S3Options(...)` | credentials; otherwise the environment |
 
-**Where the archive location comes from.** The refusal carries it when it fits — a close
-frame is 123 bytes and the numbers that make the message readable are ordered first, so a
-long bucket URI is what drops. The greeting carries it too, with no such limit, so a client
-that did not get it from the refusal spends one throwaway connection asking. An explicit
-`archive=` beats both.
+**Where the metadata file comes from.** The greeting names it, with the stream's id, so a
+refused client spends one throwaway connection asking. The refusal does not: a close frame
+is 123 bytes and a bucket URI does not fit beside the numbers. The id is checked against
+the file, so a file that belongs to another stream is refused rather than read. An
+explicit `metadata=` wins, and is trusted to be the file the caller meant.
 
-**Failures land at `connect`, not at the first `recv`.** The archive is opened before the
+**Failures land at `connect`, not at the first `recv`.** The first snapshot is opened before the
 subscription is handed back, so unreadable credentials raise where you called `connect`
 rather than minutes later from whatever line read next. The message is long on purpose —
 it names what was tried, which credential source, and four ways out:
@@ -801,9 +806,10 @@ cannot read stream 'trades' from s3://market-data/prod to catch up.
   * To skip the gap and accept the loss, reconnect with offset=streamcast.EARLIEST ...
 ```
 
-**What it cannot fix.** If the archive's frontier is itself below the server's window,
-a range exists that neither holds — the server has forgotten it and the archive never
-received it. That is reported with both numbers rather than half-served, because a
+**What it cannot fix.** If the published tables end below the server's window, a range
+exists that neither holds — the server has forgotten it and it was never published. The
+same is true at the other end: tables that start above the consumer's offset do not hold
+the rows it asked for. That is reported with both numbers rather than half-served, because a
 consumer that silently resumed above the gap would have lost data and been told it
 recovered.
 
@@ -889,7 +895,7 @@ StreamcastError
 | `empty` | subscribe live; there is nothing to replay yet |
 | `ahead` | your cursor is above the server's frontier — it was restored or rebuilt |
 | `too_old` | `catch_up=True`, or read the log directly and subscribe from where you stopped |
-| `evicted` | below what the scan's tier holds; `catch_up=True` if the archive goes back further, else accept the gap |
+| `evicted` | below what the scan's tier holds; `catch_up=True` if the published tables go back further, else accept the gap |
 
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.
@@ -930,15 +936,15 @@ would otherwise be ignored and every send validated against columns you never wr
 **The table carries two columns you did not declare.** `litelink_offset` is litelink's, and
 every frame carries it as its offset. **`streamcast_ts`** is streamcast's: the time the server
 took the row, in UTC microseconds — so `streamcast_ts - event_ts` is feed latency per row,
-queryable over the whole archive. It is stored and never sent: no frame carries it and the
+queryable over the whole history. It is stored and never sent: no frame carries it and the
 greeting's `schema` leaves it out. `send_many` gives its whole group one value, because the
 group commits as one transaction. It is wall clock, so a clock step on the server shows in
 it.
 
 The name is reserved. A declaration that uses it is refused, and so is a row that
 supplies it. A log created before the column existed opens unchanged and is not stamped,
-and a log you pass as `log=` is stamped only if its schema has the column — `info.log.owned`
-says which.
+and a log you pass as `log=` is stamped only if its schema has the column — each log's
+`system_schema` in the metadata file says which.
 
 | JSON | `format` | Arrow |
 |---|---|---|
@@ -1038,7 +1044,7 @@ streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
 without this repo:
 
 ```json
-{"streamcast":2,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+{"streamcast":3,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
  "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
 ```
 
@@ -1060,9 +1066,11 @@ async with streamcast.serve(stream, "localhost", 8765):
     ...
 ```
 
-The current log is sealed for good (and pushed in full to its archive, if it has one).
-Then `trades-v2` is created with the new schema, starting at exactly the offset the old log
-ended at. `root/trades.metadata.json` (and a copy in the archive) records the sequence.
+The current log is retired: sealed for good, published in full, and refusing writers from
+then on. Then `trades-v2` is created with the new schema, starting at exactly the offset
+the old log ended at. `root/trades.metadata.json` (and a copy beside the published tables,
+when they are on S3) records the sequence. A migration that dies partway finishes on the
+rerun.
 Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
 log the metadata names as current.
 
@@ -1086,12 +1094,12 @@ application.
 
 **The server replays only the current log.** A consumer that was caught up when the
 server stopped resumes at the seam with nothing lost. One further behind is refused
-`evicted`, with `earliest` at the seam, and `catch_up` can't bridge it yet: reading a
-whole migrated stream is `Stream.snapshot` (#32). `offset=EARLIEST` means the start of the
-current log.
+`evicted`, with `earliest` at the seam, and `catch_up=True` bridges it: it reads through
+`Stream.snapshot`, which reads every log of the stream. `offset=EARLIEST` means the start
+of the current log.
 
 `sort_by` and `config` default to the current log's. `s3=` is what the metadata file is
-uploaded to the archive with, both here and at `serve`.
+uploaded with, both here and at `serve`.
 
 Each migration also adds the retired log to `<stream>.manifest.parquet`: per-column bounds
 and counts, read from the log's own Iceberg statistics without opening a data file. It is
@@ -1118,13 +1126,13 @@ That is what puts litelink underneath this rather than an append-only file:
 |---|---|
 | **pruning** | Iceberg statistics per column, so a bounded query never reads the rest |
 | **compression** | a `price` column of float64 compresses against its neighbours |
-| **the archive** | any Iceberg engine reads it as a table, with nothing installed |
+| **the published tables** | any Iceberg engine reads them, with nothing installed |
 | **the replay** | rows come off Arrow as columns, not as strings to re-parse |
 
 A log written by streamcast is an ordinary litelink log, so everything litelink offers
-applies unchanged: `scan`, `sql`, archiving to S3, WAL replication, and reading it from
-another machine with `litelink.snapshot`. Reading the log directly is how you go further
-back than `max_replay`.
+applies unchanged: `scan`, `sql`, publishing to S3 and WAL replication. A whole stream —
+every log a migration left behind — reads from another machine with
+[`Stream.snapshot`](#reading-a-streams-history).
 
 ```python
 with litelink.open("data", "trades", read_only=True) as reader:
@@ -1138,6 +1146,70 @@ process is the supported shape.
 reconnect notices are dropped by the feed handler, which is the same division of labour a
 kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
+## Reading a stream's history
+
+```python
+await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
+                                 broker=None, s3=None) -> Snapshot
+await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
+                             filters=(), start_offset=None, end_offset=None) -> pa.Table
+await streamcast.Stream.sql(metadata_uri, query, *, <the same>) -> pa.Table
+
+stream.metadata_uri -> str | None     # on the server
+sub.info.metadata -> str | None       # on a subscriber
+```
+
+A stream is a sequence of logs — one per schema, after `Stream.migrate` — and its
+metadata file says which, in order, where each is published, and the offsets and
+`streamcast_ts` range each holds. `Stream.snapshot` reads that file and then the published
+tables, on the reader's own machine with its own credentials. The broker is consulted only
+for rows no table holds yet, and only when asked.
+
+```python
+async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await snapshot.scan(columns=["price"], filters=[("price", ">", 500.0)])
+    async for offset, row in snapshot.rows(1):
+        ...
+```
+
+`Stream.scan` and `Stream.sql` are the one-shot forms: open, read once, close.
+
+**A fixed point, three ways to name it** — at most one of them:
+
+| | |
+|---|---|
+| *(neither)* | everything published. The live log's unpublished tail is left out, and no broker is involved |
+| `as_of_offset=N` | every row up to and including offset `N`. Past what is published the rest comes from `broker=`, and is refused without it |
+| `as_of_offset=streamcast.LATEST` | the broker's frontier when it connects; needs `broker=` |
+| `as_of_ts=T` | every row whose `streamcast_ts` is at most `T`. Published rows only, since the wire never carries `streamcast_ts`, so a `T` past what is published is refused rather than answered short |
+
+`snapshot.end_offset` is exclusive: every row the snapshot holds is below it, and a reader
+carrying on live subscribes there.
+
+| | |
+|---|---|
+| `scan(columns=, where=, filters=, start_offset=, end_offset=)` | rows in `[start_offset, end_offset)`, oldest first, as one Arrow table |
+| `sql(query)` | `query` over the whole snapshot, which it reads as the table `log` |
+| `rows(start, stop=None)` | one `(offset, row)` at a time, built exactly as a server replays them |
+| `close()` | or `async with` |
+
+`where` is SQL over the stream's columns. `filters` are `(column, operator, value)` terms,
+ANDed with `where`, and they are what let a retired log be skipped without being opened:
+they are pruned against `<stream>.manifest.parquet` first. Across a migration the logs read
+as one table with `UNION ALL BY NAME`, so a column a log lacked reads as null there.
+
+**Correct or it raises `SnapshotUnavailable`.** A missing metadata file, a file whose
+`stream_id` is not the one the greeting named, a retired log whose table holds fewer rows
+than it had when it was retired, and a range neither the tables nor the broker holds, all
+raise. The last one names both numbers. A short answer to an analytical question is a
+wrong number, not an error, so it is never given.
+
+**Where the metadata file is.** With an `s3://` published location, the copy beside the
+tables, which reads from anywhere. Without one, every log publishes under its own
+directory and the URI is the local `file://` file, which reads only on the server's
+machine. On another machine the read says so and suggests an `s3://` location.
+
 ## On the wire
 
 Every frame is a text frame of JSON. The greeting, then a **two-element pair** per message:
@@ -1145,9 +1217,9 @@ the offset, then the row. Reading a row in another language, including binary co
 spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "log":{"name":"trades","archive":"s3://market-data/prod",
-        "owned":["litelink_offset","streamcast_ts"]},"schema":{...},"durable":true}
+{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades.metadata.json",
+ "stream_id":"5f0c…","schema":{...},"durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 

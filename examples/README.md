@@ -96,10 +96,11 @@ persist.
 `--from-start` ignores the cursor and replays everything the log still holds.
 
 `--catch-up` is the case one step past that — a consumer so far behind that the
-broker refuses, and the rows it wants are only in the log's archive. This demo
-cannot show it: the log has no `archive=`, because that would mean credentials,
-and the point here is that there are none. `trades/consumer.py` takes the flag anyway,
-so a real deployment is the same script.
+broker refuses, and the rows it wants are only in the stream's published tables.
+Here the broker publishes to a directory beside its log, which a consumer on the
+same machine reads directly. On another machine the tables have to be on S3
+(`published="s3://…"`) and the consumer needs credentials for them; the script
+is the same.
 
 ## Live-only, for contrast
 

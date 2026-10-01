@@ -29,8 +29,8 @@ property the table was for —
   reads every byte of every message in range.
 * **Compression.** A `price` column of float64 compresses against its
   neighbours; the same numbers inside a JSON string do not.
-* **The archive.** litelink's headline is that any Iceberg engine can read the
-  archive with nothing installed. Pointed at a blob column it gets one string
+* **The published table.** litelink's headline is that any Iceberg engine can
+  read it with nothing installed. Pointed at a blob column it gets one string
   per row and has to parse JSON in SQL to ask anything.
 * **The replay.** Rows had to be read out of Arrow as strings and re-encoded,
   when the columns were right there.
@@ -93,7 +93,7 @@ STAMP: Final = "streamcast_ts"
 A row's own timestamps are the publisher's — when the exchange matched, when
 the sensor read. What no application column carries is when THIS server
 received it, and the difference is what you want when something looks wrong:
-`streamcast_ts - event_ts` is feed latency per row over the whole archive.
+`streamcast_ts - event_ts` is feed latency per row over the whole history.
 
 **An int64 epoch, in microseconds**, which is how litelink stores every
 timestamp: an integer is the same value in the table, in a JSON frame and in a
@@ -393,8 +393,8 @@ async def replay(
     """`rows`, encoded — what a subscriber's pump sends.
 
     Split from `rows` so the CLIENT can reuse the batch reader without an
-    encode-then-decode round trip it would only undo: `_catchup` reads the
-    archive the same way and hands the caller dicts directly, and 1.5 us a row
+    encode-then-decode round trip it would only undo: `_snapshot` reads the
+    published tables the same way and hands the caller dicts directly, and 1.5 us a row
     through msgspec twice adds up over a catch-up of millions.
 
     **`where` is applied before the encode**, so a filtered replay does not

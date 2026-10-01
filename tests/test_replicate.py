@@ -152,7 +152,7 @@ class TestItActuallyReplicates:
         assert any(key.endswith(".ltx") for key in shipped_quotes), shipped_quotes[:5]
 
     async def test_the_merged_config_names_every_owned_database(self, two_shipped):
-        """Three databases per log — buffer, catalog, archive — under one
+        """Three databases per log — buffer, catalog, published — under one
         `dbs:`. Asserted on the file, so a merge that silently dropped a log
         fails here rather than as an absence in object storage an hour later.
         """

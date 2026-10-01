@@ -379,7 +379,7 @@ def serve(
     """
     routes = _routes(streams)
     # **Every stream's metadata file, before anything else.** Written if it is
-    # not there and synced to the archive, and a failure is a failure to
+    # not there and synced to its S3 copy, and a failure is a failure to
     # start: a stream nothing else can read is found out here rather than at
     # the first remote read. First, too, because it is where a `Stream(log=…)`
     # learns its retired logs, which the maintainer below is handed.

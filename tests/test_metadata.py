@@ -198,7 +198,7 @@ class TestItNamesTheLiveLog:
 
 
 @pytest.mark.replication
-class TestTheArchiveCopy:
+class TestThePublishedCopy:
     async def test_serve_uploads_it(self, tmp_path, serve, s3, bucket):
         stream = streamcast.Stream.new(
             "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3=s3

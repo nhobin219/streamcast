@@ -120,7 +120,7 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
 
     **Every log is isolated from every other one.** The `try` is INSIDE the
     per-log loop rather than around it, so a log whose recovery fails, whose
-    archive is unreachable, or whose claim is held elsewhere costs that log a
+    published location is unreachable, or whose claim is held elsewhere costs that log a
     pass and costs the others nothing. Around the loop it would cost every
     log after it in the iteration order its whole pass, which is the failure
     mode sharing a process introduces and the one thing that must not happen.
@@ -156,7 +156,7 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
                 print(f"[maintain] {name}: skipped: {exc}", file=sys.stderr, flush=True)
 
             except Exception as exc:  # noqa: BLE001, PERF203
-                # Anything else — a lost commit race, a transient archive
+                # Anything else — a lost commit race, a transient object-storage
                 # error. A maintainer that died here would trade a delay for
                 # an outage: nothing has landed, and the work is still there
                 # next pass. Named, because with one process for many logs

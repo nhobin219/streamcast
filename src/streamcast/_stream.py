@@ -201,7 +201,7 @@ class Stream:
         maintaining so their retention and eviction carry on.
 
         `s3` is what `serve` uploads the stream's metadata file with, when the
-        log has an archive. None resolves from the environment, as litelink
+        log publishes to S3. None resolves from the environment, as litelink
         does. It is kept, not used here: this initialiser does no I/O.
 
         `replay_published` says whether a replay may read the log's published
@@ -361,7 +361,7 @@ class Stream:
         **`replay_published=True` with `max_replay=None` makes the server a
         complete gateway to the log.** Together they mean no subscribe is ever
         refused for reaching too far back: the server reads whatever the
-        archive holds and streams it as ordinary JSON frames. A client in any
+        published table holds and streams it as ordinary JSON frames. A client in any
         language replays the entire history over a plain WebSocket — no
         litelink, no Iceberg reader, no object-storage credentials, no
         dependency on this repo. `catch_up` exists because the default is the
@@ -426,15 +426,15 @@ class Stream:
 
         Three steps, in this order:
 
-        1. **The current log is sealed for good.** Every buffered row goes to
-           Parquet and, if the log has an archive, the whole log is pushed to
-           it. Nothing writes to it again.
+        1. **The current log is retired.** Every buffered row is sealed, the
+           whole log is published, and litelink refuses any writer from then
+           on.
         2. **The next log is created** — `trades-v2`, then `-v3` — with the new
            schema, starting at EXACTLY the offset the old one ended at. The
            offsets stay one dense sequence across the seam: no fence, because
            with the server stopped nothing can send in between.
         3. **The metadata records both**, the new one as current, locally and
-           in the archive. See `_metadata`.
+           beside the published tables on S3. See `_metadata`.
 
         **Idempotent**, so it can sit in a server's startup: a stream whose
         current log already has this schema AND every system column there is
@@ -455,14 +455,16 @@ class Stream:
         have it. Treating them as one — `coalesce(px, price)` — is the
         application's decision, made on the table it reads back.
 
-        `config` and `sort_by` default to the current log's, and the archive
-        is always the current log's — the metadata lives beside it.
+        `config` and `sort_by` default to the current log's, and the published
+        location is the current log's — the metadata lives beside it — unless
+        that was litelink's local default, which lives inside the old log's
+        directory; then the new log gets its own.
 
         **This server replays only the current log.** A subscriber resuming
         from below the seam is refused `evicted`, naming where the current log
-        starts; reading a whole migrated stream is `Stream.snapshot` (#32). A
-        consumer that was caught up when the server stopped resumes exactly at
-        the seam and loses nothing.
+        starts; `catch_up=True` reads below it through `Stream.snapshot`,
+        which reads every log. A consumer that was caught up when the server
+        stopped resumes exactly at the seam and loses nothing.
         """
         declared = _declaration(schema)
         metadata = _metadata.load(root, name)
@@ -812,7 +814,7 @@ class Stream:
         return self._end_offset
 
     def ensure_metadata(self) -> None:
-        """Write this stream's metadata file if it has none, and sync its archive.
+        """Write this stream's metadata file if it has none, and sync its S3 copy.
 
         What `serve` calls for every stream before it listens; a failure is a
         failure to start. See `_metadata.ensure`. A stream with no log has no
@@ -1205,11 +1207,9 @@ class Stream:
                     replay=replaying,
                     durable=self._log is not None,
                     schema=self._shape,
-                    # The log's OWN name, not the stream's. They are equal
-                    # when `Stream.new` fed one through and need not be when
-                    # a caller passed `log=` a handle they opened, and a
-                    # subscriber that guessed asks the archive for a table
-                    # that is not there.
+                    # Where the history is read, and whose: a subscriber
+                    # checks the id against the file, so a file at the same
+                    # path that belongs to another stream is refused.
                     metadata=self.metadata_uri,
                     stream_id=self._stream_id,
                     where=dict(where) if where is not None else None,
@@ -1248,7 +1248,7 @@ class Stream:
             # The only call that asks the log where it starts, and it is in a
             # thread because `coverage()` resolves offset extents from table
             # statistics — local file reads, and a metadata GET when the log
-            # has been evicted to its archive.
+            # has been evicted to its published table.
             first = await asyncio.to_thread(
                 partial(_log.earliest, log, published=self._replay_published)
             )
@@ -1525,7 +1525,7 @@ def _seal_and_succeed(
     whole log). Read here — after the seal and the push, before anything new
     exists — so a failure to read them leaves the stream exactly as it was.
 
-    The seal comes FIRST and entirely: a failure there — an archive that is
+    The seal comes FIRST and entirely: a failure there — a published location that is
     unreachable — leaves the stream exactly as it was, one log, current, with
     its rows merely sealed earlier than the maintainer would have.
     """

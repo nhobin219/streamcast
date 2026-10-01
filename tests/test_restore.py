@@ -74,7 +74,7 @@ def ship(config: str, s3: litelink.S3Options, binary: Path) -> None:
         environment["LITESTREAM_SECRET_ACCESS_KEY"] = resolved.secret_key
 
     # Only a database that exists has anything to snapshot: a log that has
-    # archived nothing has no `archive.db` yet, and waiting on its replica
+    # published nothing has no `published.db` yet, and waiting on its replica
     # would wait for ever.
     replicas = [
         f"{bucket}/{path}/0009"
@@ -216,9 +216,9 @@ class TestItStandsUpElsewhere:
         #
         # `catch_up` recovers the DATA but not the live join, which is worth
         # being precise about: measured, it delivered offsets 51..200 out of
-        # the archive — every row that existed — and then failed, because the
+        # the published table — every row that existed — and then failed, because the
         # server still refuses 201 and the fence range above it was never
-        # issued, so no archive will ever hold it. Raising the bound is the
+        # issued, so no published table will ever hold it. Raising the bound is the
         # only thing that closes it.
         revived = streamcast.Stream.restore(
             "trades",
@@ -302,7 +302,7 @@ class TestTheFenceIsNotDistance:
 
             assert all(o is not None for o in received), "a durable stream numbers them"
             got = [o for o in received if o is not None]
-            assert got[0] == 51, "the archived rows come first"
+            assert got[0] == 51, "the published rows come first"
             assert got[149] == 200, "then the rest of what the old box served"
             assert got[150] > 1_000_000, "then the live stream, above the fence"
             assert got == sorted(got)
@@ -331,8 +331,8 @@ class TestCatchUpOnTopOfIt:
 
         Before `_resolve` counted rows, a fenced cursor was refused and
         `catch_up` was the suggested remedy. It half-worked: it delivered
-        every archived row — measured, 51..200 — and then could not rejoin,
-        because the server still refused the offset the archive ended at and
+        every published row — measured, 51..200 — and then could not rejoin,
+        because the server still refused the offset the published table ended at and
         the fence range above it was never issued.
 
         With the refusal gone the server replays those rows itself, so
@@ -379,8 +379,8 @@ class TestWhatItCostsToSkipHydrate:
     ):
         """`hydrate` is a parameter and not a default, so say what skipping it means.
 
-        The Parquet is on the machine that is gone and only the archive has
-        it, so the local table comes back empty. A handle that reads local
+        The Parquet is on the machine that is gone and only the published table
+        has it, so the local table comes back empty. A handle that reads local
         files only sees nothing — which is correct, and surprising if nobody
         wrote it down.
         """
@@ -434,7 +434,7 @@ class TestWhatItCostsToSkipHydrate:
         try:
             assert revived.log is not None
             assert revived.log.staging_extent() is not None, (
-                "hydrate must re-register archived files into the local table"
+                "hydrate must re-register published files into the local table"
             )
         finally:
             await revived.aclose()
@@ -482,7 +482,7 @@ class TestAMigratedStream:
     async def test_restore_rebuilds_the_current_log_not_the_first(
         self, tmp_path, s3, bucket, litestream
     ):
-        """The metadata in the archive is what says which log is current.
+        """The metadata beside the published tables is what says which log is current.
 
         Without it, a restore of `trades` rebuilds the stream's FIRST log and
         serves it as though no migration had happened.

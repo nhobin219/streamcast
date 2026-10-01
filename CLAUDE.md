@@ -42,9 +42,9 @@ The log is an ordinary litelink table with whatever shape the application gave
 it, and `send` takes a **row**. streamcast adds exactly one column of its own,
 `streamcast_ts` — the time the server took the row, stamped at append — on the
 terms litelink owns `litelink_offset`: never a key on the wire, never in the
-greeting's `schema`, and listed in the greeting's `log.owned` instead. One owned
-scalar beside the application's columns is not owning the shape; see
-`docs/SPEC.md` §5 for where that line is.
+greeting's `schema`, and listed in each log's `system_schema` in the metadata
+file instead. One owned scalar beside the application's columns is not owning
+the shape; see `docs/SPEC.md` §5 for where that line is.
 
 The schema is declared in **JSON Schema** and converted here (`_schema.py`),
 not in litelink: litelink speaks Arrow and is deliberately general about what
@@ -56,8 +56,8 @@ Schema's vocabulary.
 
 An earlier design owned a fixed `(recv_ts, kind, payload)` schema and stored
 each upstream frame whole. That threw away pruning, compression, a queryable
-archive and a cheap replay — everything the table was for — and litelink's own
-example says so in as many words: *"the reason to declare a schema rather than
+published table and a cheap replay — everything the table was for — and
+litelink's own example says so in as many words: *"the reason to declare a schema rather than
 store the frame whole."* `docs/SPEC.md` §5 records why, because the mistake
 defended itself in a docstring and could be made again.
 
@@ -84,8 +84,8 @@ possible is wrong even if every test passes.
    `_maintain`. A server started with `maintain=False` and no external maintainer buffers
    every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
    target, with zero Parquet files.
-7. **Hold a socket open while reading the archive.** `catch_up` reads the gap with
-   NOTHING connected. Opening the connection first closes the window by construction and
+7. **Hold a socket open while reading the published tables.** `catch_up` reads the gap
+   with NOTHING connected. Opening the connection first closes the window by construction and
    makes the server queue for a subscriber that is not reading — `max_backlog` then drops
    it, so the recovery fails on exactly the consumers that needed it. The loop closes the
    window instead.
@@ -100,7 +100,7 @@ possible is wrong even if every test passes.
 10. **Let a replayed frame differ from the live one it repeats.** Both project through
     the log's declared column order, so the bytes match. `_log.rows` checks each batch's
     column order against what it projected for exactly this reason — and a catch-up reads
-    through the same function, so an archived row is built the same way too.
+    through the same function, so a published row is built the same way too.
 
 ## The two invariants that fail silently
 
@@ -152,7 +152,9 @@ src/streamcast/
     _log.py         the litelink tier: columns, replay, earliest
     _metadata.py    a migrated stream's logs, in order, and which one is current
     _manifest.py    per-log statistics, and pruning whole logs on them — soundly
-    _catchup.py     reading the gap from the archive when the server will not
+    _published.py   one published table, read with DuckDB as another machine reads it
+    _snapshot.py    Stream.snapshot — a stream's history as of one point, anywhere
+    _catchup.py     reading the gap from the published tables when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
     _publish.py     publish, Publication — the producer end, over a socket

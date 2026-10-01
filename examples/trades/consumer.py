@@ -27,7 +27,7 @@ is loaded at connect, resumed one above, and saved as the loop runs. Add
 storage too,
 so this consumer can come back on a different machine — and `--catch-up` for
 when it has been down long enough that the server will not replay that far
-back, which reads the gap from the log's archive before going live. It
+back, which reads the gap from the stream's published tables before going live. It
 advances only when the loop comes back for another message and never when the
 handler raised — a cursor ahead of the work is a message skipped for ever,
 where a cursor behind it is one handled twice.
@@ -103,7 +103,9 @@ async def run(
             # are a gap rather than a misunderstanding — see the message.
             print(f"[{label}] cannot resume ({exc.why}): {exc}")
             if exc.why in {"too_old", "evicted"} and not catch_up:
-                print(f"[{label}] try --catch-up to read the gap from the archive")
+                print(
+                    f"[{label}] try --catch-up to read the gap from the published tables"
+                )
 
             return
 
@@ -147,8 +149,9 @@ async def main() -> None:
         action="store_true",
         help=(
             "if this consumer has been down long enough that the server will "
-            "not replay that far back, read the gap from the log's archive "
-            "first (needs credentials for it)"
+            "not replay that far back, read the gap from the stream's published "
+            "tables first (on another machine, they must be on S3 and this "
+            "process needs credentials for them)"
         ),
     )
     parser.add_argument(

@@ -51,9 +51,12 @@ async with streamcast.publish(uri) as producer:
 with litelink.open("data", "trades", read_only=True) as log:
     log.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
 
-# Or from anywhere, over the archive — no local root, no catalog service.
-with litelink.snapshot("trades", archive="s3://bucket/prefix") as log:
-    log.scan(where="side = 1").read_all()
+# Or from anywhere, from the stream's published tables: every log it has
+# been through, as of a point, with no server involved.
+async with await streamcast.Stream.snapshot(
+    "s3://bucket/prefix/trades.metadata.json"
+) as snapshot:
+    await snapshot.sql("SELECT count(*), max(price) FROM log WHERE side = 1")
 
 # Or from any Iceberg engine, with neither streamcast nor litelink installed.
 duckdb.sql("""
@@ -64,11 +67,11 @@ duckdb.sql("""
 ```
 
 Rows land in a SQLite buffer first and seal into Parquet behind it, so the newest messages
-are in the buffer and the rest are columnar — `log.sql` reads across both and an external
-engine reads the sealed part. That is one store with tiers, not a transactional copy and an
-analytical copy that have to be reconciled.
+are in the buffer and the rest are columnar — `log.sql` reads across both, and a reader
+anywhere else reads what the log has published. That is one store with tiers, not a
+transactional copy and an analytical copy that have to be reconciled.
 
-The tiering, the archive layout, consistency guarantees, and costs are
+The tiering, the published-table layout, consistency guarantees, and costs are
 [litelink](https://github.com/nhobin219/litelink)'s, and its README and
 [SPEC](https://github.com/nhobin219/litelink/blob/main/docs/SPEC.md) describe them in
 depth — including why `version_name_format` is spelled out above, and how an engine
@@ -95,11 +98,18 @@ both subscribing and publishing here are URL conventions on top of it.
 streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      archive=None, s3=None, replay_archive=False,
+                      published=None, s3=None, replay_published=False,
                       max_backlog=8192, max_replay=100_000)   # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
+    stream.metadata_uri                         # where a reader finds its history
+
+await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
+                                 broker=None, s3=None) -> Snapshot
+    await snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=)
+    await snapshot.sql(query)                   # over the table `log`
+await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
                  publish=False, ...) -> Server
@@ -107,7 +117,8 @@ streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
 streamcast.publish(uri, ...) -> Publication          # server needs publish=True
     await producer.send(row) · await producer.send_many(rows)
-streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor · streamcast.EARLIEST
+streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor
+streamcast.EARLIEST · streamcast.LATEST
 ```
 
 Three deliberate exceptions:
@@ -141,8 +152,8 @@ A client in any language needs a JSON parser, plus, for binary columns, the deco
 in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":2,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "log":{"name":"trades","archive":"s3://market-data/prod"},"durable":true}
+{"streamcast":3,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"6f1c…","durable":true}
 [1861,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
@@ -150,11 +161,12 @@ The offset is positional, so `const [offset, msg] = JSON.parse(frame)` is a clie
 another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
 with none at all.
 
-`log` is the stream's log — its name and where it is archived — so a subscriber holding
-the greeting can open it directly rather than through the socket:
-`litelink.snapshot(info.log.name, archive=info.log.archive)`, or any Iceberg engine
-pointed at the archive. `null` when the stream has no log. Credentials are never in it:
-they are the reader's own. Key order comes from the log's schema, so a replayed message is
+`metadata` is the stream's metadata file — every log it has been through, where each
+is published, and what each holds — so a subscriber holding the greeting can read the
+history itself rather than through the socket: `Stream.snapshot(info.metadata)`, or any
+Iceberg engine pointed at a log's published table. `stream_id` says which stream the
+file is. Both `null` when the stream has no log. Credentials are never in it: they are
+the reader's own. Key order comes from the log's schema, so a replayed message is
 byte-identical to the live one it repeats.
 
 Encoding is [msgspec](https://github.com/jcrist/msgspec): 0.285 µs for a six-column row
@@ -332,10 +344,10 @@ stay contiguous and a `send_many` stays one commit whoever else is writing. The 
 for the **publishers**, so each can find its own rows again after a restart. See
 [recovering a producer](#recovering-a-producer).
 
-**Declare them before anyone publishes.** `litelink.add_column` can add them later, but a
-late-added column is nullable for ever — older files read null — so a publisher that forgets
-to set it writes NULL silently, and a recovery scan cannot tell that apart from another
-publisher's row. Declared up front they are `required` and non-null, and a publisher that
+**Declare them before anyone publishes.** A column added later means migrating the stream
+to a new log (`Stream.migrate`), and is nullable for ever — older logs read null — so a
+publisher that forgets to set it writes NULL silently, and a recovery scan cannot tell that
+apart from another publisher's row. Declared up front they are `required` and non-null, and a publisher that
 forgets fails loudly at `send`.
 
 A row that already carries a natural unique key needs none of this — match on that instead.
@@ -375,12 +387,12 @@ other; `just bench-replay` prints the arithmetic for your hardware.
 ### Recovering a server
 
 A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
-rebuilds the log itself from the archive and the replicated WAL on a machine that never
-held it:
+rebuilds the log itself from its published table and the replicated WAL on a machine
+that never held it:
 
 ```python
 stream = streamcast.Stream.restore(
-    "trades", root="data", archive="s3://market-data/prod", replay_archive=True,
+    "trades", root="data", published="s3://market-data/prod", replay_published=True,
 )
 ```
 
@@ -393,8 +405,8 @@ rather than offset distance. The fence puts the new frontier a million offsets u
 consumer 150 rows behind is 150 rows behind — the distance check runs first and free, and
 only a subscribe it would refuse pays to find out what the replay actually costs.
 
-`hydrate=timedelta(days=7)` copies archived files back to local disk; without it the local
-tier comes back empty and reads go to the archive.
+`hydrate=timedelta(days=7)` copies published files back to local disk; without it the local
+tier comes back empty and replays read the published table.
 
 A **planned** cutover loses nothing — stop the writer, let the sidecar ship its last
 frames, then restore. Unplanned failover loses whatever never shipped.
@@ -406,14 +418,14 @@ frames, then restore. Unplanned failover loses whatever never shipped.
 
 ### Serving the whole history
 
-`replay_archive=True` with `max_replay=None` makes the server a complete gateway to the
-log: no subscribe is refused for reaching too far back, and the server reads the archive on
-the subscriber's behalf.
+`replay_published=True` with `max_replay=None` makes the server a complete gateway to the
+log: no subscribe is refused for reaching too far back, and the server reads the published
+table on the subscriber's behalf.
 
 ```python
 stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
-                               archive="s3://bucket/prefix",
-                               replay_archive=True, max_replay=None)
+                               published="s3://bucket/prefix",
+                               replay_published=True, max_replay=None)
 ```
 
 Every frame is still JSON over a plain WebSocket, so **a client in any language replays the
@@ -639,7 +651,7 @@ async with streamcast.connect(uri, cursor=".trades.offset") as stream:
 | `offset=N` | resume from `N` inclusive; `streamcast.EARLIEST` for everything the log holds |
 | `cursor=path` | keep the resume point on disk — loaded at connect, saved as the loop runs |
 | `cursor_uri=s3://…` | ship that cursor to object storage — see [recovering a consumer](#recovering-a-consumer) |
-| `catch_up=True` | read the gap from the archive — see [recovering a consumer](#recovering-a-consumer) |
+| `catch_up=True` | read the gap from the published tables — see [recovering a consumer](#recovering-a-consumer) |
 
 The cursor advances when you ask for the *next* message, and is not saved if the block
 exits with an exception — so a crash re-delivers rather than skips. `sub.commit()` forces
@@ -650,8 +662,8 @@ An offset the server cannot serve is refused, never silently rounded:
 ```
 NotReplayable: offset 100 is below 5000, the earliest offset this stream's log
 still serves. Reconnect with catch_up=True to read the rows between from the
-archive if it still holds them — it will say so if it does not — or with
-offset=streamcast.EARLIEST to take what is left and accept the gap.
+published tables if they still hold them — it will say so if they do not — or
+with offset=streamcast.EARLIEST to take what is left and accept the gap.
 ```
 
 Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
@@ -681,15 +693,14 @@ disaster-recovery case and the only one where a copy that lags by up to `upload_
 should decide.
 
 **`catch_up` covers having been down too long.** A consumer past the server's `max_replay`
-is refused; the rows are in the archive, not gone. It reads them with **nothing
-connected** — holding a socket through a long catch-up gets the subscriber dropped for
-falling behind — then opens the socket where the archive ended, looping if the server
-moved on meanwhile.
+is refused; the rows are in the stream's published tables, not gone. It reads them with
+`Stream.snapshot`, from the metadata file the greeting names, with **nothing connected** —
+holding a socket through a long catch-up gets the subscriber dropped for falling behind —
+then opens the socket where the snapshot ended, looping if the server moved on meanwhile.
 
-It reads the **archive**, not the replicated WAL, so a catching-up consumer needs S3 read
-access and nothing else: no litestream binary, no subprocess. The band the WAL would add
-is the one the server is about to send anyway. [`SPEC.md`](docs/SPEC.md) §5 has the
-measurements.
+It reads the **published tables**, not the replicated WAL, so a catching-up consumer needs
+S3 read access and nothing else: no litestream binary, no subprocess, no litelink handle.
+The band the WAL would add is the one the server is about to send anyway.
 
 Neither is automatic. Both are keywords on `connect`, because a consumer that would rather
 fail loudly than resume from a copy that lags should be able to say so.

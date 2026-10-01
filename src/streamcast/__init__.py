@@ -81,9 +81,9 @@ the reason litelink's read handles have no `append`.
 
 **Recovery is three keywords on `connect`.** `cursor=` keeps the last handled
 offset on disk; `cursor_uri=` ships it to object storage so a consumer can
-resume on another box; `catch_up=True` reads the gap from the log's archive
-when a consumer has fallen past what the server will replay, then picks the
-socket up where the archive ended.
+resume on another box; `catch_up=True` reads the gap from the stream's
+published tables when a consumer has fallen past what the server will replay,
+then picks the socket up where they ended.
 
 ``EARLIEST`` is the offset that means "everything the log still holds".
 

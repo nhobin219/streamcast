@@ -21,8 +21,8 @@ publisher rather than once per subscriber.
 loop.** `cursor=` keeps the last handled offset on disk and resumes one above
 it; `cursor_uri=` ships that integer to object storage, so a consumer whose
 machine is gone can resume on another; `catch_up=True` reads the gap from the
-log's archive when the consumer has fallen past what the server will replay,
-then picks the socket up where the archive ended. `_cursor`, `_remote` and
+stream's published tables when the consumer has fallen past what the server
+will replay, then picks the socket up where they ended. `_cursor`, `_remote` and
 `_catchup` are where each is argued.
 
 **The second deviation is that there is no `send`.** A subscription is
@@ -248,7 +248,7 @@ class Subscription:
         self._stream = stream
         self._offset: int | None = None
         self._cursor = cursor
-        # Rows from the archive, drained BEFORE anything is connected — see
+        # Rows from the published tables, drained BEFORE anything is connected — see
         # `_catchup`, where holding a socket through a long catch-up is what
         # gets the subscriber dropped for falling behind. `_catcher` opens the
         # connection itself once the gap is closed.
@@ -307,11 +307,11 @@ class Subscription:
     def _live(self) -> ClientConnection:
         """The socket, once there is one.
 
-        None only while a catch-up is draining the archive — `Catcher` opens
+        None only while a catch-up is reading the published tables — `Catcher` opens
         it when the gap closes, and `recv` swaps it in before reaching here.
         """
         if self._connection is None:  # pragma: no cover — recv swaps it in
-            msg = "still reading the archive; there is no connection yet"
+            msg = "still reading the published tables; there is no connection yet"
             raise RuntimeError(msg)
 
         return self._connection
@@ -346,7 +346,7 @@ class Subscription:
             # Exhausted, which means `Catcher.stream` returned — and it does
             # not return until it has a live connection. Everything below the
             # socket came from object storage; everything from here comes from
-            # the server, starting where the archive stopped.
+            # the server, starting where the tables stopped.
             self._prelude = None
             catcher, self._catcher = self._catcher, None
             if catcher is not None and catcher.connection is not None:
@@ -367,7 +367,7 @@ class Subscription:
 
         offset, row = decode(frame)
         # Binary columns arrive as text in their encoding, and a row that
-        # came out of the archive by catch-up carries bytes: decoded here so
+        # came out of the published tables by catch-up carries bytes: decoded here so
         # the consumer cannot tell which source a row came from.
         if self._inbound is not None:
             row = self._inbound(row)
@@ -731,7 +731,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             self._catch_up_retries,
             self._handshake,
         )
-        # BEFORE handing anything back, so an unreadable archive raises here
+        # BEFORE handing anything back, so an unreadable table raises here
         # rather than from whatever line first calls `recv`. Entering the
         # block has to keep meaning that the subscription works.
         await catcher.prepare()
@@ -801,7 +801,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
                 raise
 
             # Too far behind for the server to replay, which is exactly what
-            # the archive is for.
+            # the published tables are for.
             subscription = await self._recover(refusal)
 
         else:

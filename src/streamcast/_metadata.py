@@ -36,9 +36,9 @@ exists on two machines names two different streams, and the id is how a
 reader tells them apart.
 
 **Beside the logs, not inside one.** `root/trades` IS the first log's
-directory, so a file in it would be a file inside a litelink log. And a copy
-goes to `<archive>/trades.metadata.json`, because `Stream.restore` and a
-remote reader have the archive and not this disk.
+directory, so a file in it would be a file inside a litelink log. And when the
+logs publish to S3 a copy goes to `<published>/trades.metadata.json`, because
+`Stream.restore` and a remote reader have the bucket and not this disk.
 
 **Each entry says where its log's rows are read from**: `published`, the
 prefix its published table sits under, at `<published>/<name>`. Per log,
@@ -395,39 +395,39 @@ def uri(stream: str, log: LogHandle) -> str:
     return path(log.root, stream).resolve().as_uri()
 
 
-def _uri(archive: str, stream: str) -> str:
-    return f"{archive.rstrip('/')}/{stream}.metadata.json"
+def _uri(published: str, stream: str) -> str:
+    return f"{published.rstrip('/')}/{stream}.metadata.json"
 
 
-def publish(metadata: Metadata, archive: str, s3: S3Options | None) -> None:
-    """Copy the metadata to the archive, beside the logs' own prefixes.
+def publish(metadata: Metadata, published: str, s3: S3Options | None) -> None:
+    """Copy the metadata to `published`, beside the logs' published tables.
 
-    Raises rather than logging: a stream whose archive does not name its
-    current log is one `Stream.restore` would rebuild as the wrong log.
+    Raises rather than logging: a stream whose published copy does not name
+    its current log is one `Stream.restore` would rebuild as the wrong log.
     """
-    uri = _uri(archive, metadata.stream)
+    uri = _uri(published, metadata.stream)
     filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
     with filesystem.open_output_stream(key) as stream:
         stream.write(metadata.to_json().encode())
 
 
-def sync(metadata: Metadata, archive: str, s3: S3Options | None) -> None:
-    """Make the archive's copy match `metadata`, uploading only if it differs.
+def sync(metadata: Metadata, published: str, s3: S3Options | None) -> None:
+    """Make the published copy match `metadata`, uploading only if it differs.
 
     Run at every `serve`, so an upload that failed is repaired by the next
     start rather than by whoever notices, and a stream that has not changed
     costs one GET. Raises on any failure but absence — see `fetch`.
     """
-    if fetch(archive, metadata.stream, s3) != metadata:
-        publish(metadata, archive, s3)
+    if fetch(published, metadata.stream, s3) != metadata:
+        publish(metadata, published, s3)
 
 
 def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
-    """The stream's metadata, written if it is not there and synced to the archive.
+    """The stream's metadata, written if it is not there and synced to S3.
 
     **`serve` calls this for every durable stream before it listens**, and a
     failure is a failure to start: a stream whose metadata cannot be written,
-    or cannot reach its archive, is one nothing else can read, and finding
+    or cannot reach its S3 copy, is one nothing else can read, and finding
     that out at the first remote read is finding it out too late.
 
     `log` must be the stream's LIVE log. A handle to any other — a retired log
@@ -463,14 +463,14 @@ def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
     return found
 
 
-def fetch(archive: str, stream: str, s3: S3Options | None) -> Metadata | None:
-    """The archive's copy, or None if there is none there.
+def fetch(published: str, stream: str, s3: S3Options | None) -> Metadata | None:
+    """The published copy, or None if there is none there.
 
     Only a MISSING object is None. Anything else — bad credentials, an
     unreachable endpoint — raises, because treating it as "one log" would
     restore the stream's first log as though it were its current one.
     """
-    uri = _uri(archive, stream)
+    uri = _uri(published, stream)
     filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
     try:
         with filesystem.open_input_stream(key) as source:
@@ -482,7 +482,7 @@ def fetch(archive: str, stream: str, s3: S3Options | None) -> Metadata | None:
         # would go on to rebuild the stream's first log as though it were live.
         bucket = key.split("/", 1)[0]
         if filesystem.get_file_info(bucket).type == pafs.FileType.NotFound:
-            msg = f"the archive's bucket {bucket!r} does not exist ({archive})"
+            msg = f"the published location's bucket {bucket!r} does not exist ({published})"
             raise FileNotFoundError(msg) from None
 
         return None
