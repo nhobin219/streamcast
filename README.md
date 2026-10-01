@@ -713,15 +713,23 @@ A subscription delivers rows one at a time. To ask a question of a stream — an
 a join, a scan of last Tuesday — read it as a table, `log`, that spans every log the
 stream has been through.
 
-**`Stream.snapshot` reads a fixed point, offline.** Given the stream's metadata file on S3,
-it reads the published tables on your machine with your credentials, and never touches the
-server:
+**`Stream.snapshot` reads a fixed point.** Given the stream's metadata file on S3, it reads
+the published tables on your machine with your credentials, offline — or, given `broker=`,
+it also takes the rows the server has not published yet, up to an offset or the latest:
 
 ```python
 async with await streamcast.Stream.snapshot(
     "s3://market-data/prod/trades.metadata.json"
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+
+# The same, completed from the server up to its newest row.
+async with await streamcast.Stream.snapshot(
+    "s3://market-data/prod/trades.metadata.json",
+    as_of_offset=streamcast.LATEST,
+    broker="ws://localhost:8765/trades",
+) as snapshot:
+    ...
 ```
 
 **`Stream.live` is real-time analytics on a stream in one line.** It is a snapshot kept
