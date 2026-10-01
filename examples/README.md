@@ -38,7 +38,7 @@ just demo NAME [ARGS]      # run one, with all its processes
 | `live` | as `trades`, with a live-only broker | no log: nothing to replay |
 | `fastapi` | `fastapi_app.py` as the broker, then as `trades` | the broker mounted in a FastAPI app |
 | `book` | broker, `book/producer.py`, `book/index.html` | Bitstamp's live order book as a keyed table log, kept by a browser page |
-| `otel` | otel-gui, broker, `otel/services.py`, `otel/export.py` | OpenTelemetry logs and traces through streams, in a dashboard |
+| `otel` | otel-gui, broker, `otel/services.py`, `otel/analytics.py`, `otel/export.py` | OpenTelemetry logs and traces through streams, in a dashboard |
 | `clean` | | delete what the demos stored |
 
 `just demo` starts a demo's processes in order, waiting for each one that
@@ -263,7 +263,7 @@ history still a queryable table.
 ## OpenTelemetry logs and traces, in a dashboard
 
 ```
-just demo otel                        # otel-gui, a broker, the services, and the OTLP exporter
+just demo otel                        # otel-gui, a broker, the services, analytics, and the OTLP exporter
 uv run python -m examples.otel.demo   # the same pipeline once, printing what each part saw
 ```
 
@@ -276,6 +276,19 @@ failed order is one trace across both services: payments' `POST /charge`
 span with a `card declined` event and error log, and checkout's request
 marked failed with an `order failed` warning.
 
+`otel/analytics.py` is real-time analytics on the same telemetry, in one
+`Stream.live` view of `spans`. Every few seconds it asks, in one SQL query,
+each service's error rate over the last 30 seconds against its error rate
+over everything, and p95 latency, and prints a line to the console, flagging
+a service whose recent rate is well above its long-term one. There is no
+consumer loop and no running total kept by hand: the view keeps itself
+current, and the question is a query.
+
+```
+[22:10:31] checkout  last 15s:  23.8% errors of  21 requests  | all    24:  29.2%  | p95   54.1 ms
+[22:10:31] payments  last 15s:  23.8% errors of  21 requests  | all    24:  29.2%  | p95    0.2 ms
+```
+
 | file | what it holds |
 |---|---|
 | `otel/common.py` | what both signals share: `AnyValue`, ids, scope, and publishing from OTel's export thread |
@@ -284,6 +297,7 @@ marked failed with an `order failed` warning.
 | `otel/demo.py` | the two services, the broker, and the one-shot demo |
 | `otel/export.py` | rows back to OTel records and spans, out through OTel's OTLP exporters |
 | `otel/services.py` | the producer: two services logging and tracing through OTel, publishing to the broker |
+| `otel/analytics.py` | real-time analytics with `Stream.live`: error rate now against always, per service |
 | `otel/gui.py` | otel-gui, downloaded, checked and run: where `export.py` sends what it reads |
 
 **None of this is in streamcast.** The schemas and conversions are built from

@@ -17,7 +17,8 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
-from examples.otel import common, demo, export, logs, spans  # noqa: E402
+import streamcast  # noqa: E402
+from examples.otel import analytics, common, demo, export, logs, spans  # noqa: E402
 
 
 class TestTheDemo:
@@ -293,3 +294,98 @@ class TestTheExporter:
         assert span.parent_span_id == original_span.parent.span_id.to_bytes(8, "big")
         assert span.status.code == 2  # STATUS_CODE_ERROR
         assert [e.name for e in span.events] == ["card declined"]
+
+
+def span_row(i: int, service: str, *, kind: int = 2, failed: bool = False) -> dict:
+    """The fields `spans.SCHEMA` requires, plus the service: enough to count."""
+    return {
+        "trace_id": i.to_bytes(16, "big"),
+        "span_id": i.to_bytes(8, "big"),
+        "name": "POST /orders" if service == "checkout" else "POST /charge",
+        "kind": kind,
+        "start_time_unix_nano": 1_000_000_000 * i,
+        "end_time_unix_nano": 1_000_000_000 * i + 5_000_000,
+        "service": service,
+        "status_code": spans.ERROR if failed else 1,
+    }
+
+
+class TestTheAnalytics:
+    async def test_the_query_counts_each_services_requests_and_errors(
+        self, tmp_path, serve
+    ):
+        """Through `Stream.live`, as the demo runs it: server spans only."""
+        stream = streamcast.Stream.new("spans", root=tmp_path, schema=spans.SCHEMA)
+        rows = [
+            *(span_row(i, "checkout", failed=i == 0) for i in range(4)),
+            *(span_row(10 + i, "payments", failed=i < 2) for i in range(4)),
+            span_row(
+                20, "checkout", kind=3, failed=True
+            ),  # a client call: not a request
+        ]
+        await stream.send_many(rows)
+        try:
+            async with serve(stream, maintain=False) as uri:
+                async with await streamcast.Stream.live(uri) as live:
+                    await live.wait_for(len(rows))
+                    table = await live.sql(analytics.query(3_600 * 1_000_000))
+
+            counts = [
+                {
+                    k: r[k]
+                    for k in ("service", "recent", "recent_errors", "total", "errors")
+                }
+                for r in table.to_pylist()
+            ]
+            assert counts == [
+                {
+                    "service": "checkout",
+                    "recent": 4,
+                    "recent_errors": 1,
+                    "total": 4,
+                    "errors": 1,
+                },
+                {
+                    "service": "payments",
+                    "recent": 4,
+                    "recent_errors": 2,
+                    "total": 4,
+                    "errors": 2,
+                },
+            ]
+            assert all(r["p95_ms"] == pytest.approx(5.0) for r in table.to_pylist())
+        finally:
+            await stream.aclose()
+
+    def test_a_service_running_hot_is_flagged(self, capsys):
+        hot = {
+            "service": "payments",
+            "recent": 10,
+            "recent_errors": 5,
+            "total": 100,
+            "errors": 10,
+            "p95_ms": 12.0,
+        }
+        steady = {
+            "service": "checkout",
+            "recent": 10,
+            "recent_errors": 1,
+            "total": 100,
+            "errors": 10,
+            "p95_ms": 3.0,
+        }
+        few = {
+            "service": "billing",
+            "recent": 2,
+            "recent_errors": 2,
+            "total": 100,
+            "errors": 10,
+            "p95_ms": None,
+        }
+        analytics.report([hot, steady, few], 30, 101)
+
+        lines = capsys.readouterr().out.splitlines()
+        flagged = [line for line in lines if "ABOVE LONG-TERM" in line]
+        assert len(flagged) == 1
+        assert "payments" in flagged[0]
+        assert "50.0%" in flagged[0]

@@ -273,9 +273,14 @@ class Snapshot:
             )
 
         if not parts:
-            # Nothing to read, so nothing to filter: the caller's conditions
-            # would name columns this empty relation does not have.
-            return "SELECT NULL::BIGINT AS litelink_offset WHERE FALSE"
+            # Nothing to read — nothing published yet, no tail — but still the
+            # stream's columns, typed as the live log declares them: a query
+            # over an empty stream is an empty answer, not a binder error on
+            # the first column it names.
+            self._connection.register(
+                "streamcast_empty", _tail_table(self.metadata.live_log, [])
+            )
+            parts.append("SELECT * FROM streamcast_empty")
 
         union = " UNION ALL BY NAME ".join(parts)
         conditions = [_term_sql(term) for term in filters]
