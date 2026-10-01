@@ -57,7 +57,13 @@ class TestItIsStamped:
         await stream.send(trade(0))
 
         [ts] = stored(stamped)
-        assert stream.stats.last_send_ts == pytest.approx(ts / 1e6, abs=1e-6)
+        # One `time_ns()` reading, two forms: the log keeps it truncated to
+        # whole microseconds, the stats keep it as float seconds. They differ
+        # by under 1 us of truncation plus float rounding, which at today's
+        # epoch is one ulp of 2**-22 s (0.24 us) per value — so 1.5 us is a
+        # bound, not a margin. 1 us alone failed on a reading 0.99 us past
+        # the microsecond.
+        assert stream.stats.last_send_ts == pytest.approx(ts / 1e6, abs=1.5e-6)
 
     async def test_the_callers_row_is_not_modified(self, stamped):
         stream = streamcast.Stream("trades", log=stamped)
