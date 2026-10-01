@@ -7,6 +7,16 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- **`just demo-otel`** no longer loses its dashboard on the first export.
+  otel-gui loads its trace and logs protobuf definitions lazily into one
+  shared root, and the exporter's first traces and logs requests arrive
+  together; the interleaved loads crash otel-gui. The recipe now sends one
+  empty request to each, in turn, before the exporter starts.
+
 ## 0.9.0 — 2026-09-30
 
 ### Added
