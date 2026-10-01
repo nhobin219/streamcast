@@ -1,20 +1,20 @@
-"""`examples/state/`, run rather than read.
+"""`examples/keyed_table/`, run rather than read.
 
-The latest-state view and the branches built on it are patterns a reader
+The keyed table log's view and the branches built on it are patterns a reader
 copies, so each runs end to end here, with every view's book pinned.
 """
 
 from __future__ import annotations
 
-from examples.state import branches, latest
-from examples.state.view import View
+from examples.keyed_table import branches, orders
+from examples.keyed_table.view import View
 
 
-class TestTheLatestState:
+class TestTheKeyedTable:
     async def test_the_book_is_the_last_row_per_order_without_tombstones(
         self, tmp_path
     ):
-        seen = await latest.main(tmp_path)
+        seen = await orders.main(tmp_path)
 
         assert seen["book"] == [
             {"order_id": 1, "symbol": "AAPL", "side": "buy", "qty": 60, "price": 191.0},
@@ -25,7 +25,7 @@ class TestTheLatestState:
         assert seen["from_log"] == seen["book"]
 
     async def test_a_reopened_view_resumes_from_its_own_offset(self, tmp_path):
-        seen = await latest.main(tmp_path)
+        seen = await orders.main(tmp_path)
 
         # Written in the same transaction as the rows, so what the view read
         # back on reopening is exactly where it had stopped.
@@ -35,12 +35,12 @@ class TestTheLatestState:
 class TestAFork:
     def test_is_its_own_database_at_the_same_offset(self):
         main = View.open()
-        main.apply(1, latest.order(1, "AAPL", "buy", 100, 190.0))
+        main.apply(1, orders.order(1, "AAPL", "buy", 100, 190.0))
         fork = main.fork()
 
         assert fork.offset == main.offset == 1
-        main.apply(2, latest.gone(1))
-        fork.apply(3, latest.order(2, "MSFT", "sell", 5, 410.0))
+        main.apply(2, orders.gone(1))
+        fork.apply(3, orders.order(2, "MSFT", "sell", 5, 410.0))
 
         assert [o["order_id"] for o in main.orders()] == []
         assert [o["order_id"] for o in fork.orders()] == [1, 2]

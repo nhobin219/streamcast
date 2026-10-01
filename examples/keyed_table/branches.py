@@ -1,6 +1,6 @@
 """Branches: every client its own database, committed with one `send_many`.
 
-    uv run python -m examples.state.branches
+    uv run python -m examples.keyed_table.branches
 
 One stream of order events, with a `branch_id` column. `main` is production.
 A branch is a client's private database: a copy of main's view at the offset
@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import streamcast
-from examples.state.latest import gone, order
-from examples.state.view import ORDER, View
+from examples.keyed_table.orders import gone, order
+from examples.keyed_table.view import ORDER, View
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

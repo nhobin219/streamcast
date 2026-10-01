@@ -241,15 +241,15 @@ demo-otel host="127.0.0.1" port="4318":
 # in SQLite: the last row by id, where not deleted. It is stopped partway and resumes from its own stored offset.
 #
 # A keyed table log of orders, kept as a table in SQLite.
-demo-latest:
-    uv run python -m examples.state.latest
+demo-keyed-table:
+    uv run python -m examples.keyed_table.orders
 
 # Branches: each client forks main's view into a private database, writes to
 # its own branch_id, and commits with one send_many onto main.
 #
 # Branches: every client its own database, committed with one send_many.
 demo-branches:
-    uv run python -m examples.state.branches
+    uv run python -m examples.keyed_table.branches
 
 # The OTel example once, start to finish, printing what each part saw.
 demo-otel-once:

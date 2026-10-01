@@ -1,6 +1,6 @@
 """A keyed table log of orders, and a subscriber that keeps the table.
 
-    uv run python -m examples.state.latest
+    uv run python -m examples.keyed_table.orders
 
 Orders are written as a keyed table log (`view.py`): new, amended, cancelled
 and filled, each row an order's whole state, a tombstone to close one. A
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import streamcast
-from examples.state.view import SCHEMA, View
+from examples.keyed_table.view import SCHEMA, View
 
 
 def order(
@@ -66,7 +66,7 @@ AFTER = [
 ]
 
 # "Last row by id, where not deleted", over the whole log.
-LATEST = """
+TABLE = """
 SELECT order_id, symbol, side, qty, price FROM (
     SELECT *, row_number() OVER (
         PARTITION BY order_id ORDER BY litelink_offset DESC
@@ -113,7 +113,7 @@ async def main(root: Path) -> dict[str, Any]:
             book = view.orders()
 
         assert stream.log is not None
-        from_log = stream.log.sql(LATEST).read_all().to_pylist()
+        from_log = stream.log.sql(TABLE).read_all().to_pylist()
     finally:
         server.close()
         await server.wait_closed()

@@ -134,8 +134,8 @@ Needs the extra: `pip install 'streamcast[asgi]'`.
 ## A keyed table log, and branches
 
 ```
-just demo-latest       # open orders, kept in SQLite by a subscriber
-just demo-branches     # every client its own database, committed with one send_many
+just demo-keyed-table   # open orders, kept in SQLite by a subscriber
+just demo-branches      # every client its own database, committed with one send_many
 ```
 
 What state a stream holds is the application's to define. These examples
@@ -143,16 +143,16 @@ use a common shape, the **keyed table log**: each row is the whole state of
 one record, keyed by an id, with a `deleted` flag. Written that way, the
 table the log stands for is "the last row by id, where not deleted", and a
 subscriber can keep it as it reads. streamcast knows nothing of keys or
-deletes; this schema defines both. `state/view.py` keeps that table for a
-log of orders, in SQLite, one statement per row.
+deletes; this schema defines both. `keyed_table/view.py` keeps that table
+for a log of orders, in SQLite, one statement per row.
 
 **The view is its own cursor.** It writes the offset it has applied in the
 same transaction as the row, so a view reopened after a crash resumes at
-exactly the next row. `state/latest.py` stops one partway, publishes more,
-and reopens it. It then asks the log the same question, as one window
+exactly the next row. `keyed_table/orders.py` stops one partway, publishes
+more, and reopens it. It then asks the log the same question, as one window
 function over `litelink_offset`, and gets the same book.
 
-**Branches** (`state/branches.py`) add a `branch_id` column. Production
+**Branches** (`keyed_table/branches.py`) add a `branch_id` column. Production
 writes to `main`. A branch is a client's private database:
 
 1. `View.fork()` copies main's view at the offset it has applied.
