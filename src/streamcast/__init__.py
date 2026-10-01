@@ -17,6 +17,12 @@ The API is a thin custom pubsub layer on top of standard `websockets`. For
 those familiar with kdb+, a streamcast server is effectively a Python
 WebSocket tickerplant (https://code.kx.com/q/architecture/).
 
+A streamcast server is a LOG-BACKED PUB/SUB BROKER. Publishers and subscribers
+are both its clients; it owns the log, assigns the offsets, and is the only
+writer. Routing is exact-match on the stream's name — no topic hierarchy, no
+wildcard subscriptions — and a subscriber resumes by offset instead, which is
+what the log buys.
+
 With a log attached, every message is durable *before* any subscriber sees it,
 so a consumer that falls behind, crashes or restarts reconnects with the last
 offset it processed and the server replays the gap before switching it to

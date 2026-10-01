@@ -212,6 +212,15 @@ streamcast.serve(streams, host=None, port=None, *, maintain=True,
                  **websockets_kwargs) -> Server
 ```
 
+Runs a **log-backed pub/sub broker**: publishers on one side, subscribers on the other,
+neither owning the process. It owns the log, assigns every offset, and is litelink's
+single writer.
+
+Routing is exact-match on `Stream.name`. There is no topic hierarchy and no wildcard
+subscription, and that is a consequence rather than an omission: a subscriber resumes by
+offset, an offset belongs to one log, so a subscription spanning streams would need a
+cursor per stream.
+
 `streams` is a `Stream` or an iterable of them. Returns exactly what `websockets.serve`
 returns, so all three forms work:
 

@@ -30,6 +30,12 @@ API is a thin custom pubsub layer on top of standard `websockets`. For those fam
 kdb+, a streamcast server is effectively a Python WebSocket
 [tickerplant](https://code.kx.com/q/architecture/).
 
+**A streamcast server is a log-backed pub/sub broker.** Publishers and subscribers are both
+its clients — a feed handler calling `Stream.send` in the same process or
+`streamcast.publish` from another machine on one side; `connect`, `Stream.snapshot` and
+`Stream.live` on the other — and the server owns the log, assigns the offsets, and is its
+only writer.
+
 ## The log is the analytical table
 
 The usual shape is a message log in one system and an analytical store in another, with a
@@ -178,6 +184,14 @@ against 5.815 µs for stdlib `json`.
 counter would look like a resume cursor until the server restarted.
 
 ## Server
+
+`serve` runs the broker. It accepts publishers, fans messages out to subscribers, and with
+a log attached replays what a subscriber missed — so neither end owns the process, and
+either can restart without the other noticing.
+
+Routing is exact-match on the stream's name: there is no topic hierarchy and no wildcard
+subscription. A subscriber names one stream and resumes it by offset, which is the trade
+the log buys.
 
 The schema is yours, declared in JSON Schema. `streamcast` is the only import a durable
 stream needs.
