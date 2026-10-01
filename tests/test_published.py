@@ -35,6 +35,61 @@ def test_litelinks_provisioning_is_still_where_this_reads_it():
         assert callable(getattr(_read, name)), f"litelink._read.{name} moved"
 
 
+class TestTheConnection:
+    """One database per process and credential set; a connection per reader."""
+
+    def test_readers_share_a_database_and_not_their_views(self):
+        first = _published.connection(None, remote=False)
+        second = _published.connection(None, remote=False)
+        try:
+            # Shared: what one creates in the database, the other sees — so
+            # `iceberg`, loaded once, is loaded for both.
+            first.execute("CREATE OR REPLACE TABLE shared_probe AS SELECT 1 AS x")
+            assert second.execute("SELECT x FROM shared_probe").fetchall() == [(1,)]
+            # Private: a snapshot's `log` view is its own.
+            first.execute("CREATE TEMP VIEW log AS SELECT 1 AS x")
+            with pytest.raises(Exception, match="log"):
+                second.execute("SELECT * FROM log")
+        finally:
+            first.execute("DROP TABLE shared_probe")
+            first.close()
+            second.close()
+
+    def test_different_credentials_never_share_a_database(self):
+        one = litelink.S3Options(access_key="a", secret_key="1", endpoint="http://x:9")
+        two = litelink.S3Options(access_key="b", secret_key="2", endpoint="http://x:9")
+        first = _published.connection(one, remote=True)
+        second = _published.connection(two, remote=True)
+        again = _published.connection(one, remote=True)
+        try:
+            keys = "SELECT secret_string FROM duckdb_secrets()"
+            assert "key_id=a;" in str(first.execute(keys).fetchall())
+            assert "key_id=b;" in str(second.execute(keys).fetchall())
+            assert "key_id=a;" in str(again.execute(keys).fetchall())
+        finally:
+            for connected in (first, second, again):
+                connected.close()
+
+    def test_the_ambient_chain_is_resolved_again_per_connection(self, monkeypatch):
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+        chain = litelink.S3Options(endpoint="http://chain:9")
+        first = _published.connection(chain, remote=True)
+        try:
+            # Gone from the database, as an expired one effectively is ...
+            first.execute("DROP SECRET litelink_s3")
+            second = _published.connection(chain, remote=True)
+            try:
+                # ... and back, because the next reader re-created it.
+                secrets = "SELECT provider FROM duckdb_secrets()"
+                assert second.execute(secrets).fetchall() == [("credential_chain",)]
+            finally:
+                second.close()
+        finally:
+            first.close()
+
+
 class TestALocalTable:
     def test_it_reads_the_rows_and_their_extent(self, tmp_path):
         with published_log(tmp_path, 5) as log:

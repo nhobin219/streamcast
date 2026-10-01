@@ -14,13 +14,20 @@ landing in between cannot make them disagree. A reader that wants newer rows
 opens the table again.
 
 **The DuckDB connection is litelink's**, with the `iceberg` and `httpfs`
-extensions litelink provisions rather than installs at first read. Those are
+extensions litelink provisions rather than installs at first read.
+
+**One database per process, a connection per reader.** Loading `iceberg` into
+a fresh DuckDB database costs 400-580 ms (measured, `just bench-snapshot`), and
+was the whole cost of opening a snapshot; a connection to a database that has
+it loaded costs 0.2 ms. Each reader still gets its own connection, so its temp
+view and registered tail are its own. Those are
 private in litelink 0.6 (`litelink._read`); litelink#108 asks for a public
 spelling, and `tests/test_published.py` fails loudly if they move first.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit
 
@@ -48,16 +55,43 @@ def _quoted(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
+# The databases readers connect to, by what they can read with. Never evicted:
+# a process reads with a handful of credential sets at most.
+_DATABASES: dict[tuple[bool, str | None], duckdb.DuckDBPyConnection] = {}
+_LOCK = threading.Lock()
+
+
 def connection(s3: S3Options | None, *, remote: bool) -> duckdb.DuckDBPyConnection:
-    """A DuckDB connection that can read published tables.
+    """A DuckDB connection that can read published tables. The caller closes it.
 
     `httpfs` and credentials only when `remote`, for `s3://` tables: a local
     one needs neither, and a machine reading only local tables never loads them.
+
+    **One database per credential set**, keyed by the secret itself. DuckDB's
+    secrets belong to the database, not the connection, so two readers with
+    different keys or endpoints sharing one would read with whichever wrote
+    the secret last.
+
+    **The ambient chain is resolved again for every connection.** A
+    `credential_chain` secret fetches its credentials when it is created, and a
+    database that outlives an STS session would go on presenting an expired
+    token. Re-creating it is what a database per reader used to do implicitly.
     """
-    connected = duckdb_connection()
-    if remote:
-        load_extension(connected, "httpfs", remote=True)
-        connected.execute(secret_sql((s3 or S3Options()).resolved()))
+    secret = secret_sql((s3 or S3Options()).resolved()) if remote else None
+    with _LOCK:
+        database = _DATABASES.get((remote, secret))
+        if database is None:
+            database = duckdb_connection()
+            if secret is not None:
+                load_extension(database, "httpfs", remote=True)
+                database.execute(secret)
+
+            _DATABASES[(remote, secret)] = database
+
+        elif secret is not None and "credential_chain" in secret:
+            database.execute(secret)
+
+        connected = database.cursor()
 
     return connected
 
