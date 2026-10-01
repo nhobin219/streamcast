@@ -19,6 +19,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   Also branches built on it: each client forks main's view into a private
   database, follows its own `branch_id`, and commits with one `send_many`
   onto main.
+- **`examples/migration/`** and **`just demo-migration`**: a pipeline of
+  streams, A -> B -> C, and a schema migration of B tested in a shadow,
+  D -> E, against production's live and historical data without production
+  waiting on it. Old and new are diffed with one DuckDB join on the source
+  offset each row carries; `--bug` shows a wrong migration named order by
+  order.
 
 ### Fixed
 

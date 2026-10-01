@@ -172,6 +172,34 @@ That is how to try a new system against live data: a migration or a new
 service reads everything production does, writes only to its branch, and
 production never sees a row of it.
 
+## A migration, tested against live production data
+
+```
+just demo-migration          # a correct migration: old and new agree
+just demo-migration --bug    # a wrong one: the diff names every order it breaks
+```
+
+Production is a pipeline of streams: A (`orders`) feeds B (`positions`),
+which feeds C (`alerts`). Each node subscribes to one stream and publishes
+to the next (`migration/node.py`). The migration changes B's output schema.
+Rather than change B in place, a shadow runs beside it:
+
+- **D** is B's code, changed to write the new schema to its own stream. It
+  subscribes to A from `EARLIEST`, so it rebuilds B's state from production's
+  whole history, then follows production live.
+- **E** is C's code, changed to read the new schema.
+
+Production never knows. D and E are just more subscribers, and a stream never
+waits on a subscriber: the demo makes D slow on purpose, and production
+finishes long before it does.
+
+**The test is a join.** Every output row carries `order_offset`, the offset
+in A it came from, so old and new compare row for row rather than by time. A
+comparator watches the four outputs live, and DuckDB joins B against D and C
+against E. An empty diff means the migration does what production does. Once
+it's empty, the cutover is C reading D's stream, and B retires with its
+history still a queryable table.
+
 ## OpenTelemetry logs and traces, in a dashboard
 
 ```

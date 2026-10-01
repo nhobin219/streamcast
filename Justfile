@@ -251,6 +251,14 @@ demo-keyed-table:
 demo-branches:
     uv run python -m examples.keyed_table.branches
 
+# A pipeline A -> B -> C, and a migration of B tested against its live and
+# historical data by a shadow D -> E beside it, diffed old against new.
+# `just demo-migration --bug` deploys a migration that is wrong.
+#
+# A schema migration, tested against live production data in a shadow.
+demo-migration *args:
+    uv run python -m examples.migration.demo {{args}}
+
 # The OTel example once, start to finish, printing what each part saw.
 demo-otel-once:
     uv run python -m examples.otel.demo
