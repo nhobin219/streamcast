@@ -30,7 +30,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   for the next row. Memory holds only what is
   not yet published: the base is re-pinned every `rebase_every` seconds and
   after every reconnect. Dropped connections reconnect with catch-up; a
-  failure that can't be fixed is raised by the next query.
+  failure that can't be fixed is raised by the next query. `where=` narrows
+  the view on the server and the published tables alike, and
+  `start_offset=` (or `LATEST`, from now) is the lowest offset it sees.
 - **`Stream.metadata_uri`**: where a reader finds the stream's metadata file.
 - **`connect(metadata=)`**: the metadata file `catch_up` reads from, in place
   of the greeting's.

@@ -1276,7 +1276,8 @@ machine. On another machine the read says so and suggests an `s3://` location.
 ### Keeping it current: `Stream.live`
 
 ```python
-await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0) -> Live
+await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0, where=None,
+                             start_offset=None) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
@@ -1301,6 +1302,8 @@ listening to it. For an offline read, or a fixed point to come back to, use a sn
 | **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
 | **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |
 | **`wait_for`** | exactly one of `offset` (that row has arrived) or `ts=` (every row stamped at or before it has). A time is proven only by a row stamped after it, so on a quiet stream `wait_for(ts=)` waits for the next row: bound it with `asyncio.timeout` where the stream can go idle. Published rows count. Refused on a log without `streamcast_ts` |
+| **`where=`** | narrows the view as `connect(where=)` narrows a subscription, on both sides of the join: the server sends only matching rows, and the published tables are read with the same terms as `filters=`, so every query sees only matches and retired logs that can't match are skipped. Equality and membership over **non-null scalars on scalar columns** only — `None` means "is null" to the subscription and matches nothing in SQL, and a binary column is text on the wire and bytes in the table — so those are refused at open; filter them in the query instead. With `where=`, `wait_for(offset)` returns once a *matching* row at or past it has arrived |
+| **`start_offset=`** | the lowest offset any query sees. `streamcast.LATEST` is the broker's frontier at open: a view of what happens from now. Rows still move to the published tables at each rebase, read from there above the start, so memory stays the publish lag |
 | **failures** | anything reconnecting can't fix is kept and raised by the next query or `wait_for`, so a broken view never answers from stale data |
 
 Queries run one at a time: each reads one DuckDB connection, which cannot run two.
