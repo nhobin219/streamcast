@@ -735,7 +735,15 @@ async with await streamcast.Stream.snapshot(
     "s3://market-data/prod/trades.metadata.json", s3=s3
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
-    await snapshot.scan(columns=["price"], filters=[("price", ">", 85_000.0)])
+    await snapshot.scan(
+        columns=["event_ts", "price"],
+        filters=[("price", ">", 85_000.0)],   # skips whole logs that can't match
+        where="side = 1 AND amount * price > 1000",   # any SQL, applied to rows
+    )
+    # The same split for SQL: `filters=` narrows the table `log` the query sees.
+    await snapshot.sql(
+        "SELECT max(price) FROM log WHERE side = 1", filters=[("price", ">", 85_000.0)]
+    )
 
 # One-shot forms, for a single question:
 await streamcast.Stream.sql("s3://market-data/prod/trades.metadata.json", "SELECT ...")
@@ -765,19 +773,39 @@ Everything else is a read of files.
 another stream, a range neither the tables nor the broker holds: each raises
 `SnapshotUnavailable` with the numbers, never a short answer.
 
-**Pruning** comes from `filters=` and offset bounds, which rule out whole logs on the
-stream's statistics before any is opened. A `WHERE` inside your SQL filters rows but
-skips nothing ([#57](https://github.com/nhobin219/streamcast/issues/57)).
+**`filters=` and `where=` both filter rows, but only `filters=` can skip a log.** The
+result is the same either way; what differs is how much gets read.
+
+- **`filters=`** is a list of `(column, operator, value)` terms — `==`, `<`, `<=`, `>`, `>=`,
+  `in` — ANDed together. Because each term is that simple, it can be checked against every
+  log's per-column min and max (`<stream>.manifest.parquet`) *before the log is opened*: a
+  log whose prices all sit below 85,000 is never read. The terms are then applied to the
+  rows too, so what you get never depends on what was skipped. Numeric and boolean columns
+  skip; others still filter, they just can't rule out a log.
+- **`where=`** (and a `WHERE` in your SQL) is any SQL expression: arithmetic, `OR`,
+  functions, other columns. It is applied to the rows of every log in range, and skips
+  none. Reading arbitrary SQL well enough to rule logs out is easy to get subtly wrong —
+  an `OR` or a cast misread drops a log that held matches, and the answer comes back short
+  with nothing to show for it — so it isn't attempted
+  ([#57](https://github.com/nhobin219/streamcast/issues/57)).
+
+So state the cheap, prunable part of a predicate as `filters=` and the rest as `where=`, as
+above. Offset bounds (`start_offset=`, `end_offset=`) skip logs the same way `filters=`
+does. Within a log, DuckDB's own Parquet statistics still prune files for both.
 
 ### Live: always online
 
-`Stream.live` is a snapshot kept current, and it is **online by design**: it takes only the
-broker's address, because a view of the stream *now* has to be listening to it.
+`Stream.live` is a snapshot kept current: **real-time analytics on a stream in one line**.
+The aggregate you would run over yesterday's history runs over everything up to the row
+that arrived a moment ago, with the same `scan` and `sql`, `filters=` and `where=`. It is
+**online by design**: it takes only the broker's address, because a view of the stream
+*now* has to be listening to it.
 
 ```python
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)          # until that row is visible to a query
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await live.scan(filters=[("price", ">", 85_000.0)], where="side = 1")
 ```
 
 It reads the greeting for where the stream is published, snapshots that, and subscribes
