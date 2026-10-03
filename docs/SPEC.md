@@ -451,6 +451,25 @@ prints both, and the arithmetic, for your own shape and hardware.
 Every number here comes from `benchmarks/replay.py`. Raise one of the two
 settings and check the other.
 
+### The inbound side: `max_inbound`
+
+A slow consumer is dropped; a slow DISK cannot be. Every publisher on a stream
+feeds one writer thread, and if commits fall behind what arrives, rows queue
+in memory — with nothing bounding them, until the broker is out of it.
+`max_inbound` (65,536 rows by default) bounds that queue per stream, across
+all its publishers, and at the bound a sender **waits** rather than being
+refused: a local `send` waits for room, and a publisher connection's reader
+stops reading its socket, so TCP holds the remote publisher back and its
+`submit` waits on its window. The check and the queueing are adjacent
+statements with no `await` between them — `tests/test_invariants.py` holds
+them so — or two senders could take the same room. A batch larger than the
+bound is let in when the queue is empty, so it waits rather than deadlocks.
+
+Per connection the bound is `serve(max_in_flight=)`, 64 frames: the replies
+one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
+a connection's share of memory is bounded too, and `max_inbound` caps what
+any number of connections add up to.
+
 ### A subscriber that walks away
 
 A disconnect is noticed by `send` raising — but only if there is something to

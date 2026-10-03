@@ -253,3 +253,31 @@ def test_no_initialiser_builds_its_own_collaborators():
         "an initialiser builds a collaborator or does I/O; move it to a "
         f"factory (see `Stream.new`): {offenders}"
     )
+
+
+@pytest.mark.parametrize("name", ["send", "send_many", "serve_publisher"])
+def test_room_is_taken_by_the_next_statement(name):
+    """`max_inbound`'s bound holds only if nothing runs between the check and
+    the queueing: `await self._room(n)` must be followed directly by the
+    statement that calls `self._submit`. An `await` in between lets another
+    sender take the same room, and the queue grows past the bound.
+    """
+    found = 0
+    for node in ast.walk(function(_stream, "Stream", name)):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+
+        for index, statement in enumerate(body):
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Await)
+                and ast.unparse(statement.value.value).startswith("self._room(")
+            ):
+                found += 1
+                following = body[index + 1] if index + 1 < len(body) else None
+                assert following is not None and "self._submit(" in ast.unparse(
+                    following
+                ), f"Stream.{name}: the statement after `_room` must queue"
+
+    assert found == 1, f"Stream.{name} takes room {found} times"

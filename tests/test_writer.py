@@ -214,3 +214,104 @@ class TestTheGreeting:
         live = streamcast.Stream("t", group_commit=True)
         async with serve(live) as uri, streamcast.connect(uri) as sub:
             assert sub.info.group_commit is False
+
+
+class TestTheInboundCap:
+    """`max_inbound`: rows a stream may have queued for commit, across every
+    publisher, before a send waits. The broker's memory bound when its disk
+    falls behind."""
+
+    async def test_a_send_waits_at_the_cap(self, tmp_path, monkeypatch):
+        stream = streamcast.Stream.new(
+            "trades", root=tmp_path, schema=SCHEMA, max_inbound=3
+        )
+        held, _commits = hold(stream, monkeypatch)
+        try:
+            sends = [asyncio.ensure_future(stream.send({"i": n})) for n in range(6)]
+            await asyncio.sleep(0.05)  # the first commit is held; the rest queue
+            assert stream._queued <= 3  # noqa: SLF001 — never past the cap
+
+            held.set()
+            assert await asyncio.gather(*sends) == [1, 2, 3, 4, 5, 6]
+            assert stream._queued == 0  # noqa: SLF001
+        finally:
+            await stream.aclose()
+
+    async def test_a_remote_publisher_is_held_at_the_socket(
+        self, tmp_path, serve, monkeypatch
+    ):
+        stream = streamcast.Stream.new(
+            "trades", root=tmp_path, schema=SCHEMA, max_inbound=2
+        )
+        held, _commits = hold(stream, monkeypatch)
+        try:
+            async with serve(stream, maintain=False, publish=True) as uri:
+                async with streamcast.publish(uri) as producer:
+                    futures = [await producer.submit({"i": n}) for n in range(20)]
+                    await asyncio.sleep(0.1)
+                    assert stream._queued <= 2  # noqa: SLF001
+
+                    held.set()
+                    assert await asyncio.gather(*futures) == list(range(1, 21))
+        finally:
+            await stream.aclose()
+
+    async def test_a_batch_larger_than_the_cap_gets_in_alone(self, tmp_path):
+        stream = streamcast.Stream.new(
+            "trades", root=tmp_path, schema=SCHEMA, max_inbound=2
+        )
+        try:
+            offsets = await asyncio.wait_for(
+                stream.send_many([{"i": n} for n in range(5)]), timeout=5
+            )
+            assert offsets == [1, 2, 3, 4, 5]
+        finally:
+            await stream.aclose()
+
+    async def test_a_failed_commit_frees_its_room(self, tmp_path, monkeypatch):
+        stream = streamcast.Stream.new(
+            "trades", root=tmp_path, schema=SCHEMA, max_inbound=1
+        )
+        assert stream.log is not None
+        real = stream.log.extend
+        failed = []
+
+        def flaky(rows):
+            if not failed:
+                failed.append(True)
+                raise OSError("disk full")
+
+            return real(rows)
+
+        monkeypatch.setattr(stream.log, "extend", flaky)
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                await stream.send({"i": 0})
+
+            assert stream._queued == 0  # noqa: SLF001
+            assert await asyncio.wait_for(stream.send({"i": 1}), timeout=5) == 1
+        finally:
+            await stream.aclose()
+
+    async def test_a_stream_with_no_log_never_waits(self):
+        live = streamcast.Stream("t", max_inbound=1)
+        for n in range(10):
+            assert await asyncio.wait_for(live.send({"i": n}), timeout=1) is None
+
+
+def hold(stream, monkeypatch) -> tuple[threading.Event, list[int]]:
+    """Hold the writer's FIRST commit until released; record each commit's size."""
+    assert stream.log is not None
+    held = threading.Event()
+    commits: list[int] = []
+    real = stream.log.extend
+
+    def gated(rows):
+        if not commits:
+            held.wait(5)
+
+        commits.append(len(rows))
+        return real(rows)
+
+    monkeypatch.setattr(stream.log, "extend", gated)
+    return held, commits

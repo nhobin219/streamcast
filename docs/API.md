@@ -78,12 +78,13 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_backlog=8192, max_replay=100_000, group_commit=True)
+                  max_backlog=8192, max_replay=100_000, group_commit=True,
+                  max_inbound=65_536)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
-                      max_backlog=8192, max_replay=100_000)
+                      max_backlog=8192, max_replay=100_000, max_inbound=65_536)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -143,6 +144,12 @@ alongside `log=` to hand over the lifetime of a handle you opened. An existing l
 a declared `schema=` rather than adopted, because a declaration that disagreed with the
 disk would be silently ignored and every `send` validated against columns the caller never
 wrote down.
+
+`max_inbound` is its twin on the way in: rows a durable stream may have queued for commit,
+across every publisher, before a send waits for room. It is what bounds the broker's memory
+when its disk falls behind — at the bound a local `send` waits, and a remote publisher's
+connection stops being read, so TCP holds it back. Nothing is refused. A batch larger than
+the bound is let in alone, when nothing else is queued.
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
 how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused

@@ -105,7 +105,8 @@ streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
                       published=None, s3_options=None, replay_published=False,
-                      max_backlog=8192, max_replay=100_000)   # None = no bound
+                      max_backlog=8192, max_replay=100_000,   # None = no bound
+                      max_inbound=65_536)                     # rows queued to commit
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema

@@ -23,6 +23,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`max_inbound`** on `Stream`, `Stream.new`, `Stream.restore` and
+  `Stream.migrate` (65,536 rows by default): rows a durable stream may have
+  queued for commit, across all its publishers, before a send waits. The
+  broker's memory bound when its disk falls behind — at the bound a local
+  `send` waits and a remote publisher's connection stops being read, so TCP
+  holds it back; nothing is refused.
 - **`Publication.submit(row)` and `submit_many(rows)`**: publish without
   waiting for the acknowledgement. Each returns once the frame is written,
   with a future of the offsets that resolves once the rows are durable. Up

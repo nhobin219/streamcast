@@ -95,6 +95,17 @@ that does it for you, because the library never sees a typical message until
 it is running.
 """
 
+MAX_INBOUND: Final = 65_536
+"""Rows a durable stream may have queued for commit before a send waits.
+
+The inbound twin of `max_backlog`. Every publisher on a stream feeds one
+writer thread; if the disk falls behind, rows queue in memory, and without a
+bound they queue until the broker is out of it. At the bound a `send` waits
+for room — a remote publisher's connection stops being read, and TCP holds
+the publisher back — rather than anything being refused. Per stream, across
+all its publishers.
+"""
+
 MAX_REPLAY: Final = 100_000
 """How far back a subscribe may ask to resume from.
 
@@ -180,6 +191,9 @@ class Stream:
         "_validate",
         "_writer",
         "_group_commit",
+        "_max_inbound",
+        "_queued",
+        "_waiting",
         "_check_stored",
     )
 
@@ -197,6 +211,7 @@ class Stream:
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
+        max_inbound: int = MAX_INBOUND,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -285,6 +300,11 @@ class Stream:
         # the stream opts out — then each send is its own transaction. The
         # greeting says which promise this stream makes.
         self._group_commit = group_commit and log is not None
+        # Rows queued for the writer and not yet delivered, and the senders
+        # waiting for that to fall below `max_inbound`. See `_room`.
+        self._max_inbound = max_inbound
+        self._queued = 0
+        self._waiting: list[asyncio.Future[None]] = []
         self._writer = (
             None
             if log is None
@@ -367,6 +387,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
+        max_inbound: int = MAX_INBOUND,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -435,6 +456,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            max_inbound=max_inbound,
         )
 
     @classmethod
@@ -451,6 +473,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
+        max_inbound: int = MAX_INBOUND,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -557,6 +580,7 @@ class Stream:
                     s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                     replay_published=replay_published,
                     group_commit=group_commit,
+                    max_inbound=max_inbound,
                 )
 
             retired_schema = old.schema
@@ -621,6 +645,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            max_inbound=max_inbound,
         )
 
     @classmethod
@@ -634,6 +659,7 @@ class Stream:
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
+        max_inbound: int = MAX_INBOUND,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
@@ -699,6 +725,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            max_inbound=max_inbound,
         )
 
     def __repr__(self) -> str:
@@ -986,6 +1013,7 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
+        await self._room(1)
         [offset] = await self._submit([row])
         return offset
 
@@ -1006,7 +1034,34 @@ class Stream:
         if not batch:
             return []
 
+        await self._room(len(batch))
         return list(await self._submit(batch))
+
+    async def _room(self, rows: int) -> None:
+        """Wait until `rows` more fit under `max_inbound`. Call `_submit` next,
+        with no await between: what was checked here is what is queued there.
+
+        A batch larger than the bound on its own is let in when nothing else
+        is queued, so it waits rather than deadlocks. A stream with no log
+        queues nothing and never waits.
+        """
+        while (
+            self._writer is not None
+            and self._queued
+            and self._queued + rows > self._max_inbound
+        ):
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiting.append(waiter)
+            await waiter
+
+    def _drained(self, rows: int) -> None:
+        """`rows` left the queue — committed or failed. Wake every waiter to
+        re-check; one that still does not fit waits again. No await."""
+        self._queued -= rows
+        waiting, self._waiting = self._waiting, []
+        for waiter in waiting:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def _submit(self, batch: list[Row]) -> asyncio.Future[list[int | None]]:
         """Check `batch` and queue it — or, with no log, deliver it now.
@@ -1067,6 +1122,7 @@ class Stream:
 
         done: asyncio.Future[list[int]] = asyncio.get_running_loop().create_future()
         writer.submit(Job(rows=rows, stored=stored, now=now, done=done))
+        self._queued += len(rows)
         return done
 
     def _deliver(self, jobs: list[Job], offsets: list[int]) -> None:
@@ -1093,12 +1149,15 @@ class Stream:
             if not job.done.done():
                 job.done.set_result(mine)
 
-    @staticmethod
-    def _fail(jobs: list[Job], exc: BaseException) -> None:
+        self._drained(start)
+
+    def _fail(self, jobs: list[Job], exc: BaseException) -> None:
         """A commit that raised: nothing landed, so nothing is delivered."""
         for job in jobs:
             if not job.done.done():
                 job.done.set_exception(exc)
+
+        self._drained(sum(len(job.rows) for job in jobs))
 
     def _stamp(self, now: int) -> None:
         """Record that a send happened at `now`, in epoch nanoseconds. No await.
@@ -1287,6 +1346,9 @@ class Stream:
                         )
 
                     batch: list[Row] = list(rows) if isinstance(rows, list) else [rows]
+                    # Room first: at `max_inbound` this stops reading the
+                    # socket, and TCP holds the publisher back.
+                    await self._room(len(batch))
                     queued = self._submit(batch) if batch else None
 
                 except (ValueError, TypeError) as exc:
