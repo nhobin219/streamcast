@@ -114,7 +114,7 @@ will be asked to fix the spec, because a document that lies is worse than a miss
 ## Pull requests
 
 Branch from `main`, keep the PR to one thread of work, and make sure `just check` is
-green before pushing — CI runs the same gates on Python 3.11 and 3.13 plus a packaging
+green before pushing — CI runs the same gates on Python 3.11 and 3.14 plus a packaging
 job that installs the wheel into a clean environment and runs a stream through it.
 `CI success` is the required check.
 
