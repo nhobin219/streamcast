@@ -22,12 +22,9 @@ from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportRes
 from examples.otel import common
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Sequence
 
     from opentelemetry.sdk._logs import ReadableLogRecord
-
-    import streamcast
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -79,15 +76,12 @@ def row(record: ReadableLogRecord) -> dict[str, object]:
 class StreamLogExporter(LogRecordExporter):
     """Publishes each batch of OTel log records to a stream."""
 
-    def __init__(
-        self, publication: streamcast.Publication, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self._publication = publication
-        self._loop = loop
+    def __init__(self, publisher: common.Publisher) -> None:
+        self._publisher = publisher
 
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         rows = [row(record) for record in batch]
-        if common.publish(self._publication, self._loop, rows):
+        if self._publisher.send(rows):
             return LogRecordExportResult.SUCCESS
 
         return LogRecordExportResult.FAILURE

@@ -20,12 +20,9 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from examples.otel import common
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Sequence
 
     from opentelemetry.sdk.trace import ReadableSpan
-
-    import streamcast
 
 
 def _struct(properties: dict[str, Any]) -> dict[str, Any]:
@@ -137,15 +134,12 @@ def row(span: ReadableSpan) -> dict[str, object]:
 class StreamSpanExporter(SpanExporter):
     """Publishes each batch of finished OTel spans to a stream."""
 
-    def __init__(
-        self, publication: streamcast.Publication, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self._publication = publication
-        self._loop = loop
+    def __init__(self, publisher: common.Publisher) -> None:
+        self._publisher = publisher
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         rows = [row(span) for span in spans]
-        if common.publish(self._publication, self._loop, rows):
+        if self._publisher.send(rows):
             return SpanExportResult.SUCCESS
 
         return SpanExportResult.FAILURE

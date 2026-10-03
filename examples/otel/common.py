@@ -11,10 +11,10 @@ import json
 import math
 from typing import TYPE_CHECKING, Any
 
+import streamcast
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import streamcast
 
 # -- the schema pieces --------------------------------------------------------------
 
@@ -119,27 +119,73 @@ def scope(value: Any) -> dict[str, object] | None:  # noqa: ANN401 — Instrumen
 # -- publishing from OTel's export thread -----------------------------------------
 
 
-def publish(
-    publication: streamcast.Publication,
-    loop: asyncio.AbstractEventLoop,
-    rows: Sequence[dict[str, object]],
-) -> bool:
-    """Publish `rows` from an OTel exporter; True once the stream has them.
+class Publisher:
+    """One stream's publisher for OTel's exporters, reconnecting after a drop.
 
     OTel's batch processors call `export` on their own worker thread, and a
-    streamcast publisher lives on an event loop — so the batch is handed to
+    streamcast publisher lives on an event loop — so each batch is handed to
     the loop and the thread waits for the stream's acknowledgement. That makes
     a flush mean the rows are DURABLE, not merely sent.
+
+    It connects on the first batch, and a batch that fails on the connection
+    drops it, so the next batch connects again: a broker restart costs the
+    batches sent while it was down, not every batch after. The SDK calls
+    `export` every half second or so, which is all the retrying there is.
     """
-    if loop.is_closed():
-        # A provider flushing at interpreter exit, after the loop has gone:
-        # nothing can be published, and the SDK wants a result, not a raise.
-        return False
 
-    sent = asyncio.run_coroutine_threadsafe(publication.send_many(rows), loop)
-    try:
-        sent.result(timeout=10)
-    except Exception:  # noqa: BLE001 — the SDK wants a result, not an exception
-        return False
+    def __init__(self, uri: str, loop: asyncio.AbstractEventLoop) -> None:
+        self.uri = uri
+        self._loop = loop
+        self._publication: streamcast.Publication | None = None
+        self._failing = False
+        # Two services' processors can export at once; one connection each time.
+        self._connecting = asyncio.Lock()
 
-    return True
+    async def _send(self, rows: Sequence[dict[str, object]]) -> None:
+        async with self._connecting:
+            if self._publication is None:
+                self._publication = await streamcast.publish(self.uri)
+
+            publication = self._publication
+
+        try:
+            await publication.send_many(rows)
+        except streamcast.Rejected:
+            raise  # a bad row, on a connection that is fine
+
+        except BaseException:
+            if self._publication is publication:
+                self._publication = None  # the next batch reconnects
+
+            raise
+
+    def send(self, rows: Sequence[dict[str, object]]) -> bool:
+        """Publish `rows`; True once the stream has them. Never raises: failing
+        to send telemetry must not fail the application that made it."""
+        if self._loop.is_closed():
+            # A provider flushing at interpreter exit, after the loop has gone.
+            return False
+
+        sent = asyncio.run_coroutine_threadsafe(self._send(rows), self._loop)
+        try:
+            sent.result(timeout=10)
+        except Exception as exc:  # noqa: BLE001 — the SDK wants a result, not an exception
+            sent.cancel()
+            # Printed, not logged: a `logging` record would be exported
+            # through this same failing publisher. Once per outage.
+            if not self._failing:
+                print(f"telemetry to {self.uri} is being dropped: {exc!r}", flush=True)
+
+            self._failing = True
+            return False
+
+        if self._failing:
+            print(f"telemetry to {self.uri} is being published again", flush=True)
+
+        self._failing = False
+        return True
+
+    async def aclose(self) -> None:
+        if self._publication is not None:
+            await self._publication.close()
+            self._publication = None

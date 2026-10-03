@@ -9,10 +9,12 @@ case, because they are what a reader copies.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from typing import Any
 
+import litelink
 import pytest
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
@@ -132,6 +134,57 @@ class TestAnyValue:
     )
     def test_each_kind(self, value, stored):
         assert common.any_value(value) == stored
+
+
+class TestThePublisher:
+    """What every exporter publishes through: telemetry must never fail the app."""
+
+    async def test_a_broker_restart_costs_only_the_batches_sent_while_it_was_down(
+        self, tmp_path, capsys
+    ):
+        schema = {
+            "type": "object",
+            "properties": {"i": {"type": "integer"}},
+            "required": ["i"],
+        }
+
+        async def broker(port: int = 0):  # noqa: ANN202
+            stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
+            return await streamcast.serve(
+                stream, "127.0.0.1", port, publish=True, maintain=False
+            )
+
+        server = await broker()
+        port = server.sockets[0].getsockname()[1]
+        publisher = common.Publisher(
+            f"ws://127.0.0.1:{port}/t", asyncio.get_running_loop()
+        )
+        # `send` blocks on the loop, as OTel's export thread does.
+        assert await asyncio.to_thread(publisher.send, [{"i": 1}])
+
+        server.close()
+        await server.wait_closed()
+        # Down: dropped, not raised. Twice, but reported once.
+        assert not await asyncio.to_thread(publisher.send, [{"i": 2}])
+        assert not await asyncio.to_thread(publisher.send, [{"i": 3}])
+
+        server = await broker(port)
+        try:
+            assert await asyncio.to_thread(publisher.send, [{"i": 4}])
+            await publisher.aclose()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # One line when the outage starts, one when it ends: not one a batch.
+        printed = capsys.readouterr().out.splitlines()
+        assert len(printed) == 2
+        assert "is being dropped" in printed[0]
+        assert "is being published again" in printed[1]
+        with litelink.open(tmp_path, "t", read_only=True) as log:
+            stored = log.sql("SELECT i FROM log ORDER BY litelink_offset").read_all()
+
+        assert stored.column("i").to_pylist() == [1, 4]
 
 
 def emitted() -> list:
@@ -482,7 +535,7 @@ class TestTheMetrics:
         from opentelemetry.sdk.metrics import Counter, Histogram, UpDownCounter
         from opentelemetry.sdk.metrics.export import AggregationTemporality
 
-        exporter = metrics.StreamMetricExporter(None, None)  # ty: ignore[invalid-argument-type]
+        exporter = metrics.StreamMetricExporter(None)  # ty: ignore[invalid-argument-type]
         preferred = exporter._preferred_temporality  # noqa: SLF001
         assert preferred is not None
         assert preferred[Counter] == AggregationTemporality.DELTA
