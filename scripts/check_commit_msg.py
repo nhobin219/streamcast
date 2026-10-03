@@ -35,8 +35,8 @@ SCOPES = {
     "publish",  # §6b remote publishing: the producer end
     "schema",  # JSON Schema <-> Arrow
     "cursor",  # where a consumer keeps its offset, local and remote
-    "catchup",  # reading the gap from the archive
-    "maintain",  # the maintainer subprocess
+    "catchup",  # reading the gap from the published tables
+    "maintain",  # the maintainer's role subprocesses
     "replicate",  # the litestream sidecar
     "errors",  # the refusal vocabulary and close codes
     "spec",  # docs/SPEC.md itself

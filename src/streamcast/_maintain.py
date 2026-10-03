@@ -381,10 +381,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 class Supervisor:
-    """One maintainer subprocess for one or more logs, restarted if it dies.
+    """One role's maintainer subprocess for one or more logs, restarted if it dies.
 
-    **One per serving process, not one per log**, which is what it was. Each
-    maintainer is a full interpreter with litelink, pyarrow, pyiceberg and
+    **One per role per serving process, not per log**, which is what it was. Each
+    maintainer process is a full interpreter with litelink, pyarrow, pyiceberg and
     duckdb loaded: measured at ~207 MB RSS each, so a producer serving four
     small streams spent ~830 MB on maintenance for a producer of ~460 MB.
     Worse than the total was the marginal cost — adding a stream that takes a

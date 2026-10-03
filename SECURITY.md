@@ -63,15 +63,17 @@ A server reachable by untrusted clients wants a connection limit in front of it.
 client that cannot reach a stream still learns that it exists. If a stream's
 existence is itself sensitive, run it on a separate port.
 
-**The greeting publishes the archive's location**, and the `too_old` refusal
-carries it when it fits in 123 bytes. That is deliberate — it is what lets
-`catch_up=True` find the gap without being told where to look — but it means a
-subscriber learns the bucket and prefix the log is archived to. Reading it
-still needs credentials the server never sends and never has to: the client
-resolves its own from the ordinary AWS chain, so a bucket policy is what
-decides who may read the archive, not this library. If the URI itself is
-sensitive, leave `archive=` off the log and give catching-up consumers the
-location out of band.
+**The greeting publishes the stream's metadata location** — the URI of its
+metadata file, and the stream's id. That is deliberate — it is what lets
+`catch_up=True`, `Stream.live` and anyone holding a greeting find the
+published tables without being told where to look — but it means a subscriber
+learns the bucket and prefix the log publishes to, or, for a log that
+publishes locally, a path on the server's disk. Refusals carry no location.
+Reading the tables still needs credentials the server never sends and never
+has to: the client resolves its own from the ordinary AWS chain, so a bucket
+policy is what decides who may read them, not this library. There is no
+switch to leave the location out of the greeting; if it is itself sensitive,
+the port should not be reachable by anyone who should not learn it.
 
 **A server that allows publishing accepts writes from anyone who can reach
 it.** `serve(..., publish=True)` is opt-in for that reason, and off by default

@@ -615,7 +615,7 @@ was considered and rejected; it would make a JSON codec part of the public
 surface of a library whose value is being general.
 
 What it buys is an import list of one. `Stream.new(name, root=…, schema=…)` creates
-the log, `serve` maintains and replicates it, and a caller reaches for neither
+the log, `serve` maintains it (and replicates it, with `replicate=True`), and a caller reaches for neither
 litelink nor pyarrow.
 
 **`format` carries the width, because JSON Schema does not.** `integer` does

@@ -18,7 +18,7 @@ Most of the suite needs nothing else: every test binds port 0 on loopback, every
 temp directory, and a change that makes the ordinary tests need the network is a change to
 reject. The **replication and catch-up tiers** are the exception and are marked
 `@pytest.mark.replication` — they run litestream against a real object store and read a
-real archive back, which cannot be faked without testing the fake. They SKIP without an
+real published table back, which cannot be faked without testing the fake. They SKIP without an
 endpoint, and a skip is not a pass:
 
 ```bash

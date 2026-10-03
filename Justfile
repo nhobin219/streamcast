@@ -5,7 +5,7 @@ set dotenv-load := true
 
 # The local S3-compatible endpoint the replication tier is tested against.
 # Matches tests/conftest.py; change both together. Ported from litelink, whose
-# archive tier needs the same thing — same image, same port, same shape — so a
+# published tier needs the same thing — same image, same port, same shape — so a
 # developer moving between the two repos configures nothing.
 # Port 9002, not litelink's 9000. That is the one deliberate difference from
 # the recipe this is copied from: a developer with both repos checked out runs
