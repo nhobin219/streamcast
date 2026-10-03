@@ -295,6 +295,19 @@ class Greeting:
     cursor that was never real.
     """
 
+    group_commit: bool = False
+    """Whether this stream may commit several sends in one transaction.
+
+    True — a stream's default — means the server may group sends that arrived
+    while a commit was in flight into one transaction, for throughput: every
+    row is still durable before its send returns and before any subscriber
+    sees it, each send's rows are still adjacent, and offsets and order are
+    unchanged, but rows from different publishers can share a commit. False
+    is the stricter guarantee: each `send` and each `send_many` is its own
+    commit. False too on a stream with no log, which commits nothing, and for
+    a greeting without the field, from a server that never grouped.
+    """
+
 
 def greeting(
     *,
@@ -302,6 +315,7 @@ def greeting(
     end_offset: int | None,
     replay: tuple[int, int] | None,
     durable: bool,
+    group_commit: bool = False,
     schema: dict[str, object] | None = None,
     metadata: str | None = None,
     stream_id: str | None = None,
@@ -324,6 +338,7 @@ def greeting(
             "end_offset": end_offset,
             "replay": list(replay) if replay is not None else None,
             "durable": durable,
+            "group_commit": group_commit,
             "schema": schema,
             "metadata": metadata,
             "stream_id": stream_id,
@@ -376,6 +391,7 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         stream_id=stream_id if isinstance(stream_id, str) else None,
         where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
+        group_commit=bool(fields.get("group_commit", False)),
     )
 
 

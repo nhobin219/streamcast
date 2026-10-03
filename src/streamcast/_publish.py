@@ -20,9 +20,9 @@ of publishers, one writer.
 row and one fsync; `send_many` is a group in one transaction. The choice and
 its consequences are identical to `Stream.send` versus `Stream.send_many`,
 because they ARE those calls — the server makes them on the publisher's
-behalf. See `Stream.send` for what a publisher that never yields does to the
-subscribers sharing that loop; a remote publisher can do it too, and nothing
-here prevents it any more than the local path does.
+behalf. See `Stream.send` for what a publisher that never yields does to a
+stream with no log; a remote publisher can do it too, and nothing here
+prevents it any more than the local path does.
 
 **What a lost acknowledgement means.** A row is durable when `send` returns,
 the way a local `await send(...)` is. If the connection drops before the reply

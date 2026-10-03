@@ -7,6 +7,32 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **A durable `send` commits on a writer thread of the stream's own**, not
+  on the event loop every stream shares. A SQLite commit and fsync ran on the
+  loop, so one busy stream stalled the whole broker — measured, a publisher
+  sending in a loop kept the loop from running at all for the 3 s it ran,
+  and a burst stalled it for up to 71 ms. Streams now commit in parallel,
+  and the loop is free while they do. Offsets, order, durability before
+  broadcast and the subscribe partition are unchanged. A single publisher
+  sending as fast as it can pays a thread hop each way: about 800 rows/s
+  where it was about 1,500, at the cost of everything else on the broker.
+
+### Added
+
+- **Group commit, on by default** (`group_commit` on `Stream`,
+  `Stream.new`, `Stream.restore` and `Stream.migrate`): sends from several
+  publishers that queue behind a commit share the next transaction —
+  measured 4,232 rows/s from 8 publishers against ~1,300. Each send's rows
+  stay adjacent and every row is durable before its send returns; a lone
+  publisher never waits for a group. `group_commit=False` makes each `send`
+  or `send_many` its own commit. The greeting's new `group_commit` field
+  says which a stream makes; a greeting without it means each send commits
+  alone.
+
 ## 0.11.0 — 2026-10-03
 
 ### Changed — breaking

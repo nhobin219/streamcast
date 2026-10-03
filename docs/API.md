@@ -78,11 +78,11 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_backlog=8192, max_replay=100_000)
+                  max_backlog=8192, max_replay=100_000, group_commit=True)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
-                      replay_published=False,
+                      replay_published=False, group_commit=True,
                       max_backlog=8192, max_replay=100_000)
 ```
 
@@ -154,6 +154,11 @@ while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.
 
+`group_commit` (on by default) lets the stream commit sends from several publishers in one
+transaction when they queue behind a commit in flight — more throughput under concurrent
+publishers. `group_commit=False` makes each send its own commit. See Publishing; the
+greeting says which a stream makes.
+
 ### Publishing
 
 ```python
@@ -177,9 +182,18 @@ tell a group from the same rows sent singly. That is deliberate — batching is 
 durability decision, and making it visible on the wire would make every subscriber's
 parser depend on how the publisher happened to poll.
 
-**Neither awaits a consumer**, and today neither awaits at all. See `SPEC.md` §3 for why
-that is a correctness property rather than a performance note — and for the one hazard it
-creates: a publish loop with no `await` of its own starves every subscriber.
+**Neither awaits a consumer.** With a log, each awaits its own commit, which runs on the
+stream's writer thread so no other stream on the broker waits on this one's disk; without
+one, neither awaits at all. See `SPEC.md` §3 for the ordering that is a correctness
+property rather than a performance note — and for the one hazard on a stream with no log:
+a publish loop with no `await` of its own starves every subscriber.
+
+**Sends that queue behind a commit share the next one**, by default: under concurrent
+publishers that is the throughput — measured 4,232 rows/s from 8 publishers against
+~1,300 committed one at a time. Every row is still durable before its send returns and
+before any subscriber sees it, in the same order, and each send's rows stay adjacent. A
+lone publisher never waits for a group to form. `group_commit=False` makes each send its
+own commit; the greeting's `group_commit` says which guarantee a stream makes.
 
 The frame is the row as JSON text, encoded once with msgspec and shared by every
 subscriber (I6). **Key order comes from the log's schema, not from your dict**, which is
@@ -656,7 +670,8 @@ for what a bare code cannot say.
 
 `info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
-a server restart), `schema` (the stream's columns as JSON Schema), `metadata`,
+a server restart), `group_commit` (whether sends may share a commit; false means each
+send is its own), `schema` (the stream's columns as JSON Schema), `metadata`,
 `stream_id`, `stream`, `version`.
 
 **`info.metadata` is enough to read the stream's history yourself.** It is the URI of the

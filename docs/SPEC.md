@@ -299,30 +299,57 @@ would turn a rejected subscribe into an empty stream.
 
 Two atomicity claims, both load-bearing, both invisible when broken.
 
-### I1 — `send` contains no `await`
+### I1 — commits are queued, made and delivered in one order
 
-The offset is assigned, the row is made durable, and the frame is offered to
-every subscriber with nothing able to interleave. Two concurrent senders cannot
-produce a subscriber that sees offset 8 before offset 7.
+A durable row is committed off the event loop, on a writer thread of the
+stream's own, and delivered back on the loop in commit order. Two concurrent
+senders cannot produce a subscriber that sees offset 8 before offset 7:
 
 ```python
-kind = kind_of(message)
-if self._log is not None:
-    offset = self._log.append(_log.row(kind, message))   # sync; durable on return
-    self._end_offset = offset + 1
-else:
-    offset = self._end_offset
-    self._end_offset = offset + 1
+# on the loop — _commit: no await
+check(stored_row)                        # what append checks, before queueing
+writer.submit(Job(rows, stored, now, done))   # FIFO: queue order is call order
 
-self._fan_out(encode(offset, kind, message))             # put_nowait per subscriber
+# on the stream's writer thread
+offsets = log.extend(rows)               # one transaction; durable on return
+loop.call_soon_threadsafe(deliver, jobs, offsets)   # FIFO: commit order
+
+# on the loop — _deliver: no await
+self._end_offset = offsets[-1] + 1       # the frontier, then …
+self._fan_out(encode(offset, ts, row))   # … put_nowait per subscriber
 ```
 
-`async def` with no `await` in it is deliberate: it is the signature
-`websockets` has, and it leaves room to move the append off the loop later
-without breaking callers. Any such move has to restore this property some other
-way — an explicit ordering lock — because nothing else provides it.
+Both loop-side steps contain no `await`, and `tests/test_invariants.py` reads
+the AST to keep it so: checking and queueing are one step, so rows are queued
+in the order `send` was called; one thread commits them first in, first out;
+and `call_soon_threadsafe` runs one thread's callbacks in the order it
+scheduled them, so `_deliver` sees commits in commit order and advances the
+frontier and fans out in one step. A stream with no log has nothing to commit
+and does the delivery inside `send`.
 
-**The other side of I1: a publish loop that never awaits starves every
+**Why the commit is off the loop.** Every stream a broker serves shares one
+event loop. A commit on it — a SQLite transaction and fsync at
+`synchronous=FULL`, ~2 ms — stalled every other stream for its length, and a
+publisher sending in a loop never yielded at all: measured, a broker's event
+loop did not run for the whole 3 s of a flat-out publisher. On the writer
+thread SQLite releases the GIL while it waits on the disk, so streams commit in
+parallel and the loop stays responsive.
+
+**Sends that queue behind a commit share the next one, by default.** Under
+concurrent publishers, sends that queued while a commit was in flight share the
+next transaction, each one's rows still adjacent and in queue order, every row
+still durable before its send returns and before any subscriber sees it.
+Measured 4,232 rows/s from 8 concurrent publishers against ~1,300 one commit
+at a time. A lone publisher never waits for a group to form: groups are only
+what queued anyway. What it gives up is that a commit's failure — the disk,
+SQLite itself — fails every send in the group, which would fail the next send
+regardless. A stream created with `group_commit=False` commits each `send` and
+each `send_many` in a transaction of its own. The greeting's `group_commit`
+says which guarantee a stream makes. Rows are checked on the
+loop before they are queued, so one bad row is refused alone rather than
+failing a group.
+
+**On a stream with no log, a publish loop that never awaits starves every
 subscriber.** `for … : await stream.send(…)` over a list in memory runs to
 completion before any pump gets the loop back, so every subscriber sees the run
 arrive at once — and a run longer than `max_backlog` drops all of them. A real
@@ -1145,17 +1172,17 @@ corruption path with no guard (§8b). Publishing to the process that already
 owns the handle resolves the concurrency where it can actually be resolved:
 any number of publishers, one writer.
 
-**Concurrency is free because of I1.** `send` contains no `await`, so two
-handlers calling it cannot interleave — each assigns its offset, appends and
-fans out in one step. `send_many` stays one transaction, so a batch's offsets
+**Concurrency is free because of I1.** Each send is queued for the stream's
+writer in one step and delivered in commit order, so two handlers calling it
+cannot interleave. `send_many` stays one transaction, so a batch's offsets
 are adjacent even with another publisher racing it. Nothing coordinates the
 publishers and nothing needs to.
 
 **Granularity is the publisher's, exactly as it is locally.** A frame is a row
 or a list of rows, and the shape is the request: an object means `send`, a
 list means `send_many`. The consequences are the local ones too — §3's note
-about a publish loop that never yields applies to a remote publisher in the
-same way and for the same reason.
+about a publish loop that never yields, on a stream with no log, applies to a
+remote publisher in the same way and for the same reason.
 
 A row the schema refuses is answered and the connection stays open, because
 that is what the local call does: `send` raises, the caller catches it, the
@@ -1252,7 +1279,7 @@ matter — pays nothing and skips all of it.
 
 | | |
 |---|---|
-| **I1** | `Stream.send` and `send_many` contain no `await`. Offset assignment, durability and fan-out are one step. |
+| **I1** | `Stream._commit` and `_deliver` contain no `await`. Rows are queued in call order, committed in queue order on the stream's writer thread, and delivered — frontier and fan-out — in commit order. |
 | **I2** | Joining the fan-out set and reading the frontier are adjacent statements. The replay range and the live queue partition the stream exactly. |
 | **I3** | A message is durable before it is delivered, never after. |
 | **I4** | What a subscriber receives is a contiguous prefix of the stream from where it subscribed, in increasing offset order. A drop ends it; nothing punches a hole in it. The order is CHECKED at the subscriber, not assumed — see below. |
