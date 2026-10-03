@@ -24,6 +24,13 @@ there was nothing to have changed from. Everything above it is ordinary.
     shows them in otel-gui's Metrics tab.** The dashboard moves to otel-gui
     3.0.0, the first release that accepts metrics.
 
+### Changed
+
+- **The one-shot OTel demo runs without a maintainer**, as the migration demo
+  does. Its maintainer processes were still opening the logs when the run
+  ended, and cost it several seconds: `demo.main` took 3–11 s with them and
+  about 1 s without.
+
 ## 0.13.1 — 2026-10-03
 
 ### Changed

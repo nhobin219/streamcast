@@ -82,8 +82,16 @@ async def one_trace(
 async def main(root: Path) -> dict[str, Any]:
     """Run the whole demo under `root`, print it, and return what it saw."""
     log_stream, span_stream, metric_stream = streams(root)
+    # No maintainer, as in the migration demo: a run this short never fills a
+    # log enough to seal it. Its five processes were still opening the logs
+    # when the run ended, and cost the run several seconds. `just demo otel`'s
+    # broker keeps `serve`'s default, which starts them.
     server = await streamcast.serve(
-        [log_stream, span_stream, metric_stream], "127.0.0.1", 0, publish=True
+        [log_stream, span_stream, metric_stream],
+        "127.0.0.1",
+        0,
+        publish=True,
+        maintain=False,
     )
     base = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     try:
