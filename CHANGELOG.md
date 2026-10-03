@@ -29,6 +29,11 @@ there was nothing to have changed from. Everything above it is ordinary.
   broker's memory bound when its disk falls behind — at the bound a local
   `send` waits and a remote publisher's connection stops being read, so TCP
   holds it back; nothing is refused.
+- **`max_tail`** on `Stream.snapshot`, `scan`, `sql` and `live`
+  (1,000,000 rows): what a reader holds from the broker that the published
+  tables do not. A snapshot past it is refused and a live view stops, each
+  saying publishing is behind, rather than running out of memory waiting on
+  a stalled publisher.
 - **`Publication.submit(row)` and `submit_many(rows)`**: publish without
   waiting for the acknowledgement. Each returns once the frame is written,
   with a future of the offsets that resolves once the rows are durable. Up

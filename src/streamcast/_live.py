@@ -86,8 +86,13 @@ class Live:
         *,
         where: dict[str, object] | None = None,
         start: int | None = None,
+        max_tail: int = _snapshot.MAX_TAIL,
     ) -> None:
         self._broker = broker
+        # What the view will hold from the broker, unpublished, before it
+        # stops: a publisher that has stalled must not run this process out
+        # of memory. See `_snapshot.MAX_TAIL`.
+        self._max_tail = max_tail
         # The subscription's filter, and the same terms for the published
         # base — one narrowing, applied on both sides of the join.
         self._where = where
@@ -214,6 +219,15 @@ class Live:
 
         if offset < self._end:
             return  # the base already holds it, or it was received before
+
+        held = len(self._pending) + sum(table.num_rows for table in self._tail)
+        if held >= self._max_tail:
+            msg = (
+                f"the live view of {self._broker} holds max_tail={self._max_tail} "
+                f"rows the published tables do not: publishing is behind or has "
+                f"stalled. Raise max_tail, or publish more often."
+            )
+            raise RuntimeError(msg)
 
         self._pending.append({_log.COLUMN: offset, _log.STAMP: ts, **row})
         self._end = offset + 1
@@ -474,6 +488,7 @@ async def live(
     rebase_every: float = REBASE_EVERY,
     where: dict[str, object] | None = None,
     start_offset: int | None = None,
+    max_tail: int = _snapshot.MAX_TAIL,
 ) -> Live:
     """See `Stream.live`."""
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
@@ -502,7 +517,14 @@ async def live(
         uri, s3_options=s3_options, stream_id=greeting.stream_id
     )
     view = Live(
-        broker, greeting, s3_options, rebase_every, base, where=where, start=start
+        broker,
+        greeting,
+        s3_options,
+        rebase_every,
+        base,
+        where=where,
+        start=start,
+        max_tail=max_tail,
     )
     try:
         await view._start()  # noqa: SLF001

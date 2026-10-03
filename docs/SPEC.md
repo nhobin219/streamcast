@@ -470,6 +470,22 @@ one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
+### What bounds memory, at each end
+
+Neither end can be run out of memory by the other, or by a stall:
+
+| where | what | bound | at the bound |
+|---|---|---|---|
+| broker | a subscriber's outbound queue | `max_backlog`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
+| broker | a stream's rows queued for commit | `max_inbound`, 65,536 rows | sends wait; publishers are held at the socket |
+| broker | replies owed one publisher connection | `serve(max_in_flight=)`, 64 frames | the connection stops being read |
+| both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB) | the connection stops being read |
+| broker | a replay | one batch at a time, into the bounded subscriber queue | — |
+| client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
+| client | a catch-up | one batch at a time | — |
+| client | a snapshot's rows from the broker | `max_tail`, 1,000,000 rows | the snapshot is refused |
+| client | a live view's unpublished rows | `max_tail`, 1,000,000 rows | the view stops; its next query raises |
+
 ### A subscriber that walks away
 
 A disconnect is noticed by `send` raising — but only if there is something to

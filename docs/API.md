@@ -1235,7 +1235,8 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
 ```python
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
-                                 broker=None, s3_options=None) -> Snapshot
+                                 broker=None, s3_options=None,
+                                 max_tail=1_000_000) -> Snapshot
 await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
                              filters=(), start_offset=None, end_offset=None) -> pa.Table
 await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
@@ -1346,6 +1347,11 @@ than it had when it was retired, and a range neither the tables nor the broker h
 raise. The last one names both numbers. A short answer to an analytical question is a
 wrong number, not an error, so it is never given.
 
+**`max_tail` bounds what a snapshot reads from the broker**: the rows the published tables
+do not hold yet, which it keeps in memory. That stays small while publishing keeps up; past
+`max_tail` rows (1,000,000 by default, counted as read) the snapshot is refused, saying
+publishing is behind, rather than running the reader out of memory.
+
 **Where the metadata file is.** With an `s3://` published location, the copy beside the
 tables, which reads from anywhere. Without one, every log publishes under its own
 directory and the URI is the local `file://` file, which reads only on the server's
@@ -1355,7 +1361,7 @@ machine. On another machine the read says so and suggests an `s3://` location.
 
 ```python
 await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
-                             start_offset=None) -> Live
+                             start_offset=None, max_tail=1_000_000) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
@@ -1376,7 +1382,7 @@ listening to it. For an offline read, or a fixed point to come back to, use a sn
 |---|---|
 | **open** | one connection for the greeting, a published snapshot of the metadata file it names, then a subscription at the snapshot's end with `catch_up=True`: no gap and no duplicate at the join |
 | **where** | the broker is the only address. Its greeting names the metadata file and the stream's id, read again at every reconnect, so the view follows the stream as the broker serves it now. A stream with no log has nothing published and raises `ValueError` |
-| **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped |
+| **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped. If publishing stalls, the view stops at `max_tail` rows (1,000,000 by default) and its next query raises, rather than holding whatever a stalled publisher leaves it |
 | **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
 | **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |
 | **`wait_for`** | exactly one of `offset` (that row has arrived) or `ts=` (every row stamped at or before it has). A time is proven only by a row stamped after it, so on a quiet stream `wait_for(ts=)` waits for the next row: bound it with `asyncio.timeout` where the stream can go idle. Published rows count. Refused on a log without `streamcast_ts` |

@@ -747,6 +747,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = _snapshot.MAX_TAIL,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -767,6 +768,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         )
 
     @staticmethod
@@ -777,6 +779,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = _snapshot.MAX_TAIL,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -790,6 +793,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         ) as snap:
             return await snap.scan(
                 columns=columns,
@@ -808,6 +812,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = _snapshot.MAX_TAIL,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -823,6 +828,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         ) as snap:
             return await snap.sql(
                 query,
@@ -839,6 +845,7 @@ class Stream:
         rebase_every: float = _live.REBASE_EVERY,
         where: dict[str, object] | None = None,
         start_offset: int | None = None,
+        max_tail: int = _snapshot.MAX_TAIL,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -865,6 +872,7 @@ class Stream:
             rebase_every=rebase_every,
             where=where,
             start_offset=start_offset,
+            max_tail=max_tail,
         )
 
     @property
