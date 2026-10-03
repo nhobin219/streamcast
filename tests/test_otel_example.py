@@ -18,7 +18,15 @@ import pytest
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
 import streamcast  # noqa: E402
-from examples.otel import analytics, common, demo, export, logs, spans  # noqa: E402
+from examples.otel import (  # noqa: E402
+    analytics,
+    common,
+    demo,
+    export,
+    logs,
+    metrics,
+    spans,
+)
 
 
 class TestTheDemo:
@@ -48,6 +56,25 @@ class TestTheDemo:
         # And the table answers a log search's questions.
         assert seen["errors"] == [{"service": "payments", "errors": 1}]
         assert seen["lag_ms"] >= 0
+
+    async def test_the_metrics_count_what_happened(self, tmp_path):
+        """Totals, not row counts: how many rows a run makes depends on how
+        many one-second collections it spans; what they add up to does not."""
+        seen = await demo.main(tmp_path)
+
+        assert seen["points"] > 0
+        assert seen["outcomes"] == [
+            {"outcome": "confirmed", "orders": 2},
+            {"outcome": "failed", "orders": 1},
+        ]
+        assert [(d["service"], d["requests"]) for d in seen["durations"]] == [
+            ("checkout", 3),
+            ("payments", 3),
+        ]
+        assert all(d["mean_ms"] > 0 for d in seen["durations"])
+        # The one failed order was counted inside its request's span: its
+        # exemplar is that request's trace.
+        assert seen["exemplars"] == [seen["failed"]]
 
     async def test_the_failed_request_is_one_trace_across_both_services(self, tmp_path):
         seen = await demo.main(tmp_path)
@@ -229,11 +256,17 @@ class TestTheExporter:
         import threading
 
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
         from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
             ExportLogsServiceRequest,
+        )
+        from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+            ExportMetricsServiceRequest,
         )
         from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
             ExportTraceServiceRequest,
@@ -272,10 +305,16 @@ class TestTheExporter:
             span_processor.on_end(export.span(spans.row(original_span)))
             assert span_processor.force_flush(timeout_millis=10_000)
             span_processor.shutdown()
+
+            metric_exporter = OTLPMetricExporter(endpoint=f"{receiver}/v1/metrics")
+            original_metrics, trace = collected()
+            stored = metrics.rows(original_metrics)
+            metric_exporter.export(export.metrics_data(stored))
+            metric_exporter.shutdown()
         finally:
             server.shutdown()
 
-        assert sorted(received) == ["/v1/logs", "/v1/traces"]
+        assert sorted(received) == ["/v1/logs", "/v1/metrics", "/v1/traces"]
         request = ExportLogsServiceRequest.FromString(received["/v1/logs"])
         [resource] = request.resource_logs
         [scope] = resource.scope_logs
@@ -294,6 +333,161 @@ class TestTheExporter:
         assert span.parent_span_id == original_span.parent.span_id.to_bytes(8, "big")
         assert span.status.code == 2  # STATUS_CODE_ERROR
         assert [e.name for e in span.events] == ["card declined"]
+
+        sent = ExportMetricsServiceRequest.FromString(received["/v1/metrics"])
+        by_name = {m.name: m for m in sent.resource_metrics[0].scope_metrics[0].metrics}
+        orders = by_name["shop.orders"].sum
+        assert orders.aggregation_temporality == 1  # DELTA, as stored
+        assert orders.is_monotonic
+        [orders_point] = orders.data_points
+        assert orders_point.as_int == 2
+        [exemplar] = orders_point.exemplars
+        assert exemplar.trace_id == trace.to_bytes(16, "big")
+        [duration] = by_name["http.server.request.duration"].histogram.data_points
+        assert list(duration.bucket_counts) == [1, 1, 0]
+
+
+def collected():
+    """Real SDK metrics of every kind, as a reader collects them.
+
+    A counter measured inside a sampled span, so it carries an exemplar; an
+    up-down counter, a gauge, an explicit-bucket and an exponential histogram.
+    """
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from opentelemetry.sdk.metrics.view import (
+        ExponentialBucketHistogramAggregation,
+        View,
+    )
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+
+    reader = InMemoryMetricReader(preferred_temporality=metrics.PREFERRED_TEMPORALITY)
+    provider = MeterProvider(
+        [reader],
+        resource=Resource({"service.name": "checkout"}),
+        views=[
+            View(
+                instrument_name="shop.amount",
+                aggregation=ExponentialBucketHistogramAggregation(),
+            )
+        ],
+    )
+    meter = provider.get_meter("shop", "1.0")
+    with TracerProvider().get_tracer("t").start_as_current_span("request") as span:
+        meter.create_counter("shop.orders", unit="{order}").add(
+            2, {"outcome": "failed", "items": ("book", "pen")}
+        )
+        trace = span.get_span_context().trace_id
+
+    meter.create_up_down_counter("shop.in_flight").add(-3)
+    meter.create_gauge("shop.temperature", unit="Cel").set(21.5, {"room": "a"})
+    duration = meter.create_histogram(
+        "http.server.request.duration",
+        unit="s",
+        explicit_bucket_boundaries_advisory=[0.01, 0.1],
+    )
+    # Two buckets of three filled, unevenly: counts that read the same
+    # backwards would hide a reversal.
+    duration.record(0.005)
+    duration.record(0.05)
+    amount = meter.create_histogram("shop.amount")
+    amount.record(0.3)
+    amount.record(0)
+    return reader.get_metrics_data(), trace
+
+
+class TestTheMetrics:
+    """A metrics export as rows, one per data point, and back."""
+
+    def test_every_kind_survives_the_round_trip_as_otlp_encodes_it(self):
+        """Compared as OTLP, encoded by OTel's own encoder: what a receiver gets."""
+        from opentelemetry.exporter.otlp.proto.common.metrics_encoder import (
+            encode_metrics,
+        )
+
+        original, _trace = collected()
+        again = export.metrics_data(metrics.rows(original))
+
+        assert encode_metrics(again) == encode_metrics(original)
+
+    def test_a_row_is_one_data_point_carrying_its_metric(self):
+        original, trace = collected()
+        by_name = {row["name"]: row for row in metrics.rows(original)}
+
+        orders = by_name["shop.orders"]
+        assert (orders["type"], orders["temporality"], orders["is_monotonic"]) == (
+            "sum",
+            metrics.DELTA,
+            True,
+        )
+        assert (orders["value_int"], orders["value_double"]) == (2, None)
+        exemplars = orders["exemplars"]
+        assert isinstance(exemplars, list)
+        [exemplar] = exemplars
+        assert exemplar["trace_id"] == trace.to_bytes(16, "big")
+
+        # The SDK's `delta` preference keeps an up-down counter cumulative.
+        assert by_name["shop.in_flight"]["temporality"] == metrics.CUMULATIVE
+        assert by_name["shop.in_flight"]["value_int"] == -3
+        gauge = by_name["shop.temperature"]
+        assert (gauge["type"], gauge["temporality"], gauge["value_double"]) == (
+            "gauge",
+            None,
+            21.5,
+        )
+        duration = by_name["http.server.request.duration"]
+        assert duration["bucket_counts"] == [1, 1, 0]
+        assert duration["explicit_bounds"] == [0.01, 0.1]
+        amount = by_name["shop.amount"]
+        assert (amount["type"], amount["count"], amount["zero_count"]) == (
+            "exponential_histogram",
+            2,
+            1,
+        )
+
+    def test_a_non_finite_double_is_stored_as_null(self):
+        """A stream refuses NaN and ±inf; the point is kept, the value is not."""
+        from opentelemetry.sdk.metrics.export import (
+            Gauge,
+            Metric,
+            MetricsData,
+            NumberDataPoint,
+            ResourceMetrics,
+            ScopeMetrics,
+        )
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+
+        point = NumberDataPoint({}, None, 1, math.inf)  # ty: ignore[invalid-argument-type]
+        data = MetricsData(
+            [
+                ResourceMetrics(
+                    Resource({}),
+                    [
+                        ScopeMetrics(
+                            InstrumentationScope("s"),
+                            [Metric("g", "", "", Gauge([point]))],
+                            "",
+                        )
+                    ],
+                    "",
+                )
+            ]
+        )
+        [row] = metrics.rows(data)
+        assert (row["value_int"], row["value_double"]) == (None, None)
+
+    def test_the_exporter_asks_for_delta_counters_and_histograms(self):
+        from opentelemetry.sdk.metrics import Counter, Histogram, UpDownCounter
+        from opentelemetry.sdk.metrics.export import AggregationTemporality
+
+        exporter = metrics.StreamMetricExporter(None, None)  # ty: ignore[invalid-argument-type]
+        preferred = exporter._preferred_temporality  # noqa: SLF001
+        assert preferred is not None
+        assert preferred[Counter] == AggregationTemporality.DELTA
+        assert preferred[Histogram] == AggregationTemporality.DELTA
+        assert preferred[UpDownCounter] == AggregationTemporality.CUMULATIVE
 
 
 def span_row(i: int, service: str, *, kind: int = 2, failed: bool = False) -> dict:

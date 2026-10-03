@@ -123,7 +123,7 @@ DEMOS: dict[str, Demo] = {
         ],
     ),
     "otel": Demo(
-        "OpenTelemetry logs and traces through streams, in otel-gui",
+        "OpenTelemetry logs, traces and metrics through streams, in otel-gui",
         [
             Process("otel-gui", module("examples.otel.gui"), 4318),
             Process(
@@ -134,6 +134,8 @@ DEMOS: dict[str, Demo] = {
                     "logs=examples.otel.logs:SCHEMA",
                     "--stream",
                     "spans=examples.otel.spans:SCHEMA",
+                    "--stream",
+                    "metrics=examples.otel.metrics:SCHEMA",
                     "--port",
                     "8766",
                     "--root",

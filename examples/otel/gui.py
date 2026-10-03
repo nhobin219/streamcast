@@ -3,7 +3,7 @@
     just demo otel    # this, a broker, the services, and the OTLP exporter
 
 [otel-gui](https://github.com/metafab/otel-gui) is a local OTLP receiver
-with a dashboard for logs, traces and the service map. The first run
+with a dashboard for logs, traces, metrics and the service map. The first run
 downloads its release for this platform, checks its SHA-256 against the
 published one, and caches it. It listens on 127.0.0.1, and Ctrl-C stops it.
 
@@ -27,7 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "2.1.0"
+VERSION = "3.0.0"
+"""3.0.0 is the first to take metrics: earlier ones answer `/v1/metrics` 501."""
 ASSETS = {
     ("Linux", "x86_64"): "otel-gui-linux-x64",
     ("Linux", "aarch64"): "otel-gui-linux-arm64",
@@ -95,16 +96,17 @@ def ready(port: int, gui: subprocess.Popen[bytes], log: Path) -> None:
 
 
 def warm(port: int) -> None:
-    """Have otel-gui load its trace and logs decoders, one after the other.
+    """Have otel-gui load its trace, logs and metrics decoders, one at a time.
 
-    otel-gui (2.1.0, and 3.0.0 unchanged) loads its trace and logs `.proto`
-    files lazily into one shared protobufjs Root, on the first request to
-    each. The exporter sends both at once, the two loads interleave, one
-    resolves before `resource.proto` is parsed, and the throw escapes into a
-    callback and kills the dashboard. An empty request to each, in turn, does
-    the loading before anything can race it.
+    otel-gui (2.1.0 and 3.0.0) loads each signal's `.proto` files lazily into
+    one shared protobufjs Root, on the first request to each. The exporter
+    sends all three at once, the loads interleave, one resolves before
+    `resource.proto` is parsed, and the throw escapes into a callback and
+    kills the dashboard: on 3.0.0, all three signals' first requests at once
+    killed it 5 times in 5. An empty request to each, in turn, does the
+    loading before anything can race it, and none died.
     """
-    for signal_name in ("traces", "logs"):
+    for signal_name in ("traces", "logs", "metrics"):
         request = urllib.request.Request(  # noqa: S310
             f"http://127.0.0.1:{port}/v1/{signal_name}",
             data=b"",

@@ -38,7 +38,7 @@ just demo NAME [ARGS]      # run one, with all its processes
 | `live` | as `trades`, with a live-only broker | no log: nothing to replay |
 | `fastapi` | `fastapi_app.py` as the broker, then as `trades` | the broker mounted in a FastAPI app |
 | `book` | broker, `book/producer.py`, `book/index.html` | Bitstamp's live order book as a keyed table log, kept by a browser page |
-| `otel` | otel-gui, broker, `otel/services.py`, `otel/analytics.py`, `otel/export.py` | OpenTelemetry logs and traces through streams, in a dashboard |
+| `otel` | otel-gui, broker, `otel/services.py`, `otel/analytics.py`, `otel/export.py` | OpenTelemetry logs, traces and metrics through streams, in a dashboard |
 | `clean` | | delete what the demos stored |
 
 `just demo` starts a demo's processes in order, waiting for each one that
@@ -260,21 +260,38 @@ against E. An empty diff means the migration does what production does. Once
 it's empty, the cutover is C reading D's stream, and B retires with its
 history still a queryable table.
 
-## OpenTelemetry logs and traces, in a dashboard
+## OpenTelemetry logs, traces and metrics, in a dashboard
 
 ```
 just demo otel                        # otel-gui, a broker, the services, analytics, and the OTLP exporter
 uv run python -m examples.otel.demo   # the same pipeline once, printing what each part saw
 ```
 
-Two simulated services, checkout and payments, handle traced orders and log
-through Python's `logging` and the OpenTelemetry SDK. Their log records and
-spans are published to two streams, `logs` and `spans`. `otel/export.py`
-follows both and re-exports every row as OTLP to [otel-gui](https://github.com/metafab/otel-gui),
-a local dashboard where logs, traces and the service map fill in live. A
+Two simulated services, checkout and payments, handle traced orders, log
+through Python's `logging`, and record metrics, all through the OpenTelemetry
+SDK. Their log records, spans and metric data points are published to three
+streams, `logs`, `spans` and `metrics`. `otel/export.py` follows all three
+and re-exports every row as OTLP to [otel-gui](https://github.com/metafab/otel-gui),
+a local dashboard where logs, traces, metrics and the service map fill in live. A
 failed order is one trace across both services: payments' `POST /charge`
 span with a `card declined` event and error log, and checkout's request
 marked failed with an `order failed` warning.
+
+**The metrics** are an order count by outcome (`shop.orders`) and each
+service's request duration (`http.server.request.duration`, OTel's semantic
+convention), exported every second. A stream row is one data point, carrying
+its metric's name, unit, type and temporality. Counters and histograms are
+exported as deltas, so each row is what happened in its own second and a
+window's total is a `sum()`:
+
+```sql
+SELECT attributes['outcome'].string_value AS outcome, sum(value_int) AS orders
+FROM log WHERE name = 'shop.orders' GROUP BY outcome
+```
+
+A measurement made inside a span keeps that span's trace as an *exemplar*,
+so a metric leads straight to a request: the failed order's count points at
+the failed order's trace.
 
 `otel/analytics.py` is real-time analytics on the same telemetry, in one
 `Stream.live` view of `spans`. Every few seconds it asks, in one SQL query,
@@ -291,26 +308,29 @@ current, and the question is a query.
 
 | file | what it holds |
 |---|---|
-| `otel/common.py` | what both signals share: `AnyValue`, ids, scope, and publishing from OTel's export thread |
+| `otel/common.py` | what the signals share: `AnyValue`, ids, scope, and publishing from OTel's export thread |
 | `otel/logs.py` | the log record's schema, its row conversion, and `StreamLogExporter` |
 | `otel/spans.py` | the span's schema, its row conversion, and `StreamSpanExporter` |
+| `otel/metrics.py` | the metric data point's schema, its row conversion, and `StreamMetricExporter` |
 | `otel/demo.py` | the two services, the broker, and the one-shot demo |
-| `otel/export.py` | rows back to OTel records and spans, out through OTel's OTLP exporters |
-| `otel/services.py` | the producer: two services logging and tracing through OTel, publishing to the broker |
+| `otel/export.py` | rows back to OTel records, spans and metric exports, out through OTel's OTLP exporters |
+| `otel/services.py` | the producer: two services logging, tracing and recording metrics through OTel, publishing to the broker |
 | `otel/analytics.py` | real-time analytics with `Stream.live`: error rate now against always, per service |
 | `otel/gui.py` | otel-gui, downloaded, checked and run: where `export.py` sends what it reads |
 
 **None of this is in streamcast.** The schemas and conversions are built from
 the column types any stream can declare: trace and span ids as hex binary,
-attributes as a map, OTel's `AnyValue` as a struct, and a span's events and
-links as lists of structs. The OTel packages are dev dependencies, for this
+attributes as a map, OTel's `AnyValue` as a struct, a span's events and
+links as lists of structs, and a histogram's buckets as lists. The OTel packages are dev dependencies, for this
 example only.
 
 **`otel/export.py` is an ordinary OTLP exporter.** OTel viewers are
 *receivers*: telemetry is pushed to them, and none subscribes to a WebSocket.
 So this subscribes to the streams, turns each row back into an SDK log record
 or span, and hands it to OpenTelemetry's own batch processors and OTLP/HTTP
-exporters. The batching, the protobuf encoding and the retries are OTel's,
+exporters. Metrics have no batch processor to hand a point to, so metric rows
+are regrouped every half second into the resource, scope and metric nesting
+an export carries, and handed to OTel's OTLP metric exporter. The batching, the protobuf encoding and the retries are OTel's,
 and it works with any OTLP/HTTP receiver. Point `--receiver` at an OTel
 Collector and it feeds whatever the Collector does.
 
@@ -324,4 +344,7 @@ The one-shot run shows what a subscriber can do beyond a dashboard:
 - one failed request replayed by its trace id from both streams, with the id
   given as hex text in `where=`;
 - SQL over the stored tables: errors per service, the slowest request from
-  its root span, and ingest lag from `streamcast_ts`.
+  its root span, and ingest lag from `streamcast_ts`;
+- SQL over the metrics: orders by outcome, mean request duration per service
+  from the histograms, and the failed order's exemplar, which is the failed
+  request's trace id.
