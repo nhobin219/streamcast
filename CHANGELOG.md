@@ -7,6 +7,30 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **Metrics in the OTel example** (`examples/otel/metrics.py`):
+  - **`StreamMetricExporter`**, an OTel metric exporter that publishes each
+    collection to a stream, one row per data point. It covers sums, gauges
+    and both kinds of histogram, with exemplars kept, so a metric leads to
+    the trace it measured.
+  - **Delta temporality** for counters and histograms, so a window's total
+    is a `sum()` over the stored table.
+  - **The services record metrics:** an order count by outcome and
+    `http.server.request.duration`.
+  - **`otel/export.py` re-exports metrics as OTLP**, and **`just demo otel`
+    shows them in otel-gui's Metrics tab.** The dashboard moves to otel-gui
+    3.0.0, the first release that accepts metrics.
+
+### Changed
+
+- **The one-shot OTel demo runs without a maintainer**, as the migration demo
+  does. Its maintainer processes were still opening the logs when the run
+  ended, and cost it several seconds: `demo.main` took 3–11 s with them and
+  about 1 s without.
+
 ## 0.13.1 — 2026-10-03
 
 ### Changed

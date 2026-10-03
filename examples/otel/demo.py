@@ -1,10 +1,10 @@
-"""OpenTelemetry logs and traces, through two streams, into tables you can query.
+"""OpenTelemetry logs, traces and metrics, through streams, into tables you can query.
 
     uv run python -m examples.otel.demo    # once, printing what it saw
     just demo otel                         # the same roles as processes, live
 
 Nothing here is part of streamcast. The OTel schemas and conversions live in
-`logs.py` and `spans.py`, built from ordinary column types. The OTel packages
+`logs.py`, `spans.py` and `metrics.py`, built from ordinary column types. The OTel packages
 are dev dependencies, for this example only.
 
 The three roles, in one process so a test can run it: the broker, the
@@ -12,17 +12,20 @@ producer (`services.py`) and the subscribers are each what they would be as
 separate processes, talking over sockets, and nothing below changes but the
 URI. `just demo otel` runs them as separate processes.
 
-1. **A broker** serves two streams, `logs` and `spans`, each with a log,
-   accepting remote publishers (`publish=True`).
+1. **A broker** serves three streams, `logs`, `spans` and `metrics`, each
+   with a log, accepting remote publishers (`publish=True`).
 2. **The producer**: two services, checkout and payments, handle traced
-   requests and log through the standard `logging` module. OTel's SDK turns
-   each into records and spans, published by the exporters in `logs.py` and
-   `spans.py`.
+   requests, log through the standard `logging` module, and count orders and
+   time requests. OTel's SDK turns each into records, spans and metric data
+   points, published by the exporters in `logs.py`, `spans.py` and
+   `metrics.py`.
 3. **A live tail** follows the problems as they happen — `where=` a membership
    filter on `severity_text` — and **a replay** reads back one request by its
    trace id from both streams, `where={"trace_id": "<32 hex chars>"}`.
-4. **The stored tables** answer what a log search and a trace view would:
-   errors per service, the slowest request, and ingest lag.
+4. **The stored tables** answer what a log search, a trace view and a metrics
+   dashboard would: errors per service, the slowest request, ingest lag,
+   orders by outcome, mean request duration per service, and the failed
+   order's exemplar, which names the failed request's trace.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import streamcast
-from examples.otel import logs, spans
+from examples.otel import logs, metrics, spans
 from examples.otel.services import exporting, traffic
 
 if TYPE_CHECKING:
@@ -42,10 +45,13 @@ if TYPE_CHECKING:
 # -- the broker -------------------------------------------------------------------
 
 
-def streams(root: Path) -> tuple[streamcast.Stream, streamcast.Stream]:
+def streams(
+    root: Path,
+) -> tuple[streamcast.Stream, streamcast.Stream, streamcast.Stream]:
     return (
         streamcast.Stream.new("logs", root=root, schema=logs.SCHEMA),
         streamcast.Stream.new("spans", root=root, schema=spans.SCHEMA),
+        streamcast.Stream.new("metrics", root=root, schema=metrics.SCHEMA),
     )
 
 
@@ -75,9 +81,17 @@ async def one_trace(
 
 async def main(root: Path) -> dict[str, Any]:
     """Run the whole demo under `root`, print it, and return what it saw."""
-    log_stream, span_stream = streams(root)
+    log_stream, span_stream, metric_stream = streams(root)
+    # No maintainer, as in the migration demo: a run this short never fills a
+    # log enough to seal it. Its five processes were still opening the logs
+    # when the run ended, and cost the run several seconds. `just demo otel`'s
+    # broker keeps `serve`'s default, which starts them.
     server = await streamcast.serve(
-        [log_stream, span_stream], "127.0.0.1", 0, publish=True
+        [log_stream, span_stream, metric_stream],
+        "127.0.0.1",
+        0,
+        publish=True,
+        maintain=False,
     )
     base = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     try:
@@ -116,13 +130,40 @@ async def main(root: Path) -> dict[str, Any]:
             log_stream,
             "SELECT max(streamcast_ts * 1000 - time_unix_nano) / 1e6 AS ms FROM log",
         )
+        # Each row of `shop.orders` is one interval's count (delta temporality),
+        # so the total is a sum.
+        outcomes = query(
+            metric_stream,
+            "SELECT attributes['outcome'].string_value AS outcome, "
+            "sum(value_int)::BIGINT AS orders FROM log "
+            "WHERE name = 'shop.orders' GROUP BY outcome ORDER BY outcome",
+        )
+        durations = query(
+            metric_stream,
+            "SELECT service, sum(count)::BIGINT AS requests, "
+            "sum(sum) / sum(count) * 1e3 AS mean_ms FROM log "
+            "WHERE name = 'http.server.request.duration' "
+            "GROUP BY service ORDER BY service",
+        )
+        # The failed order was counted inside its request's span, so the SDK
+        # kept it as an exemplar: from the metric straight to the trace.
+        exemplars = query(
+            metric_stream,
+            "SELECT lower(hex(e.trace_id)) AS trace FROM ("
+            "SELECT unnest(exemplars) AS e FROM log WHERE name = 'shop.orders' "
+            "AND attributes['outcome'].string_value = 'failed')",
+        )
         [stored_logs] = query(log_stream, "SELECT count(*) AS n FROM log")
         [stored_spans] = query(span_stream, "SELECT count(*) AS n FROM log")
+        [stored_points] = query(metric_stream, "SELECT count(*) AS n FROM log")
     finally:
         server.close()
         await server.wait_closed()
 
-    print(f"{stored_logs['n']} log records and {stored_spans['n']} spans stored")
+    print(
+        f"{stored_logs['n']} log records, {stored_spans['n']} spans and "
+        f"{stored_points['n']} metric data points stored"
+    )
     print("live tail, errors and warnings as they happened:")
     for message in live:
         print(
@@ -142,6 +183,14 @@ async def main(root: Path) -> dict[str, Any]:
     print(f"errors per service: {errors}")
     print(f"slowest request: {slowest['ms']:.1f} ms")
     print(f"ingest lag, worst: {lag['ms']:.1f} ms")
+    print(f"orders by outcome: {outcomes}")
+    for row in durations:
+        print(
+            f"  {row['service']:>8}  {row['requests']} requests, "
+            f"mean {row['mean_ms']:.2f} ms"
+        )
+
+    print(f"the failed order's exemplar: trace {[e['trace'] for e in exemplars]}")
 
     return {
         "logs": stored_logs["n"],
@@ -153,6 +202,10 @@ async def main(root: Path) -> dict[str, Any]:
         "errors": errors,
         "slowest_ms": slowest["ms"],
         "lag_ms": lag["ms"],
+        "points": stored_points["n"],
+        "outcomes": outcomes,
+        "durations": durations,
+        "exemplars": [e["trace"] for e in exemplars],
     }
 
 
