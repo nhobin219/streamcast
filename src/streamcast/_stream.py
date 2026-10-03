@@ -963,6 +963,9 @@ class Stream:
         the broker waits on this one's disk (`_writer`); the fan-out is a
         queue insert per subscriber, done on the loop once the commit is back.
         Without a log there is nothing to commit, and it does not await at all.
+        With one it may also wait for room: past `serve`'s `max_inbound`
+        rows queued for commit, a send waits for the disk — never for a
+        consumer.
 
         The frame is the row as JSON text, encoded once and shared by every
         subscriber (I6) — measured at 0.285 us for a six-column row. The key
@@ -1275,6 +1278,12 @@ class Stream:
         `send_many`, with the same consequences. The reply is the offsets
         assigned, so a publisher learns its rows are durable the way an
         `await send(...)` does.
+
+        **Pipelined.** Each frame is queued for the writer as it is read,
+        without waiting for the one before it to commit, and answered in the
+        order it arrived. At most `max_in_flight` replies are owed one
+        connection; past that it stops being read, which is backpressure at
+        the socket, not an error.
 
         A row the schema refuses is answered and the connection stays open,
         because that is what the local call does: `send` raises, the caller

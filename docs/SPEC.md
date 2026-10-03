@@ -324,7 +324,9 @@ the AST to keep it so: checking and queueing are one step, so rows are queued
 in the order `send` was called; one thread commits them first in, first out;
 and `call_soon_threadsafe` runs one thread's callbacks in the order it
 scheduled them, so `_deliver` sees commits in commit order and advances the
-frontier and fans out in one step. A stream with no log has nothing to commit
+frontier and fans out in one step. A pipelined publisher connection queues
+each frame through the same step (`_submit`) as it reads it, so its rows are
+queued in the order its frames arrived. A stream with no log has nothing to commit
 and does the delivery inside `send`.
 
 **Why the commit is off the loop.** Every stream a broker serves shares one
