@@ -101,12 +101,10 @@ so it reads the same way. WebSocket itself has no verbs — the protocol is fram
 both subscribing and publishing here are URL conventions on top of it.
 
 ```python
-streamcast.Stream(name="", *, log=None, owns_log=False,
-                  max_backlog=8192, max_replay=100_000)
+streamcast.Stream(name="", *, log=None, owns_log=False, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
                       published=None, s3_options=None, replay_published=False,
-                      max_backlog=8192, max_replay=100_000,   # None = no bound
-                      max_inbound=65_536)                     # rows queued to commit
+                      max_replay=100_000)                     # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
@@ -121,7 +119,9 @@ await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept curren
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
-                 publish=False, max_in_flight=64, ...) -> Server
+                 publish=False, max_backlog=8192,        # frames per subscriber
+                 max_inbound=65_536,                     # rows queued to commit
+                 max_in_flight=64, ...) -> Server        # an int, or {stream: int}
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
 streamcast.publish(uri, ...) -> Publication          # server needs publish=True
@@ -397,6 +397,7 @@ them:
 | checked | on every send, per subscriber | once, when the subscriber attaches |
 | exceeded | that subscriber is **dropped** — `TooSlow`, 4429 | the subscribe is **refused** — `too_old`, 4416 |
 | protects | the server's memory | the worker thread a replay scan holds |
+| set on | `serve`, per process | `Stream`, per stream |
 
 **They interact, which is why sizing one without the other goes wrong.** A replay is
 served *before* the live queue, and live messages pile up behind it — so a subscriber

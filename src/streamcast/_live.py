@@ -50,6 +50,7 @@ from websockets.exceptions import ConnectionClosed
 
 from streamcast import _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
+from streamcast._limits import MAX_TAIL
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -86,12 +87,12 @@ class Live:
         *,
         where: dict[str, object] | None = None,
         start: int | None = None,
-        max_tail: int = _snapshot.MAX_TAIL,
+        max_tail: int = MAX_TAIL,
     ) -> None:
         self._broker = broker
         # What the view will hold from the broker, unpublished, before it
         # stops: a publisher that has stalled must not run this process out
-        # of memory. See `_snapshot.MAX_TAIL`.
+        # of memory. See `_limits.MAX_TAIL`.
         self._max_tail = max_tail
         # The subscription's filter, and the same terms for the published
         # base — one narrowing, applied on both sides of the join.
@@ -488,7 +489,7 @@ async def live(
     rebase_every: float = REBASE_EVERY,
     where: dict[str, object] | None = None,
     start_offset: int | None = None,
-    max_tail: int = _snapshot.MAX_TAIL,
+    max_tail: int = MAX_TAIL,
 ) -> Live:
     """See `Stream.live`."""
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`

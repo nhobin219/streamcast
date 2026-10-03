@@ -60,11 +60,12 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from websockets.frames import Close as _CloseFrame
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
-from streamcast._protocol import MAX_IN_FLIGHT, Publish, parse_subscribe, refusal
+from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
+from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._server import _DETAIL_CHARS, _routes, _sidecars, _supervisors
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Iterable, Mapping
     from types import TracebackType
 
     from starlette.types import Receive, Scope, Send
@@ -277,7 +278,6 @@ class _Mounted:
     __slots__ = (
         "_children",
         "_maintain",
-        "_max_in_flight",
         "_publish",
         "_sidecars",
         "_started",
@@ -291,12 +291,16 @@ class _Mounted:
         maintain: bool | Maintain = True,
         replicate: bool = False,
         publish: bool = False,
-        max_in_flight: int = MAX_IN_FLIGHT,
+        max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
+        max_inbound: int | Mapping[str, int] = MAX_INBOUND,
+        max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
     ) -> None:
         # Resolved here, synchronously, exactly as `serve` does: a stream-set
         # collision or a missing litestream should fail at the call rather
         # than inside a lifespan event whose traceback names the framework.
         self._streams = _routes(streams)
+        _bound(self._streams, max_backlog, max_inbound, max_in_flight)
+
         self._maintain = maintain
         # The sidecar resolves litestream here, so a missing binary fails at
         # the call. The maintainer waits for `_start`: it is handed the
@@ -306,7 +310,6 @@ class _Mounted:
         self._sidecars: list[_Child] = [*_sidecars(self._streams, replicate)]
         self._children: list[_Child] = []
         self._publish = publish
-        self._max_in_flight = max_in_flight
         self._started = False
 
     def __repr__(self) -> str:
@@ -449,7 +452,7 @@ class _Mounted:
                 await peer.close(Close.BAD_REQUEST, refusal("publish_disabled"))
                 return
 
-            await stream.serve_publisher(peer, max_in_flight=self._max_in_flight)
+            await stream.serve_publisher(peer)
             return
 
         try:
@@ -474,7 +477,9 @@ def asgi(
     maintain: bool | Maintain = True,
     replicate: bool = False,
     publish: bool = False,
-    max_in_flight: int = MAX_IN_FLIGHT,
+    max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
+    max_inbound: int | Mapping[str, int] = MAX_INBOUND,
+    max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
 ) -> _Mounted:
     """An ASGI app serving `streams`, for mounting in an existing service.
 
@@ -508,6 +513,8 @@ def asgi(
         maintain=maintain,
         replicate=replicate,
         publish=publish,
+        max_backlog=max_backlog,
+        max_inbound=max_inbound,
         max_in_flight=max_in_flight,
     )
 

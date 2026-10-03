@@ -20,11 +20,19 @@ there was nothing to have changed from. Everything above it is ordinary.
   answered in its place and the rest carry on. `serve(max_in_flight=64)`
   (and `asgi`) bounds the replies one connection may be owed, past which the
   server stops reading it.
+- **BREAKING: `max_backlog` moves from `Stream` to `serve` and `asgi`.**
+  `Stream(max_backlog=)` and `Stream.new(max_backlog=)` are gone; pass
+  `serve(..., max_backlog=)`. A queue bound is the serving process's
+  setting, not the stream's, so it now changes with a restart without
+  touching the code that builds the streams. `serve` and `asgi` take each of
+  their bounds — `max_backlog`, `max_inbound`, `max_in_flight` — as one int
+  for every stream, or a map from stream name to int that must name exactly
+  the streams served; a missing or unknown name, or a bound below 1, raises
+  `ValueError` at the call.
 
 ### Added
 
-- **`max_inbound`** on `Stream`, `Stream.new`, `Stream.restore` and
-  `Stream.migrate` (65,536 rows by default): rows a durable stream may have
+- **`max_inbound`** on `serve` and `asgi` (65,536 rows by default): rows a durable stream may have
   queued for commit, across all its publishers, before a send waits. The
   broker's memory bound when its disk falls behind — at the bound a local
   `send` waits and a remote publisher's connection stops being read, so TCP

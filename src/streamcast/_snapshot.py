@@ -43,6 +43,7 @@ import pyarrow as pa
 
 from streamcast import _log, _manifest, _published, _remote, _schema
 from streamcast._errors import NotReplayable, StreamcastError
+from streamcast._limits import MAX_TAIL
 from streamcast._metadata import Metadata
 
 if TYPE_CHECKING:
@@ -55,17 +56,6 @@ if TYPE_CHECKING:
 
 LATEST: Final = -1
 """`as_of_offset=LATEST`: up to the broker's frontier as of connect."""
-
-MAX_TAIL: Final = 1_000_000
-"""Rows a snapshot or live view will hold from the broker, in memory.
-
-What the published tables do not hold yet is read off the socket and kept;
-it stays small while publishing keeps up. Past this, a snapshot is refused
-and a live view stops, each saying the published tables are too far behind —
-rather than the reader running out of memory waiting for a publisher that
-has stalled. Counted in rows read, not offset distance, which a restore fence
-stretches by 2**20.
-"""
 
 
 class SnapshotUnavailable(StreamcastError):
@@ -612,7 +602,7 @@ async def _with_tail(
     as_of_offset: int,
     broker: str,
     s3_options: S3Options | None,
-    max_tail: int = MAX_TAIL,
+    max_tail: int,
 ) -> Snapshot:
     """The published snapshot, then the broker's rows above it up to the point."""
     from streamcast import _client  # noqa: PLC0415 — the client imports this module
@@ -696,7 +686,6 @@ def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
 
 __all__ = [
     "LATEST",
-    "MAX_TAIL",
     "Snapshot",
     "SnapshotUnavailable",
     "metadata",

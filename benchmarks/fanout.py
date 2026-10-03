@@ -117,7 +117,7 @@ async def main() -> None:
 
     # --- fan-out: the queue insert per subscriber, no sockets ---------------
     for count in sorted({1, 10, args.subscribers}):
-        stream = streamcast.Stream("bench", max_backlog=args.messages + 1)
+        stream = streamcast.Stream("bench")
         subscribers = [
             Subscriber(_Sink(), max_backlog=args.messages + 1)  # ty: ignore[invalid-argument-type]
             for _ in range(count)

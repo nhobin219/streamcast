@@ -78,13 +78,12 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_backlog=8192, max_replay=100_000, group_commit=True,
-                  max_inbound=65_536)
+                  max_replay=100_000, group_commit=True)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
-                      max_backlog=8192, max_replay=100_000, max_inbound=65_536)
+                      max_replay=100_000)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -145,18 +144,12 @@ a declared `schema=` rather than adopted, because a declaration that disagreed w
 disk would be silently ignored and every `send` validated against columns the caller never
 wrote down.
 
-`max_inbound` is its twin on the way in: rows a durable stream may have queued for commit,
-across every publisher, before a send waits for room. It is what bounds the broker's memory
-when its disk falls behind — at the bound a local `send` waits, and a remote publisher's
-connection stops being read, so TCP holds it back. Nothing is refused. A batch larger than
-the bound is let in alone, when nothing else is queued.
-
-`max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
+`max_replay` bounds
 how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused
 as `too_old`. With `replay_published=True` that makes the server a complete gateway to the
 log — any language can replay the whole stream over a plain WebSocket, with no litelink and
 no credentials of its own. The cost is that a long replay accumulates live messages behind
-it and `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
+it and `serve`'s `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
 while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.
@@ -230,7 +223,8 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 
 ```python
 streamcast.serve(streams, host=None, port=None, *, maintain=True,
-                 replicate=False, publish=False, max_in_flight=64,
+                 replicate=False, publish=False, max_backlog=8192,
+                 max_inbound=65_536, max_in_flight=64,
                  **websockets_kwargs) -> Server
 ```
 
@@ -257,6 +251,29 @@ await server.serve_forever()
 Routing is by `Stream.name`. Two streams with one name raise `ValueError` at `serve`
 rather than resolving: whichever lost would be unreachable, and the subscriber that
 wanted it would get somebody else's messages — which looks like working software.
+
+**Three keywords bound every queue the server keeps**, so neither a slow consumer, a slow
+disk nor a fast publisher can run it out of memory. They are the serving process's
+settings, not the streams', so a restart may change them:
+
+| keyword | bounds | at the bound |
+|---|---|---|
+| `max_backlog` (8,192) | frames a subscriber may fall behind | it is dropped with `TooSlow` |
+| `max_inbound` (65,536) | rows a durable stream may have queued for commit, across every publisher | a local `send` waits; a remote publisher's connection stops being read, so TCP holds it back |
+| `max_in_flight` (64) | replies owed one publisher connection | the connection stops being read |
+
+Each takes one int for every stream, or a map from stream name to int that names exactly
+the streams served — a missing name or one not served raises `ValueError` at `serve`, as
+does a bound below 1:
+
+```python
+streamcast.serve([trades, quotes], host, port,
+                 max_inbound={"trades": 262_144, "quotes": 65_536}, max_backlog=16_384)
+```
+
+`max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). Nothing at
+`max_inbound` is refused, and a batch larger than it is let in alone, when nothing else is
+queued.
 
 `host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for a
 server that should only serve its own box, which is the case this library is built for.
@@ -480,7 +497,8 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=False, publish=False)
+asgi(streams, *, maintain=True, replicate=False, publish=False,
+     max_backlog=8192, max_inbound=65_536, max_in_flight=64)
 ```
 
 The same streams behind an ASGI app, for a service that already has one. Needs the extra:

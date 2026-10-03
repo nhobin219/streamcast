@@ -117,6 +117,7 @@ from streamcast._errors import (
     StreamNotFound,
     TooSlow,
 )
+from streamcast._limits import MAX_BACKLOG
 from streamcast._live import Live
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
@@ -125,7 +126,7 @@ from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._snapshot import LATEST, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
-from streamcast._stream import MAX_BACKLOG, MAX_REPLAY, Stream
+from streamcast._stream import MAX_REPLAY, Stream
 
 try:
     __version__ = version("streamcast")

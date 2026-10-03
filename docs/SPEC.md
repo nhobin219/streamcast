@@ -456,7 +456,7 @@ settings and check the other.
 A slow consumer is dropped; a slow DISK cannot be. Every publisher on a stream
 feeds one writer thread, and if commits fall behind what arrives, rows queue
 in memory — with nothing bounding them, until the broker is out of it.
-`max_inbound` (65,536 rows by default) bounds that queue per stream, across
+`serve(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
 all its publishers, and at the bound a sender **waits** rather than being
 refused: a local `send` waits for room, and a publisher connection's reader
 stops reading its socket, so TCP holds the remote publisher back and its
@@ -470,14 +470,19 @@ one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
+The broker's three bounds are `serve`'s keywords, not the `Stream`'s: they
+are the serving process's settings, and change with a restart rather than
+with the stream. Each is one int for every stream or a map naming every
+stream served, checked in full before any stream is set.
+
 ### What bounds memory, at each end
 
 Neither end can be run out of memory by the other, or by a stall:
 
 | where | what | bound | at the bound |
 |---|---|---|---|
-| broker | a subscriber's outbound queue | `max_backlog`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
-| broker | a stream's rows queued for commit | `max_inbound`, 65,536 rows | sends wait; publishers are held at the socket |
+| broker | a subscriber's outbound queue | `serve(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
+| broker | a stream's rows queued for commit | `serve(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
 | broker | replies owed one publisher connection | `serve(max_in_flight=)`, 64 frames | the connection stops being read |
 | both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB) | the connection stops being read |
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |

@@ -59,9 +59,9 @@ from streamcast import (
 )
 from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
+from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
 from streamcast._protocol import (
     EARLIEST,
-    MAX_IN_FLIGHT,
     decode,
     decode_publish,
     encode,
@@ -82,29 +82,6 @@ if TYPE_CHECKING:
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
-
-MAX_BACKLOG: Final = 8_192
-"""Messages a subscriber may fall behind before it is dropped.
-
-Counted in MESSAGES, not bytes, because that is what the queue holds — a
-pointer to a frame every subscriber shares. A backlog is ~8 bytes per
-subscriber per queued message plus one copy of each frame, so 8,192 across 200
-subscribers is ~13 MB of pointers over whatever the frames themselves weigh.
-Size it in bytes by multiplying by your own message size; there is no setting
-that does it for you, because the library never sees a typical message until
-it is running.
-"""
-
-MAX_INBOUND: Final = 65_536
-"""Rows a durable stream may have queued for commit before a send waits.
-
-The inbound twin of `max_backlog`. Every publisher on a stream feeds one
-writer thread; if the disk falls behind, rows queue in memory, and without a
-bound they queue until the broker is out of it. At the bound a `send` waits
-for room — a remote publisher's connection stops being read, and TCP holds
-the publisher back — rather than anything being refused. Per stream, across
-all its publishers.
-"""
 
 MAX_REPLAY: Final = 100_000
 """How far back a subscribe may ask to resume from.
@@ -176,6 +153,8 @@ class Stream:
         "_last_send_ts",
         "_log",
         "_max_backlog",
+        "_max_in_flight",
+        "_max_inbound",
         "_max_replay",
         "_name",
         "_owned",
@@ -191,7 +170,6 @@ class Stream:
         "_validate",
         "_writer",
         "_group_commit",
-        "_max_inbound",
         "_queued",
         "_waiting",
         "_check_stored",
@@ -203,7 +181,6 @@ class Stream:
         *,
         log: WriteHandle | None = None,
         owns_log: bool = False,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         floor: int | None = None,
         retired: Sequence[tuple[Path, str]] = (),
@@ -211,7 +188,6 @@ class Stream:
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
-        max_inbound: int = MAX_INBOUND,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -302,7 +278,6 @@ class Stream:
         self._group_commit = group_commit and log is not None
         # Rows queued for the writer and not yet delivered, and the senders
         # waiting for that to fall below `max_inbound`. See `_room`.
-        self._max_inbound = max_inbound
         self._queued = 0
         self._waiting: list[asyncio.Future[None]] = []
         self._writer = (
@@ -335,7 +310,12 @@ class Stream:
         self._owned = log if (owns_log and log is not None) else None
         self._name = name
         self._log = log
-        self._max_backlog = max_backlog
+        # The queue bounds, defaults until `serve` sets the deployment's
+        # (`_bound`): they belong to the process serving the stream, not to
+        # the stream, so they can change on a restart. See `_limits`.
+        self._max_backlog = MAX_BACKLOG
+        self._max_inbound = MAX_INBOUND
+        self._max_in_flight = MAX_IN_FLIGHT
         self._max_replay = max_replay
         # Read ONCE, here, and maintained by `send` thereafter. litelink's
         # `end_offset()` is a SQLite read and `append` returns the offset it
@@ -383,11 +363,9 @@ class Stream:
         config: object | None = None,
         published: str | None = None,
         s3_options: object | None = None,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
-        max_inbound: int = MAX_INBOUND,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -449,14 +427,12 @@ class Stream:
             name,
             log=log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
-            max_inbound=max_inbound,
         )
 
     @classmethod
@@ -469,11 +445,9 @@ class Stream:
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
         s3_options: object | None = None,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
-        max_inbound: int = MAX_INBOUND,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -573,14 +547,12 @@ class Stream:
                     name,
                     log=opened,
                     owns_log=True,
-                    max_backlog=max_backlog,
                     max_replay=max_replay,
                     floor=_floor(metadata),
                     retired=_retired(root, metadata),
                     s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                     replay_published=replay_published,
                     group_commit=group_commit,
-                    max_inbound=max_inbound,
                 )
 
             retired_schema = old.schema
@@ -638,14 +610,12 @@ class Stream:
             name,
             log=new_log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
-            max_inbound=max_inbound,
         )
 
     @classmethod
@@ -659,8 +629,6 @@ class Stream:
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
-        max_inbound: int = MAX_INBOUND,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
         """Stand a stream up on a box that never held its log.
@@ -718,14 +686,12 @@ class Stream:
             name,
             log=log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
-            max_inbound=max_inbound,
         )
 
     def __repr__(self) -> str:
@@ -747,7 +713,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
-        max_tail: int = _snapshot.MAX_TAIL,
+        max_tail: int = MAX_TAIL,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -779,7 +745,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
-        max_tail: int = _snapshot.MAX_TAIL,
+        max_tail: int = MAX_TAIL,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -812,7 +778,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
-        max_tail: int = _snapshot.MAX_TAIL,
+        max_tail: int = MAX_TAIL,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -845,7 +811,7 @@ class Stream:
         rebase_every: float = _live.REBASE_EVERY,
         where: dict[str, object] | None = None,
         start_offset: int | None = None,
-        max_tail: int = _snapshot.MAX_TAIL,
+        max_tail: int = MAX_TAIL,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -1061,6 +1027,16 @@ class Stream:
             waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             self._waiting.append(waiter)
             await waiter
+
+    def _bound(self, *, max_backlog: int, max_inbound: int, max_in_flight: int) -> None:
+        """Set the queue bounds `serve` and `asgi` were given for this stream.
+
+        A new `max_backlog` applies to subscribers that join after it, and a
+        new `max_in_flight` to publisher connections that open after it. No await.
+        """
+        self._max_backlog = max_backlog
+        self._max_in_flight = max_in_flight
+        self._max_inbound = max_inbound
 
     def _drained(self, rows: int) -> None:
         """`rows` left the queue — committed or failed. Wake every waiter to
@@ -1278,9 +1254,7 @@ class Stream:
 
     # -- subscribe ---------------------------------------------------------
 
-    async def serve_publisher(
-        self, connection: Peer, *, max_in_flight: int = MAX_IN_FLIGHT
-    ) -> None:
+    async def serve_publisher(self, connection: Peer) -> None:
         """Take rows from a remote publisher and commit them as this process.
 
         **The whole point is that this adds no authority.** A publisher hands
@@ -1329,7 +1303,7 @@ class Stream:
         # order frames arrived, and a refusal takes its place in that line.
         # Bounded: a client that ignores its own window is held at the socket.
         replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None] = (
-            asyncio.Queue(maxsize=max_in_flight)
+            asyncio.Queue(maxsize=self._max_in_flight)
         )
         replying = asyncio.create_task(self._reply(connection, replies))
         try:
@@ -1867,4 +1841,4 @@ async def _prepend(
         yield item
 
 
-__all__ = ["MAX_BACKLOG", "MAX_REPLAY", "Stream"]
+__all__ = ["MAX_REPLAY", "Stream"]

@@ -99,7 +99,7 @@ class TestTheWindow:
     async def test_the_servers_bound_holds_a_client_allowed_more(
         self, stream, serve, monkeypatch
     ):
-        """`serve(max_in_flight=)`: past it, the server stops reading."""
+        """The server's `max_in_flight`: past it, the server stops reading."""
         held, commits = hold_commits(stream, monkeypatch)
         async with serve(stream, maintain=False, publish=True, max_in_flight=2) as uri:
             async with streamcast.publish(uri, max_in_flight=10) as producer:

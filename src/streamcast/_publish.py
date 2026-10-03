@@ -55,8 +55,8 @@ from websockets.exceptions import ConnectionClosed
 from streamcast._client import _refusal
 from streamcast._codec import from_greeting
 from streamcast._cursor import Cursor
+from streamcast._limits import MAX_IN_FLIGHT
 from streamcast._protocol import (
-    MAX_IN_FLIGHT,
     Greeting,
     encode_publish,
     parse_greeting,
@@ -496,4 +496,4 @@ async def _first(many: asyncio.Future[list[int | None]]) -> int | None:
     return offset
 
 
-__all__ = ["MAX_IN_FLIGHT", "Publication", "publish"]
+__all__ = ["Publication", "publish"]

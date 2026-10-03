@@ -33,14 +33,15 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
+from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
 from streamcast._maintain import ROLES, Maintain, Supervisor
-from streamcast._protocol import MAX_IN_FLIGHT, Publish, parse_subscribe, refusal
+from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stats import STATS_PATH, payload
 from streamcast._stream import Stream
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from websockets.asyncio.server import Server, ServerConnection
 
@@ -328,7 +329,9 @@ def serve(
     maintain: bool | Maintain = True,
     replicate: bool = False,
     publish: bool = False,
-    max_in_flight: int = MAX_IN_FLIGHT,
+    max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
+    max_inbound: int | Mapping[str, int] = MAX_INBOUND,
+    max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
     stats: bool | str = True,
     compression: str | None = None,
     **kwargs: Any,
@@ -411,11 +414,25 @@ def serve(
     A `process_request` of your own still works with it: yours is called for
     every path but this one, whether it is sync or async.
 
+    **Three keywords bound every queue the server keeps**, so a slow
+    consumer, a slow disk or a fast publisher holds memory to a bound rather
+    than running the process out of it: `max_backlog`, the frames a
+    subscriber may fall behind before it is dropped; `max_inbound`, the rows
+    a stream may have queued for commit before a send waits; `max_in_flight`,
+    the replies owed one publisher connection before it stops being read.
+    Each is one int for every stream, or a map from stream name to int that
+    must name exactly the streams served. They are this process's settings,
+    not the streams': a restart may change them. See `_limits`.
+
     A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to
     send, and is closed by the keepalive when its pongs stop arriving.
     """
     routes = _routes(streams)
+    # The queue bounds, before anything is written or started: a map that
+    # misses a stream, or names one not served, fails the call.
+    _bound(routes, max_backlog, max_inbound, max_in_flight)
+
     # **Every stream's metadata file, before anything else.** Written if it is
     # not there and synced to its S3 copy, and a failure is a failure to
     # start: a stream nothing else can read is found out here rather than at
@@ -477,7 +494,7 @@ def serve(
                 return
 
             try:
-                await stream.serve_publisher(connection, max_in_flight=max_in_flight)
+                await stream.serve_publisher(connection)
             except ConnectionClosed:
                 return
 
