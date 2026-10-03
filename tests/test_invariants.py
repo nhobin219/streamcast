@@ -1,7 +1,8 @@
 """The two atomicity claims, checked against the source rather than believed.
 
-`_stream` opens by saying that `send` contains no `await`, and that neither
-does the pair of statements that attaches a subscriber. Both are correctness
+`_stream` opens by saying that `_commit` and `_deliver` contain no `await` —
+queueing a send for the stream's writer, and delivering its commit — and that
+neither does the pair of statements that attaches a subscriber. Both are correctness
 arguments — the first is why two concurrent senders cannot deliver offset 8
 before offset 7, the second is why a resume is exactly-once — and **both fail
 silently if broken.** Adding an `await` inside either compiles, passes every
@@ -58,14 +59,17 @@ def awaits(node: ast.AST) -> list[int]:
     return lines
 
 
-@pytest.mark.parametrize("name", ["send", "send_many", "_fan_out"])
+@pytest.mark.parametrize("name", ["_commit", "_deliver", "_fan_out"])
 def test_publishing_never_awaits(name):
     """The ordering guarantee.
 
-    The offset is assigned, the row is made durable and the frame is offered
-    to every subscriber with nothing able to interleave. An `await` anywhere
-    in here lets a second sender run between the assignment and the fan-out,
-    and a subscriber then receives offsets out of order.
+    `_commit` checks rows and queues them for the stream's writer thread in
+    one step, so they are committed in the order `send` was called. `_deliver`
+    takes each commit back in commit order and advances the frontier and
+    offers the frame to every subscriber with nothing able to interleave. An
+    `await` in either lets a second sender run in between, and a subscriber
+    then receives offsets out of order — or a frontier that disagrees with
+    its queue.
     """
     found = awaits(function(_stream, "Stream", name))
     assert found == [], (

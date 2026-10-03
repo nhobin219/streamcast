@@ -5,23 +5,32 @@ behind a WebSocket port and `connect` reads it from the other end, but the
 ordering guarantee, the offset assignment and the replay partition are all
 decided here — which means they can be tested without a socket, and are.
 
-**The invariant the rest of the library rests on: `send` contains no `await`,
-and neither does the pair of statements that attaches a subscriber.** Both are
-therefore atomic against the event loop, and that atomicity is not a
+**The invariant the rest of the library rests on: `_deliver` contains no
+`await`, and neither does the pair of statements that attaches a subscriber.**
+Both are therefore atomic against the event loop, and that atomicity is not a
 performance note — it is the correctness argument:
 
-* In `send`, the offset is assigned, the row is made durable, and the frame is
-  offered to every subscriber with nothing able to interleave. Two concurrent
-  senders cannot produce a subscriber that sees offset 8 before offset 7.
+* A durable row is committed by the stream's writer thread (`_writer`), in
+  the order `send` queued it, and handed back in commit order. `_deliver`
+  then advances the frontier and offers the frame to every subscriber with
+  nothing able to interleave, so two concurrent senders cannot produce a
+  subscriber that sees offset 8 before offset 7. A live-only stream, which
+  has nothing to commit, does the same step inside `send`.
 * In `_attach`, the subscriber joins the fan-out set and the frontier is read
-  with nothing able to interleave. Every offset below the frontier is already
-  durable in the log; every offset from it up is already in the new
-  subscriber's queue. The two sets partition the stream exactly — no gap, no
-  duplicate — and that is what makes a resume exactly-once.
+  with nothing able to interleave. Every offset below the frontier has been
+  delivered, so it is durable in the log; every offset from it up is either
+  already in the new subscriber's queue or not yet delivered, and will be.
+  The two sets partition the stream exactly — no gap, no duplicate — and that
+  is what makes a resume exactly-once.
 
 If an `await` is ever added inside either, both properties are gone and
 nothing will fail loudly. `tests/test_invariants.py` is the guard: it
 reads this module's AST and fails on an `await` in either place.
+
+**Why the commit is off the loop.** Every stream a broker serves shares its
+event loop, so a durable append on the loop — a SQLite commit and fsync, ~2 ms
+— stalled every other stream for its length: measured up to 71 ms of loop lag
+with one publisher sending flat out. See `_writer`.
 """
 
 from __future__ import annotations
@@ -59,6 +68,7 @@ from streamcast._protocol import (
 )
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
+from streamcast._writer import Job, Writer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
@@ -165,6 +175,9 @@ class Stream:
         "_started_ts",
         "_subscribers",
         "_validate",
+        "_writer",
+        "_group_commit",
+        "_check_stored",
     )
 
     def __init__(
@@ -180,6 +193,7 @@ class Stream:
         s3_options: S3Options | None = None,
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
+        group_commit: bool = False,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -254,6 +268,24 @@ class Stream:
             None
             if declared_live is None
             else partial(litelink.validate_row, declared_live)
+        )
+        # **A durable row is checked on the loop, before it is queued**, against
+        # the log's whole schema — what `append` itself checks. The writer
+        # commits queued rows in groups, and one bad row in a group would fail
+        # every other publisher's rows in its transaction; refused here, it
+        # fails alone. Started lazily, on the first send: constructing a
+        # `Stream` still starts nothing.
+        self._check_stored = (
+            None if log is None else partial(litelink.validate_row, log.schema)
+        )
+        # Each send its own transaction unless the stream opts in: a client
+        # that sends a row is promised that row commits on its own, and the
+        # greeting says which promise this stream makes.
+        self._group_commit = group_commit and log is not None
+        self._writer = (
+            None
+            if log is None
+            else Writer(log, self._deliver, self._fail, group=group_commit)
         )
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish. Without
@@ -331,6 +363,7 @@ class Stream:
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
+        group_commit: bool = False,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -398,6 +431,7 @@ class Stream:
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
+            group_commit=group_commit,
         )
 
     @classmethod
@@ -413,6 +447,7 @@ class Stream:
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
+        group_commit: bool = False,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -518,6 +553,7 @@ class Stream:
                     retired=_retired(root, metadata),
                     s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                     replay_published=replay_published,
+                    group_commit=group_commit,
                 )
 
             retired_schema = old.schema
@@ -581,6 +617,7 @@ class Stream:
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
+            group_commit=group_commit,
         )
 
     @classmethod
@@ -593,6 +630,7 @@ class Stream:
         s3_options: object | None = None,
         binary: str | None = None,
         replay_published: bool = False,
+        group_commit: bool = False,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
@@ -657,6 +695,7 @@ class Stream:
             retired=_retired(root, metadata),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
+            group_commit=group_commit,
         )
 
     def __repr__(self) -> str:
@@ -915,22 +954,25 @@ class Stream:
         is recoverable: a message a subscriber has seen is always a message
         the log holds, never the other way round.
 
-        **It never awaits a consumer**, and today it does not await at all:
-        the append is synchronous and the fan-out is a queue insert per
-        subscriber. `async` is the signature `websockets` has, and it is what
-        leaves room to move the append off the loop without breaking callers
-        — see the module docstring for what that move would have to preserve.
+        **It never awaits a consumer.** With a log it awaits its own commit,
+        which runs on the stream's writer thread so that no other stream on
+        the broker waits on this one's disk (`_writer`); the fan-out is a
+        queue insert per subscriber, done on the loop once the commit is back.
+        Without a log there is nothing to commit, and it does not await at all.
 
         The frame is the row as JSON text, encoded once and shared by every
         subscriber (I6) — measured at 0.285 us for a six-column row. The key
         order comes from the log's schema rather than from this dict, which is
         what makes a replay of this row byte-identical to what goes out now.
 
-        Throughput on the durable path is one fsync per call. `send_many` is
-        the lever: it commits a whole group in one transaction.
+        Throughput on the durable path is one fsync per call: each send is its
+        own transaction. `send_many` is the lever: it commits a whole group in
+        one. A stream created with `group_commit=True` may also commit sends
+        from several publishers that queued behind one commit in a single
+        transaction, and says so in its greeting.
 
-        **A publish loop that never awaits starves every subscriber.** That
-        is the other side of the atomicity above: nothing here yields, so a
+        **On a stream with no log, a publish loop that never awaits starves
+        every subscriber.** There nothing yields, so a
         `for … : await stream.send(…)` over a list in memory runs to
         completion before any pump gets the loop back, and every subscriber
         sees the whole run arrive at once — which for a run longer than
@@ -952,18 +994,16 @@ class Stream:
             # before anything is fanned out.
             self._validate(row)
 
-        offset = None
-        if self._log is not None:
-            offset = self._log.append(
-                self._stamp_row(row, now) if self._stamped else row
-            )
-            self._end_offset = offset + 1
+        if self._writer is not None:
+            [offset] = await self._commit([row], now)
+            return offset
 
+        # Live-only: nothing to commit, so the delivery is this one step.
         self._stamp(now)
         wire = row if codec.outbound is None else codec.outbound(row)
-        self._fan_out(row, encode(offset, self._wire_ts(now), wire, self._columns))
+        self._fan_out(row, encode(None, self._wire_ts(now), wire, self._columns))
 
-        return offset
+        return None
 
     async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Make a group of rows durable in ONE transaction, then fan each out.
@@ -999,21 +1039,64 @@ class Stream:
             for row in batch:
                 self._validate(row)
 
-        offsets: list[int | None] = [None] * len(batch)
-        if self._log is not None:
-            stored = (
-                [self._stamp_row(row, now) for row in batch] if self._stamped else batch
-            )
-            offsets = list(self._log.extend(stored))
-            self._end_offset = offsets[-1] + 1  # ty: ignore[unsupported-operator]
+        if self._writer is not None:
+            return list(await self._commit(batch, now))
 
         self._stamp(now)
         ts = self._wire_ts(now)
-        for offset, row in zip(offsets, batch, strict=True):
+        for row in batch:
             wire = row if codec.outbound is None else codec.outbound(row)
-            self._fan_out(row, encode(offset, ts, wire, self._columns))
+            self._fan_out(row, encode(None, ts, wire, self._columns))
 
-        return offsets
+        return [None] * len(batch)
+
+    def _commit(self, rows: list[Row], now: int) -> asyncio.Future[list[int]]:
+        """Check `rows`, queue them for the writer, and return what resolves
+        to their offsets once they are committed AND delivered. No await:
+        validating and queueing are one step, so two senders queue in the
+        order they called."""
+        writer = self._writer
+        check = self._check_stored
+        assert writer is not None  # only called with a log
+        assert check is not None
+        stored = [self._stamp_row(row, now) for row in rows] if self._stamped else rows
+        for row in stored:
+            check(row)
+
+        done: asyncio.Future[list[int]] = asyncio.get_running_loop().create_future()
+        writer.submit(Job(rows=rows, stored=stored, now=now, done=done))
+        return done
+
+    def _deliver(self, jobs: list[Job], offsets: list[int]) -> None:
+        """Commits, back from the writer in commit order: advance the frontier
+        and fan out. NO AWAIT — see the module docstring.
+
+        One call per commit, which may be several `send`s grouped into one
+        transaction; each job's rows are adjacent in `offsets`, in queue order.
+        """
+        codec = self._codec
+        start = 0
+        for job in jobs:
+            mine = offsets[start : start + len(job.rows)]
+            start += len(job.rows)
+            self._end_offset = mine[-1] + 1
+            self._stamp(job.now)
+            ts = self._wire_ts(job.now)
+            for offset, row in zip(mine, job.rows, strict=True):
+                wire = row if codec.outbound is None else codec.outbound(row)
+                self._fan_out(row, encode(offset, ts, wire, self._columns))
+
+            # A sender that gave up waiting has still had its rows committed
+            # and delivered; there is just no one to tell.
+            if not job.done.done():
+                job.done.set_result(mine)
+
+    @staticmethod
+    def _fail(jobs: list[Job], exc: BaseException) -> None:
+        """A commit that raised: nothing landed, so nothing is delivered."""
+        for job in jobs:
+            if not job.done.done():
+                job.done.set_exception(exc)
 
     def _stamp(self, now: int) -> None:
         """Record that a send happened at `now`, in epoch nanoseconds. No await.
@@ -1112,6 +1195,11 @@ class Stream:
             return_exceptions=True,
         )
 
+        # Whatever is queued is committed and delivered first, then the thread
+        # stops — before the log it writes to can be closed underneath it.
+        if self._writer is not None:
+            await asyncio.to_thread(self._writer.close)
+
         # A log this object opened is a log this object closes. One handed in
         # is left alone: the caller may be sharing it, and closing a borrowed
         # handle is how a library becomes one you cannot lend to.
@@ -1131,10 +1219,11 @@ class Stream:
         makes remote publishing safe where a second `WriteHandle` on another
         box is not (litelink refuses neither, and cannot detect one).
 
-        I1 is what makes concurrency free here. `send` contains no `await`, so
-        two handlers calling it cannot interleave: offsets are assigned in
-        one step each, and `send_many` stays one transaction, so a batch's
-        offsets are adjacent even with another publisher racing it.
+        I1 is what makes concurrency free here. Each send is checked and
+        queued for the stream's writer in one step, committed in that order,
+        and delivered in commit order, so two handlers cannot interleave:
+        `send_many` stays one transaction, and a batch's offsets are adjacent
+        even with another publisher racing it.
 
         **A frame is a row, or a list of rows**, and the publisher chooses
         which — exactly the choice a local publisher makes between `send` and
@@ -1153,6 +1242,7 @@ class Stream:
                 end_offset=self._end_offset,
                 replay=None,
                 durable=self._log is not None,
+                group_commit=self._group_commit,
                 schema=self._shape,
                 metadata=self.metadata_uri,
                 stream_id=self._stream_id,
@@ -1260,6 +1350,7 @@ class Stream:
                     end_offset=frontier,
                     replay=replaying,
                     durable=self._log is not None,
+                    group_commit=self._group_commit,
                     schema=self._shape,
                     # Where the history is read, and whose: a subscriber
                     # checks the id against the file, so a file at the same

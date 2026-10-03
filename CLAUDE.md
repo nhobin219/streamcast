@@ -112,8 +112,10 @@ possible is wrong even if every test passes.
 
 `docs/SPEC.md` §3. Both compile fine when broken and produce a defect only under a race:
 
-- **`Stream.send` and `send_many` contain no `await`.** Offset assignment, durability and
-  fan-out are one step against the event loop.
+- **`Stream._commit` and `_deliver` contain no `await`.** A durable row is checked and
+  queued for the stream's writer thread in one step, committed in queue order, and handed
+  back in commit order; `_deliver` advances the frontier and fans out in one step against
+  the event loop.
 - **Joining the fan-out set and reading the frontier are adjacent statements.** That is
   what makes the replay range and the live queue partition the stream exactly.
 
@@ -154,6 +156,7 @@ src/streamcast/
     _protocol.py    the wire: frames, greeting, refusal codec, subscribe URLs
     _errors.py      the refusal vocabulary and the close codes that carry it
     _stream.py      Stream — offsets, fan-out, the subscribe partition
+    _writer.py      the durable append on a writer thread per stream, and group commit
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
     _metadata.py    a migrated stream's logs, in order, and which one is current
