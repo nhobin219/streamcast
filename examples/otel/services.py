@@ -36,8 +36,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-import streamcast
-from examples.otel import logs, metrics, spans
+from examples.otel import common, logs, metrics, spans
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Counter, Histogram
@@ -248,16 +247,19 @@ def orders_forever(exporters: Exporters, stop: threading.Event) -> None:
 async def exporting(base: str):  # noqa: ANN201
     """A publisher on each stream, wrapped as the exporters OTel's SDK calls."""
     loop = asyncio.get_running_loop()
-    async with (
-        streamcast.publish(f"{base}/logs") as log_publication,
-        streamcast.publish(f"{base}/spans") as span_publication,
-        streamcast.publish(f"{base}/metrics") as metric_publication,
-    ):
+    publishers = [
+        common.Publisher(f"{base}/{name}", loop)
+        for name in ("logs", "spans", "metrics")
+    ]
+    try:
         yield Exporters(
-            logs.StreamLogExporter(log_publication, loop),
-            spans.StreamSpanExporter(span_publication, loop),
-            metrics.StreamMetricExporter(metric_publication, loop),
+            logs.StreamLogExporter(publishers[0]),
+            spans.StreamSpanExporter(publishers[1]),
+            metrics.StreamMetricExporter(publishers[2]),
         )
+    finally:
+        for publisher in publishers:
+            await publisher.aclose()
 
 
 async def run(broker: str) -> None:

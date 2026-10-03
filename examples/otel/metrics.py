@@ -46,12 +46,8 @@ from opentelemetry.sdk.metrics.export import (
 from examples.otel import common
 
 if TYPE_CHECKING:
-    import asyncio
-
     from opentelemetry.sdk.metrics import Exemplar
     from opentelemetry.sdk.metrics.export import MetricsData
-
-    import streamcast
 
 
 def _list_of(items: dict[str, Any]) -> dict[str, Any]:
@@ -252,15 +248,13 @@ class StreamMetricExporter(MetricExporter):
 
     def __init__(
         self,
-        publication: streamcast.Publication,
-        loop: asyncio.AbstractEventLoop,
+        publisher: common.Publisher,
         preferred_temporality: dict[type, AggregationTemporality] | None = None,
     ) -> None:
         super().__init__(
             preferred_temporality=preferred_temporality or PREFERRED_TEMPORALITY
         )
-        self._publication = publication
-        self._loop = loop
+        self._publisher = publisher
 
     def export(
         self,
@@ -269,7 +263,7 @@ class StreamMetricExporter(MetricExporter):
         **kwargs: object,  # noqa: ARG002
     ) -> MetricExportResult:
         batch = rows(metrics_data)
-        if not batch or common.publish(self._publication, self._loop, batch):
+        if not batch or self._publisher.send(batch):
             return MetricExportResult.SUCCESS
 
         return MetricExportResult.FAILURE

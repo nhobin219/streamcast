@@ -30,6 +30,14 @@ there was nothing to have changed from. Everything above it is ordinary.
   does. Its maintainer processes were still opening the logs when the run
   ended, and cost it several seconds: `demo.main` took 3–11 s with them and
   about 1 s without.
+- **The OTel exporters reconnect after a dropped connection.** They used to
+  hold one publication for the life of the process, so a broker restart
+  ended a service's telemetry for good, silently. Each exporter now takes a
+  `common.Publisher` with the stream's URI: it connects on the first batch,
+  drops a connection that fails, and the next batch connects again. A
+  failed batch is still dropped rather than raised, so telemetry never fails
+  the application. One line is printed when telemetry starts being dropped
+  and one when it is published again.
 
 ## 0.13.1 — 2026-10-03
 
