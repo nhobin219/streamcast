@@ -143,10 +143,10 @@ class TestRowsReadFromTheTables:
         await stream.send_many([row(i) for i in range(3)])
         log = stream.log
         assert log is not None
-        while log.seal() is not None:
+        while log.seal(flush=True) is not None:
             pass
 
-        log.publish(push_unsettled=True)
+        log.publish(flush=True)
         await stream.send(row(3))  # only on the broker
         expected = stored(log)
         uri = stream.metadata_uri
@@ -182,21 +182,21 @@ class TestRowsReadFromTheTables:
             root=tmp_path,
             schema=SCHEMA,
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             max_replay=2,
         )
         await stream.send_many([row(i) for i in range(10)])
         log = stream.log
         assert log is not None
-        while log.seal() is not None:
+        while log.seal(flush=True) is not None:
             pass
 
-        log.publish(push_unsettled=True)
+        log.publish(flush=True)
         expected = stored(log)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(
-                    uri, offset=1, catch_up=True, s3=s3
+                    uri, offset=1, catch_up=True, s3_options=s3
                 ) as sub:
                     received = [await sub.recv() for _ in range(10)]
 

@@ -2,8 +2,8 @@
 
 **Nothing in this library sealed before this existed, and that was a defect
 rather than a missing convenience.** litelink is explicit — *"A maintainer is
-not optional. Nothing seals unless something calls `seal_due()`"* — and a
-streamcast server calls neither it nor `maintain()`. Measured on 120,000 rows
+not optional. Nothing seals unless something calls `seal()`"* — and a
+streamcast server calls neither it nor `advance()`. Measured on 120,000 rows
 through a server: every row still in the SQLite buffer, zero Parquet files, a
 2.6 MB `buffer.db` still growing, and a DuckDB read cache mirroring the
 unsealed tail at roughly 1.1x the payload. One maintainer pass turned that
@@ -54,11 +54,11 @@ from streamcast._process import popen
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-# Cadences, and they differ by 40x because the costs do. `seal_due` is an
+# Cadences, and they differ by 40x because the costs do. `seal` is an
 # indexed read of one row when there is nothing to seal, so calling it four
-# times a second is close to free and keeps the buffer shallow. `maintain`
-# reads table metadata to compact, evict and expire, so it runs rarely.
-# Both are litelink's own demo defaults.
+# times a second is close to free and keeps the buffer shallow. `advance`
+# reads table metadata to compact, publish, evict and reclaim, so it runs
+# rarely. Both are litelink's own demo defaults.
 SEAL_EVERY: Final = 0.25
 MAINTAIN_EVERY: Final = 10.0
 
@@ -90,8 +90,8 @@ class Maintain:
     dedicated: tuple[str, ...] = field(default=())
     """Logs that get a maintainer to themselves rather than sharing one.
 
-    The shared loop sweeps its logs in series, so one log whose `maintain()`
-    takes seconds delays every other log's `seal_due()` by that much. That is
+    The shared loop sweeps its logs in series, so one log whose `advance()`
+    takes seconds delays every other log's `seal()` by that much. That is
     a fine trade for the small streams this sharing exists for and a bad one
     for a very large or very hot log, which is what this names.
 
@@ -112,11 +112,13 @@ class Maintain:
 def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> None:
     """The loop over every log this process maintains, until SIGTERM.
 
-    Both calls, at their own cadences, because **`maintain()` does not seal**
-    — litelink's docstring calls `seal_due` "the maintainer's frequent call,
-    and the counterpart to `maintain`". A loop that ran only `maintain()`
-    would compact and expire an empty table for ever while the buffer grew,
-    which is the failure this file exists to prevent wearing a disguise.
+    Both calls, at their own cadences. `seal()` is the frequent one: it writes
+    what the size trigger has cut, so the buffer stays shallow between the
+    rarer `advance()` passes. `advance()` is litelink's whole pipeline — seal,
+    compact, publish, then cleanup behind it — and the only place the buffer
+    rows already in staging are deleted (`evict("buffer")`): since litelink
+    0.7, `seal()` and `publish()` move data and delete nothing, so a loop
+    without `advance()` would grow `buffer.db` without bound.
 
     **Every log is isolated from every other one.** The `try` is INSIDE the
     per-log loop rather than around it, so a log whose recovery fails, whose
@@ -125,12 +127,12 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
     log after it in the iteration order its whole pass, which is the failure
     mode sharing a process introduces and the one thing that must not happen.
 
-    **`maintain()` is staggered across logs.** All of them coming due in the
+    **`advance()` is staggered across logs.** All of them coming due in the
     same pass would put N table-metadata reads back to back, which is the
     latency spike this file moved to a subprocess to avoid — reintroduced at
     1/N the frequency and N times the size.
     """
-    # Spread the first `maintain()` across the interval rather than firing
+    # Spread the first `advance()` across the interval rather than firing
     # them together on the first pass.
     span = plan.maintain_every / max(len(logs), 1)
     due = {
@@ -139,16 +141,15 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
     while True:
         for name, log in logs:
             try:
-                log.seal_due()
+                log.seal()
                 if time.monotonic() >= due[name]:
-                    log.maintain()
-                    # Every log publishes since litelink 0.6 — to an `s3://`
-                    # prefix, or by default a directory beside it — and must:
-                    # eviction never deletes an unpublished file, so a log
-                    # that never published would never free its disk.
-                    log.publish()
-
+                    # Publish included, as every log must publish since
+                    # litelink 0.6: eviction never deletes an unpublished
+                    # file, so a log that never published would never free
+                    # its disk. It raises if the publish fails — the buffer
+                    # and staging steps have run first — and is handled below.
                     due[name] = time.monotonic() + plan.maintain_every
+                    log.advance()
 
             except RuntimeError as exc:
                 # Another owner holds a claim over the range this pass wanted.
@@ -231,12 +232,12 @@ def main(argv: list[str] | None = None) -> int:
             sweep(opened, plan)
 
         # One last pass each on the way out, so a short-lived server does not
-        # leave its whole run in the buffer. `seal()` rather than `seal_due()`:
-        # an orderly shutdown is the one moment closing the open group is
-        # right. Guarded per log, for the reason `sweep` is.
+        # leave its whole run in the buffer. `seal(flush=True)` rather than
+        # `seal()`: an orderly shutdown is the one moment closing the open
+        # group is right. Guarded per log, for the reason `sweep` is.
         for _name, log in opened:
             with contextlib.suppress(Exception):
-                while log.seal() is not None:
+                while log.seal(flush=True) is not None:
                     pass
 
     return 0
@@ -256,7 +257,7 @@ class Supervisor:
     few rows a minute cost the same ~207 MB as the busiest one, which turns
     "should this be its own stream" into a resource question it should not be.
 
-    The work itself was never per-process: `seal_due()` on an idle log is an
+    The work itself was never per-process: `seal()` on an idle log is an
     indexed read of one row, so N of them in a loop is the same shape as one.
     `Maintain.dedicated` names the logs that should still get their own.
     """

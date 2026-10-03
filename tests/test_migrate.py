@@ -659,12 +659,14 @@ class TestThePublishedCopy:
         self, tmp_path, s3, bucket
     ):
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=V1, published=bucket, s3=s3
+            "trades", root=tmp_path, schema=V1, published=bucket, s3_options=s3
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
 
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2, s3=s3)
+        migrated = streamcast.Stream.migrate(
+            "trades", root=tmp_path, schema=V2, s3_options=s3
+        )
         try:
             assert migrated.log is not None
             assert migrated.log.published == bucket
@@ -770,7 +772,9 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     _metadata.path(tmp_path, "trades").write_text(json.dumps(written))
     again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
     assert again.log is not None
-    while again.log.seal() is not None:  # so its statistics hold a `streamcast_ts`
+    while (
+        again.log.seal(flush=True) is not None
+    ):  # so its statistics hold a `streamcast_ts`
         pass
 
     async with serve(again, maintain=False):

@@ -41,7 +41,7 @@ async def main(root, bucket):
         schema=pa.schema([pa.field("event_ts", pa.int64(), nullable=False)]),
         sort_by=("event_ts",),
         config=litelink.LogConfig(wal_replication=replicated),
-        **({"published": bucket, "s3": litelink.S3Options().resolved()} if replicated else {}),
+        **({"published": bucket, "s3_options": litelink.S3Options().resolved()} if replicated else {}),
     )
     stream = streamcast.Stream("trades", log=handle)
     async with streamcast.serve(stream, "127.0.0.1", 0):

@@ -283,7 +283,7 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
         *,
         cursor: str | PathLike[str] | None = None,
         cursor_uri: str | None = None,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
         compression: str | None = None,
         **kwargs: Any,
@@ -301,7 +301,10 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
                 raise ValueError(msg)
 
             self._remote = RemoteCursor(
-                self._cursor, cursor_uri, s3=s3, upload_every=upload_every
+                self._cursor,
+                cursor_uri,
+                s3_options=s3_options,
+                upload_every=upload_every,
             )
 
     async def _open(self) -> Publication:

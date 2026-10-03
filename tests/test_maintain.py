@@ -4,13 +4,17 @@ Nothing here sealed before `_maintain` existed, and the reason it went
 unnoticed is worth knowing: litelink's `target_seal_size` defaults to 8 MiB,
 so a short test or a short demo never crosses it and every log looks fine.
 These tests deliberately cross the threshold — a small one, set on the log,
-because what is under test is who calls `seal_due`, not where the line is,
+because what is under test is who calls `seal`, not where the line is,
 and crossing 8 MiB took 100,000 rows and most of these tests' run time.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sqlite3
+import time
+from pathlib import Path
 
 import litelink
 import pyarrow as pa
@@ -77,7 +81,7 @@ class TestTheDefect:
     async def test_without_a_maintainer_nothing_ever_seals(self, wide_log):
         """The state this library shipped in, pinned.
 
-        Not a litelink bug: `seal_due` respects the policy, and the policy is
+        Not a litelink bug: `seal` respects the policy, and the policy is
         satisfied here — ~560 KB against a 256 KiB target. It simply never runs,
         because nothing calls it. The buffer grows for the life of the server
         and the DuckDB read cache mirrors it.
@@ -91,14 +95,14 @@ class TestTheDefect:
             # hoping: on a slower box two seconds is not evidence, and on any
             # box it is two seconds of nothing. Nothing here is SCHEDULED to
             # seal — `maintain=False` starts no subprocess and the library
-            # calls `seal_due` nowhere else — so there is no race for a wait
+            # calls `seal` nowhere else — so there is no race for a wait
             # to lose, and a longer one could not catch anything.
             #
             # What proves the policy was satisfied is the POSITIVE CONTROL
             # below: `test_with_one_the_buffer_drains_into_parquet` runs the
             # same fixture through the same `fill` and does seal. An empty
             # table here means the maintainer, not an unmet threshold.
-            # (`seal_due()` would answer it directly and must not be called —
+            # (`seal()` would answer it directly and must not be called —
             # it SEALS, which is the whole point of this test.)
             assert wide_log.buffered_rows() == ROWS
             assert wide_log.staging_files() == 0
@@ -114,6 +118,28 @@ class TestTheDefect:
 
             assert wide_log.staging_files() >= 1
             assert wide_log.buffered_rows() < ROWS
+
+    @pytest.mark.slow
+    async def test_sealed_rows_leave_the_buffer(self, wide_log):
+        """Sealing moves rows; only `advance()` deletes them from `buffer.db`.
+
+        `buffered_rows()` counts UNSEALED rows, so it drops on a seal alone and
+        cannot see this: a maintainer that sealed and published but never ran
+        litelink's `evict("buffer")` would pass every other test here while
+        `buffer.db` held every row it was ever sent. Counted in the file.
+        """
+        stream = streamcast.Stream("trades", log=wide_log)
+        async with streamcast.serve(
+            stream, "127.0.0.1", 0, maintain=Maintain(maintain_every=1.0)
+        ):
+            await fill(stream)
+            assert await settle(wide_log)
+
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and in_buffer(wide_log) >= ROWS:
+                await asyncio.sleep(0.25)
+
+            assert in_buffer(wide_log) < ROWS, "sealed rows were never evicted"
 
     @pytest.mark.slow
     async def test_a_replay_still_spans_the_seam_the_maintainer_made(self, wide_log):
@@ -203,7 +229,7 @@ class TestLifecycle:
 
     async def test_dedicated_names_a_log_that_gets_its_own(self, log, tmp_path):
         """The opt-out, for a log large or hot enough that its `maintain()`
-        would hold up everyone else's `seal_due()`.
+        would hold up everyone else's `seal()`.
 
         The shared loop sweeps in series, so that delay is real — it is just a
         fine trade for the small streams sharing exists for.
@@ -351,7 +377,7 @@ class TestLifecycle:
 
 
 def test_the_cadences_differ_because_the_costs_do():
-    # `seal_due` is an indexed read when idle; `maintain` reads table
+    # `seal` is an indexed read when idle; `advance` reads table
     # metadata. A single interval would make one of them wrong.
     plan = Maintain()
     assert plan.seal_every < plan.maintain_every
@@ -389,3 +415,10 @@ def test_there_is_no_thread_mode_to_get_wrong():
 # `wal_replication` on, because the maintainer did not run litestream. It now
 # does — see `test_replicate.py`, which exercises the sidecar against a real
 # endpoint rather than asserting an apology.
+
+
+def in_buffer(log) -> int:
+    """Rows physically in `buffer.db`, sealed or not — read-only, beside the writer."""
+    path = Path(log.root) / log.name / "buffer.db"
+    with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
+        return db.execute("SELECT count(*) FROM buffer").fetchone()[0]

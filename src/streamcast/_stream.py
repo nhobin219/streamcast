@@ -62,7 +62,6 @@ from streamcast._subscriber import Subscriber
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
-    from datetime import timedelta
     from os import PathLike
 
     import pyarrow as pa
@@ -178,7 +177,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         floor: int | None = None,
         retired: Sequence[tuple[Path, str]] = (),
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
     ) -> None:
@@ -201,7 +200,7 @@ class Stream:
         each retired log still on this disk, which `serve`'s maintainer keeps
         maintaining so their retention and eviction carry on.
 
-        `s3` is what `serve` uploads the stream's metadata file with, when the
+        `s3_options` is what `serve` uploads the stream's metadata file with, when the
         log publishes to S3. None resolves from the environment, as litelink
         does. It is kept, not used here: this initialiser does no I/O.
 
@@ -273,7 +272,7 @@ class Stream:
         self._stream_id: str | None = None
         self._replay_published = replay_published
         self._retired = tuple(retired)
-        self._s3 = s3
+        self._s3 = s3_options
         # Closed by `aclose` only when this object owns it. A log the caller
         # opened stays the caller's — they may be sharing it, and a library
         # that closes a handle it was lent is a library you cannot lend one
@@ -328,7 +327,7 @@ class Stream:
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
         published: str | None = None,
-        s3: object | None = None,
+        s3_options: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
@@ -386,7 +385,7 @@ class Stream:
             sort_by=sort_by,
             config=config,
             published=published,
-            s3=s3,
+            s3_options=s3_options,
         )
 
         return cls(
@@ -397,7 +396,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
         )
 
@@ -410,7 +409,7 @@ class Stream:
         schema: Mapping[str, object],
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
-        s3: object | None = None,
+        s3_options: object | None = None,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
@@ -517,7 +516,7 @@ class Stream:
                     max_replay=max_replay,
                     floor=_floor(metadata),
                     retired=_retired(root, metadata),
-                    s3=s3,  # ty: ignore[invalid-argument-type]
+                    s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                     replay_published=replay_published,
                 )
 
@@ -529,7 +528,7 @@ class Stream:
                 declared=declared,
                 sort_by=sort_by,
                 config=config,
-                s3=s3,
+                s3_options=s3_options,
                 retired=retired,
             )
         finally:
@@ -562,11 +561,11 @@ class Stream:
         try:
             _manifest.save(root, name, manifest)
             if _metadata.remote(new_log.published):
-                _manifest.publish(new_log.published, name, manifest, s3)  # ty: ignore[invalid-argument-type]
+                _manifest.publish(new_log.published, name, manifest, s3_options)  # ty: ignore[invalid-argument-type]
 
             _metadata.save(root, metadata)
             if _metadata.remote(new_log.published):
-                _metadata.publish(metadata, new_log.published, s3)  # ty: ignore[invalid-argument-type]
+                _metadata.publish(metadata, new_log.published, s3_options)  # ty: ignore[invalid-argument-type]
 
         except BaseException:
             new_log.close()
@@ -580,7 +579,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
         )
 
@@ -591,9 +590,8 @@ class Stream:
         *,
         root: str | PathLike[str],
         published: str,
-        s3: object | None = None,
+        s3_options: object | None = None,
         binary: str | None = None,
-        hydrate: timedelta | None = None,
         replay_published: bool = False,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
@@ -623,13 +621,10 @@ class Stream:
         its last frames, then restore. Only unplanned failover loses rows, and
         it loses the ones the old box never managed to replicate.
 
-        `hydrate` is a `timedelta` and has no default, because it costs S3
-        egress and the right window is the caller's to choose. Without it the
-        local table comes back EMPTY — the Parquet is on the dead machine —
-        so a local-only replay sees nothing below the buffer. Pass
-        `hydrate=timedelta(days=7)` to bring a week of files back down, or
-        `replay_published=True` to serve from the published table instead of
-        copying it.
+        The staging table comes back EMPTY — its Parquet was on the dead
+        machine — so a replay from local tiers sees nothing below the buffer.
+        Pass `replay_published=True` to serve history from the published
+        table. Nothing copies published files back down.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
         being reused; nothing stops the machine you are failing over FROM if
@@ -641,19 +636,14 @@ class Stream:
         # **The metadata first**, because it says which log is current. Without
         # it this would rebuild a migrated stream's FIRST log and serve that as
         # though nothing had happened since.
-        metadata = _metadata.fetch(published, name, s3)  # ty: ignore[invalid-argument-type]
+        metadata = _metadata.fetch(published, name, s3_options)  # ty: ignore[invalid-argument-type]
         log = litelink.restore(
             root,
             name if metadata is None else metadata.current.name,
             published=published,
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             binary=binary,
         )
-        if hydrate is not None:
-            # After the handle exists and before anyone serves from it, so a
-            # subscriber never sees the local tier fill underneath it.
-            log.hydrate(since=hydrate)
-
         if metadata is not None:
             _metadata.save(root, metadata)
 
@@ -665,7 +655,7 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
         )
 
@@ -687,7 +677,7 @@ class Stream:
         as_of_offset: int | None = None,
         as_of_ts: int | None = None,
         broker: str | None = None,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -707,7 +697,7 @@ class Stream:
             as_of_offset=as_of_offset,
             as_of_ts=as_of_ts,
             broker=broker,
-            s3=s3,
+            s3_options=s3_options,
         )
 
     @staticmethod
@@ -717,7 +707,7 @@ class Stream:
         as_of_offset: int | None = None,
         as_of_ts: int | None = None,
         broker: str | None = None,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -730,7 +720,7 @@ class Stream:
             as_of_offset=as_of_offset,
             as_of_ts=as_of_ts,
             broker=broker,
-            s3=s3,
+            s3_options=s3_options,
         ) as snap:
             return await snap.scan(
                 columns=columns,
@@ -748,7 +738,7 @@ class Stream:
         as_of_offset: int | None = None,
         as_of_ts: int | None = None,
         broker: str | None = None,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -763,7 +753,7 @@ class Stream:
             as_of_offset=as_of_offset,
             as_of_ts=as_of_ts,
             broker=broker,
-            s3=s3,
+            s3_options=s3_options,
         ) as snap:
             return await snap.sql(
                 query,
@@ -776,7 +766,7 @@ class Stream:
     async def live(
         broker: str,
         *,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         rebase_every: float = _live.REBASE_EVERY,
         where: dict[str, object] | None = None,
         start_offset: int | None = None,
@@ -802,7 +792,7 @@ class Stream:
         """
         return await _live.live(
             broker,
-            s3=s3,
+            s3_options=s3_options,
             rebase_every=rebase_every,
             where=where,
             start_offset=start_offset,
@@ -1463,7 +1453,7 @@ def _open_or_create(
     sort_by: Sequence[str] | None,
     config: object | None,
     published: str | None,
-    s3: object | None,
+    s3_options: object | None,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
     """The log for this stream, created if it is not there yet, and its metadata.
 
@@ -1501,7 +1491,7 @@ def _open_or_create(
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
             published=published,
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
         ), None
 
     # Compared WITHOUT `streamcast_ts`, so a log created before the column
@@ -1580,7 +1570,7 @@ def _seal_and_succeed(
     declared: pa.Schema,
     sort_by: Sequence[str] | None,
     config: object | None,
-    s3: object | None,
+    s3_options: object | None,
     retired: bool = False,
 ) -> tuple[WriteHandle, TierStatistics]:
     """Seal `old` for good, then create the log that follows it.
@@ -1628,7 +1618,7 @@ def _seal_and_succeed(
             # default, which lives INSIDE the old log's directory: the new log
             # gets its own default rather than a table nested in a retired log.
             published=None if _metadata.default_published(old) else old.published,
-            s3=s3,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             start_offset=start,
         )
     except FileExistsError:

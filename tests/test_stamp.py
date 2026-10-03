@@ -115,7 +115,7 @@ class TestItIsNeverSent:
                 live = await raw.recv()
 
             # Seal, so the replay reads Parquet rather than the buffer.
-            while stamped.seal() is not None:
+            while stamped.seal(flush=True) is not None:
                 pass
 
             async with websockets.connect(uri + "?offset=2") as raw:

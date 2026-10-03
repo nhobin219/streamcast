@@ -79,7 +79,7 @@ class TestReplay:
         # and then reads back across the seam.
         stream = streamcast.Stream("trades", log=log)
         await stream.send_many([trade(i) for i in range(60)])
-        while log.seal() is not None:
+        while log.seal(flush=True) is not None:
             pass
 
         await stream.send_many([trade(i) for i in range(60, 70)])

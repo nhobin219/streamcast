@@ -57,7 +57,9 @@ uses.
 """
 
 
-def _filesystem(uri: str, s3: S3Options | None) -> tuple[pafs.S3FileSystem, str]:
+def _filesystem(
+    uri: str, s3_options: S3Options | None
+) -> tuple[pafs.S3FileSystem, str]:
     """A pyarrow S3 filesystem for `uri`, and the path inside it.
 
     This used to import `pyarrow.fs` inside the function, on the grounds that
@@ -68,7 +70,7 @@ def _filesystem(uri: str, s3: S3Options | None) -> tuple[pafs.S3FileSystem, str]
     imports.
     """
     split = urlsplit(uri)
-    resolved = (s3 or S3Options()).resolved()
+    resolved = (s3_options or S3Options()).resolved()
     options: dict[str, object] = {}
     if resolved.access_key and resolved.secret_key:
         options["access_key"] = resolved.access_key
@@ -125,7 +127,7 @@ class RemoteCursor:
         cursor: Cursor,
         uri: str,
         *,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
     ) -> None:
         # Checked HERE, not in `load`. Everything that reaches the network is
@@ -140,7 +142,7 @@ class RemoteCursor:
 
         self._cursor = cursor
         self._uri = uri
-        self._s3 = s3
+        self._s3 = s3_options
         self._every = upload_every
         self._key = _key(urlsplit(uri).netloc + urlsplit(uri).path)
         self._stop = threading.Event()

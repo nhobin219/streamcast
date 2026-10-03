@@ -41,7 +41,7 @@ def shipped(tmp_path, s3, bucket):
         sort_by=("event_ts",),
         config=litelink.LogConfig(wal_replication=True),
         published=bucket,
-        s3=s3,
+        s3_options=s3,
     )
     with handle:
         yield handle
@@ -58,7 +58,7 @@ def two_shipped(tmp_path, s3, bucket):
             sort_by=("event_ts",),
             config=litelink.LogConfig(wal_replication=True),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
         )
         for name in ("trades", "quotes")
     ]

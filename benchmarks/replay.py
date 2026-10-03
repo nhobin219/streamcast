@@ -89,7 +89,7 @@ async def main() -> None:
                 [row(i) for i in range(start, min(start + 500, args.rows))]
             )
 
-        while log.seal() is not None:
+        while log.seal(flush=True) is not None:
             pass
 
         print(f"{args.rows:,} rows, {log.staging_files()} parquet file(s)\n")

@@ -581,7 +581,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
                            cursor_uri="s3://streamcast/consumer1/stream.offset")
 
     A daemon thread uploads it every `upload_every` seconds; credentials
-    resolve from the environment and `s3=S3Options(...)` overrides them, the
+    resolve from the environment and `s3_options=S3Options(...)` overrides them, the
     same way litelink does it. On connect the LOCAL cursor wins and the remote
     is read only when there is no local one — the disaster-recovery case, and
     the only one where a copy that lags should decide. See `_remote` for what
@@ -598,7 +598,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     holds a socket through a long catch-up is dropped for falling behind. It
     loops, bounded by `catch_up_retries` (3), for a server that moves on while
     the gap is being read. `metadata=` overrides which metadata file to read —
-    otherwise it is the greeting's — and `s3=` the credentials. A stream that
+    otherwise it is the greeting's — and `s3_options=` the credentials. A stream that
     cannot be read raises `CatchUpUnavailable` HERE, at `connect`, with a
     message naming what was tried and what to change. See `_catchup`.
 
@@ -629,7 +629,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         offset: int | None | object = _UNSET,
         cursor: str | PathLike[str] | None = None,
         cursor_uri: str | None = None,
-        s3: S3Options | None = None,
+        s3_options: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
         where: Where | None = None,
         catch_up: bool = False,
@@ -647,7 +647,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         self._catch_up = catch_up
         self._catch_up_retries = catch_up_retries
         self._metadata = metadata
-        self._s3 = s3
+        self._s3 = s3_options
         self._stream = urlsplit(uri).path.lstrip("/")
         self._cursor = Cursor(cursor) if cursor is not None else None
 
@@ -658,7 +658,10 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
                 raise ValueError(msg)
 
             self._remote = RemoteCursor(
-                self._cursor, cursor_uri, s3=s3, upload_every=upload_every
+                self._cursor,
+                cursor_uri,
+                s3_options=s3_options,
+                upload_every=upload_every,
             )
 
         if not (offset is _UNSET or offset is None or isinstance(offset, int)):

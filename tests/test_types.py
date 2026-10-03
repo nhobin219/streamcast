@@ -130,7 +130,7 @@ class TestInvariant10:
 
             # Sealed, so the replay reads Parquet — where maps come back as
             # pairs unless the read asks otherwise.
-            while stream.log.seal() is not None:
+            while stream.log.seal(flush=True) is not None:
                 pass
 
             async with websockets.connect(uri + "?offset=1") as raw:
@@ -163,7 +163,7 @@ class TestInvariant10:
                 await stream.send_many([row(i) for i in range(3)])
                 live = [await raw.recv() for _ in range(3)]
 
-            while stream.log.seal() is not None:
+            while stream.log.seal(flush=True) is not None:
                 pass
 
             async with websockets.connect(uri + "?offset=1") as raw:

@@ -86,7 +86,7 @@ possible is wrong even if every test passes.
    at the wrong place is a hole at the join. Refuse with 4416 instead.
 5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8
    before offset 7.
-6. **Let a log grow without a maintainer.** Nothing here calls `seal_due()` except
+6. **Let a log grow without a maintainer.** Nothing here calls `seal()` except
    `_maintain`. A server started with `maintain=False` and no external maintainer buffers
    every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
    target, with zero Parquet files.

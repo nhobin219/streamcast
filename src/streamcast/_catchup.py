@@ -76,7 +76,7 @@ class CatchUpUnavailable(StreamcastError):
 
 
 def _credentials_help(
-    location: str, name: str, s3: S3Options | None, exc: object
+    location: str, name: str, s3_options: S3Options | None, exc: object
 ) -> str:
     """What to actually do about a failed read.
 
@@ -86,14 +86,18 @@ def _credentials_help(
     answers none of those.
     """
     where = (
-        f"endpoint {s3.endpoint}"
-        if s3 is not None and s3.endpoint
+        f"endpoint {s3_options.endpoint}"
+        if s3_options is not None and s3_options.endpoint
         else "the AWS default endpoint"
     )
-    region = f", region {s3.region}" if s3 is not None and s3.region else ""
+    region = (
+        f", region {s3_options.region}"
+        if s3_options is not None and s3_options.region
+        else ""
+    )
     keyed = (
         "an explicit access key"
-        if s3 is not None and s3.access_key
+        if s3_options is not None and s3_options.access_key
         else "the ambient credential chain (profile, instance metadata, SSO)"
     )
 
@@ -113,7 +117,7 @@ def _credentials_help(
         f"GET and LIST where the stream publishes.\n"
         f"  * Elsewhere, set AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, "
         f"AWS_SECRET_ACCESS_KEY and AWS_REGION, or pass "
-        f"streamcast.S3Options(...) as `s3=`.\n"
+        f"streamcast.S3Options(...) as `s3_options=`.\n"
         f"  * `catch_up=False` turns this back into the plain NotReplayable "
         f"refusal, if you would rather handle the gap yourself.\n"
         f"  * To skip the gap and accept the loss, reconnect with "
@@ -148,7 +152,7 @@ class Catcher:
         uri: str,
         stream_id: str | None,
         name: str,
-        s3: S3Options | None,
+        s3_options: S3Options | None,
         start: int,
         retries: int,
         handshake: Callable[[int], Awaitable[tuple[Any, Any]]],
@@ -156,7 +160,7 @@ class Catcher:
         self._uri = uri
         self._stream_id = stream_id
         self._name = name
-        self._s3 = s3
+        self._s3 = s3_options
         self._retries = retries
         self._handshake = handshake
         self.start = start
@@ -169,7 +173,7 @@ class Catcher:
     async def _open(self) -> _snapshot.Snapshot:
         try:
             return await _snapshot.snapshot(
-                self._uri, s3=self._s3, stream_id=self._stream_id
+                self._uri, s3_options=self._s3, stream_id=self._stream_id
             )
         except _snapshot.SnapshotUnavailable as exc:
             raise CatchUpUnavailable(str(exc)) from exc

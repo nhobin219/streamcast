@@ -20,10 +20,10 @@ def published_log(root, rows: int) -> litelink.WriteHandle:
     """A log with `rows` rows, every one sealed and published."""
     log = litelink.new(root, "trades", schema=SCHEMA)
     log.extend([{"i": i} for i in range(rows)])
-    while log.seal() is not None:
+    while log.seal(flush=True) is not None:
         pass
 
-    log.publish(push_unsettled=True)
+    log.publish(flush=True)
     return log
 
 
@@ -115,10 +115,10 @@ class TestALocalTable:
             pinned = _published.Table.open(log.published, "trades", None)
             try:
                 log.extend([{"i": i} for i in range(3, 6)])
-                while log.seal() is not None:
+                while log.seal(flush=True) is not None:
                     pass
 
-                log.publish(push_unsettled=True)
+                log.publish(flush=True)
 
                 assert pinned.extent == (1, 4)
                 assert pinned.scan().read_all().num_rows == 3
@@ -139,13 +139,15 @@ class TestALocalTable:
 
 @pytest.mark.replication
 def test_an_s3_table_reads_with_the_readers_own_credentials(tmp_path, s3, bucket):
-    log = litelink.new(tmp_path, "trades", schema=SCHEMA, published=bucket, s3=s3)
+    log = litelink.new(
+        tmp_path, "trades", schema=SCHEMA, published=bucket, s3_options=s3
+    )
     with log:
         log.extend([{"i": i} for i in range(4)])
-        while log.seal() is not None:
+        while log.seal(flush=True) is not None:
             pass
 
-        log.publish(push_unsettled=True)
+        log.publish(flush=True)
 
     table = _published.Table.open(bucket, "trades", s3)
     try:

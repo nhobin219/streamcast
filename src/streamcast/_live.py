@@ -80,7 +80,7 @@ class Live:
         self,
         broker: str,
         greeting: Greeting,
-        s3: S3Options | None,
+        s3_options: S3Options | None,
         rebase_every: float,
         base: _snapshot.Snapshot,
         *,
@@ -97,7 +97,7 @@ class Live:
         # Where the history is read, as the broker's latest greeting says.
         self._uri = greeting.metadata
         self._stream_id = greeting.stream_id
-        self._s3 = s3
+        self._s3 = s3_options
         self._rebase_every = rebase_every
         self._base = base
         # Rows received and not yet in a query: dicts, cheap to append.
@@ -135,7 +135,7 @@ class Live:
             self._broker,
             offset=self._end,
             catch_up=True,
-            s3=self._s3,
+            s3_options=self._s3,
             where=self._where,
         )
         try:
@@ -239,7 +239,9 @@ class Live:
     async def rebase(self) -> None:
         """Re-pin to what is published now, and drop the tail rows it covers."""
         fresh = await _snapshot.snapshot(
-            _require(self._broker, self._uri), s3=self._s3, stream_id=self._stream_id
+            _require(self._broker, self._uri),
+            s3_options=self._s3,
+            stream_id=self._stream_id,
         )
         async with self._lock:
             # Converted against the old base first, so a pending row is judged
@@ -468,7 +470,7 @@ def _require(broker: str, uri: str | None) -> str:
 async def live(
     broker: str,
     *,
-    s3: S3Options | None = None,
+    s3_options: S3Options | None = None,
     rebase_every: float = REBASE_EVERY,
     where: dict[str, object] | None = None,
     start_offset: int | None = None,
@@ -496,8 +498,12 @@ async def live(
         msg = f"start_offset={start_offset} is negative; LATEST means from now"
         raise ValueError(msg)
 
-    base = await _snapshot.snapshot(uri, s3=s3, stream_id=greeting.stream_id)
-    view = Live(broker, greeting, s3, rebase_every, base, where=where, start=start)
+    base = await _snapshot.snapshot(
+        uri, s3_options=s3_options, stream_id=greeting.stream_id
+    )
+    view = Live(
+        broker, greeting, s3_options, rebase_every, base, where=where, start=start
+    )
     try:
         await view._start()  # noqa: SLF001
     except BaseException:

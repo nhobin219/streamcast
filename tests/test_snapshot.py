@@ -36,10 +36,10 @@ def row(i: int, **extra: object) -> dict[str, object]:
 
 def publish(log: litelink.WriteHandle) -> None:
     """Everything sent so far, sealed and in the published table."""
-    while log.seal() is not None:
+    while log.seal(flush=True) is not None:
         pass
 
-    log.publish(push_unsettled=True)
+    log.publish(flush=True)
 
 
 async def stream_of(
@@ -47,10 +47,10 @@ async def stream_of(
     rows: int,
     *,
     published: str | None = None,
-    s3: litelink.S3Options | None = None,
+    s3_options: litelink.S3Options | None = None,
 ) -> streamcast.Stream:
     stream = streamcast.Stream.new(
-        "trades", root=root, schema=V1, published=published, s3=s3
+        "trades", root=root, schema=V1, published=published, s3_options=s3_options
     )
     await stream.send_many([row(i) for i in range(rows)])
     return stream
@@ -406,7 +406,7 @@ def _published_dir(published: str, name: str) -> Path:
 
 @pytest.mark.replication
 async def test_a_stream_published_to_s3_reads_from_there(tmp_path, s3, bucket, serve):
-    stream = await stream_of(tmp_path, 4, published=bucket, s3=s3)
+    stream = await stream_of(tmp_path, 4, published=bucket, s3_options=s3)
     assert stream.log is not None
     publish(stream.log)
     uri = stream.metadata_uri
@@ -414,5 +414,5 @@ async def test_a_stream_published_to_s3_reads_from_there(tmp_path, s3, bucket, s
     assert uri.startswith(bucket)
     await served_once(stream, serve)
 
-    table = await streamcast.Stream.scan(uri, s3=s3)
+    table = await streamcast.Stream.scan(uri, s3_options=s3)
     assert offsets(table) == [1, 2, 3, 4]

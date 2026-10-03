@@ -52,7 +52,7 @@ def published_log(tmp_path, s3, bucket):
         # shape a published table a consumer catches up from actually has.
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         published=bucket,
-        s3=s3,
+        s3_options=s3,
         config=litelink.LogConfig(
             target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
         ),
@@ -67,11 +67,11 @@ async def fill(stream, log, total=TOTAL):
             [{"i": i, "pad": PAD} for i in range(start, start + BATCH)]
         )
 
-    while log.seal() is not None:
+    while log.seal(flush=True) is not None:
         pass
 
-    await asyncio.to_thread(log.maintain)
-    # **`push_unsettled`, or the published table is empty at these sizes.** A
+    await asyncio.to_thread(log.advance)
+    # **`flush`, or the published table is empty at these sizes.** A
     # plain `publish()` holds back the trailing run for compaction, so a log with only a
     # handful of files pushes NOTHING — measured: 4 files published through 0,
     # 9 files published through 16,996. That made the fixture's behaviour a
@@ -79,7 +79,7 @@ async def fill(stream, log, total=TOTAL):
     # empty published table without saying so. A test fixture wants the whole
     # log in the published table at whatever size it was given; the cost is undersized
     # objects, which no test cares about.
-    await asyncio.to_thread(log.publish, push_unsettled=True)
+    await asyncio.to_thread(log.publish, flush=True)
 
     # Several files, or the multi-batch read of the published table these tests
     # rely on is not happening. Asserted here for the same reason as the line below.
@@ -121,7 +121,9 @@ class TestItClosesTheGap:
             assert raised.value.why == "too_old"
 
             want = 1_500
-            async with streamcast.connect(uri, offset=300, catch_up=True, s3=s3) as sub:
+            async with streamcast.connect(
+                uri, offset=300, catch_up=True, s3_options=s3
+            ) as sub:
                 got = [await sub.recv() for _ in range(want)]
 
         offsets = [offset for offset, _ts, _row in got]
@@ -155,7 +157,9 @@ class TestItClosesTheGap:
         await fill(stream, published_log)
 
         async with serve(stream, maintain=False) as uri:
-            async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3
+            ) as sub:
                 got = [await sub.recv() for _ in range(TOTAL)]
 
         assert [offset for offset, _ts, _row in got] == list(range(1, TOTAL + 1))
@@ -183,7 +187,9 @@ class TestItClosesTheGap:
                     await asyncio.sleep(0)
 
             publisher = asyncio.create_task(publish())
-            async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3
+            ) as sub:
                 got = [await sub.recv() for _ in range(TOTAL + 40)]
 
             await publisher
@@ -201,7 +207,9 @@ class TestItClosesTheGap:
         await fill(stream, published_log)
 
         async with serve(stream, maintain=False) as uri:
-            async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3
+            ) as sub:
                 for _ in range(TOTAL):
                     await sub.recv()
 
@@ -243,7 +251,7 @@ class TestItClosesTheGap:
         await fill(stream, published_log, total=800)
 
         async with serve(stream, maintain=False) as uri:
-            sub = await streamcast.connect(uri, offset=10, catch_up=True, s3=s3)
+            sub = await streamcast.connect(uri, offset=10, catch_up=True, s3_options=s3)
             await sub.recv()  # one row, then walk away mid-catch-up
 
             # A STRONG reference, so the generator cannot be collected —
@@ -285,7 +293,7 @@ class TestItClosesTheGap:
         await fill(stream, published_log, total=800)
 
         async with serve(stream, maintain=False) as uri:
-            sub = await streamcast.connect(uri, offset=10, catch_up=True, s3=s3)
+            sub = await streamcast.connect(uri, offset=10, catch_up=True, s3_options=s3)
             # Not one message read: the published table was opened by `connect` and
             # the generator is sitting unstarted.
             prelude = sub._prelude  # noqa: SLF001
@@ -325,7 +333,7 @@ class TestTheLogIsNamedInTheGreeting:
             "raw_trades_v2",  # deliberately not "trades"
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
             ),
@@ -345,7 +353,7 @@ class TestTheLogIsNamedInTheGreeting:
                     )
 
                 async with streamcast.connect(
-                    uri, offset=1, catch_up=True, s3=s3
+                    uri, offset=1, catch_up=True, s3_options=s3
                 ) as sub:
                     first, _ts, _row = await sub.recv()
 
@@ -366,7 +374,7 @@ class TestTheLogIsNamedInTheGreeting:
             "raw_trades_v2",
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
             ),
@@ -382,7 +390,7 @@ class TestTheLogIsNamedInTheGreeting:
             assert info.metadata is not None
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
-            table = await streamcast.Stream.scan(info.metadata, s3=s3)
+            table = await streamcast.Stream.scan(info.metadata, s3_options=s3)
             assert table.num_rows == 800
 
 
@@ -408,7 +416,7 @@ class TestTheWholeHistoryGateway:
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
                 compact_min_files=KEEP_FILES,
@@ -447,7 +455,7 @@ class TestTheWholeHistoryGateway:
             root=tmp_path / "data",
             schema=SCHEMA,
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             replay_published=True,
             max_replay=None,
             config=litelink.LogConfig(
@@ -501,7 +509,7 @@ class TestAnEvictedLog:
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             config=litelink.LogConfig(
                 target_seal_size=SEAL_SIZE,
                 compact_min_files=KEEP_FILES,
@@ -528,7 +536,7 @@ class TestAnEvictedLog:
                 # error: nothing ages out of the published table, so an
                 # offset the local tier has dropped is still there.
                 async with streamcast.connect(
-                    uri, offset=1, catch_up=True, s3=s3
+                    uri, offset=1, catch_up=True, s3_options=s3
                 ) as sub:
                     first, _ts, _row = await sub.recv()
 
@@ -556,7 +564,7 @@ class TestTheGapItCannotClose:
             "trades",
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             # Nothing below 500 exists in ANY tier.
             start_offset=500,
             config=litelink.LogConfig(
@@ -569,7 +577,9 @@ class TestTheGapItCannotClose:
 
             async with serve(stream, maintain=False) as uri:
                 with pytest.raises(streamcast.CatchUpUnavailable) as raised:
-                    await streamcast.connect(uri, offset=100, catch_up=True, s3=s3)
+                    await streamcast.connect(
+                        uri, offset=100, catch_up=True, s3_options=s3
+                    )
 
         message = str(raised.value)
         assert "in neither the server nor the published tables" in message
@@ -617,7 +627,9 @@ class TestWhereTheHistoryIsRead:
 
             fields = raised.value.fields
             assert not any("://" in str(value) for value in fields.values()), fields
-            async with streamcast.connect(uri, offset=1, catch_up=True, s3=s3) as sub:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3
+            ) as sub:
                 assert (await sub.recv())[0] == 1
 
     async def test_an_explicit_metadata_uri_wins(
@@ -631,7 +643,7 @@ class TestWhereTheHistoryIsRead:
             missing = (tmp_path / "elsewhere.metadata.json").as_uri()
             with pytest.raises(streamcast.CatchUpUnavailable, match="elsewhere"):
                 await streamcast.connect(
-                    uri, offset=1, catch_up=True, s3=s3, metadata=missing
+                    uri, offset=1, catch_up=True, s3_options=s3, metadata=missing
                 )
 
 
@@ -662,7 +674,7 @@ class TestWhenItCannot:
                     uri,
                     offset=10,
                     catch_up=True,
-                    s3=streamcast.S3Options(
+                    s3_options=streamcast.S3Options(
                         endpoint="http://127.0.0.1:1",
                         access_key="wrong",
                         secret_key="wrong",
@@ -703,7 +715,9 @@ class TestWhenItCannot:
 
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(streamcast.CatchUpUnavailable) as raised:
-                await streamcast.connect(uri, offset=asking, catch_up=True, s3=s3)
+                await streamcast.connect(
+                    uri, offset=asking, catch_up=True, s3_options=s3
+                )
 
         message = str(raised.value)
         assert "neither holds" in message

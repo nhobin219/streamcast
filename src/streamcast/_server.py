@@ -175,11 +175,11 @@ def _supervisors(
     duckdb loaded — ~207 MB RSS each — so four small streams cost ~830 MB to
     maintain a producer of ~460 MB, and each new stream cost the same again
     whether it took a row a minute or a million. The work never needed the
-    isolation: `seal_due()` on an idle log is an indexed read of one row.
+    isolation: `seal()` on an idle log is an indexed read of one row.
 
     `Maintain.dedicated` names logs that still get their own, for one large
     or hot enough that its `maintain()` would hold up everyone else's
-    `seal_due()`.
+    `seal()`.
 
     WAL replication is a separate concern with its own argument — see
     `_sidecars`, which runs litestream for the logs that need it.
@@ -341,10 +341,10 @@ def serve(
     rather than one per log: a maintainer is a full interpreter with litelink,
     pyarrow, pyiceberg and duckdb loaded — measured at 149 MB RSS on this box,
     so four streams cost 596 MB one-per-log against 149 MB shared. The work
-    never needed the isolation; `seal_due()` on an idle log is an indexed read
+    never needed the isolation; `seal()` on an idle log is an indexed read
     of one row. `Maintain(dedicated=("trades",))` gives a named log its own,
     for one busy enough that its `maintain()` would hold up the others'
-    `seal_due()`. That is a departure from
+    `seal()`. That is a departure from
     litelink's "the library owns neither the thread nor the interval", and it
     is deliberate: a streamcast server already owns a socket, a task per
     subscriber and a queue per subscriber, so owning its own storage

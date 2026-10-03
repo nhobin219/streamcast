@@ -7,6 +7,28 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed — breaking
+
+- **litelink 0.7** (`>=0.7.0,<0.8`).
+- **`s3=` is now `s3_options=`** everywhere streamcast takes credentials,
+  matching litelink: `Stream.new`, `Stream.restore`, `Stream.migrate`,
+  `Stream(...)`, `Stream.snapshot`, `Stream.scan`, `Stream.sql`, `Stream.live`,
+  `connect` and `publish`.
+- **`Stream.restore(hydrate=)` is gone**, with litelink's `hydrate()`. A
+  restored stream's staging table comes back empty; serve its history from
+  the published table with `replay_published=True`.
+
+### Changed
+
+- **The maintainer runs litelink's `advance()`**: seal, compact, publish,
+  then cleanup behind them, every `maintain_every` seconds, with `seal()` on
+  the faster `seal_every` cadence between. `advance()` is also what deletes
+  buffer rows already in staging, which `seal()` and `publish()` no longer
+  do. A log whose `advance()` fails waits the full interval before the next
+  attempt.
+
 ## 0.10.1 — 2026-10-01
 
 ### Added

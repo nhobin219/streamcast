@@ -16,7 +16,6 @@ import os
 import re
 import subprocess
 import time
-from datetime import timedelta
 from pathlib import Path
 
 import litelink
@@ -116,7 +115,7 @@ def produce(root: Path, bucket: str, s3: litelink.S3Options, count: int = 200):
         "trades",
         schema=streamcast.to_arrow(SCHEMA),
         published=bucket,
-        s3=s3,
+        s3_options=s3,
         config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
     )
     stream = streamcast.Stream("trades", log=handle)
@@ -132,11 +131,11 @@ class TestItStandsUpElsewhere:
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
             before = handle.end_offset()
 
@@ -145,7 +144,7 @@ class TestItStandsUpElsewhere:
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
             replay_published=True,
         )
@@ -189,11 +188,11 @@ class TestItStandsUpElsewhere:
 
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
 
             # A consumer reads part of the stream and records where it got to.
             async with serve(stream, maintain=False) as uri:
@@ -224,7 +223,7 @@ class TestItStandsUpElsewhere:
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
             replay_published=True,
             max_replay=None,
@@ -276,11 +275,11 @@ class TestTheFenceIsNotDistance:
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         # NOT `max_replay=None`. The default bound, which is the point.
@@ -288,7 +287,7 @@ class TestTheFenceIsNotDistance:
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
             replay_published=True,
         )
@@ -341,18 +340,18 @@ class TestCatchUpOnTopOfIt:
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
             replay_published=True,
         )
@@ -360,7 +359,7 @@ class TestCatchUpOnTopOfIt:
             async with serve(revived, maintain=False) as uri:
                 await revived.send_many([row(i) for i in range(500, 520)])
                 async with streamcast.connect(
-                    uri, offset=51, catch_up=True, s3=s3
+                    uri, offset=51, catch_up=True, s3_options=s3
                 ) as sub:
                     received = [(await sub.recv())[0] for _ in range(170)]
 
@@ -373,32 +372,32 @@ class TestCatchUpOnTopOfIt:
             await revived.aclose()
 
 
-class TestWhatItCostsToSkipHydrate:
-    async def test_an_unhydrated_log_is_locally_empty(
+class TestTheStagingTableComesBackEmpty:
+    async def test_a_restored_log_is_locally_empty(
         self, tmp_path, s3, bucket, litestream
     ):
-        """`hydrate` is a parameter and not a default, so say what skipping it means.
+        """Nothing copies published files back, so say what that means.
 
         The Parquet is on the machine that is gone and only the published table
-        has it, so the local table comes back empty. A handle that reads local
+        has it, so the staging table comes back empty. A handle that reads local
         files only sees nothing — which is correct, and surprising if nobody
         wrote it down.
         """
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
         )
         try:
@@ -410,32 +409,36 @@ class TestWhatItCostsToSkipHydrate:
         finally:
             await revived.aclose()
 
-    async def test_hydrate_brings_the_local_tier_back(
-        self, tmp_path, s3, bucket, litestream
+    async def test_replay_published_serves_the_history_anyway(
+        self, tmp_path, s3, bucket, litestream, serve
     ):
+        """What replaces copying files back: read them where they are."""
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
-            hydrate=timedelta(hours=1),
+            replay_published=True,
         )
         try:
             assert revived.log is not None
-            assert revived.log.staging_extent() is not None, (
-                "hydrate must re-register published files into the local table"
-            )
+            assert revived.log.staging_extent() is None
+            async with serve(revived, maintain=False) as uri:
+                async with streamcast.connect(uri, offset=1) as sub:
+                    first = [(await sub.recv())[0] for _ in range(3)]
+
+            assert first == [1, 2, 3]
         finally:
             await revived.aclose()
 
@@ -453,18 +456,18 @@ class TestTheServerStartsWhatItNeeds:
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
             await stream.send_many([row(i) for i in range(200)])
-            while handle.seal() is not None:
+            while handle.seal(flush=True) is not None:
                 pass
 
-            handle.maintain()
-            handle.publish(push_unsettled=True)
+            handle.advance()
+            handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
         revived = streamcast.Stream.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
         )
         try:
@@ -492,7 +495,7 @@ class TestAMigratedStream:
             root=tmp_path / "box_a",
             schema=SCHEMA,
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
         )
         await stream.send_many([row(i) for i in range(20)])
@@ -506,7 +509,7 @@ class TestAMigratedStream:
             },
         }
         migrated = streamcast.Stream.migrate(
-            "trades", root=tmp_path / "box_a", schema=v2, s3=s3
+            "trades", root=tmp_path / "box_a", schema=v2, s3_options=s3
         )
         assert migrated.log is not None
         await migrated.send_many([{**row(i), "venue": "x"} for i in range(20, 30)])
@@ -517,7 +520,7 @@ class TestAMigratedStream:
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
-            s3=s3,
+            s3_options=s3,
             binary=str(litestream),
         )
         try:
