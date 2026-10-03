@@ -105,8 +105,8 @@ class Stream:
 
     Constructed before there is a loop and serves any number of subscribers on
     whichever loop `serve` runs on. It owns no thread and starts nothing —
-    `serve` is what starts the maintainer and the litestream sidecar, and it
-    stops them again.
+    `serve` is what starts the maintainer and, with `replicate=True`, the
+    litestream sidecar, and it stops them again.
 
         stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
 

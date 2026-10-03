@@ -92,7 +92,7 @@ home — routing and the greeting both read it, so they cannot disagree.
 **Two ways to give it a log, and they are separate calls.** `Stream.new(root=, schema=)`
 creates or opens one — `new` the first time, `open` every time after, which is the
 try/except every caller otherwise writes — and takes litelink's own `new()` keywords
-(`sort_by`, `config`, `published`, `s3`) with the stream's name fed through. The plain
+(`sort_by`, `config`, `published`, `s3_options`) with the stream's name fed through. The plain
 initialiser takes a handle you already opened.
 
 The split follows litelink, whose own handles say it outright: *"the initialiser takes
@@ -250,13 +250,15 @@ what lets anything other than this server read the stream (#32), so a broken one
 at deploy. The ASGI app does the same when its lifespan starts.
 
 ```json
-{"streamcast_metadata": 1, "stream": "trades", "stream_id": "6f1c…",
- "sealed_logs": [], "live_log": {"name": "trades", "start_offset": 1, …}, "manifest": null}
+{"streamcast_metadata": 2, "stream": "trades", "stream_id": "6f1c…",
+ "sealed_logs": [], "live_log": {"name": "trades", "published": "s3://…",
+ "start_offset": 1, "start_ts": 1790038800123456, …}, "manifest": null}
 ```
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
-an earlier release gets its file on its first `serve`. A `Stream(log=…)` handed a log the
+an earlier release gets its file on its first `serve`, and a version-1 file is rewritten
+as version 2. A `Stream(log=…)` handed a log the
 file says is sealed is refused.
 
 ### `maintain`

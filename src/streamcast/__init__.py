@@ -76,8 +76,9 @@ per consumer.
 
 **`serve` starts everything the stream needs.** A log that nobody seals grows
 for ever, and a WAL nobody ships is not replicated, so `serve` runs the
-maintainer in a subprocess and litestream as an flock-guarded sidecar. Both
-are keyword-controlled (`maintain=`, `replicate=`) for when you run your own.
+maintainer as five role subprocesses and, with `replicate=True`, litestream as
+an flock-guarded sidecar. Both are keyword-controlled (`maintain=`,
+`replicate=`) for when you run your own.
 
 **The object model is two classes and two functions.** `Stream` is the
 broadcast — offsets, subscribers, replay — and holds no socket. `serve` puts

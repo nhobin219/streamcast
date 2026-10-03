@@ -98,7 +98,7 @@ possible is wrong even if every test passes.
 8. **Run two litestream instances against one database.** It is the one thing litestream
    forbids. The sidecar takes an `flock` beside the log — not beside `log.root`, which is
    the shared parent — holds it for the server's life, and stands by rather than starting
-   a second. Both it and the maintainer start through `_process.popen`, which sets
+   a second. Both it and the maintainer's processes start through `_process.popen`, which sets
    `PR_SET_PDEATHSIG` so a `SIGKILL` of the server cannot orphan either.
 9. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
    which is safe; a cursor ahead of it skips messages for ever. `_cursor` advances only
