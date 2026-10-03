@@ -51,7 +51,7 @@ class TestCrossBoxRecovery:
                 offset=0,
                 cursor=first,
                 cursor_uri=remote_key,
-                s3=s3,
+                s3_options=s3,
                 # **Long on purpose, and no sleep.** This used to set 0.2s
                 # and then sleep 0.6s hoping the interval had fired — a race
                 # against a daemon thread, which on a loaded box it can lose.
@@ -72,7 +72,11 @@ class TestCrossBoxRecovery:
             second.parent.mkdir()
             assert not second.exists()
             async with streamcast.connect(
-                uri, cursor=second, cursor_uri=remote_key, s3=s3, upload_every=0.2
+                uri,
+                cursor=second,
+                cursor_uri=remote_key,
+                s3_options=s3,
+                upload_every=0.2,
             ) as sub:
                 assert (await sub.recv())[0] == 31
 
@@ -98,7 +102,7 @@ class TestCrossBoxRecovery:
                 offset=0,
                 cursor=cursor,
                 cursor_uri=remote_key,
-                s3=s3,
+                s3_options=s3,
                 # As above: the push on close is the guarantee, not the timer.
                 upload_every=30.0,
             ) as sub:
@@ -109,7 +113,11 @@ class TestCrossBoxRecovery:
             cursor.write_text("40")
 
             async with streamcast.connect(
-                uri, cursor=cursor, cursor_uri=remote_key, s3=s3, upload_every=30.0
+                uri,
+                cursor=cursor,
+                cursor_uri=remote_key,
+                s3_options=s3,
+                upload_every=30.0,
             ) as sub:
                 assert (await sub.recv())[0] == 41
 
@@ -128,13 +136,13 @@ class TestCrossBoxRecovery:
                 offset=0,
                 cursor=cursor,
                 cursor_uri=remote_key,
-                s3=s3,
+                s3_options=s3,
                 upload_every=600.0,  # never on the interval
             ) as sub:
                 for _ in range(15):
                     await sub.recv()
 
-            remote = RemoteCursor(Cursor(cursor), remote_key, s3=s3)
+            remote = RemoteCursor(Cursor(cursor), remote_key, s3_options=s3)
             assert remote.load() == 15
 
 
@@ -158,7 +166,7 @@ class TestItIsBestEffort:
                     offset=0,
                     cursor=cursor,
                     cursor_uri="s3://nope-does-not-exist-xyz/consumer/stream.offset",
-                    s3=streamcast.S3Options(
+                    s3_options=streamcast.S3Options(
                         endpoint="http://127.0.0.1:1",
                         access_key="x",
                         secret_key="y",
@@ -176,7 +184,9 @@ class TestItIsBestEffort:
             assert cursor.read_text() == "1"
 
     async def test_a_missing_remote_is_not_an_error(self, tmp_path, remote_key, s3):
-        remote = RemoteCursor(Cursor(tmp_path / "absent.offset"), remote_key, s3=s3)
+        remote = RemoteCursor(
+            Cursor(tmp_path / "absent.offset"), remote_key, s3_options=s3
+        )
         assert remote.load() is None
 
 
@@ -235,7 +245,7 @@ class TestConfiguration:
     def test_the_thread_is_a_daemon(self, tmp_path, remote_key, s3):
         # A consumer exiting with an upload in flight simply exits; a
         # best-effort backup has no business holding the interpreter open.
-        remote = RemoteCursor(Cursor(tmp_path / "c.offset"), remote_key, s3=s3)
+        remote = RemoteCursor(Cursor(tmp_path / "c.offset"), remote_key, s3_options=s3)
         remote.start()
         try:
             assert remote._thread is not None

@@ -7,6 +7,49 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed — breaking
+
+- **litelink 0.7** (`>=0.7.0,<0.8`).
+- **`s3=` is now `s3_options=`** everywhere streamcast takes credentials,
+  matching litelink: `Stream.new`, `Stream.restore`, `Stream.migrate`,
+  `Stream(...)`, `Stream.snapshot`, `Stream.scan`, `Stream.sql`, `Stream.live`,
+  `connect` and `publish`.
+- **`Stream.restore(hydrate=)` is gone**, with litelink's `hydrate()`. A
+  restored stream's staging table comes back empty; serve its history from
+  the published table with `replay_published=True`.
+- **The maintainer is litelink's five-process split.** `serve` (and `asgi`)
+  start one subprocess per role — `seal`, `compact`, `publish`, `clean`
+  (`evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")`)
+  and `clean-published` (`reclaim("published")`, `sweep("published")`) —
+  each covering every log, where one process ran everything. A minute-long
+  push never delays a seal; the cost is five interpreters (~150 MB each)
+  where there was one. `Maintain`'s `maintain_every` is replaced by one
+  cadence per role: `seal_every` 0.25 s, `compact_every`, `publish_every`
+  and `clean_every` 10 s, `clean_published_every` 60 s. `clean` is what
+  deletes buffer rows already in staging, which `seal()` and `publish()` no
+  longer do. A pass that fails waits its full interval before the next.
+- **litestream is opt-in: `serve(replicate=True)`**, where it ran by default
+  for logs with `wal_replication`. Such a log served without it gets a
+  `UserWarning` naming it, at every start.
+
+### Changed
+
+- **A migrated stream's retired logs are no longer handed to the
+  maintainer.** `retire()` published, evicted and swept them completely, and
+  litelink refuses them a writer, so each role only printed "cannot open"
+  for them. One exception: the `publish` role retires, through litelink,
+  any old log a migration before streamcast 0.10 only sealed. With no
+  archive such a log was never published, and snapshots, live views and
+  catch-up could not read across its seam.
+
+### Fixed
+
+- **A snapshot or live view whose live log has published nothing has that
+  log's columns.** A column a migration added was missing from the table
+  until the new log first published, so a query naming it failed.
+
 ## 0.10.1 — 2026-10-01
 
 ### Added

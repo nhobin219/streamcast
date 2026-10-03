@@ -33,10 +33,10 @@ def row(i: int) -> dict[str, object]:
 def publish(stream: streamcast.Stream) -> None:
     log = stream.log
     assert log is not None
-    while log.seal() is not None:
+    while log.seal(flush=True) is not None:
         pass
 
-    log.publish(push_unsettled=True)
+    log.publish(flush=True)
 
 
 @contextlib.asynccontextmanager
@@ -243,10 +243,10 @@ class TestWaitingForATime:
         legacy = litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(SCHEMA))
         unstamped = streamcast.Stream("trades", log=legacy)
         await unstamped.send_many([row(i) for i in range(3)])
-        while legacy.seal() is not None:
+        while legacy.seal(flush=True) is not None:
             pass
 
-        legacy.publish(push_unsettled=True)
+        legacy.publish(flush=True)
         try:
             async with served(unstamped) as (_server, broker):
                 async with await streamcast.Stream.live(broker) as live:

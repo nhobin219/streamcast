@@ -104,7 +104,7 @@ both subscribing and publishing here are URL conventions on top of it.
 streamcast.Stream(name="", *, log=None, owns_log=False,
                   max_backlog=8192, max_replay=100_000)
 streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
-                      published=None, s3=None, replay_published=False,
+                      published=None, s3_options=None, replay_published=False,
                       max_backlog=8192, max_replay=100_000)   # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
@@ -112,14 +112,14 @@ streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
     stream.metadata_uri                         # where a reader finds its history
 
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
-                                 broker=None, s3=None) -> Snapshot
+                                 broker=None, s3_options=None) -> Snapshot
     await snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=)
     await snapshot.sql(query, *, filters=, start_offset=, end_offset=)  # table `log`
 await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
-await streamcast.Stream.live(broker, *, s3=None) -> Live   # kept current
+await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
+streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
                  publish=False, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
@@ -231,17 +231,19 @@ async def main():
 asyncio.run(main())
 ```
 
-`serve` starts everything the streams need: one maintainer subprocess covering every log
-it serves, and one litestream for the logs with `wal_replication` on. Both are opt-out
-(`maintain=False`, `replicate=False`). Without a maintainer nothing ever seals — litelink
+`serve` starts everything the streams need: one maintainer covering every log it serves —
+a set of five subprocesses, one per storage role (seal, compact, publish, clean, clean
+published) — and, with `replicate=True`, one litestream for the logs with
+`wal_replication` on. The maintainer is opt-out (`maintain=False`); litestream is opt-in. Without a maintainer nothing ever seals — litelink
 is explicit that *"a maintainer is not optional"*.
 
-**One of each per server, not per log.** A maintainer is a full interpreter with litelink,
-pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured here — so four streams cost
-596 MB one-per-log against 149 MB shared, and litestream adds 40–170 MB per process on top.
+**One of each per server, not per log.** A maintainer process is a full interpreter with
+litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured here — so the set of
+five is shared by every log rather than started again for each, and litestream adds
+40–170 MB per process on top.
 The marginal cost mattered more than the total: a stream taking a row a minute cost the
 same as the busiest one, which made "should this be its own stream" a resource question it
-should not be. `Maintain(dedicated=("trades",))` gives a named log its own maintainer.
+should not be. `Maintain(dedicated=("trades",))` gives a named log a set of its own.
 
 `Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened yourself
 and does no I/O. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you want it.
@@ -421,8 +423,9 @@ rather than offset distance. The fence puts the new frontier a million offsets u
 consumer 150 rows behind is 150 rows behind — the distance check runs first and free, and
 only a subscribe it would refuse pays to find out what the replay actually costs.
 
-`hydrate=timedelta(days=7)` copies published files back to local disk; without it the local
-tier comes back empty and replays read the published table.
+The local staging table comes back empty — its Parquet was on the dead machine — so a
+restored stream that should replay history serves it from the published table, with
+`replay_published=True`.
 
 A **planned** cutover loses nothing — stop the writer, let the sidecar ship its last
 frames, then restore. Unplanned failover loses whatever never shipped.

@@ -201,7 +201,7 @@ class TestItNamesTheLiveLog:
 class TestThePublishedCopy:
     async def test_serve_uploads_it(self, tmp_path, serve, s3, bucket):
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
         )
         try:
             async with serve(stream, maintain=False, replicate=False):
@@ -217,12 +217,14 @@ class TestThePublishedCopy:
         self, tmp_path, serve, s3, bucket, monkeypatch
     ):
         first = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
         )
         async with serve(first, maintain=False, replicate=False):
             pass
 
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA, s3=s3)
+        stream = streamcast.Stream.new(
+            "trades", root=tmp_path, schema=SCHEMA, s3_options=s3
+        )
         try:
             uploads: list[str] = []
             original = _metadata.publish
@@ -246,7 +248,7 @@ class TestThePublishedCopy:
     ):
         missing = f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/prefix"
         stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=missing, s3=s3
+            "trades", root=tmp_path, schema=SCHEMA, published=missing, s3_options=s3
         )
         try:
             with pytest.raises(FileNotFoundError, match="does not exist"):

@@ -95,11 +95,11 @@ def save(root: str | os.PathLike[str], stream: str, manifest: pa.Table) -> Path:
 
 
 def publish(
-    published: str, stream: str, manifest: pa.Table, s3: S3Options | None
+    published: str, stream: str, manifest: pa.Table, s3_options: S3Options | None
 ) -> None:
     """Copy it beside the logs' published tables and the metadata file."""
     uri = f"{published.rstrip('/')}/{name(stream)}"
-    filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
+    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
     with filesystem.open_output_stream(key) as sink:
         pq.write_table(manifest, sink)
 

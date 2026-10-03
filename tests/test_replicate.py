@@ -41,7 +41,7 @@ def shipped(tmp_path, s3, bucket):
         sort_by=("event_ts",),
         config=litelink.LogConfig(wal_replication=True),
         published=bucket,
-        s3=s3,
+        s3_options=s3,
     )
     with handle:
         yield handle
@@ -58,7 +58,7 @@ def two_shipped(tmp_path, s3, bucket):
             sort_by=("event_ts",),
             config=litelink.LogConfig(wal_replication=True),
             published=bucket,
-            s3=s3,
+            s3_options=s3,
         )
         for name in ("trades", "quotes")
     ]
@@ -100,7 +100,7 @@ class TestItActuallyReplicates:
         they had continuous RPO protection with none of it.
         """
         stream = streamcast.Stream("trades", log=shipped)
-        async with streamcast.serve(stream, "127.0.0.1", 0):
+        async with streamcast.serve(stream, "127.0.0.1", 0, replicate=True):
             await stream.send_many(
                 [{"event_ts": i, "price": 1.0 * i} for i in range(2_000)]
             )
@@ -124,7 +124,7 @@ class TestItActuallyReplicates:
         only the first log's config: `quotes` then ships nothing.
         """
         streams = [streamcast.Stream(h.name, log=h) for h in two_shipped]
-        async with streamcast.serve(streams, "127.0.0.1", 0) as server:
+        async with streamcast.serve(streams, "127.0.0.1", 0, replicate=True) as server:
             sidecars = [c for c in server._children if isinstance(c, Sidecar)]  # noqa: SLF001
 
             assert len(sidecars) == 1, "one litestream per log is the defect"
@@ -219,10 +219,30 @@ class TestItActuallyReplicates:
             second.terminate()
             await second.wait_closed()
 
-    async def test_replicate_false_starts_nothing(self, shipped):
-        # For a deployment running its own, more finely tuned, litestream.
+    async def test_by_default_it_starts_nothing_and_says_so(self, shipped):
+        """Opt-in, and a log that asked for replication is told it has none.
+
+        Silence would leave the operator believing the log is protected —
+        the failure this module exists to prevent — so the default warns,
+        naming the log and both ways out.
+        """
         stream = streamcast.Stream("trades", log=shipped)
-        server = await streamcast.serve(stream, "127.0.0.1", 0, replicate=False)
+        with pytest.warns(UserWarning, match="'?trades'?.*replicate=True"):
+            server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=False)
+
+        try:
+            assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_replicate_false_starts_nothing_and_still_says_so(self, shipped):
+        # For a deployment running its own, more finely tuned, litestream: one
+        # line at start, which is cheap next to a log nobody replicates.
+        stream = streamcast.Stream("trades", log=shipped)
+        with pytest.warns(UserWarning, match="replicate=True"):
+            server = await streamcast.serve(stream, "127.0.0.1", 0, replicate=False)
+
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
         finally:
@@ -314,7 +334,7 @@ class TestItFailsLoudly:
         )
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.raises(SidecarUnavailable, match="litestream was not found"):
-            streamcast.serve(stream, "127.0.0.1", 0)
+            streamcast.serve(stream, "127.0.0.1", 0, replicate=True)
 
     async def test_the_message_names_the_way_out(self, shipped, monkeypatch):
         monkeypatch.setattr(
@@ -323,7 +343,7 @@ class TestItFailsLoudly:
         )
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.raises(SidecarUnavailable) as raised:
-            streamcast.serve(stream, "127.0.0.1", 0)
+            streamcast.serve(stream, "127.0.0.1", 0, replicate=True)
 
         assert "replicate=False" in str(raised.value)
         assert "'trades'" in str(raised.value)

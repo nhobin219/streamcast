@@ -23,6 +23,7 @@ a second spelling of "no name".
 from __future__ import annotations
 
 import inspect
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -32,7 +33,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
-from streamcast._maintain import Maintain, Supervisor
+from streamcast._maintain import ROLES, Maintain, Supervisor
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stats import STATS_PATH, payload
@@ -165,21 +166,21 @@ class _Served:
 def _supervisors(
     routes: dict[str, Stream], maintain: bool | Maintain
 ) -> list[Supervisor]:
-    """ONE maintainer for every log this server serves, plus any dedicated.
+    """FIVE maintainers — one per role of litelink's split — for every log
+    this server serves, plus five more for each dedicated log.
 
     A live-only stream has nothing to sweep, so a server of them spawns
-    nothing rather than a process with no work to do.
+    nothing rather than processes with no work to do.
 
-    **One process, not one per log**, which is what this built before. A
-    maintainer is a full interpreter with litelink, pyarrow, pyiceberg and
-    duckdb loaded — ~207 MB RSS each — so four small streams cost ~830 MB to
-    maintain a producer of ~460 MB, and each new stream cost the same again
-    whether it took a row a minute or a million. The work never needed the
-    isolation: `seal_due()` on an idle log is an indexed read of one row.
+    **Five per server, not five per log.** A maintainer is a full interpreter
+    with litelink, pyarrow, pyiceberg and duckdb loaded — ~150-200 MB RSS
+    each — so each role's process covers every log, and a new stream costs a
+    row in five loops rather than five more interpreters. The roles are split
+    from each other because the work in them is, on CPU or the network; the
+    logs need no such isolation. See `_maintain`.
 
-    `Maintain.dedicated` names logs that still get their own, for one large
-    or hot enough that its `maintain()` would hold up everyone else's
-    `seal_due()`.
+    `Maintain.dedicated` names logs that still get their own five, for one
+    large or hot enough that its compaction would hold up everyone else's.
 
     WAL replication is a separate concern with its own argument — see
     `_sidecars`, which runs litestream for the logs that need it.
@@ -206,25 +207,45 @@ def _supervisors(
         )
         raise ValueError(msg)
 
-    alone = [log for log in logs if log.name in plan.dedicated]
+    groups = [
+        [(Path(log.root), log.name)] for log in logs if log.name in plan.dedicated
+    ]
     shared = [
         (Path(log.root), log.name) for log in logs if log.name not in plan.dedicated
     ]
-    # **A migrated stream's retired logs are maintained too**, in the shared
-    # process. Nothing writes to them again, so there is nothing to seal —
-    # but their local retention and eviction still run on the maintainer's
-    # cadence, and a retired log nothing maintains keeps every file for ever.
-    shared += [target for stream in routes.values() for target in stream.retired]
-
-    supervisors = [Supervisor([(Path(log.root), log.name)], plan) for log in alone]
+    # **A migrated stream's retired logs are not maintained.** `retire()`
+    # publishes everything, evicts staging and sweeps both tables completely
+    # before it marks the log retired, and litelink refuses a writer on one
+    # from then on: there is nothing left to do, and nothing could open it
+    # to try. One `publish` process is handed them anyway, to retire through
+    # litelink any that a migration before streamcast 0.10 only sealed — see
+    # `_maintain.finish_retiring`.
     if shared:
-        supervisors.append(Supervisor(shared, plan))
+        groups.append(shared)
 
-    return supervisors
+    retired = [target for stream in routes.values() for target in stream.retired]
+    # The shared set's publish role if there is one, else the first.
+    owner = len(groups) - 1 if shared else 0
+    return [
+        Supervisor(
+            group,
+            plan,
+            role,
+            retiring=retired if (index == owner and role == "publish") else (),
+        )
+        for index, group in enumerate(groups)
+        for role in ROLES
+    ]
 
 
 def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     """ONE litestream for every log this server replicates, or none.
+
+    **Opt-in twice:** `wal_replication` on the log, and `replicate=True` on
+    the server. Off by default because most deployments replicate nothing, and
+    one that does may run its own litestream. A log that asks for replication
+    on a server that does not run it is warned about, by name, at every start
+    — one line — rather than left believing it is protected.
 
     `wal_replication` is opt-in on the log, so this is empty for almost every
     deployment and starts nothing. When it is on, the log's whole point is
@@ -240,14 +261,22 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     the replicator; `Sidecar` holds one per log and replicates exactly the
     ones it holds.
     """
-    if not replicate:
-        return []
-
     shipping = [
         stream.log
         for stream in routes.values()
         if stream.log is not None and stream.log.config.wal_replication
     ]
+    if not replicate:
+        if shipping:
+            names = ", ".join(sorted(log.name for log in shipping))
+            warnings.warn(
+                f"log(s) {names} have wal_replication on, and this server was "
+                f"started without replicate=True: nothing here replicates them. "
+                f"Pass replicate=True, or run litestream for them yourself.",
+                stacklevel=3,
+            )
+
+        return []
 
     return [Sidecar.new(shipping)] if shipping else []
 
@@ -297,7 +326,7 @@ def serve(
     port: int | None = None,
     *,
     maintain: bool | Maintain = True,
-    replicate: bool = True,
+    replicate: bool = False,
     publish: bool = False,
     stats: bool | str = True,
     compression: str | None = None,
@@ -336,15 +365,16 @@ def serve(
     takeover, the variant that would let one compressed frame be shared across
     connections, the same frames compress 1.1x.
 
-    **`maintain=True` starts ONE maintainer subprocess covering every stream
-    that has a log**, and stops it when the server closes. One for the server
-    rather than one per log: a maintainer is a full interpreter with litelink,
-    pyarrow, pyiceberg and duckdb loaded — measured at 149 MB RSS on this box,
-    so four streams cost 596 MB one-per-log against 149 MB shared. The work
-    never needed the isolation; `seal_due()` on an idle log is an indexed read
-    of one row. `Maintain(dedicated=("trades",))` gives a named log its own,
-    for one busy enough that its `maintain()` would hold up the others'
-    `seal_due()`. That is a departure from
+    **`maintain=True` starts ONE maintainer covering every stream that has a
+    log** — a set of five subprocesses, one per role of litelink's split:
+    seal, compact, publish, clean, clean-published — and stops them when the
+    server closes. One set for the server rather than one per log: each is a
+    full interpreter with litelink, pyarrow, pyiceberg and duckdb loaded —
+    measured at 149 MB RSS on this box. The roles are split because their
+    work is, on CPU or the network; the logs never needed the isolation.
+    `Maintain(dedicated=("trades",))` gives a named log a set of its own, for
+    one busy enough that its compaction would hold up the others'. That is a
+    departure from
     litelink's "the library owns neither the thread nor the interval", and it
     is deliberate: a streamcast server already owns a socket, a task per
     subscriber and a queue per subscriber, so owning its own storage

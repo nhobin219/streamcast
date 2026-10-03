@@ -100,10 +100,10 @@ async def build(root: Path, rows: int, logs: int) -> str:
 
     log = stream.log
     assert log is not None
-    while log.seal() is not None:
+    while log.seal(flush=True) is not None:
         pass
 
-    log.publish(push_unsettled=True)
+    log.publish(flush=True)
     uri = stream.metadata_uri
     assert uri is not None
     stream.ensure_metadata()

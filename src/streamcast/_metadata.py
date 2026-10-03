@@ -399,30 +399,30 @@ def _uri(published: str, stream: str) -> str:
     return f"{published.rstrip('/')}/{stream}.metadata.json"
 
 
-def publish(metadata: Metadata, published: str, s3: S3Options | None) -> None:
+def publish(metadata: Metadata, published: str, s3_options: S3Options | None) -> None:
     """Copy the metadata to `published`, beside the logs' published tables.
 
     Raises rather than logging: a stream whose published copy does not name
     its current log is one `Stream.restore` would rebuild as the wrong log.
     """
     uri = _uri(published, metadata.stream)
-    filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
+    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
     with filesystem.open_output_stream(key) as stream:
         stream.write(metadata.to_json().encode())
 
 
-def sync(metadata: Metadata, published: str, s3: S3Options | None) -> None:
+def sync(metadata: Metadata, published: str, s3_options: S3Options | None) -> None:
     """Make the published copy match `metadata`, uploading only if it differs.
 
     Run at every `serve`, so an upload that failed is repaired by the next
     start rather than by whoever notices, and a stream that has not changed
     costs one GET. Raises on any failure but absence — see `fetch`.
     """
-    if fetch(published, metadata.stream, s3) != metadata:
-        publish(metadata, published, s3)
+    if fetch(published, metadata.stream, s3_options) != metadata:
+        publish(metadata, published, s3_options)
 
 
-def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
+def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadata:
     """The stream's metadata, written if it is not there and synced to S3.
 
     **`serve` calls this for every durable stream before it listens**, and a
@@ -458,12 +458,12 @@ def ensure(stream: str, log: LogHandle, s3: S3Options | None) -> Metadata:
         raise ValueError(msg)
 
     if remote(log.published):
-        sync(found, log.published, s3)
+        sync(found, log.published, s3_options)
 
     return found
 
 
-def fetch(published: str, stream: str, s3: S3Options | None) -> Metadata | None:
+def fetch(published: str, stream: str, s3_options: S3Options | None) -> Metadata | None:
     """The published copy, or None if there is none there.
 
     Only a MISSING object is None. Anything else — bad credentials, an
@@ -471,7 +471,7 @@ def fetch(published: str, stream: str, s3: S3Options | None) -> Metadata | None:
     restore the stream's first log as though it were its current one.
     """
     uri = _uri(published, stream)
-    filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
+    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
     try:
         with filesystem.open_input_stream(key) as source:
             text = source.read().decode()

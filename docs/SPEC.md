@@ -41,8 +41,8 @@ upstream ws feed
 │             └─► pump ──► subscriber C   │
 │                                         │
 │   serve() also starts, per stream:      │
-│     maintainer  (subprocess)  §5        │   ← nothing seals without it
-│     litestream  (sidecar)               │   ← only if the log ships its WAL
+│     maintainer  (5 subprocesses)  §5    │   ← nothing seals without it
+│     litestream  (sidecar)               │   ← only with replicate=True, if the log ships its WAL
 └─────────────────────────────────────────┘
 ```
 
@@ -833,8 +833,9 @@ loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
 the server's replay. `EARLIEST` on a freshly migrated stream is where the
 current log begins.
 
-Retired logs stay on disk and in their published tables. `serve`'s maintainer keeps
-maintaining the ones on this disk, so their local retention still runs.
+Retired logs stay on disk and in their published tables. `serve`'s maintainer leaves
+them alone: `retire()` published, evicted and swept them completely, and litelink
+refuses them a writer, so there is nothing left to maintain.
 litestream replicates only the current log, since nothing writes to a retired
 one.
 
@@ -1348,9 +1349,9 @@ default server and a plain `connect` — no raised bound, no `catch_up`.
 | the published table in full, adopted via `version-hint.text` | the staging table — rebuilt EMPTY; its Parquet was on the dead machine |
 | the unsealed tail and the band between `published_through` and `end_offset`, from the replicated `buffer.db` | rows appended inside the replication lag — served to callers, never shipped |
 
-`hydrate=timedelta(...)` re-registers published files into staging. It has no
-default because it costs egress and the window is the caller's; without it
-staging stays empty and a replay without `replay_published=True` sees nothing.
+Nothing copies published files back into staging, so staging stays empty and
+a replay without `replay_published=True` sees nothing below the buffer. With
+it, the server reads history from the published table.
 
 **A planned cutover loses nothing**: stop the writer, let the sidecar ship its
 last frames, then restore. Only unplanned failover loses rows, and it loses

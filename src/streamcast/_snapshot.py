@@ -61,17 +61,19 @@ class SnapshotUnavailable(StreamcastError):
     """A snapshot that cannot be served as asked: what is missing, and why."""
 
 
-def _read(uri: str, s3: S3Options | None) -> bytes:
+def _read(uri: str, s3_options: S3Options | None) -> bytes:
     if uri.startswith("file://"):
         with open(_published.path(uri), "rb") as file:  # noqa: PTH123
             return file.read()
 
-    filesystem, key = _remote._filesystem(uri, s3)  # noqa: SLF001
+    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
     with filesystem.open_input_stream(key) as source:
         return source.read()
 
 
-def metadata(uri: str, s3: S3Options | None, stream_id: str | None = None) -> Metadata:
+def metadata(
+    uri: str, s3_options: S3Options | None, stream_id: str | None = None
+) -> Metadata:
     """The stream's metadata at `uri`, checked against `stream_id` if given.
 
     `stream_id` is the greeting's. A `file://` path that exists on two
@@ -79,7 +81,7 @@ def metadata(uri: str, s3: S3Options | None, stream_id: str | None = None) -> Me
     another stream's history without a word; the id is what tells them apart.
     """
     try:
-        found = Metadata.from_json(_read(uri, s3).decode())
+        found = Metadata.from_json(_read(uri, s3_options).decode())
     except FileNotFoundError:
         if uri.startswith("file://"):
             msg = (
@@ -146,7 +148,7 @@ class Snapshot:
         tail: pa.Table | None,
         ts: int | None,
         manifest: pa.Table | None,
-        s3: S3Options | None,
+        s3_options: S3Options | None,
     ) -> None:
         self.metadata = metadata
         self._pieces = pieces
@@ -155,7 +157,7 @@ class Snapshot:
         self._tail = tail
         self._ts = ts
         self._manifest = manifest
-        self._s3 = s3
+        self._s3 = s3_options
 
     # -- reading ---------------------------------------------------------------
 
@@ -272,11 +274,14 @@ class Snapshot:
                 f"WHERE {self._bounds(start, stop, stamped=False)}"
             )
 
-        if not parts:
-            # Nothing to read — nothing published yet, no tail — but still the
-            # stream's columns, typed as the live log declares them: a query
-            # over an empty stream is an empty answer, not a binder error on
-            # the first column it names.
+        live = self.metadata.live_log
+        if self._tail is None and not any(piece.entry is live for piece in pieces):
+            # Nothing read from the live log — it has published nothing, and
+            # there is no tail — but its columns still belong in the table,
+            # typed as it declares them: a column a migration added would
+            # otherwise be missing until the live log first publishes, and a
+            # query naming it would be a binder error rather than NULLs. With
+            # nothing else to read either, this is the whole (empty) table.
             self._connection.register(
                 "streamcast_empty", _tail_table(self.metadata.live_log, [])
             )
@@ -431,7 +436,7 @@ async def snapshot(
     as_of_offset: int | None = None,
     as_of_ts: int | None = None,
     broker: str | None = None,
-    s3: S3Options | None = None,
+    s3_options: S3Options | None = None,
     stream_id: str | None = None,
 ) -> Snapshot:
     """See `Stream.snapshot`."""
@@ -447,18 +452,18 @@ async def snapshot(
         msg = f"as_of_offset={as_of_offset} is negative; LATEST means the frontier"
         raise ValueError(msg)
 
-    found = await asyncio.to_thread(metadata, metadata_uri, s3, stream_id)
+    found = await asyncio.to_thread(metadata, metadata_uri, s3_options, stream_id)
     return (
         await asyncio.to_thread(
-            _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3
+            _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3_options
         )
         if broker is None or as_of_offset is None
-        else await _with_tail(metadata_uri, found, as_of_offset, broker, s3)
+        else await _with_tail(metadata_uri, found, as_of_offset, broker, s3_options)
     )
 
 
 def _manifest_for(
-    metadata_uri: str, found: Metadata, s3: S3Options | None
+    metadata_uri: str, found: Metadata, s3_options: S3Options | None
 ) -> pa.Table | None:
     if found.manifest is None:
         return None
@@ -467,7 +472,9 @@ def _manifest_for(
     try:
         import pyarrow.parquet as pq  # noqa: PLC0415 — only when there is one
 
-        return pq.read_table(pa.BufferReader(_read(f"{base}/{found.manifest}", s3)))
+        return pq.read_table(
+            pa.BufferReader(_read(f"{base}/{found.manifest}", s3_options))
+        )
     except FileNotFoundError:
         # Missing statistics never prune: every sealed log is read.
         return None
@@ -506,21 +513,21 @@ def _assemble(
     found: Metadata,
     as_of_offset: int | None,
     as_of_ts: int | None,
-    s3: S3Options | None,
+    s3_options: S3Options | None,
 ) -> Snapshot:
     """Everything a snapshot needs but a broker: the pieces, the live pin, the end."""
     remote = any((entry.published or "").startswith("s3://") for entry in found.logs)
-    connection = _published.connection(s3, remote=remote)
+    connection = _published.connection(s3_options, remote=remote)
     try:
         pieces = _pieces(found, as_of_ts)
         live = next((p for p in pieces if p.entry is found.live_log), None)
         published_end = found.live_log.start_offset
         if live is not None:
-            if _has_table(found.live_log, s3):
+            if _has_table(found.live_log, s3_options):
                 live.table = _published.Table.open(
                     found.live_log.published or "",
                     found.live_log.name,
-                    s3,
+                    s3_options,
                     shared=connection,
                 )
                 if live.table.extent is not None:
@@ -564,21 +571,21 @@ def _assemble(
             end,
             tail=None,
             ts=as_of_ts,
-            manifest=_manifest_for(metadata_uri, found, s3),
-            s3=s3,
+            manifest=_manifest_for(metadata_uri, found, s3_options),
+            s3_options=s3_options,
         )
     except BaseException:
         connection.close()
         raise
 
 
-def _has_table(entry: Entry, s3: S3Options | None) -> bool:
+def _has_table(entry: Entry, s3_options: S3Options | None) -> bool:
     """Whether the log has published anything yet: a hint file exists."""
     uri = (
         f"{(entry.published or '').rstrip('/')}/{entry.name}/metadata/version-hint.text"
     )
     try:
-        _read(uri, s3)
+        _read(uri, s3_options)
     except FileNotFoundError:
         return False
 
@@ -590,12 +597,14 @@ async def _with_tail(
     found: Metadata,
     as_of_offset: int,
     broker: str,
-    s3: S3Options | None,
+    s3_options: S3Options | None,
 ) -> Snapshot:
     """The published snapshot, then the broker's rows above it up to the point."""
     from streamcast import _client  # noqa: PLC0415 — the client imports this module
 
-    published = await asyncio.to_thread(_assemble, metadata_uri, found, None, None, s3)
+    published = await asyncio.to_thread(
+        _assemble, metadata_uri, found, None, None, s3_options
+    )
     start = published.end_offset
     try:
         if as_of_offset != LATEST and as_of_offset + 1 <= start:

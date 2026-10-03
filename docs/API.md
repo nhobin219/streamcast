@@ -81,7 +81,7 @@ streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
                   max_backlog=8192, max_replay=100_000)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
-                      sort_by=None, config=None, published=None, s3=None,
+                      sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False,
                       max_backlog=8192, max_replay=100_000)
 ```
@@ -254,37 +254,53 @@ at deploy. The ASGI app does the same when its lifespan starts.
  "sealed_logs": [], "live_log": {"name": "trades", "start_offset": 1, …}, "manifest": null}
 ```
 
-The upload uses the `s3=` the stream was created with (`Stream.new`, `Stream.migrate`,
-`Stream.restore`, or `Stream(log=…, s3=…)`), and otherwise the environment. A stream from
+The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
+`Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
 an earlier release gets its file on its first `serve`. A `Stream(log=…)` handed a log the
 file says is sealed is refused.
 
 ### `maintain`
 
-**`maintain=True` starts one maintainer subprocess covering every stream that has a log**,
-and stops it when the server closes. One process for the server, not one per log: a
-maintainer is a full interpreter with litelink, pyarrow, pyiceberg and duckdb loaded —
-149 MB RSS measured — so four streams cost 596 MB one-per-log against 149 MB shared.
+**`maintain=True` starts one maintainer covering every stream that has a log** — a set of
+five subprocesses, one per role of litelink's recommended split — and stops them when the
+server closes:
 
-`Maintain(dedicated=("trades",))` gives a named log its own, for one busy enough that its
-`maintain()` would hold up the others' `seal_due()`. Names are the **log's**, not the
+| role | runs | every |
+|---|---|---|
+| `seal` | `seal()` | 0.25 s |
+| `compact` | `compact()` | 10 s |
+| `publish` | `publish()` | 10 s |
+| `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | 10 s |
+| `clean-published` | `reclaim("published")`, `sweep("published")` | 60 s |
+
+A step gets its own process when it is heavy on CPU or the network, so a minute-long push
+to a slow bucket never delays a seal, and compaction never competes with it for an
+interpreter. One set for the server, not one per log: each process is a full interpreter
+with litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured — so the set
+costs five of those, shared by every log.
+
+`Maintain(dedicated=("trades",))` gives a named log a set of its own, for one busy enough
+that its compaction would hold up the others'. Names are the **log's**, not the
 route; a name this server does not serve with a log raises at `serve` rather than being
 ignored, and naming every log starts no shared maintainer at all. Without it, nothing in this library ever calls litelink's
-`seal_due()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
+`seal()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
 held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
 growing. litelink says it plainly: *"A maintainer is not optional."*
 
 ```python
-streamcast.serve(streams, host, port)                          # one maintainer, all logs
+streamcast.serve(streams, host, port)                          # one set of five, all logs
 streamcast.serve(stream, host, port, maintain=False)           # you run your own
 streamcast.serve(stream, host, port,
-                 maintain=streamcast.Maintain(seal_every=0.1, maintain_every=30))
+                 maintain=streamcast.Maintain(seal_every=0.1, publish_every=30))
 ```
 
-`Maintain` is a frozen dataclass of `seal_every` (0.25 s) and `maintain_every` (10 s). The
-cadences differ by 40x because the costs do: `seal_due` is an indexed read of one row when
-there is nothing to seal, while `maintain` reads table metadata to compact, evict and
-expire.
+`Maintain` is a frozen dataclass of one cadence per role — `seal_every`, `compact_every`,
+`publish_every`, `clean_every`, `clean_published_every`, with the defaults above — and
+`dedicated`. The cadences differ by orders of magnitude because the costs do: `seal` is an
+indexed read of one row when there is nothing to seal, compaction rewrites files, and the
+published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
+rows already in staging** (litelink's `evict("buffer")`): `seal` and `publish` move data
+and delete nothing, so a maintainer without it grows `buffer.db` without bound.
 
 **It is always a subprocess, and there is deliberately no thread option.** A seal is
 CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no
@@ -300,11 +316,14 @@ terminal's Ctrl-C reaches the server alone, and the server stops them. The other
 maintainer that exits while the server runs is restarted with backoff, because losing it
 silently returns the server to never sealing.
 
-`maintain=False` is right when you run litelink's own four-process shape
-(`examples/adsb/`, one process per storage role), or when the log is shared with something
-else that sweeps it. `python -m streamcast maintain --log PATH NAME` is the same
+`maintain=False` is right when you run the roles yourself — litelink's `examples/adsb/`, or
+one container per role — or when the log is shared with something else that sweeps it.
+`python -m streamcast maintain --role ROLE --every SECONDS --log PATH NAME` is one role's
 loop, runnable by hand; repeat `--log` to sweep several from one process, which is what
-`serve` does.
+`serve` does for each role.
+
+A migrated stream's retired logs are not maintained: `retire()` published, evicted and
+swept them completely, and litelink refuses them a writer.
 
 ### `replicate`
 
@@ -317,13 +336,18 @@ log = litelink.new(root, "trades", schema=SCHEMA,
                    config=litelink.LogConfig(wal_replication=True),
                    published="s3://bucket/prefix")
 
-async with streamcast.serve(streamcast.Stream("trades", log=log), host, port):
-    ...        # sealing, compaction, and WAL shipping all running
+async with streamcast.serve(
+    streamcast.Stream("trades", log=log), host, port, replicate=True
+):
+    ...        # sealing, compaction, publishing, and WAL shipping all running
 ```
 
-`wal_replication` is opt-in on the log, so for almost every deployment this starts
-nothing. `replicate=False` opts out, for someone running their own more finely tuned
-litestream.
+**It is off by default** — opt in with `replicate=True`. `wal_replication` is opt-in on the
+log too, so for almost every deployment there is nothing to replicate anyway. A log that
+has `wal_replication` on, served without `replicate=True`, gets a `UserWarning` naming it
+at every start — one line — because silence would leave you believing the log is
+protected. That includes running your own, more finely tuned litestream, where the line
+is a reminder rather than a fault.
 
 **Two litestream instances on one database is the thing litestream forbids**, and the
 sidecar is built around not doing it:
@@ -432,7 +456,7 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=True, publish=False)
+asgi(streams, *, maintain=True, replicate=False, publish=False)
 ```
 
 The same streams behind an ASGI app, for a service that already has one. Needs the extra:
@@ -505,7 +529,7 @@ and the `Subscriber` stays in the fan-out set for ever.
 ## `publish`
 
 ```python
-streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3=None,
+streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3_options=None,
                    upload_every=30.0, **websockets_kwargs) -> Publication
 
 await producer.send(row) -> int | None          # durable, then fanned out
@@ -567,7 +591,7 @@ arithmetic.
 
 ```python
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
-                   s3=None, upload_every=30.0, catch_up=False,
+                   s3_options=None, upload_every=30.0, catch_up=False,
                    catch_up_retries=3, metadata=None,
                    **websockets_kwargs) -> Subscription
 ```
@@ -795,7 +819,7 @@ which of three things to change.
 | `catch_up=False` *(default)* | the plain `NotReplayable` refusal; handle the gap yourself |
 | `catch_up_retries=3` | rounds of read-then-connect before giving up |
 | `metadata="s3://bucket/prefix/trades.metadata.json"` | the metadata file to read from; otherwise the greeting's |
-| `s3=streamcast.S3Options(...)` | credentials; otherwise the environment |
+| `s3_options=streamcast.S3Options(...)` | credentials; otherwise the environment |
 
 **Where the metadata file comes from.** The greeting names it, with the stream's id, so a
 refused client spends one throwaway connection asking. The refusal does not: a close frame
@@ -864,7 +888,7 @@ That is the disaster-recovery case, and the only one where a copy that lags by u
 `upload_every` should decide. When it is used, the value is written down locally too, so a
 second restart on the new box needs no bucket.
 
-Credentials resolve from the environment and `s3=streamcast.S3Options(...)` overrides them
+Credentials resolve from the environment and `s3_options=streamcast.S3Options(...)` overrides them
 — litelink's model, so a profile, instance metadata or SSO all work untouched. The upload
 goes through pyarrow, which litelink already brings, so this adds no dependency.
 
@@ -1114,7 +1138,7 @@ server stopped resumes at the seam with nothing lost. One further behind is refu
 `Stream.snapshot`, which reads every log of the stream. `offset=EARLIEST` means the start
 of the current log.
 
-`sort_by` and `config` default to the current log's. `s3=` is what the metadata file is
+`sort_by` and `config` default to the current log's. `s3_options=` is what the metadata file is
 uploaded with, both here and at `serve`.
 
 Each migration also adds the retired log to `<stream>.manifest.parquet`: per-column bounds
@@ -1166,7 +1190,7 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
 ```python
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
-                                 broker=None, s3=None) -> Snapshot
+                                 broker=None, s3_options=None) -> Snapshot
 await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
                              filters=(), start_offset=None, end_offset=None) -> pa.Table
 await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
@@ -1199,7 +1223,7 @@ it never touches the server**:
 s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
 
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades.metadata.json", s3=s3
+    "s3://market-data/prod/trades.metadata.json", s3_options=s3
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
 ```
@@ -1285,7 +1309,7 @@ machine. On another machine the read says so and suggests an `s3://` location.
 ### Keeping it current: `Stream.live`
 
 ```python
-await streamcast.Stream.live(broker, *, s3=None, rebase_every=10.0, where=None,
+await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
                              start_offset=None) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:

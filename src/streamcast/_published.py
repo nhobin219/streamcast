@@ -59,7 +59,9 @@ _DATABASES: dict[S3Options | None, duckdb.DuckDBPyConnection] = {}
 _LOCK = threading.Lock()
 
 
-def connection(s3: S3Options | None, *, remote: bool) -> duckdb.DuckDBPyConnection:
+def connection(
+    s3_options: S3Options | None, *, remote: bool
+) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection that can read published tables. The caller closes it.
 
     `httpfs` and credentials only when `remote`, for `s3://` tables: a local
@@ -76,12 +78,12 @@ def connection(s3: S3Options | None, *, remote: bool) -> duckdb.DuckDBPyConnecti
     Keys rotated in the environment resolve to different options, and so to
     a database of their own.
     """
-    key = (s3 or S3Options()).resolved() if remote else None
+    key = (s3_options or S3Options()).resolved() if remote else None
     with _LOCK:
         database = _DATABASES.get(key)
         if database is None:
             database = (
-                duckdb_connection(key, remote=True)
+                duckdb_connection(s3_options=key)
                 if key is not None
                 else duckdb_connection()
             )
@@ -138,7 +140,7 @@ class Table:
         cls,
         published: str,
         name: str,
-        s3: S3Options | None,
+        s3_options: S3Options | None,
         *,
         shared: duckdb.DuckDBPyConnection | None = None,
     ) -> Table:
@@ -154,7 +156,9 @@ class Table:
         """
         uri = f"{published.rstrip('/')}/{name}"
         connected = (
-            connection(s3, remote=uri.startswith("s3://")) if shared is None else shared
+            connection(s3_options, remote=uri.startswith("s3://"))
+            if shared is None
+            else shared
         )
         try:
             table = path(uri)
