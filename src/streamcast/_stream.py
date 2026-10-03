@@ -193,7 +193,7 @@ class Stream:
         s3_options: S3Options | None = None,
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
-        group_commit: bool = False,
+        group_commit: bool = True,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -278,8 +278,8 @@ class Stream:
         self._check_stored = (
             None if log is None else partial(litelink.validate_row, log.schema)
         )
-        # Each send its own transaction unless the stream opts in: a client
-        # that sends a row is promised that row commits on its own, and the
+        # Sends that queue behind a commit in flight share the next one, unless
+        # the stream opts out — then each send is its own transaction. The
         # greeting says which promise this stream makes.
         self._group_commit = group_commit and log is not None
         self._writer = (
@@ -363,7 +363,7 @@ class Stream:
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
-        group_commit: bool = False,
+        group_commit: bool = True,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -447,7 +447,7 @@ class Stream:
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
-        group_commit: bool = False,
+        group_commit: bool = True,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -630,7 +630,7 @@ class Stream:
         s3_options: object | None = None,
         binary: str | None = None,
         replay_published: bool = False,
-        group_commit: bool = False,
+        group_commit: bool = True,
         max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
@@ -966,10 +966,11 @@ class Stream:
         what makes a replay of this row byte-identical to what goes out now.
 
         Throughput on the durable path is one fsync per call: each send is its
-        own transaction. `send_many` is the lever: it commits a whole group in
-        one. A stream created with `group_commit=True` may also commit sends
-        from several publishers that queued behind one commit in a single
-        transaction, and says so in its greeting.
+        own transaction while nothing else is committing. `send_many` is the
+        lever: it commits a whole group in one. By default (`group_commit`)
+        sends from several publishers that queue behind a commit in flight
+        share the next transaction; a stream created with `group_commit=False`
+        commits each on its own, and its greeting says which.
 
         **On a stream with no log, a publish loop that never awaits starves
         every subscriber.** There nothing yields, so a

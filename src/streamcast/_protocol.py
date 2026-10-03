@@ -298,14 +298,14 @@ class Greeting:
     group_commit: bool = False
     """Whether this stream may commit several sends in one transaction.
 
-    False — the default — is the guarantee a publisher can rely on: each
-    `send` and each `send_many` is its own commit, so its rows become durable
-    together and on their own. True means the server may group sends that
-    arrived while a commit was in flight into one transaction, for
-    throughput: every row is still durable before its send returns and before
-    any subscriber sees it, and offsets and order are unchanged, but rows from
-    different publishers can share a commit. False on a stream with no log,
-    which commits nothing.
+    True — a stream's default — means the server may group sends that arrived
+    while a commit was in flight into one transaction, for throughput: every
+    row is still durable before its send returns and before any subscriber
+    sees it, each send's rows are still adjacent, and offsets and order are
+    unchanged, but rows from different publishers can share a commit. False
+    is the stricter guarantee: each `send` and each `send_many` is its own
+    commit. False too on a stream with no log, which commits nothing, and for
+    a greeting without the field, from a server that never grouped.
     """
 
 

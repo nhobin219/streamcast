@@ -27,9 +27,10 @@ only ever does what is cheap: validate, queue, and later fan out.
   that subscriber live, never by replay; one below it was fanned out before
   the subscriber joined, and is replayed. No gap, no duplicate.
 
-**Group commit.** While one commit is in flight, more jobs queue behind it;
-the next commit takes all of them in one transaction, one fsync, each job's
-rows still adjacent and in queue order. Under concurrent publishers on one
+**Group commit, on by default.** While one commit is in flight, more jobs
+queue behind it; the next commit takes all of them in one transaction, one
+fsync, each job's rows still adjacent and in queue order. A stream created
+with `group_commit=False` commits each job on its own. Under concurrent publishers on one
 stream that is throughput the per-call fsync never had. A job's rows are
 validated on the loop before they are queued, so one bad row is refused alone
 rather than failing every publisher's rows that shared its transaction.
@@ -123,8 +124,8 @@ class Writer:
             jobs: list[Job] = [first]  # ty: ignore[invalid-assignment]
             count = len(first.stored)  # ty: ignore[unresolved-attribute]
             stopping = False
-            # Group commit, when the stream opted in: whatever queued while the
-            # last commit ran. Off, each job is its own transaction.
+            # Group commit, unless the stream opted out: whatever queued while
+            # the last commit ran. Off, each job is its own transaction.
             while self._group and count < GROUP_ROWS:
                 try:
                     more = self._queue.get_nowait()

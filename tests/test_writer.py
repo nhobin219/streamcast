@@ -143,19 +143,19 @@ class TestOffTheLoop:
         assert all(t is not threading.main_thread() for t in threads)
 
     @pytest.mark.parametrize(
-        ("group_commit", "expected"), [(False, [1] * 21), (True, [1, 20])]
+        ("group_commit", "expected"),
+        [(False, [1] * 21), (True, [1, 20]), (None, [1, 20])],  # None: the default
     )
-    async def test_queued_sends_are_grouped_only_when_the_stream_opts_in(
+    async def test_queued_sends_are_grouped_unless_the_stream_opts_out(
         self, tmp_path, monkeypatch, group_commit, expected
     ):
         """Deterministic: the first commit is held until the rest have queued.
 
-        By default a publisher is promised its send commits on its own, so the
-        twenty queued behind are twenty commits. Opted in, they are one.
+        By default the twenty queued behind are one commit. Opted out, each
+        send is promised a commit of its own, so they are twenty.
         """
-        stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, group_commit=group_commit
-        )
+        extra = {} if group_commit is None else {"group_commit": group_commit}
+        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA, **extra)
         assert stream.log is not None
         held = threading.Event()
         commits: list[int] = []
@@ -196,6 +196,11 @@ class TestTheGreeting:
                     assert sub.info.group_commit is group_commit
         finally:
             await stream.aclose()
+
+    async def test_it_is_on_by_default(self, stream, serve):
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.connect(uri) as sub:
+                assert sub.info.group_commit is True
 
     def test_a_greeting_without_it_means_each_send_commits_alone(self):
         from streamcast._protocol import parse_greeting

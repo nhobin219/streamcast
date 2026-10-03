@@ -23,13 +23,15 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- **`group_commit=True`** on `Stream`, `Stream.new`, `Stream.restore` and
-  `Stream.migrate`: sends from several publishers that queue behind a
-  commit share the next transaction — measured 4,232 rows/s from 8
-  publishers against ~1,300. Off by default, which keeps the guarantee
-  that each `send` or `send_many` is its own commit. The greeting's new
-  `group_commit` field says which guarantee a stream makes; a greeting
-  without it means each send commits alone.
+- **Group commit, on by default** (`group_commit` on `Stream`,
+  `Stream.new`, `Stream.restore` and `Stream.migrate`): sends from several
+  publishers that queue behind a commit share the next transaction —
+  measured 4,232 rows/s from 8 publishers against ~1,300. Each send's rows
+  stay adjacent and every row is durable before its send returns; a lone
+  publisher never waits for a group. `group_commit=False` makes each `send`
+  or `send_many` its own commit. The greeting's new `group_commit` field
+  says which a stream makes; a greeting without it means each send commits
+  alone.
 
 ## 0.11.0 — 2026-10-03
 

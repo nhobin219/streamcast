@@ -335,14 +335,17 @@ loop did not run for the whole 3 s of a flat-out publisher. On the writer
 thread SQLite releases the GIL while it waits on the disk, so streams commit in
 parallel and the loop stays responsive.
 
-**Each send is its own commit, by default.** A publisher is promised its
-`send` — or its `send_many` — becomes durable in a transaction of its own. A
-stream created with `group_commit=True` waives that for throughput: sends that
-queued while a commit was in flight share the next transaction, each one's
-rows still adjacent and in queue order, every row still durable before its send
-returns and before any subscriber sees it. Measured 4,232 rows/s from 8
-concurrent publishers against ~1,300 one commit at a time. The greeting's
-`group_commit` says which guarantee a stream makes. Rows are checked on the
+**Sends that queue behind a commit share the next one, by default.** Under
+concurrent publishers, sends that queued while a commit was in flight share the
+next transaction, each one's rows still adjacent and in queue order, every row
+still durable before its send returns and before any subscriber sees it.
+Measured 4,232 rows/s from 8 concurrent publishers against ~1,300 one commit
+at a time. A lone publisher never waits for a group to form: groups are only
+what queued anyway. What it gives up is that a commit's failure — the disk,
+SQLite itself — fails every send in the group, which would fail the next send
+regardless. A stream created with `group_commit=False` commits each `send` and
+each `send_many` in a transaction of its own. The greeting's `group_commit`
+says which guarantee a stream makes. Rows are checked on the
 loop before they are queued, so one bad row is refused alone rather than
 failing a group.
 

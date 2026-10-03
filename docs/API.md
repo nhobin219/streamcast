@@ -78,11 +78,11 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_backlog=8192, max_replay=100_000, group_commit=False)
+                  max_backlog=8192, max_replay=100_000, group_commit=True)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
-                      replay_published=False, group_commit=False,
+                      replay_published=False, group_commit=True,
                       max_backlog=8192, max_replay=100_000)
 ```
 
@@ -154,10 +154,10 @@ while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.
 
-`group_commit=True` lets the stream commit sends from several publishers in one
+`group_commit` (on by default) lets the stream commit sends from several publishers in one
 transaction when they queue behind a commit in flight — more throughput under concurrent
-publishers, at the cost of the default guarantee that each send is its own commit. See
-Publishing; the greeting says which a stream makes.
+publishers. `group_commit=False` makes each send its own commit. See Publishing; the
+greeting says which a stream makes.
 
 ### Publishing
 
@@ -188,12 +188,12 @@ one, neither awaits at all. See `SPEC.md` §3 for the ordering that is a correct
 property rather than a performance note — and for the one hazard on a stream with no log:
 a publish loop with no `await` of its own starves every subscriber.
 
-**Each send is its own commit** unless the stream is created with `group_commit=True`,
-which lets sends from several publishers that queued behind one commit share the next
-transaction, for throughput: measured 4,232 rows/s from 8 concurrent publishers against
+**Sends that queue behind a commit share the next one**, by default: under concurrent
+publishers that is the throughput — measured 4,232 rows/s from 8 publishers against
 ~1,300 committed one at a time. Every row is still durable before its send returns and
-before any subscriber sees it, in the same order. The greeting's `group_commit` says which
-guarantee a stream makes.
+before any subscriber sees it, in the same order, and each send's rows stay adjacent. A
+lone publisher never waits for a group to form. `group_commit=False` makes each send its
+own commit; the greeting's `group_commit` says which guarantee a stream makes.
 
 The frame is the row as JSON text, encoded once with msgspec and shared by every
 subscriber (I6). **Key order comes from the log's schema, not from your dict**, which is
