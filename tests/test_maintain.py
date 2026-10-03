@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast._maintain import Maintain, Supervisor
+from streamcast._maintain import ROLES, Maintain, Supervisor
 
 # ~140 bytes a row, so ROWS is ~560 KB — comfortably past SEAL_SIZE, at
 # which litelink's policy says a seal is due.
@@ -110,9 +110,7 @@ class TestTheDefect:
     @pytest.mark.slow
     async def test_with_one_the_buffer_drains_into_parquet(self, wide_log):
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(
-            stream, "127.0.0.1", 0, maintain=Maintain(maintain_every=1.0)
-        ):
+        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST):
             await fill(stream)
             assert await settle(wide_log), "the maintainer sealed nothing"
 
@@ -129,9 +127,7 @@ class TestTheDefect:
         `buffer.db` held every row it was ever sent. Counted in the file.
         """
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(
-            stream, "127.0.0.1", 0, maintain=Maintain(maintain_every=1.0)
-        ):
+        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST):
             await fill(stream)
             assert await settle(wide_log)
 
@@ -146,9 +142,7 @@ class TestTheDefect:
         # The maintainer moves rows from the buffer into Parquet underneath a
         # running server. A replay has to cross that boundary without noticing.
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(
-            stream, "127.0.0.1", 0, maintain=Maintain(maintain_every=1.0)
-        ) as server:
+        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST) as server:
             # All of ROWS: fewer would leave the buffer under the target,
             # with nothing due, and this would assert on a seal the policy
             # correctly declined to make.
@@ -186,16 +180,16 @@ class TestLifecycle:
 
         assert _supervisors({"a": streamcast.Stream("a", log=log)}, False) == []
 
-    async def test_one_supervisor_covers_every_log(self, log, tmp_path):
-        """**One process for the server, not one per log.**
+    async def test_one_set_of_five_covers_every_log(self, log, tmp_path):
+        """**Five processes for the server — one per role — not five per log.**
 
         Each maintainer is a full interpreter with litelink, pyarrow,
-        pyiceberg and duckdb loaded — ~207 MB RSS — so one per log made a
-        producer serving four small streams spend ~830 MB maintaining ~460 MB
-        of producer, and made adding a stream that takes a row a minute cost
-        the same as the busiest one.
+        pyiceberg and duckdb loaded — ~150-200 MB RSS — so a set per log made
+        adding a stream that takes a row a minute cost as much as the busiest
+        one. The roles are split from each other because their work is; the
+        logs are not.
 
-        Falsify by returning one `Supervisor` per log in `_supervisors`.
+        Falsify by returning a set of `Supervisor`s per log in `_supervisors`.
         """
         from streamcast._server import _supervisors
 
@@ -213,23 +207,26 @@ class TestLifecycle:
             )
             made = _supervisors(routes, True)
 
-            assert len(made) == 1, "one maintainer per log is the defect"
+            assert sorted(sup.role for sup in made) == sorted(ROLES), (
+                "one process per role, and only one"
+            )
             # By the LOG's name, not the route key: the maintainer opens the
             # log, and `serve` may route it under a different path.
-            assert {name for _root, name in made[0].targets} == {
-                "trades",
-                "s0",
-                "s1",
-                "s2",
-            }, "a log was left unmaintained"
+            for sup in made:
+                assert {name for _root, name in sup.targets} == {
+                    "trades",
+                    "s0",
+                    "s1",
+                    "s2",
+                }, f"a log was left out of {sup.role}"
 
         finally:
             for handle in others:
                 handle.close()
 
     async def test_dedicated_names_a_log_that_gets_its_own(self, log, tmp_path):
-        """The opt-out, for a log large or hot enough that its `maintain()`
-        would hold up everyone else's `seal()`.
+        """The opt-out, for a log large or hot enough that its compaction
+        would hold up everyone else's.
 
         The shared loop sweeps in series, so that delay is real — it is just a
         fine trade for the small streams sharing exists for.
@@ -245,10 +242,16 @@ class TestLifecycle:
             }
             made = _supervisors(routes, Maintain(dedicated=("busy",)))
 
-            covered = [{name for _root, name in sup.targets} for sup in made]
-            assert {"busy"} in covered, "the dedicated log did not get its own"
-            assert {"trades"} in covered, "the rest did not keep sharing"
-            assert len(made) == 2
+            by_role = {
+                role: sorted(
+                    sorted(n for _r, n in sup.targets)
+                    for sup in made
+                    if sup.role == role
+                )
+                for role in ROLES
+            }
+            # Every role twice: once for the dedicated log, once shared.
+            assert by_role == {role: [["busy"], ["trades"]] for role in ROLES}
 
         finally:
             busy.close()
@@ -277,11 +280,10 @@ class TestLifecycle:
             }
             made = _supervisors(routes, Maintain(dedicated=("trades", "other")))
 
-            assert len(made) == 2, "an empty shared maintainer was started"
-            assert sorted(sorted(n for _r, n in s.targets) for s in made) == [
-                ["other"],
-                ["trades"],
-            ]
+            assert len(made) == 2 * len(ROLES), "an empty shared set was started"
+            assert sorted(sorted(n for _r, n in s.targets) for s in made) == (
+                [["other"]] * len(ROLES) + [["trades"]] * len(ROLES)
+            )
             assert all(sup.targets for sup in made), "a maintainer sweeps nothing"
 
         finally:
@@ -319,17 +321,19 @@ class TestLifecycle:
         stream = streamcast.Stream("trades", log=log)
         server = await streamcast.serve(stream, "127.0.0.1", 0)
         alive = list(server._children)  # noqa: SLF001
-        assert len(alive) == 1
-        assert alive[0]._process is not None  # noqa: SLF001
-        assert alive[0]._process.poll() is None  # noqa: SLF001
+        assert len(alive) == len(ROLES)
+        for child in alive:
+            assert child._process is not None  # noqa: SLF001
+            assert child._process.poll() is None  # noqa: SLF001
 
         server.close()
         await server.wait_closed()
 
         # Terminated AND reaped: a dropped reference here is one zombie per
         # server for the life of the parent.
-        assert alive[0]._process is None  # noqa: SLF001
-        assert alive[0]._stopped is None  # noqa: SLF001
+        for child in alive:
+            assert child._process is None  # noqa: SLF001
+            assert child._stopped is None  # noqa: SLF001
 
     async def test_a_maintainer_that_dies_is_restarted(self, log):
         """The direction that matters.
@@ -377,11 +381,15 @@ class TestLifecycle:
 
 
 def test_the_cadences_differ_because_the_costs_do():
-    # `seal` is an indexed read when idle; `advance` reads table
-    # metadata. A single interval would make one of them wrong.
+    # `seal` is an indexed read when idle; every other role reads table
+    # metadata or waits on a network. A single interval would make one wrong.
     plan = Maintain()
-    assert plan.seal_every < plan.maintain_every
-    assert plan.maintain_every / plan.seal_every >= 10
+    for role in ROLES:
+        if role != "seal":
+            assert plan.every(role) / plan.seal_every >= 10, role
+
+    # The published table's cleanup lists a bucket: rarest of all.
+    assert plan.clean_published_every > plan.clean_every
 
 
 def test_there_is_no_thread_mode_to_get_wrong():
@@ -398,7 +406,10 @@ def test_there_is_no_thread_mode_to_get_wrong():
     assert "thread" not in inspect.signature(streamcast.serve).parameters
     assert set(Maintain.__dataclass_fields__) == {
         "seal_every",
-        "maintain_every",
+        "compact_every",
+        "publish_every",
+        "clean_every",
+        "clean_published_every",
         # Names logs that get their own PROCESS, which is the opt-out from
         # sharing one — still not a thread, and there is no way to ask for
         # one.
@@ -415,6 +426,12 @@ def test_there_is_no_thread_mode_to_get_wrong():
 # `wal_replication` on, because the maintainer did not run litestream. It now
 # does — see `test_replicate.py`, which exercises the sidecar against a real
 # endpoint rather than asserting an apology.
+
+
+# Every slow role once a second, so a test sees a whole pipeline turn over.
+FAST = Maintain(
+    compact_every=1.0, publish_every=1.0, clean_every=1.0, clean_published_every=1.0
+)
 
 
 def in_buffer(log) -> int:

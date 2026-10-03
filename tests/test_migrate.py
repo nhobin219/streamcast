@@ -473,16 +473,18 @@ class TestServingAMigratedStream:
         finally:
             await stream.aclose()
 
-    async def test_the_retired_log_is_still_maintained(self, tmp_path):
+    async def test_the_retired_log_is_not_maintained(self, tmp_path):
+        """`retire()` left nothing to do, and litelink refuses it a writer.
+
+        Handed to the maintainer, each role would print "cannot open" for it
+        at every start and do nothing else.
+        """
         await seeded(tmp_path)
         stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert stream.retired == ((tmp_path, "trades"),)
-            [supervisor] = _supervisors({"trades": stream}, True)
-            assert set(supervisor.targets) == {
-                (tmp_path, "trades-v2"),
-                (tmp_path, "trades"),
-            }
+            for supervisor in _supervisors({"trades": stream}, True):
+                assert supervisor.targets == [(tmp_path, "trades-v2")]
         finally:
             await stream.aclose()
 

@@ -17,6 +17,30 @@ which no message is fanned out, no subscriber is served and no keepalive is
 answered, surfacing as latency spikes that look like a network problem. There
 is deliberately no `thread=True` to get that wrong with.
 
+**Five processes, one per role — litelink's recommended split.** A step gets
+its own process when it is heavy on CPU or the network:
+
+| role | runs | why it stands alone |
+|---|---|---|
+| `seal` | `seal()` | pure-Python CPU work, and all that bounds the buffer |
+| `compact` | `compact()` | the heaviest CPU work; beside `seal` it would delay it |
+| `publish` | `publish()` | the network: one push to a slow bucket can take a minute |
+| `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | local disk, freed promptly |
+| `clean-published` | `reclaim("published")`, `sweep("published")` | deletes and listing on the published table |
+
+Local cleanup is one process, in that order: eviction queues the files
+`reclaim` deletes, and both are metadata commits that finish in milliseconds.
+The published table's cleanup is apart because on object storage it is
+network calls, and a slow listing of a bucket must not delay freeing local
+disk. **`evict()` is what deletes buffer rows already in staging** — `seal()`
+and `publish()` move data and delete nothing — so a split without `clean`
+grows `buffer.db` without bound.
+
+The cost is memory: each process is a full interpreter with litelink, pyarrow,
+pyiceberg and duckdb loaded, ~150-200 MB RSS, so five per server where there
+was one. That buys isolation between the steps — a minute-long push never
+delays a seal — which is the trade litelink's split makes.
+
 **Two processes on one log is litelink's own shape**, not a liberty taken here:
 its `examples/adsb/` runs the writer and the maintainer separately, and the
 claim table coordinates them. Each pass claims the offset range it works on, so
@@ -52,15 +76,19 @@ import litelink
 from streamcast._process import popen
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
-# Cadences, and they differ by 40x because the costs do. `seal` is an
-# indexed read of one row when there is nothing to seal, so calling it four
-# times a second is close to free and keeps the buffer shallow. `advance`
-# reads table metadata to compact, publish, evict and reclaim, so it runs
-# rarely. Both are litelink's own demo defaults.
+# Cadences per role, litelink's own (`examples/adsb/maintainer.py`). They
+# differ by orders of magnitude because the costs do: `seal` is an indexed
+# read of one row when there is nothing to seal, compaction reads and rewrites
+# whole files, local cleanup is metadata commits, and the published table's
+# cleanup waits on a network — and its sweep lists at most every four hours
+# however often it is called.
 SEAL_EVERY: Final = 0.25
-MAINTAIN_EVERY: Final = 10.0
+COMPACT_EVERY: Final = 10.0
+PUBLISH_EVERY: Final = 10.0
+CLEAN_EVERY: Final = 10.0
+CLEAN_PUBLISHED_EVERY: Final = 60.0
 
 # How long a maintainer gets to exit on its own before it is killed.
 _STOP_GRACE: Final = 5.0
@@ -85,13 +113,17 @@ class Maintain:
     """
 
     seal_every: float = SEAL_EVERY
-    maintain_every: float = MAINTAIN_EVERY
+    compact_every: float = COMPACT_EVERY
+    publish_every: float = PUBLISH_EVERY
+    clean_every: float = CLEAN_EVERY
+    clean_published_every: float = CLEAN_PUBLISHED_EVERY
 
     dedicated: tuple[str, ...] = field(default=())
-    """Logs that get a maintainer to themselves rather than sharing one.
+    """Logs that get their own five processes rather than sharing them.
 
-    The shared loop sweeps its logs in series, so one log whose `advance()`
-    takes seconds delays every other log's `seal()` by that much. That is
+    Each role's process sweeps its logs in series, so one log whose
+    compaction takes seconds delays every other log's compaction by that
+    much. That is
     a fine trade for the small streams this sharing exists for and a bad one
     for a very large or very hot log, which is what this names.
 
@@ -101,60 +133,98 @@ class Maintain:
     loop — the one thing it was named to avoid — and the symptom is a latency
     problem the caller believes they already fixed.
 
-    Naming every log starts no shared maintainer at all, rather than an
-    interpreter sweeping nothing.
+    Naming every log starts no shared maintainer at all, rather than five
+    interpreters sweeping nothing.
     """
+
+    def every(self, role: str) -> float:
+        """The cadence of `role`'s passes, in seconds."""
+        return getattr(self, f"{role.replace('-', '_')}_every")
 
 
 # -- the child ---------------------------------------------------------------
 
 
-def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> None:
-    """The loop over every log this process maintains, until SIGTERM.
+def _seal(log: litelink.WriteHandle) -> None:
+    log.seal()
 
-    Both calls, at their own cadences. `seal()` is the frequent one: it writes
-    what the size trigger has cut, so the buffer stays shallow between the
-    rarer `advance()` passes. `advance()` is litelink's whole pipeline — seal,
-    compact, publish, then cleanup behind it — and the only place the buffer
-    rows already in staging are deleted (`evict("buffer")`): since litelink
-    0.7, `seal()` and `publish()` move data and delete nothing, so a loop
-    without `advance()` would grow `buffer.db` without bound.
+
+def _compact(log: litelink.WriteHandle) -> None:
+    log.compact()
+
+
+def _publish(log: litelink.WriteHandle) -> None:
+    # Every log publishes since litelink 0.6 — to an `s3://` prefix, or by
+    # default a directory beside it — and must: eviction never deletes an
+    # unpublished file, so a log that never published never frees its disk.
+    log.publish()
+
+
+def _clean(log: litelink.WriteHandle) -> None:
+    # In this order: eviction queues the files `reclaim` deletes. `evict()`
+    # is both tables — the buffer rows staging now holds, and the staging
+    # files the published table holds. `reclaim("buffer")` is a VACUUM only
+    # when the log's `vacuum_free_ratio` is set.
+    log.evict()
+    log.reclaim("buffer")
+    log.reclaim("staging")
+    log.sweep("staging")
+
+
+def _clean_published(log: litelink.WriteHandle) -> None:
+    log.reclaim("published")
+    log.sweep("published")
+
+
+ROLES: Final[dict[str, Callable[[litelink.WriteHandle], None]]] = {
+    "seal": _seal,
+    "compact": _compact,
+    "publish": _publish,
+    "clean": _clean,
+    "clean-published": _clean_published,
+}
+"""litelink's process split: one process per role, in pipeline order."""
+
+
+def sweep(
+    logs: Sequence[tuple[str, litelink.WriteHandle]], role: str, every: float
+) -> None:
+    """One role's passes over every log this process maintains, until SIGTERM.
 
     **Every log is isolated from every other one.** The `try` is INSIDE the
     per-log loop rather than around it, so a log whose recovery fails, whose
-    published location is unreachable, or whose claim is held elsewhere costs that log a
-    pass and costs the others nothing. Around the loop it would cost every
-    log after it in the iteration order its whole pass, which is the failure
-    mode sharing a process introduces and the one thing that must not happen.
+    published location is unreachable, or whose claim is held elsewhere costs
+    that log a pass and costs the others nothing. Around the loop it would
+    cost every log after it in the iteration order its whole pass, which is
+    the failure mode sharing a process introduces and the one thing that must
+    not happen.
 
-    **`advance()` is staggered across logs.** All of them coming due in the
-    same pass would put N table-metadata reads back to back, which is the
+    **The slow roles are staggered across logs.** All of them coming due in
+    the same pass would put N table-metadata reads back to back, which is the
     latency spike this file moved to a subprocess to avoid — reintroduced at
-    1/N the frequency and N times the size.
+    1/N the frequency and N times the size. `seal` is not: an idle seal is an
+    indexed read, and every log wants one every pass.
     """
-    # Spread the first `advance()` across the interval rather than firing
-    # them together on the first pass.
-    span = plan.maintain_every / max(len(logs), 1)
+    work = ROLES[role]
+    span = 0.0 if role == "seal" else every / max(len(logs), 1)
     due = {
         name: time.monotonic() + index * span for index, (name, _) in enumerate(logs)
     }
     while True:
         for name, log in logs:
+            if time.monotonic() < due[name]:
+                continue
+
+            # Scheduled before the work, so a pass that raises waits its full
+            # interval rather than retrying on the next tick.
+            due[name] = time.monotonic() + every
             try:
-                log.seal()
-                if time.monotonic() >= due[name]:
-                    # Publish included, as every log must publish since
-                    # litelink 0.6: eviction never deletes an unpublished
-                    # file, so a log that never published would never free
-                    # its disk. It raises if the publish fails — the buffer
-                    # and staging steps have run first — and is handled below.
-                    due[name] = time.monotonic() + plan.maintain_every
-                    log.advance()
+                work(log)
 
             except RuntimeError as exc:
                 # Another owner holds a claim over the range this pass wanted.
                 # Not worth dying over: it means the work is already being done.
-                print(f"[maintain] {name}: skipped: {exc}", file=sys.stderr, flush=True)
+                print(f"[{role}] {name}: skipped: {exc}", file=sys.stderr, flush=True)
 
             except Exception as exc:  # noqa: BLE001, PERF203
                 # Anything else — a lost commit race, a transient object-storage
@@ -163,15 +233,14 @@ def sweep(logs: Sequence[tuple[str, litelink.WriteHandle]], plan: Maintain) -> N
                 # next pass. Named, because with one process for many logs
                 # "something failed" no longer says which.
                 print(
-                    f"[maintain] {name}: retrying next pass: {exc}",
+                    f"[{role}] {name}: retrying next pass: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
 
-        # Once per pass, not once per log: `seal_every` is the cadence each
-        # log is checked at, and N logs share one sleep rather than each
-        # waiting behind the others.
-        time.sleep(plan.seal_every)
+        # Once per loop, not once per log: N logs share one sleep rather than
+        # each waiting behind the others.
+        time.sleep(min(every, SEAL_EVERY))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -192,15 +261,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         dest="logs",
     )
-    parser.add_argument("--seal-every", type=float, default=SEAL_EVERY)
-    parser.add_argument("--maintain-every", type=float, default=MAINTAIN_EVERY)
+    parser.add_argument("--role", choices=list(ROLES), required=True)
+    parser.add_argument("--every", type=float, required=True)
     args = parser.parse_args(argv)
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
-    plan = Maintain(seal_every=args.seal_every, maintain_every=args.maintain_every)
 
     # `open`, never `new`: the server created these logs and is writing to
     # them. Opened one at a time and kept only if it works, so one unopenable
@@ -216,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
 
             except Exception as exc:  # noqa: BLE001, PERF203
                 print(
-                    f"[maintain] {name}: cannot open, not maintained: {exc}",
+                    f"[{args.role}] {name}: cannot open, not maintained: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -224,18 +292,18 @@ def main(argv: list[str] | None = None) -> int:
         if not opened:
             # Every one failed, which is a condition the supervisor's backoff
             # should see rather than a loop that sweeps nothing for ever.
-            print("[maintain] no logs could be opened", file=sys.stderr, flush=True)
+            print(f"[{args.role}] no logs could be opened", file=sys.stderr, flush=True)
 
             return 1
 
         with contextlib.suppress(KeyboardInterrupt):
-            sweep(opened, plan)
+            sweep(opened, args.role, args.every)
 
-        # One last pass each on the way out, so a short-lived server does not
-        # leave its whole run in the buffer. `seal(flush=True)` rather than
-        # `seal()`: an orderly shutdown is the one moment closing the open
-        # group is right. Guarded per log, for the reason `sweep` is.
-        for _name, log in opened:
+        # The seal role's last pass each on the way out, so a short-lived
+        # server does not leave its whole run in the buffer. `seal(flush=True)`
+        # rather than `seal()`: an orderly shutdown is the one moment closing
+        # the open group is right. Guarded per log, for the reason `sweep` is.
+        for _name, log in opened if args.role == "seal" else ():
             with contextlib.suppress(Exception):
                 while log.seal(flush=True) is not None:
                     pass
@@ -262,15 +330,31 @@ class Supervisor:
     `Maintain.dedicated` names the logs that should still get their own.
     """
 
-    __slots__ = ("_names", "_plan", "_process", "_stopped", "_targets", "_watch")
+    __slots__ = (
+        "_names",
+        "_plan",
+        "_process",
+        "_role",
+        "_stopped",
+        "_targets",
+        "_watch",
+    )
 
-    def __init__(self, targets: Sequence[tuple[Path, str]], plan: Maintain) -> None:
+    def __init__(
+        self, targets: Sequence[tuple[Path, str]], plan: Maintain, role: str
+    ) -> None:
         self._targets = list(targets)
-        self._names = ", ".join(sorted(name for _root, name in targets))
+        self._names = f"{role}: " + ", ".join(sorted(name for _root, name in targets))
         self._plan = plan
+        self._role = role
         self._process: subprocess.Popen[bytes] | None = None
         self._stopped: subprocess.Popen[bytes] | None = None
         self._watch: asyncio.Task[None] | None = None
+
+    @property
+    def role(self) -> str:
+        """Which of the five roles this process runs."""
+        return self._role
 
     @property
     def targets(self) -> list[tuple[Path, str]]:
@@ -285,12 +369,7 @@ class Supervisor:
         for root, name in self._targets:
             argv += ["--log", str(root), name]
 
-        argv += [
-            "--seal-every",
-            str(self._plan.seal_every),
-            "--maintain-every",
-            str(self._plan.maintain_every),
-        ]
+        argv += ["--role", self._role, "--every", str(self._plan.every(self._role))]
 
         return popen(argv)
 

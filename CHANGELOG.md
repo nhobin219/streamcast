@@ -19,15 +19,27 @@ there was nothing to have changed from. Everything above it is ordinary.
 - **`Stream.restore(hydrate=)` is gone**, with litelink's `hydrate()`. A
   restored stream's staging table comes back empty; serve its history from
   the published table with `replay_published=True`.
+- **The maintainer is litelink's five-process split.** `serve` (and `asgi`)
+  start one subprocess per role — `seal`, `compact`, `publish`, `clean`
+  (`evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")`)
+  and `clean-published` (`reclaim("published")`, `sweep("published")`) —
+  each covering every log, where one process ran everything. A minute-long
+  push never delays a seal; the cost is five interpreters (~150 MB each)
+  where there was one. `Maintain`'s `maintain_every` is replaced by one
+  cadence per role: `seal_every` 0.25 s, `compact_every`, `publish_every`
+  and `clean_every` 10 s, `clean_published_every` 60 s. `clean` is what
+  deletes buffer rows already in staging, which `seal()` and `publish()` no
+  longer do. A pass that fails waits its full interval before the next.
+- **litestream is opt-in: `serve(replicate=True)`**, where it ran by default
+  for logs with `wal_replication`. Such a log served without saying either
+  way gets a `UserWarning` naming it; `replicate=False` is silent.
 
 ### Changed
 
-- **The maintainer runs litelink's `advance()`**: seal, compact, publish,
-  then cleanup behind them, every `maintain_every` seconds, with `seal()` on
-  the faster `seal_every` cadence between. `advance()` is also what deletes
-  buffer rows already in staging, which `seal()` and `publish()` no longer
-  do. A log whose `advance()` fails waits the full interval before the next
-  attempt.
+- **A migrated stream's retired logs are no longer handed to the
+  maintainer.** `retire()` published, evicted and swept them completely, and
+  litelink refuses them a writer, so each role only printed "cannot open"
+  for them.
 
 ## 0.10.1 — 2026-10-01
 

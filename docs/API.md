@@ -261,13 +261,26 @@ file says is sealed is refused.
 
 ### `maintain`
 
-**`maintain=True` starts one maintainer subprocess covering every stream that has a log**,
-and stops it when the server closes. One process for the server, not one per log: a
-maintainer is a full interpreter with litelink, pyarrow, pyiceberg and duckdb loaded —
-149 MB RSS measured — so four streams cost 596 MB one-per-log against 149 MB shared.
+**`maintain=True` starts one maintainer covering every stream that has a log** — a set of
+five subprocesses, one per role of litelink's recommended split — and stops them when the
+server closes:
 
-`Maintain(dedicated=("trades",))` gives a named log its own, for one busy enough that its
-`advance()` would hold up the others' `seal()`. Names are the **log's**, not the
+| role | runs | every |
+|---|---|---|
+| `seal` | `seal()` | 0.25 s |
+| `compact` | `compact()` | 10 s |
+| `publish` | `publish()` | 10 s |
+| `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | 10 s |
+| `clean-published` | `reclaim("published")`, `sweep("published")` | 60 s |
+
+A step gets its own process when it is heavy on CPU or the network, so a minute-long push
+to a slow bucket never delays a seal, and compaction never competes with it for an
+interpreter. One set for the server, not one per log: each process is a full interpreter
+with litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured — so the set
+costs five of those, shared by every log.
+
+`Maintain(dedicated=("trades",))` gives a named log a set of its own, for one busy enough
+that its compaction would hold up the others'. Names are the **log's**, not the
 route; a name this server does not serve with a log raises at `serve` rather than being
 ignored, and naming every log starts no shared maintainer at all. Without it, nothing in this library ever calls litelink's
 `seal()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
@@ -275,18 +288,19 @@ held every one of them, the table held zero Parquet files, and `buffer.db` was 1
 growing. litelink says it plainly: *"A maintainer is not optional."*
 
 ```python
-streamcast.serve(streams, host, port)                          # one maintainer, all logs
+streamcast.serve(streams, host, port)                          # one set of five, all logs
 streamcast.serve(stream, host, port, maintain=False)           # you run your own
 streamcast.serve(stream, host, port,
-                 maintain=streamcast.Maintain(seal_every=0.1, maintain_every=30))
+                 maintain=streamcast.Maintain(seal_every=0.1, publish_every=30))
 ```
 
-`Maintain` is a frozen dataclass of `seal_every` (0.25 s) and `maintain_every` (10 s). The
-cadences differ by 40x because the costs do: `seal` is an indexed read of one row when
-there is nothing to seal, while `advance` reads table metadata to compact, publish, evict
-and reclaim. `advance` is also the only call that deletes buffer rows already in staging
-(litelink's `evict("buffer")`): `seal` and `publish` move data and delete nothing, so a
-maintainer without it grows `buffer.db` without bound.
+`Maintain` is a frozen dataclass of one cadence per role — `seal_every`, `compact_every`,
+`publish_every`, `clean_every`, `clean_published_every`, with the defaults above — and
+`dedicated`. The cadences differ by orders of magnitude because the costs do: `seal` is an
+indexed read of one row when there is nothing to seal, compaction rewrites files, and the
+published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
+rows already in staging** (litelink's `evict("buffer")`): `seal` and `publish` move data
+and delete nothing, so a maintainer without it grows `buffer.db` without bound.
 
 **It is always a subprocess, and there is deliberately no thread option.** A seal is
 CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no
@@ -302,11 +316,14 @@ terminal's Ctrl-C reaches the server alone, and the server stops them. The other
 maintainer that exits while the server runs is restarted with backoff, because losing it
 silently returns the server to never sealing.
 
-`maintain=False` is right when you run litelink's own four-process shape
-(`examples/adsb/`, one process per storage role), or when the log is shared with something
-else that sweeps it. `python -m streamcast maintain --log PATH NAME` is the same
+`maintain=False` is right when you run the roles yourself — litelink's `examples/adsb/`, or
+one container per role — or when the log is shared with something else that sweeps it.
+`python -m streamcast maintain --role ROLE --every SECONDS --log PATH NAME` is one role's
 loop, runnable by hand; repeat `--log` to sweep several from one process, which is what
-`serve` does.
+`serve` does for each role.
+
+A migrated stream's retired logs are not maintained: `retire()` published, evicted and
+swept them completely, and litelink refuses them a writer.
 
 ### `replicate`
 
@@ -319,13 +336,17 @@ log = litelink.new(root, "trades", schema=SCHEMA,
                    config=litelink.LogConfig(wal_replication=True),
                    published="s3://bucket/prefix")
 
-async with streamcast.serve(streamcast.Stream("trades", log=log), host, port):
-    ...        # sealing, compaction, and WAL shipping all running
+async with streamcast.serve(
+    streamcast.Stream("trades", log=log), host, port, replicate=True
+):
+    ...        # sealing, compaction, publishing, and WAL shipping all running
 ```
 
-`wal_replication` is opt-in on the log, so for almost every deployment this starts
-nothing. `replicate=False` opts out, for someone running their own more finely tuned
-litestream.
+**It is off by default** — opt in with `replicate=True`. `wal_replication` is opt-in on the
+log too, so for almost every deployment there is nothing to replicate anyway. A log that
+has `wal_replication` on, served without saying either way, gets a `UserWarning` naming it:
+silence would leave you believing the log is protected. `replicate=False` says you run
+your own, more finely tuned litestream, and warns about nothing.
 
 **Two litestream instances on one database is the thing litestream forbids**, and the
 sidecar is built around not doing it:
@@ -434,7 +455,7 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=True, publish=False)
+asgi(streams, *, maintain=True, replicate=None, publish=False)
 ```
 
 The same streams behind an ASGI app, for a service that already has one. Needs the extra:

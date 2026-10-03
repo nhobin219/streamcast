@@ -41,8 +41,8 @@ upstream ws feed
 │             └─► pump ──► subscriber C   │
 │                                         │
 │   serve() also starts, per stream:      │
-│     maintainer  (subprocess)  §5        │   ← nothing seals without it
-│     litestream  (sidecar)               │   ← only if the log ships its WAL
+│     maintainer  (5 subprocesses)  §5    │   ← nothing seals without it
+│     litestream  (sidecar)               │   ← only with replicate=True, if the log ships its WAL
 └─────────────────────────────────────────┘
 ```
 
@@ -833,8 +833,9 @@ loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
 the server's replay. `EARLIEST` on a freshly migrated stream is where the
 current log begins.
 
-Retired logs stay on disk and in their published tables. `serve`'s maintainer keeps
-maintaining the ones on this disk, so their local retention still runs.
+Retired logs stay on disk and in their published tables. `serve`'s maintainer leaves
+them alone: `retire()` published, evicted and swept them completely, and litelink
+refuses them a writer, so there is nothing left to maintain.
 litestream replicates only the current log, since nothing writes to a retired
 one.
 

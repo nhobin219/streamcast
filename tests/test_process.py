@@ -44,7 +44,7 @@ async def main(root, bucket):
         **({"published": bucket, "s3_options": litelink.S3Options().resolved()} if replicated else {}),
     )
     stream = streamcast.Stream("trades", log=handle)
-    async with streamcast.serve(stream, "127.0.0.1", 0):
+    async with streamcast.serve(stream, "127.0.0.1", 0, replicate=replicated):
         print("ready", flush=True)
         await asyncio.Event().wait()
 
@@ -195,7 +195,7 @@ def kill_the_server(root: Path, bucket: str = "-") -> tuple[list[Child], list[st
 def test_the_maintainer_dies_with_a_killed_server(tmp_path):
     spawned, survivors = kill_the_server(tmp_path)
 
-    assert len(spawned) == 1, "expected exactly the maintainer"
+    assert len(spawned) == 5, "expected the five maintainer roles"
     assert survivors == []
 
 
@@ -203,8 +203,8 @@ def test_the_maintainer_dies_with_a_killed_server(tmp_path):
 def test_the_sidecar_dies_with_a_killed_server(tmp_path, s3, bucket):  # noqa: ARG001 — s3 exports the credentials the child reads
     spawned, survivors = kill_the_server(tmp_path, bucket)
 
-    # The maintainer and litestream.
-    assert len(spawned) == 2
+    # The five maintainer roles and litestream.
+    assert len(spawned) == 6
     assert survivors == []
 
 

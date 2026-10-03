@@ -119,7 +119,7 @@ await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(u
 await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=True,
+streamcast.serve(streams, host, port, *, maintain=True, replicate=None,
                  publish=False, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
@@ -231,17 +231,19 @@ async def main():
 asyncio.run(main())
 ```
 
-`serve` starts everything the streams need: one maintainer subprocess covering every log
-it serves, and one litestream for the logs with `wal_replication` on. Both are opt-out
-(`maintain=False`, `replicate=False`). Without a maintainer nothing ever seals — litelink
+`serve` starts everything the streams need: one maintainer covering every log it serves —
+a set of five subprocesses, one per storage role (seal, compact, publish, clean, clean
+published) — and, with `replicate=True`, one litestream for the logs with
+`wal_replication` on. The maintainer is opt-out (`maintain=False`); litestream is opt-in. Without a maintainer nothing ever seals — litelink
 is explicit that *"a maintainer is not optional"*.
 
-**One of each per server, not per log.** A maintainer is a full interpreter with litelink,
-pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured here — so four streams cost
-596 MB one-per-log against 149 MB shared, and litestream adds 40–170 MB per process on top.
+**One of each per server, not per log.** A maintainer process is a full interpreter with
+litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured here — so the set of
+five is shared by every log rather than started again for each, and litestream adds
+40–170 MB per process on top.
 The marginal cost mattered more than the total: a stream taking a row a minute cost the
 same as the busiest one, which made "should this be its own stream" a resource question it
-should not be. `Maintain(dedicated=("trades",))` gives a named log its own maintainer.
+should not be. `Maintain(dedicated=("trades",))` gives a named log a set of its own.
 
 `Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened yourself
 and does no I/O. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you want it.
