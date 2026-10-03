@@ -17,7 +17,7 @@ handle resolves the concurrency where it can actually be resolved. Any number
 of publishers, one writer.
 
 **Granularity is the publisher's, exactly as it is locally.** `send` is one
-row and one fsync; `send_many` is a group in one transaction. The choice and
+row; `send_many` is a group in one transaction. The choice and
 its consequences are identical to `Stream.send` versus `Stream.send_many`,
 because they ARE those calls — the server makes them on the publisher's
 behalf. See `Stream.send` for what a publisher that never yields does to a
@@ -207,9 +207,9 @@ class Publication:
     async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Publish a group in ONE transaction. Returns their offsets.
 
-        One fsync for the group rather than one each, which is the write
-        throughput lever — the same one `Stream.send_many` is, for the same
-        reason, because it is that call.
+        One fsync for the group rather than one each, which is a write
+        throughput lever beside `submit` — the same one `Stream.send_many`
+        is, for the same reason, because it is that call.
 
         All or nothing: a row the schema refuses rejects the whole group and
         commits none of it. That is what one transaction means, and it is the
@@ -370,6 +370,11 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     silently became writable on an upgrade would be a security change nobody
     asked for, so the default refuses with `publish_disabled` and says which
     setting to change.
+
+    `max_in_flight` (64) is how many sends `submit` keeps unacknowledged
+    at once. A server that owes one connection fewer replies than that
+    (`serve(max_in_flight=)`) stops reading it, and the rest wait at the
+    socket.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`
     defaults to None for the same reason it does in `serve` and `connect`.

@@ -29,9 +29,10 @@ only ever does what is cheap: validate, queue, and later fan out.
 
 **Group commit, on by default.** While one commit is in flight, more jobs
 queue behind it; the next commit takes all of them in one transaction, one
-fsync, each job's rows still adjacent and in queue order. A stream created
-with `group_commit=False` commits each job on its own. Under concurrent publishers on one
-stream that is throughput the per-call fsync never had. A job's rows are
+fsync, each job's rows still adjacent and in queue order. Under concurrent
+publishers on one stream, or one publisher pipelining its sends, that is
+throughput the per-call fsync never had. A stream created with
+`group_commit=False` commits each job on its own. A job's rows are
 validated on the loop before they are queued, so one bad row is refused alone
 rather than failing every publisher's rows that shared its transaction.
 """
@@ -100,8 +101,9 @@ class Writer:
         self._thread: threading.Thread | None = None
 
     def submit(self, job: Job) -> None:
-        """Queue `job`. No await, and never blocks: the queue is unbounded,
-        and what bounds it is each publisher awaiting its own commit."""
+        """Queue `job`. No await, and never blocks: this queue has no bound
+        of its own. `Stream._room` bounds it, at `max_inbound` rows, before
+        a job gets here."""
         if self._thread is None:
             self._loop = asyncio.get_running_loop()
             self._thread = threading.Thread(

@@ -593,9 +593,8 @@ frames, not verbs, and `websockets` exposes `serve`, `connect` and `broadcast`. 
 protocols layered over WebSocket do define one (WAMP's `PUBLISH`, MQTT's), but streamcast
 implements none of them: this is shaped like `connect` — awaitable, async context manager,
 keywords passed through — so it reads the same way, and the request is a query parameter
-rather than a message type, exactly as `?offset=` is for a subscribe.
- The server appends with the same
-`Stream.send` / `send_many` a local publisher calls, so `send` returns once the row is
+rather than a message type, exactly as `?offset=` is for a subscribe. The server appends
+with the same `Stream.send` / `send_many` a local publisher calls, so `send` returns once the row is
 durable and `send_many` is the same throughput lever it is locally.
 
 ```python
