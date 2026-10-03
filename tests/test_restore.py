@@ -156,7 +156,7 @@ class TestItStandsUpElsewhere:
             )
 
             # It appends, and it serves.
-            async with serve(revived, maintain=False, replicate=False) as uri:
+            async with serve(revived, maintain=False) as uri:
                 offset = await revived.send(row(9_999))
                 async with streamcast.connect(uri) as sub:
                     live = await revived.send(row(10_000))
@@ -195,7 +195,7 @@ class TestItStandsUpElsewhere:
             handle.publish(flush=True)
 
             # A consumer reads part of the stream and records where it got to.
-            async with serve(stream, maintain=False, replicate=False) as uri:
+            async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(
                     uri, offset=streamcast.EARLIEST, cursor=cursor
                 ) as sub:
@@ -229,7 +229,7 @@ class TestItStandsUpElsewhere:
             max_replay=None,
         )
         try:
-            async with serve(revived, maintain=False, replicate=False) as uri:
+            async with serve(revived, maintain=False) as uri:
                 await revived.send_many([row(i) for i in range(500, 520)])
 
                 # The SAME cursor file, untouched. The consumer does not know
@@ -292,7 +292,7 @@ class TestTheFenceIsNotDistance:
             replay_published=True,
         )
         try:
-            async with serve(revived, maintain=False, replicate=False) as uri:
+            async with serve(revived, maintain=False) as uri:
                 await revived.send_many([row(i) for i in range(500, 520)])
 
                 # No catch_up, no raised bound, no intervention.
@@ -356,7 +356,7 @@ class TestCatchUpOnTopOfIt:
             replay_published=True,
         )
         try:
-            async with serve(revived, maintain=False, replicate=False) as uri:
+            async with serve(revived, maintain=False) as uri:
                 await revived.send_many([row(i) for i in range(500, 520)])
                 async with streamcast.connect(
                     uri, offset=51, catch_up=True, s3_options=s3
@@ -434,7 +434,7 @@ class TestTheStagingTableComesBackEmpty:
         try:
             assert revived.log is not None
             assert revived.log.staging_extent() is None
-            async with serve(revived, maintain=False, replicate=False) as uri:
+            async with serve(revived, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=1) as sub:
                     first = [(await sub.recv())[0] for _ in range(3)]
 

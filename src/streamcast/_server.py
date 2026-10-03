@@ -217,22 +217,35 @@ def _supervisors(
     # publishes everything, evicts staging and sweeps both tables completely
     # before it marks the log retired, and litelink refuses a writer on one
     # from then on: there is nothing left to do, and nothing could open it
-    # to try. `Stream.retired` still names them, for whoever reads them.
+    # to try. One `publish` process is handed them anyway, to retire through
+    # litelink any that a migration before streamcast 0.10 only sealed — see
+    # `_maintain.finish_retiring`.
     if shared:
         groups.append(shared)
 
-    return [Supervisor(group, plan, role) for group in groups for role in ROLES]
+    retired = [target for stream in routes.values() for target in stream.retired]
+    # The shared set's publish role if there is one, else the first.
+    owner = len(groups) - 1 if shared else 0
+    return [
+        Supervisor(
+            group,
+            plan,
+            role,
+            retiring=retired if (index == owner and role == "publish") else (),
+        )
+        for index, group in enumerate(groups)
+        for role in ROLES
+    ]
 
 
-def _sidecars(routes: dict[str, Stream], replicate: bool | None) -> list[Sidecar]:
+def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     """ONE litestream for every log this server replicates, or none.
 
     **Opt-in twice:** `wal_replication` on the log, and `replicate=True` on
     the server. Off by default because most deployments replicate nothing, and
     one that does may run its own litestream. A log that asks for replication
-    on a server told NOTHING (`None`, the default) is warned about, by name,
-    rather than left believing it is protected; an explicit `replicate=False`
-    is a decision, and says nothing.
+    on a server that does not run it is warned about, by name, at every start
+    — one line — rather than left believing it is protected.
 
     `wal_replication` is opt-in on the log, so this is empty for almost every
     deployment and starts nothing. When it is on, the log's whole point is
@@ -254,7 +267,7 @@ def _sidecars(routes: dict[str, Stream], replicate: bool | None) -> list[Sidecar
         if stream.log is not None and stream.log.config.wal_replication
     ]
     if not replicate:
-        if shipping and replicate is None:
+        if shipping:
             names = ", ".join(sorted(log.name for log in shipping))
             warnings.warn(
                 f"log(s) {names} have wal_replication on, and this server was "
@@ -313,7 +326,7 @@ def serve(
     port: int | None = None,
     *,
     maintain: bool | Maintain = True,
-    replicate: bool | None = None,
+    replicate: bool = False,
     publish: bool = False,
     stats: bool | str = True,
     compression: str | None = None,

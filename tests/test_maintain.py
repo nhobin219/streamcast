@@ -419,7 +419,8 @@ def test_there_is_no_thread_mode_to_get_wrong():
     # And the child is a real subprocess, not a thread pretending to be one.
     spawn = inspect.getsource(Supervisor._spawn)
     assert "subprocess.Popen" in spawn
-    assert "sys.executable" in spawn
+    assert "popen(" in spawn
+    assert "sys.executable" in inspect.getsource(Supervisor._spawn_argv)
 
 
 # `TestWalReplication` lived here and tested that `serve` REFUSED a log with

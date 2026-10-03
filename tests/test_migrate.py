@@ -17,6 +17,7 @@ import pytest
 
 import streamcast
 from streamcast import _log, _manifest, _metadata, _schema
+from streamcast._maintain import finish_retiring
 from streamcast._server import _supervisors
 
 V1: dict[str, Any] = {
@@ -483,10 +484,80 @@ class TestServingAMigratedStream:
         stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert stream.retired == ((tmp_path, "trades"),)
-            for supervisor in _supervisors({"trades": stream}, True):
+            made = _supervisors({"trades": stream}, True)
+            for supervisor in made:
                 assert supervisor.targets == [(tmp_path, "trades-v2")]
+
+            # Handed to one process only, to finish what a migration before
+            # streamcast 0.10 left undone; already retired, it skips it.
+            assert [s.role for s in made if s.retiring] == ["publish"]
+            [publish] = [s for s in made if s.retiring]
+            assert publish.retiring == [(tmp_path, "trades")]
         finally:
             await stream.aclose()
+
+
+class TestAStreamMigratedBeforeRetire:
+    """streamcast 0.9 sealed an old log its own way, and never retired it.
+
+    With no archive it was never published, and litelink 0.7 opens it as an
+    ordinary log that has published nothing. The maintainer's publish role
+    retires it through litelink, so its rows reach the published table and a
+    snapshot reads across the seam.
+    """
+
+    async def test_the_publish_role_retires_it(self, tmp_path, monkeypatch):
+        await seeded(tmp_path)
+
+        def sealed_only(log: litelink.WriteHandle) -> None:
+            # What 0.9's migration did: everything sealed, nothing published,
+            # and the log not marked retired.
+            while log.seal(flush=True) is not None:
+                pass
+
+        with monkeypatch.context() as patched:
+            patched.setattr(litelink.WriteHandle, "retire", sealed_only)
+            stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+
+        try:
+            with litelink.open(tmp_path, "trades") as old:  # a writer: not retired
+                assert old.published_through() == 0
+
+            # What the publish role runs for the retired logs it is handed.
+            assert finish_retiring([(tmp_path, "trades")]) == []
+            assert retired(tmp_path, "trades")
+            # And again, as at the next start: already retired, nothing to do.
+            assert finish_retiring([(tmp_path, "trades")]) == []
+
+            uri = stream.metadata_uri
+            assert uri is not None
+            stream.ensure_metadata()
+            table = await streamcast.Stream.scan(uri)
+            assert table.column("litelink_offset").to_pylist() == [1, 2, 3, 4, 5]
+        finally:
+            await stream.aclose()
+
+    async def test_the_publish_role_is_told_which(self, tmp_path):
+        await seeded(tmp_path)
+        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        try:
+            [publish] = [
+                s for s in _supervisors({"trades": stream}, True) if s.retiring
+            ]
+            argv = publish._spawn_argv()  # noqa: SLF001
+            index = argv.index("--retire")
+            assert argv[index : index + 3] == ["--retire", str(tmp_path), "trades"]
+        finally:
+            await stream.aclose()
+
+
+def retired(root, name: str) -> bool:
+    try:
+        litelink.open(root, name).close()
+    except litelink.RetiredError:
+        return True
+
+    return False
 
 
 class TestTheManifest:

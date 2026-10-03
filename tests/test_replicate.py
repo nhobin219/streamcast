@@ -236,10 +236,13 @@ class TestItActuallyReplicates:
             server.close()
             await server.wait_closed()
 
-    async def test_replicate_false_starts_nothing(self, shipped):
-        # For a deployment running its own, more finely tuned, litestream.
+    async def test_replicate_false_starts_nothing_and_still_says_so(self, shipped):
+        # For a deployment running its own, more finely tuned, litestream: one
+        # line at start, which is cheap next to a log nobody replicates.
         stream = streamcast.Stream("trades", log=shipped)
-        server = await streamcast.serve(stream, "127.0.0.1", 0, replicate=False)
+        with pytest.warns(UserWarning, match="replicate=True"):
+            server = await streamcast.serve(stream, "127.0.0.1", 0, replicate=False)
+
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
         finally:

@@ -274,11 +274,14 @@ class Snapshot:
                 f"WHERE {self._bounds(start, stop, stamped=False)}"
             )
 
-        if not parts:
-            # Nothing to read — nothing published yet, no tail — but still the
-            # stream's columns, typed as the live log declares them: a query
-            # over an empty stream is an empty answer, not a binder error on
-            # the first column it names.
+        live = self.metadata.live_log
+        if self._tail is None and not any(piece.entry is live for piece in pieces):
+            # Nothing read from the live log — it has published nothing, and
+            # there is no tail — but its columns still belong in the table,
+            # typed as it declares them: a column a migration added would
+            # otherwise be missing until the live log first publishes, and a
+            # query naming it would be a binder error rather than NULLs. With
+            # nothing else to read either, this is the whole (empty) table.
             self._connection.register(
                 "streamcast_empty", _tail_table(self.metadata.live_log, [])
             )

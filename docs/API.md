@@ -344,9 +344,10 @@ async with streamcast.serve(
 
 **It is off by default** — opt in with `replicate=True`. `wal_replication` is opt-in on the
 log too, so for almost every deployment there is nothing to replicate anyway. A log that
-has `wal_replication` on, served without saying either way, gets a `UserWarning` naming it:
-silence would leave you believing the log is protected. `replicate=False` says you run
-your own, more finely tuned litestream, and warns about nothing.
+has `wal_replication` on, served without `replicate=True`, gets a `UserWarning` naming it
+at every start — one line — because silence would leave you believing the log is
+protected. That includes running your own, more finely tuned litestream, where the line
+is a reminder rather than a fault.
 
 **Two litestream instances on one database is the thing litestream forbids**, and the
 sidecar is built around not doing it:
@@ -455,7 +456,7 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=None, publish=False)
+asgi(streams, *, maintain=True, replicate=False, publish=False)
 ```
 
 The same streams behind an ASGI app, for a service that already has one. Needs the extra:

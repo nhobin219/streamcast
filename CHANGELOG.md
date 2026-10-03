@@ -31,15 +31,24 @@ there was nothing to have changed from. Everything above it is ordinary.
   deletes buffer rows already in staging, which `seal()` and `publish()` no
   longer do. A pass that fails waits its full interval before the next.
 - **litestream is opt-in: `serve(replicate=True)`**, where it ran by default
-  for logs with `wal_replication`. Such a log served without saying either
-  way gets a `UserWarning` naming it; `replicate=False` is silent.
+  for logs with `wal_replication`. Such a log served without it gets a
+  `UserWarning` naming it, at every start.
 
 ### Changed
 
 - **A migrated stream's retired logs are no longer handed to the
   maintainer.** `retire()` published, evicted and swept them completely, and
   litelink refuses them a writer, so each role only printed "cannot open"
-  for them.
+  for them. One exception: the `publish` role retires, through litelink,
+  any old log a migration before streamcast 0.10 only sealed. With no
+  archive such a log was never published, and snapshots, live views and
+  catch-up could not read across its seam.
+
+### Fixed
+
+- **A snapshot or live view whose live log has published nothing has that
+  log's columns.** A column a migration added was missing from the table
+  until the new log first published, so a query naming it failed.
 
 ## 0.10.1 — 2026-10-01
 

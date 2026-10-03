@@ -119,7 +119,7 @@ await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(u
 await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=None,
+streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
                  publish=False, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription

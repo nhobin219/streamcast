@@ -288,7 +288,7 @@ class _Mounted:
         streams: Stream | Iterable[Stream],
         *,
         maintain: bool | Maintain = True,
-        replicate: bool | None = None,
+        replicate: bool = False,
         publish: bool = False,
     ) -> None:
         # Resolved here, synchronously, exactly as `serve` does: a stream-set
@@ -469,7 +469,7 @@ def asgi(
     streams: Stream | Iterable[Stream],
     *,
     maintain: bool | Maintain = True,
-    replicate: bool | None = None,
+    replicate: bool = False,
     publish: bool = False,
 ) -> _Mounted:
     """An ASGI app serving `streams`, for mounting in an existing service.

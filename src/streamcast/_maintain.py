@@ -186,8 +186,55 @@ ROLES: Final[dict[str, Callable[[litelink.WriteHandle], None]]] = {
 """litelink's process split: one process per role, in pipeline order."""
 
 
+def finish_retiring(pending: Sequence[tuple[Path, str]]) -> list[tuple[Path, str]]:
+    """Retire, through litelink, the retired logs litelink does not know are.
+
+    **A stream migrated before streamcast 0.10 left its old logs sealed but
+    not retired**: streamcast sealed them its own way, and with no archive
+    they were never published. litelink 0.7 opens one as an ordinary log that
+    has published nothing, and since retired logs take no maintainer passes,
+    nothing else would ever publish it — a snapshot, a live view or a
+    catch-up across its seam would fail for good. `retire()` is what
+    `Stream.migrate` does today: publish everything, evict staging, sweep both
+    tables, and mark the log retired, after which it is skipped like any
+    other.
+
+    One that litelink already reports retired is done. Returns the ones that
+    failed, to try again next pass.
+    """
+    from streamcast import _replicate  # noqa: PLC0415 — only the publish role needs it
+
+    left = []
+    for root, name in pending:
+        try:
+            with litelink.open(root, name) as log:
+                if log.config.wal_replication:
+                    with _replicate.retiring(log):
+                        log.retire()
+                else:
+                    log.retire()
+
+            print(f"[publish] {name}: retired, published in full", flush=True)
+
+        except litelink.RetiredError:
+            pass  # already retired: nothing left to do
+
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[publish] {name}: could not retire, retrying: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            left.append((root, name))
+
+    return left
+
+
 def sweep(
-    logs: Sequence[tuple[str, litelink.WriteHandle]], role: str, every: float
+    logs: Sequence[tuple[str, litelink.WriteHandle]],
+    role: str,
+    every: float,
+    retiring: Sequence[tuple[Path, str]] = (),
 ) -> None:
     """One role's passes over every log this process maintains, until SIGTERM.
 
@@ -206,11 +253,17 @@ def sweep(
     indexed read, and every log wants one every pass.
     """
     work = ROLES[role]
+    pending = list(retiring)
+    retry_at = time.monotonic()
     span = 0.0 if role == "seal" else every / max(len(logs), 1)
     due = {
         name: time.monotonic() + index * span for index, (name, _) in enumerate(logs)
     }
     while True:
+        if pending and time.monotonic() >= retry_at:
+            retry_at = time.monotonic() + every
+            pending = finish_retiring(pending)
+
         for name, log in logs:
             if time.monotonic() < due[name]:
                 continue
@@ -261,6 +314,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         dest="logs",
     )
+    parser.add_argument(
+        "--retire",
+        action="append",
+        nargs=2,
+        metavar=("ROOT", "NAME"),
+        default=[],
+        help="a stream's retired log to retire through litelink if it is not",
+    )
     parser.add_argument("--role", choices=list(ROLES), required=True)
     parser.add_argument("--every", type=float, required=True)
     args = parser.parse_args(argv)
@@ -297,7 +358,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         with contextlib.suppress(KeyboardInterrupt):
-            sweep(opened, args.role, args.every)
+            sweep(
+                opened,
+                args.role,
+                args.every,
+                [(Path(root), name) for root, name in args.retire],
+            )
 
         # The seal role's last pass each on the way out, so a short-lived
         # server does not leave its whole run in the buffer. `seal(flush=True)`
@@ -334,6 +400,7 @@ class Supervisor:
         "_names",
         "_plan",
         "_process",
+        "_retiring",
         "_role",
         "_stopped",
         "_targets",
@@ -341,9 +408,14 @@ class Supervisor:
     )
 
     def __init__(
-        self, targets: Sequence[tuple[Path, str]], plan: Maintain, role: str
+        self,
+        targets: Sequence[tuple[Path, str]],
+        plan: Maintain,
+        role: str,
+        retiring: Sequence[tuple[Path, str]] = (),
     ) -> None:
         self._targets = list(targets)
+        self._retiring = list(retiring)
         self._names = f"{role}: " + ", ".join(sorted(name for _root, name in targets))
         self._plan = plan
         self._role = role
@@ -357,6 +429,11 @@ class Supervisor:
         return self._role
 
     @property
+    def retiring(self) -> list[tuple[Path, str]]:
+        """Retired logs this process retires through litelink if they are not."""
+        return list(self._retiring)
+
+    @property
     def targets(self) -> list[tuple[Path, str]]:
         """The logs this process sweeps. Read by the tests, and by nothing else."""
         return list(self._targets)
@@ -365,13 +442,19 @@ class Supervisor:
         # A fresh interpreter rather than a fork. A forked child would inherit
         # this process's event loop and its open SQLite connections, and
         # litelink's handles are not built to be used across a fork.
+        return popen(self._spawn_argv())
+
+    def _spawn_argv(self) -> list[str]:
         argv = [sys.executable, "-m", "streamcast", "maintain"]
         for root, name in self._targets:
             argv += ["--log", str(root), name]
 
+        for root, name in self._retiring:
+            argv += ["--retire", str(root), name]
+
         argv += ["--role", self._role, "--every", str(self._plan.every(self._role))]
 
-        return popen(argv)
+        return argv
 
     def start(self) -> None:
         self._process = self._spawn()
