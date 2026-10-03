@@ -36,6 +36,7 @@ with one publisher sending flat out. See `_writer`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from functools import partial
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
+from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
 from streamcast import (
@@ -57,6 +59,7 @@ from streamcast import (
 )
 from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
+from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
 from streamcast._protocol import (
     EARLIEST,
     decode,
@@ -79,18 +82,6 @@ if TYPE_CHECKING:
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
-
-MAX_BACKLOG: Final = 8_192
-"""Messages a subscriber may fall behind before it is dropped.
-
-Counted in MESSAGES, not bytes, because that is what the queue holds — a
-pointer to a frame every subscriber shares. A backlog is ~8 bytes per
-subscriber per queued message plus one copy of each frame, so 8,192 across 200
-subscribers is ~13 MB of pointers over whatever the frames themselves weigh.
-Size it in bytes by multiplying by your own message size; there is no setting
-that does it for you, because the library never sees a typical message until
-it is running.
-"""
 
 MAX_REPLAY: Final = 100_000
 """How far back a subscribe may ask to resume from.
@@ -162,6 +153,8 @@ class Stream:
         "_last_send_ts",
         "_log",
         "_max_backlog",
+        "_max_in_flight",
+        "_max_inbound",
         "_max_replay",
         "_name",
         "_owned",
@@ -177,6 +170,8 @@ class Stream:
         "_validate",
         "_writer",
         "_group_commit",
+        "_queued",
+        "_waiting",
         "_check_stored",
     )
 
@@ -186,7 +181,6 @@ class Stream:
         *,
         log: WriteHandle | None = None,
         owns_log: bool = False,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         floor: int | None = None,
         retired: Sequence[tuple[Path, str]] = (),
@@ -282,6 +276,10 @@ class Stream:
         # the stream opts out — then each send is its own transaction. The
         # greeting says which promise this stream makes.
         self._group_commit = group_commit and log is not None
+        # Rows queued for the writer and not yet delivered, and the senders
+        # waiting for that to fall below `max_inbound`. See `_room`.
+        self._queued = 0
+        self._waiting: list[asyncio.Future[None]] = []
         self._writer = (
             None
             if log is None
@@ -312,7 +310,12 @@ class Stream:
         self._owned = log if (owns_log and log is not None) else None
         self._name = name
         self._log = log
-        self._max_backlog = max_backlog
+        # The queue bounds, defaults until `serve` sets the deployment's
+        # (`_bound`): they belong to the process serving the stream, not to
+        # the stream, so they can change on a restart. See `_limits`.
+        self._max_backlog = MAX_BACKLOG
+        self._max_inbound = MAX_INBOUND
+        self._max_in_flight = MAX_IN_FLIGHT
         self._max_replay = max_replay
         # Read ONCE, here, and maintained by `send` thereafter. litelink's
         # `end_offset()` is a SQLite read and `append` returns the offset it
@@ -360,7 +363,6 @@ class Stream:
         config: object | None = None,
         published: str | None = None,
         s3_options: object | None = None,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
@@ -425,7 +427,6 @@ class Stream:
             name,
             log=log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
@@ -444,7 +445,6 @@ class Stream:
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
         s3_options: object | None = None,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
@@ -547,7 +547,6 @@ class Stream:
                     name,
                     log=opened,
                     owns_log=True,
-                    max_backlog=max_backlog,
                     max_replay=max_replay,
                     floor=_floor(metadata),
                     retired=_retired(root, metadata),
@@ -611,7 +610,6 @@ class Stream:
             name,
             log=new_log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
@@ -631,7 +629,6 @@ class Stream:
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
-        max_backlog: int = MAX_BACKLOG,
         max_replay: int | None = MAX_REPLAY,
     ) -> Stream:
         """Stand a stream up on a box that never held its log.
@@ -689,7 +686,6 @@ class Stream:
             name,
             log=log,
             owns_log=True,
-            max_backlog=max_backlog,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
@@ -717,6 +713,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = MAX_TAIL,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -737,6 +734,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         )
 
     @staticmethod
@@ -747,6 +745,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = MAX_TAIL,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -760,6 +759,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         ) as snap:
             return await snap.scan(
                 columns=columns,
@@ -778,6 +778,7 @@ class Stream:
         as_of_ts: int | None = None,
         broker: str | None = None,
         s3_options: S3Options | None = None,
+        max_tail: int = MAX_TAIL,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -793,6 +794,7 @@ class Stream:
             as_of_ts=as_of_ts,
             broker=broker,
             s3_options=s3_options,
+            max_tail=max_tail,
         ) as snap:
             return await snap.sql(
                 query,
@@ -809,6 +811,7 @@ class Stream:
         rebase_every: float = _live.REBASE_EVERY,
         where: dict[str, object] | None = None,
         start_offset: int | None = None,
+        max_tail: int = MAX_TAIL,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -835,6 +838,7 @@ class Stream:
             rebase_every=rebase_every,
             where=where,
             start_offset=start_offset,
+            max_tail=max_tail,
         )
 
     @property
@@ -983,28 +987,9 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
-        now = time.time_ns()
-        codec = self._codec
-        if codec.check is not None:
-            # Before the append, where refusing costs nothing: a map sent as
-            # pairs would be stored, and then replayed as a different frame.
-            codec.check(row)
-
-        if self._validate is not None:
-            # A live-only stream with a schema: refused as `append` would,
-            # before anything is fanned out.
-            self._validate(row)
-
-        if self._writer is not None:
-            [offset] = await self._commit([row], now)
-            return offset
-
-        # Live-only: nothing to commit, so the delivery is this one step.
-        self._stamp(now)
-        wire = row if codec.outbound is None else codec.outbound(row)
-        self._fan_out(row, encode(None, self._wire_ts(now), wire, self._columns))
-
-        return None
+        await self._room(1)
+        [offset] = await self._submit([row])
+        return offset
 
     async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Make a group of rows durable in ONE transaction, then fan each out.
@@ -1023,33 +1008,88 @@ class Stream:
         if not batch:
             return []
 
-        # ONE stamp for the group, not one per row: `send_many` is a single
-        # transaction and its rows commit together, so per-row values would
-        # imply a precision the commit does not have.
+        await self._room(len(batch))
+        return list(await self._submit(batch))
+
+    async def _room(self, rows: int) -> None:
+        """Wait until `rows` more fit under `max_inbound`. Call `_submit` next,
+        with no await between: what was checked here is what is queued there.
+
+        A batch larger than the bound on its own is let in when nothing else
+        is queued, so it waits rather than deadlocks. A stream with no log
+        queues nothing and never waits.
+        """
+        while (
+            self._writer is not None
+            and self._queued
+            and self._queued + rows > self._max_inbound
+        ):
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiting.append(waiter)
+            await waiter
+
+    def _bound(self, *, max_backlog: int, max_inbound: int, max_in_flight: int) -> None:
+        """Set the queue bounds `serve` and `asgi` were given for this stream.
+
+        A new `max_backlog` applies to subscribers that join after it, and a
+        new `max_in_flight` to publisher connections that open after it. No await.
+        """
+        self._max_backlog = max_backlog
+        self._max_in_flight = max_in_flight
+        self._max_inbound = max_inbound
+
+    def _drained(self, rows: int) -> None:
+        """`rows` left the queue — committed or failed. Wake every waiter to
+        re-check; one that still does not fit waits again. No await."""
+        self._queued -= rows
+        waiting, self._waiting = self._waiting, []
+        for waiter in waiting:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def _submit(self, batch: list[Row]) -> asyncio.Future[list[int | None]]:
+        """Check `batch` and queue it — or, with no log, deliver it now.
+
+        NO AWAIT. One step that `send`, `send_many` and a pipelined publisher
+        connection all take, so the order rows are submitted in is the order
+        they are committed and delivered in. Returns what resolves to their
+        offsets once they are durable and fanned out; raises here, with
+        nothing queued, for a row the schema refuses.
+
+        ONE stamp for the batch, not one per row: a `send_many` is a single
+        transaction and its rows commit together, so per-row values would
+        imply a precision the commit does not have.
+        """
         now = time.time_ns()
         codec = self._codec
         if codec.check is not None:
-            # Every row, before the one transaction: one bad map refuses the
-            # group, as one bad row does inside litelink.
+            # Every row, before anything is queued: one bad map refuses the
+            # batch — a map sent as pairs would be stored, and then replayed
+            # as a different frame.
             for row in batch:
                 codec.check(row)
 
         if self._validate is not None:
-            # Every row before any is fanned out: one bad row refuses the
-            # group, as it would inside litelink's one transaction.
+            # A live-only stream with a schema: refused as `append` would,
+            # before anything is fanned out.
             for row in batch:
                 self._validate(row)
 
         if self._writer is not None:
-            return list(await self._commit(batch, now))
+            return self._commit(batch, now)  # ty: ignore[invalid-return-type]
 
+        # Live-only: nothing to commit, so the delivery is this one step.
         self._stamp(now)
         ts = self._wire_ts(now)
         for row in batch:
             wire = row if codec.outbound is None else codec.outbound(row)
             self._fan_out(row, encode(None, ts, wire, self._columns))
 
-        return [None] * len(batch)
+        done: asyncio.Future[list[int | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        done.set_result([None] * len(batch))
+        return done
 
     def _commit(self, rows: list[Row], now: int) -> asyncio.Future[list[int]]:
         """Check `rows`, queue them for the writer, and return what resolves
@@ -1066,6 +1106,7 @@ class Stream:
 
         done: asyncio.Future[list[int]] = asyncio.get_running_loop().create_future()
         writer.submit(Job(rows=rows, stored=stored, now=now, done=done))
+        self._queued += len(rows)
         return done
 
     def _deliver(self, jobs: list[Job], offsets: list[int]) -> None:
@@ -1092,12 +1133,15 @@ class Stream:
             if not job.done.done():
                 job.done.set_result(mine)
 
-    @staticmethod
-    def _fail(jobs: list[Job], exc: BaseException) -> None:
+        self._drained(start)
+
+    def _fail(self, jobs: list[Job], exc: BaseException) -> None:
         """A commit that raised: nothing landed, so nothing is delivered."""
         for job in jobs:
             if not job.done.done():
                 job.done.set_exception(exc)
+
+        self._drained(sum(len(job.rows) for job in jobs))
 
     def _stamp(self, now: int) -> None:
         """Record that a send happened at `now`, in epoch nanoseconds. No await.
@@ -1250,39 +1294,81 @@ class Stream:
             )
         )
 
-        async for frame in connection:
-            try:
-                rows = decode_publish(frame)
-            except ProtocolError as exc:
-                await connection.send(publish_error("bad_frame", detail=str(exc)))
-                continue
+        # **Pipelined.** Each frame is checked and queued for the writer the
+        # moment it is read — without waiting for the one before it to commit
+        # — and its reply follows in a task of its own, in frame order. So a
+        # publisher with several sends in flight keeps the writer fed, and
+        # its rows group into one commit rather than waiting a round trip
+        # each. The writer commits in queue order, so replies leave in the
+        # order frames arrived, and a refusal takes its place in that line.
+        # Bounded: a client that ignores its own window is held at the socket.
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None] = (
+            asyncio.Queue(maxsize=self._max_in_flight)
+        )
+        replying = asyncio.create_task(self._reply(connection, replies))
+        try:
+            async for frame in connection:
+                try:
+                    rows = decode_publish(frame)
+                except ProtocolError as exc:
+                    await replies.put(publish_error("bad_frame", detail=str(exc)))
+                    continue
 
-            try:
-                # **Text to bytes, before anything else.** A publisher over
-                # JSON can only send a binary value as text, in its column's
-                # encoding, and litelink refuses a `str` for a binary column.
-                inbound = self._codec.inbound
-                if inbound is not None:
-                    rows = (
-                        [inbound(row) for row in rows]
-                        if isinstance(rows, list)
-                        else inbound(rows)
-                    )
+                try:
+                    # **Text to bytes, before anything else.** A publisher over
+                    # JSON can only send a binary value as text, in its
+                    # column's encoding, and litelink refuses a `str` for a
+                    # binary column.
+                    inbound = self._codec.inbound
+                    if inbound is not None:
+                        rows = (
+                            [inbound(row) for row in rows]
+                            if isinstance(rows, list)
+                            else inbound(rows)
+                        )
 
-                if isinstance(rows, list):
-                    offsets = await self.send_many(rows)
-                else:
-                    offsets = [await self.send(rows)]
+                    batch: list[Row] = list(rows) if isinstance(rows, list) else [rows]
+                    # Room first: at `max_inbound` this stops reading the
+                    # socket, and TCP holds the publisher back.
+                    await self._room(len(batch))
+                    queued = self._submit(batch) if batch else None
 
-            except (ValueError, TypeError) as exc:
-                # litelink names the column and what it found. Passed through
-                # rather than summarised: a publisher debugging a schema
-                # mismatch needs the column name more than it needs a tidy
-                # sentence.
-                await connection.send(publish_error("rejected", detail=str(exc)))
-                continue
+                except (ValueError, TypeError) as exc:
+                    # litelink names the column and what it found. Passed
+                    # through rather than summarised: a publisher debugging a
+                    # schema mismatch needs the column name more than it
+                    # needs a tidy sentence.
+                    await replies.put(publish_error("rejected", detail=str(exc)))
+                    continue
 
-            await connection.send(publish_ack(offsets))
+                await replies.put(queued if queued is not None else publish_ack([]))
+
+        finally:
+            # Every row read was queued and will commit; the replies still owed
+            # go out if the connection lets them.
+            await replies.put(None)
+            await replying
+
+    @staticmethod
+    async def _reply(
+        connection: Peer,
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None],
+    ) -> None:
+        """Send each queued frame's reply, in frame order, until told to stop."""
+        while (item := await replies.get()) is not None:
+            if isinstance(item, str):
+                reply = item
+            else:
+                try:
+                    reply = publish_ack(await item)
+                except Exception as exc:  # noqa: BLE001 — answered, not raised
+                    # The commit itself failed — the disk, SQLite — so nothing
+                    # landed. Answered for this frame alone; dying here would
+                    # leave the reader blocked on a queue nothing drains.
+                    reply = publish_error("commit_failed", detail=str(exc))
+
+            with contextlib.suppress(ConnectionClosed):
+                await connection.send(reply)
 
     async def serve_subscriber(
         self,
@@ -1755,4 +1841,4 @@ async def _prepend(
         yield item
 
 
-__all__ = ["MAX_BACKLOG", "MAX_REPLAY", "Stream"]
+__all__ = ["MAX_REPLAY", "Stream"]

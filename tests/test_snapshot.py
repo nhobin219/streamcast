@@ -439,3 +439,25 @@ async def test_a_stream_published_to_s3_reads_from_there(tmp_path, s3, bucket, s
 
     table = await streamcast.Stream.scan(uri, s3_options=s3)
     assert offsets(table) == [1, 2, 3, 4]
+
+
+class TestTheTailBound:
+    async def test_a_broker_tail_past_max_tail_is_refused(self, tmp_path, serve):
+        """A stalled publisher must not run the reader out of memory."""
+        stream = await stream_of(tmp_path, 2)
+        assert stream.log is not None
+        publish(stream.log)
+        await stream.send_many([row(i) for i in range(2, 7)])  # five unpublished
+        uri = stream.metadata_uri
+        assert uri is not None
+        async with serve(stream, maintain=False) as broker:
+            with pytest.raises(SnapshotUnavailable, match="max_tail=3"):
+                await streamcast.Stream.snapshot(
+                    uri, as_of_offset=LATEST, broker=broker, max_tail=3
+                )
+
+            # Within the bound, the same read works.
+            table = await streamcast.Stream.scan(
+                uri, as_of_offset=LATEST, broker=broker, max_tail=5
+            )
+            assert offsets(table) == [1, 2, 3, 4, 5, 6, 7]

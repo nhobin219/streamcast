@@ -41,8 +41,8 @@ def fat(i: int) -> dict:
 
 class TestIsolation:
     async def test_a_stalled_consumer_does_not_delay_a_healthy_one(self, serve):
-        stream = streamcast.Stream("trades", max_backlog=16)
-        async with serve(stream) as uri:
+        stream = streamcast.Stream("trades")
+        async with serve(stream, max_backlog=16) as uri:
             # Connected, greeted, and then never read from again.
             stalled = await streamcast.connect(uri, max_queue=1)
             async with streamcast.connect(uri) as healthy:
@@ -74,8 +74,8 @@ class TestIsolation:
     async def test_send_returns_without_waiting_for_any_consumer(self, serve):
         # The property stated as a measurement rather than as prose: with a
         # subscriber that never reads, publishing stays at memory speed.
-        stream = streamcast.Stream("trades", max_backlog=4096)
-        async with serve(stream) as uri:
+        stream = streamcast.Stream("trades")
+        async with serve(stream, max_backlog=4096) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             try:
                 await stream.send(fat(0))
@@ -98,8 +98,8 @@ class TestIsolation:
 class TestDropping:
     @pytest.mark.slow
     async def test_a_consumer_that_stops_reading_is_dropped_not_buffered(self, serve):
-        stream = streamcast.Stream("trades", max_backlog=8)
-        async with serve(stream) as uri:
+        stream = streamcast.Stream("trades")
+        async with serve(stream, max_backlog=8) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             for i in range(200):
                 await stream.send(fat(i))
@@ -138,9 +138,9 @@ class TestDropping:
         reconnect on a durable one. This is the second case: fall behind, get
         dropped, come back one above what was received, and read the rest.
         """
-        stream = streamcast.Stream("trades", log=log, max_backlog=8)
+        stream = streamcast.Stream("trades", log=log)
         total = 120
-        async with serve(stream) as uri:
+        async with serve(stream, max_backlog=8) as uri:
             stalled = await streamcast.connect(uri, max_queue=1)
             for i in range(total):
                 await stream.send(fat(i))
@@ -224,8 +224,8 @@ class TestDropping:
 
 
 async def test_the_server_forgets_a_dropped_subscriber(serve):
-    stream = streamcast.Stream("trades", max_backlog=4)
-    async with serve(stream) as uri:
+    stream = streamcast.Stream("trades")
+    async with serve(stream, max_backlog=4) as uri:
         stalled = await streamcast.connect(uri, max_queue=1)
         for i in range(60):
             await stream.send(fat(i))

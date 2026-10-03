@@ -59,12 +59,14 @@ def awaits(node: ast.AST) -> list[int]:
     return lines
 
 
-@pytest.mark.parametrize("name", ["_commit", "_deliver", "_fan_out"])
+@pytest.mark.parametrize("name", ["_submit", "_commit", "_deliver", "_fan_out"])
 def test_publishing_never_awaits(name):
     """The ordering guarantee.
 
-    `_commit` checks rows and queues them for the stream's writer thread in
-    one step, so they are committed in the order `send` was called. `_deliver`
+    `_submit` — what `send`, `send_many` and a pipelined publisher connection
+    all go through — and `_commit` check rows and queue them for the stream's
+    writer thread in one step, so they are committed in the order they were
+    submitted. `_deliver`
     takes each commit back in commit order and advances the frontier and
     offers the frame to every subscriber with nothing able to interleave. An
     `await` in either lets a second sender run in between, and a subscriber
@@ -251,3 +253,31 @@ def test_no_initialiser_builds_its_own_collaborators():
         "an initialiser builds a collaborator or does I/O; move it to a "
         f"factory (see `Stream.new`): {offenders}"
     )
+
+
+@pytest.mark.parametrize("name", ["send", "send_many", "serve_publisher"])
+def test_room_is_taken_by_the_next_statement(name):
+    """`max_inbound`'s bound holds only if nothing runs between the check and
+    the queueing: `await self._room(n)` must be followed directly by the
+    statement that calls `self._submit`. An `await` in between lets another
+    sender take the same room, and the queue grows past the bound.
+    """
+    found = 0
+    for node in ast.walk(function(_stream, "Stream", name)):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+
+        for index, statement in enumerate(body):
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Await)
+                and ast.unparse(statement.value.value).startswith("self._room(")
+            ):
+                found += 1
+                following = body[index + 1] if index + 1 < len(body) else None
+                assert following is not None and "self._submit(" in ast.unparse(
+                    following
+                ), f"Stream.{name}: the statement after `_room` must queue"
+
+    assert found == 1, f"Stream.{name} takes room {found} times"

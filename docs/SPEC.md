@@ -451,6 +451,46 @@ prints both, and the arithmetic, for your own shape and hardware.
 Every number here comes from `benchmarks/replay.py`. Raise one of the two
 settings and check the other.
 
+### The inbound side: `max_inbound`
+
+A slow consumer is dropped; a slow DISK cannot be. Every publisher on a stream
+feeds one writer thread, and if commits fall behind what arrives, rows queue
+in memory — with nothing bounding them, until the broker is out of it.
+`serve(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
+all its publishers, and at the bound a sender **waits** rather than being
+refused: a local `send` waits for room, and a publisher connection's reader
+stops reading its socket, so TCP holds the remote publisher back and its
+`submit` waits on its window. The check and the queueing are adjacent
+statements with no `await` between them — `tests/test_invariants.py` holds
+them so — or two senders could take the same room. A batch larger than the
+bound is let in when the queue is empty, so it waits rather than deadlocks.
+
+Per connection the bound is `serve(max_in_flight=)`, 64 frames: the replies
+one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
+a connection's share of memory is bounded too, and `max_inbound` caps what
+any number of connections add up to.
+
+The broker's three bounds are `serve`'s keywords, not the `Stream`'s: they
+are the serving process's settings, and change with a restart rather than
+with the stream. Each is one int for every stream or a map naming every
+stream served, checked in full before any stream is set.
+
+### What bounds memory, at each end
+
+Neither end can be run out of memory by the other, or by a stall:
+
+| where | what | bound | at the bound |
+|---|---|---|---|
+| broker | a subscriber's outbound queue | `serve(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
+| broker | a stream's rows queued for commit | `serve(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
+| broker | replies owed one publisher connection | `serve(max_in_flight=)`, 64 frames | the connection stops being read |
+| both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB) | the connection stops being read |
+| broker | a replay | one batch at a time, into the bounded subscriber queue | — |
+| client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
+| client | a catch-up | one batch at a time | — |
+| client | a snapshot's rows from the broker | `max_tail`, 1,000,000 rows | the snapshot is refused |
+| client | a live view's unpublished rows | `max_tail`, 1,000,000 rows | the view stops; its next query raises |
+
 ### A subscriber that walks away
 
 A disconnect is noticed by `send` raising — but only if there is something to
@@ -1191,7 +1231,9 @@ next call works. Closing would make one bad row cost every good one behind it.
 ### Publishing is at-least-once under retry
 
 A row is durable when `send` returns. If the connection drops before the reply
-arrives, the publisher cannot tell whether the append happened. Retrying may
+arrives, the publisher cannot tell whether the append happened — and with
+`submit`, which keeps up to `max_in_flight` rows unanswered on one connection,
+that is true of every row still in flight. Retrying may
 duplicate the row; not retrying may lose it. **streamcast does not resolve
 this**, and the reason is that it cannot: the ambiguity is in the publisher's
 knowledge, not in the log.
@@ -1245,7 +1287,8 @@ than the WAL replica (§5), one layer out.
 
 **The offset and the key do different jobs, and both are needed.** The offset
 bounds *where to look*: `send` already returned it, so the replay covers only
-the rows written while one reply was in flight, however large the log is. The
+the rows written while the replies still owed were in flight — at most
+`max_in_flight` of this publisher's — however large the log is. The
 key identifies *what to look for*: the window holds other publishers' rows
 too, and `(publisher, seq)` is what picks yours out of it. A row that already
 carries a natural unique key needs no extra columns — match on that instead.

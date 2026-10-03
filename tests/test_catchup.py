@@ -151,12 +151,10 @@ class TestItClosesTheGap:
         here is 16: the old shape would be dropped with `TooSlow` long before
         finishing. Nothing is connected while the published table is read now.
         """
-        stream = streamcast.Stream(
-            "trades", log=published_log, max_replay=600, max_backlog=16
-        )
+        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
 
-        async with serve(stream, maintain=False) as uri:
+        async with serve(stream, maintain=False, max_backlog=16) as uri:
             async with streamcast.connect(
                 uri, offset=1, catch_up=True, s3_options=s3
             ) as sub:

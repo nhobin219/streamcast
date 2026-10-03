@@ -255,8 +255,13 @@ class TestBackpressureSurvives:
     """
 
     async def test_a_stalled_subscriber_is_dropped_with_4429_and_its_reason(self, log):
-        stream = streamcast.Stream("trades", log=log, max_backlog=8)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.Stream("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+            replicate=False,
+            max_backlog=8,
+        )
         async with running(app) as base:
             stalled = await streamcast.connect(f"{base}/trades", max_queue=1)
             try:
@@ -276,8 +281,13 @@ class TestBackpressureSurvives:
 
     async def test_a_stalled_subscriber_does_not_slow_a_healthy_one(self, log):
         """The property the whole design exists for, re-proven per transport."""
-        stream = streamcast.Stream("trades", log=log, max_backlog=8)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.Stream("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+            replicate=False,
+            max_backlog=8,
+        )
         async with running(app) as base:
             stalled = await streamcast.connect(f"{base}/trades", max_queue=1)
             try:

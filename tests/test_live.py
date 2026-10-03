@@ -377,3 +377,16 @@ class TestAMigrationUnderAnOpenView:
             assert table.column("venue").to_pylist() == [None, None, None, "x", "x"]
         finally:
             listening.close()
+
+
+class TestTheTailBound:
+    async def test_a_view_past_max_tail_stops_and_says_why(self, stream):
+        """Five unpublished rows, a bound of three: the view stops rather than
+        holding whatever a stalled publisher leaves it."""
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(
+                broker, rebase_every=3600, max_tail=3
+            ) as live:
+                await stream.send_many([row(i) for i in range(5, 9)])
+                with pytest.raises(RuntimeError, match="max_tail=3"):
+                    await asyncio.wait_for(live.wait_for(9), timeout=5)

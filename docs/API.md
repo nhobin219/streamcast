@@ -78,12 +78,12 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_backlog=8192, max_replay=100_000, group_commit=True)
+                  max_replay=100_000, group_commit=True)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
-                      max_backlog=8192, max_replay=100_000)
+                      max_replay=100_000)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -144,12 +144,12 @@ a declared `schema=` rather than adopted, because a declaration that disagreed w
 disk would be silently ignored and every `send` validated against columns the caller never
 wrote down.
 
-`max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). `max_replay` bounds
+`max_replay` bounds
 how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused
 as `too_old`. With `replay_published=True` that makes the server a complete gateway to the
 log — any language can replay the whole stream over a plain WebSocket, with no litelink and
 no credentials of its own. The cost is that a long replay accumulates live messages behind
-it and `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
+it and `serve`'s `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
 while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.
@@ -223,6 +223,8 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 
 ```python
 streamcast.serve(streams, host=None, port=None, *, maintain=True,
+                 replicate=False, publish=False, max_backlog=8192,
+                 max_inbound=65_536, max_in_flight=64,
                  **websockets_kwargs) -> Server
 ```
 
@@ -249,6 +251,29 @@ await server.serve_forever()
 Routing is by `Stream.name`. Two streams with one name raise `ValueError` at `serve`
 rather than resolving: whichever lost would be unreachable, and the subscriber that
 wanted it would get somebody else's messages — which looks like working software.
+
+**Three keywords bound every queue the server keeps**, so neither a slow consumer, a slow
+disk nor a fast publisher can run it out of memory. They are the serving process's
+settings, not the streams', so a restart may change them:
+
+| keyword | bounds | at the bound |
+|---|---|---|
+| `max_backlog` (8,192) | frames a subscriber may fall behind | it is dropped with `TooSlow` |
+| `max_inbound` (65,536) | rows a durable stream may have queued for commit, across every publisher | a local `send` waits; a remote publisher's connection stops being read, so TCP holds it back |
+| `max_in_flight` (64) | replies owed one publisher connection | the connection stops being read |
+
+Each takes one int for every stream, or a map from stream name to int that names exactly
+the streams served — a missing name or one not served raises `ValueError` at `serve`, as
+does a bound below 1:
+
+```python
+streamcast.serve([trades, quotes], host, port,
+                 max_inbound={"trades": 262_144, "quotes": 65_536}, max_backlog=16_384)
+```
+
+`max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). Nothing at
+`max_inbound` is refused, and a batch larger than it is let in alone, when nothing else is
+queued.
 
 `host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for a
 server that should only serve its own box, which is the case this library is built for.
@@ -472,7 +497,8 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=False, publish=False)
+asgi(streams, *, maintain=True, replicate=False, publish=False,
+     max_backlog=8192, max_inbound=65_536, max_in_flight=64)
 ```
 
 The same streams behind an ASGI app, for a service that already has one. Needs the extra:
@@ -546,10 +572,13 @@ and the `Subscriber` stays in the fan-out set for ever.
 
 ```python
 streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3_options=None,
-                   upload_every=30.0, **websockets_kwargs) -> Publication
+                   upload_every=30.0, max_in_flight=64,
+                   **websockets_kwargs) -> Publication
 
 await producer.send(row) -> int | None          # durable, then fanned out
 await producer.send_many(rows) -> list          # ONE transaction for the group
+await producer.submit(row) -> Future[int | None]        # written; the future: durable
+await producer.submit_many(rows) -> Future[list]        # the same, for a group
 producer.info -> Greeting                       # incl. the stream's schema
 producer.connection -> ClientConnection
 producer.resumed_from -> int | None              # the offset last acked, from `cursor`
@@ -586,7 +615,7 @@ client, so one address in a config file serves both ends.
 | **one writer** | any number of publishers, one `WriteHandle`, held by the server. Offsets stay contiguous and a batch stays one commit with publishers racing — I1 is what makes that free |
 | **`Rejected`** | a row the schema refuses, with litelink's message naming the column. Nothing committed; the connection stays open and the next row works |
 | **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
-| **serial per connection** | one frame outstanding at a time, so a reply needs no correlation id. More in flight means another connection |
+| **pipelined** | up to `max_in_flight` (64) frames unanswered per connection, answered in the order sent, so a reply needs no correlation id. `send` waits for its own; `submit` does not |
 
 **`cursor=` records the offset this publisher was last acknowledged for**, and
 `cursor_uri=` ships it to object storage so a producer can resume on another box — the
@@ -597,9 +626,26 @@ settled on a clean exit; `commit()` forces one, `commit(offset)` states what you
 settled. A cursor that lags only widens the recovery replay; one that leads would skip
 rows and duplicate them.
 
+**`submit` is the lever for one publisher.** A loop of `await producer.send(row)` waits a
+round trip per row: about 1,000 rows/s on localhost, less over any real network. A loop of
+`await producer.submit(row)` keeps up to `max_in_flight` rows on the wire; the server
+queues each as it reads it, so rows that arrive while a commit is in flight share the next
+(`group_commit`) — measured 8,198 rows/s from one publisher, against 998 with `send`.
+`submit` returns once the frame is written, waiting first if the window is full, with a
+future that resolves to the offset once the row is durable or raises what `send` would.
+Acknowledgements come back in the order rows were sent, and `close()` waits for the ones
+still owed. The server bounds what it will owe one connection with
+`serve(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
+
+```python
+async with streamcast.publish("ws://localhost:8765/trades") as producer:
+    futures = [await producer.submit(row) for row in rows]
+    offsets = await asyncio.gather(*futures)   # whenever you need them
+```
+
 **Publishing is at-least-once under retry.** A row is durable when `send` returns, but if
 the connection drops before the reply arrives the publisher cannot tell whether the append
-happened. Carry a publisher key and a per-publisher sequence as columns and recovery
+happened — and with `submit`, up to `max_in_flight` rows may be in that state at once. Carry a publisher key and a per-publisher sequence as columns and recovery
 becomes a query against the log — [`SPEC.md`](SPEC.md) §6b has the pattern and the
 arithmetic.
 
@@ -1207,7 +1253,8 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 
 ```python
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
-                                 broker=None, s3_options=None) -> Snapshot
+                                 broker=None, s3_options=None,
+                                 max_tail=1_000_000) -> Snapshot
 await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
                              filters=(), start_offset=None, end_offset=None) -> pa.Table
 await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
@@ -1318,6 +1365,11 @@ than it had when it was retired, and a range neither the tables nor the broker h
 raise. The last one names both numbers. A short answer to an analytical question is a
 wrong number, not an error, so it is never given.
 
+**`max_tail` bounds what a snapshot reads from the broker**: the rows the published tables
+do not hold yet, which it keeps in memory. That stays small while publishing keeps up; past
+`max_tail` rows (1,000,000 by default, counted as read) the snapshot is refused, saying
+publishing is behind, rather than running the reader out of memory.
+
 **Where the metadata file is.** With an `s3://` published location, the copy beside the
 tables, which reads from anywhere. Without one, every log publishes under its own
 directory and the URI is the local `file://` file, which reads only on the server's
@@ -1327,7 +1379,7 @@ machine. On another machine the read says so and suggests an `s3://` location.
 
 ```python
 await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
-                             start_offset=None) -> Live
+                             start_offset=None, max_tail=1_000_000) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
@@ -1348,7 +1400,7 @@ listening to it. For an offline read, or a fixed point to come back to, use a sn
 |---|---|
 | **open** | one connection for the greeting, a published snapshot of the metadata file it names, then a subscription at the snapshot's end with `catch_up=True`: no gap and no duplicate at the join |
 | **where** | the broker is the only address. Its greeting names the metadata file and the stream's id, read again at every reconnect, so the view follows the stream as the broker serves it now. A stream with no log has nothing published and raises `ValueError` |
-| **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped |
+| **memory** | only what is not yet published. Every `rebase_every` seconds, and after every reconnect, the base is re-pinned to what is published now and the rows it covers are dropped. If publishing stalls, the view stops at `max_tail` rows (1,000,000 by default) and its next query raises, rather than holding whatever a stalled publisher leaves it |
 | **reading** | a background task only appends; rows become Arrow when a query asks, and a query runs in a thread, so a slow one never stalls the socket |
 | **drops** | a closed connection, `TooSlow` or a network error reconnects from the last row received, with catch-up and a capped backoff |
 | **`wait_for`** | exactly one of `offset` (that row has arrived) or `ts=` (every row stamped at or before it has). A time is proven only by a row stamped after it, so on a quiet stream `wait_for(ts=)` waits for the next row: bound it with `asyncio.timeout` where the stream can go idle. Published rows count. Refused on a log without `streamcast_ts` |

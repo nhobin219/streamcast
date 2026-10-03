@@ -43,6 +43,7 @@ import pyarrow as pa
 
 from streamcast import _log, _manifest, _published, _remote, _schema
 from streamcast._errors import NotReplayable, StreamcastError
+from streamcast._limits import MAX_TAIL
 from streamcast._metadata import Metadata
 
 if TYPE_CHECKING:
@@ -438,6 +439,7 @@ async def snapshot(
     broker: str | None = None,
     s3_options: S3Options | None = None,
     stream_id: str | None = None,
+    max_tail: int = MAX_TAIL,
 ) -> Snapshot:
     """See `Stream.snapshot`."""
     if as_of_offset is not None and as_of_ts is not None:
@@ -458,7 +460,9 @@ async def snapshot(
             _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3_options
         )
         if broker is None or as_of_offset is None
-        else await _with_tail(metadata_uri, found, as_of_offset, broker, s3_options)
+        else await _with_tail(
+            metadata_uri, found, as_of_offset, broker, s3_options, max_tail
+        )
     )
 
 
@@ -598,6 +602,7 @@ async def _with_tail(
     as_of_offset: int,
     broker: str,
     s3_options: S3Options | None,
+    max_tail: int,
 ) -> Snapshot:
     """The published snapshot, then the broker's rows above it up to the point."""
     from streamcast import _client  # noqa: PLC0415 — the client imports this module
@@ -634,6 +639,15 @@ async def _with_tail(
 
                     records.append({_log.COLUMN: offset, _log.STAMP: ts, **row})
                     start = offset + 1
+                    if len(records) > max_tail:
+                        msg = (
+                            f"cannot serve as of {as_of_offset}: the broker holds "
+                            f"more than max_tail={max_tail} rows the published "
+                            f"tables do not — they end at {published.end_offset - 1}. "
+                            f"Publishing is behind or stalled; ask as of a lower "
+                            f"offset, raise max_tail, or wait for it to catch up."
+                        )
+                        raise SnapshotUnavailable(msg)
 
         except NotReplayable as refused:
             floor = refused.fields.get("earliest")
@@ -670,4 +684,10 @@ def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
     return pa.Table.from_pylist(records, schema=schema)
 
 
-__all__ = ["LATEST", "Snapshot", "SnapshotUnavailable", "metadata", "snapshot"]
+__all__ = [
+    "LATEST",
+    "Snapshot",
+    "SnapshotUnavailable",
+    "metadata",
+    "snapshot",
+]

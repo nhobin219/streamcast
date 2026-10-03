@@ -7,6 +7,49 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **litelink 0.8** (`>=0.8.0,<0.9`). Its one change, `ingest()` no longer
+  pushing a short tail on a log without `wal_replication`, does not touch
+  streamcast, which does not call `ingest()`.
+- **The server pipelines a publisher's frames.** Each is checked and queued
+  for the writer as it is read, without waiting for the one before it to
+  commit, and answered in the order it arrived; a refused or failed frame is
+  answered in its place and the rest carry on. `serve(max_in_flight=64)`
+  (and `asgi`) bounds the replies one connection may be owed, past which the
+  server stops reading it.
+- **BREAKING: `max_backlog` moves from `Stream` to `serve` and `asgi`.**
+  `Stream(max_backlog=)` and `Stream.new(max_backlog=)` are gone; pass
+  `serve(..., max_backlog=)`. A queue bound is the serving process's
+  setting, not the stream's, so it now changes with a restart without
+  touching the code that builds the streams. `serve` and `asgi` take each of
+  their bounds — `max_backlog`, `max_inbound`, `max_in_flight` — as one int
+  for every stream, or a map from stream name to int that must name exactly
+  the streams served; a missing or unknown name, or a bound below 1, raises
+  `ValueError` at the call.
+
+### Added
+
+- **`max_inbound`** on `serve` and `asgi` (65,536 rows by default): rows a durable stream may have
+  queued for commit, across all its publishers, before a send waits. The
+  broker's memory bound when its disk falls behind — at the bound a local
+  `send` waits and a remote publisher's connection stops being read, so TCP
+  holds it back; nothing is refused.
+- **`max_tail`** on `Stream.snapshot`, `scan`, `sql` and `live`
+  (1,000,000 rows): what a reader holds from the broker that the published
+  tables do not. A snapshot past it is refused and a live view stops, each
+  saying publishing is behind, rather than running out of memory waiting on
+  a stalled publisher.
+- **`Publication.submit(row)` and `submit_many(rows)`**: publish without
+  waiting for the acknowledgement. Each returns once the frame is written,
+  with a future of the offsets that resolves once the rows are durable. Up
+  to `max_in_flight` (`publish(max_in_flight=64)`) are unanswered at once,
+  and the server groups what arrives while a commit is in flight — measured
+  8,198 rows/s from one publisher against 998 with `send`, which still waits
+  for each. `close()` waits for the acknowledgements still owed.
+
 ## 0.12.0 — 2026-10-03
 
 ### Changed
