@@ -27,7 +27,8 @@ prevents it any more than the local path does.
 **What a lost acknowledgement means.** A row is durable when `send` returns,
 the way a local `await send(...)` is. If the connection drops before the reply
 arrives, the publisher cannot tell whether the append happened: retrying may
-duplicate a row and not retrying may lose one. Delivery here is therefore
+duplicate a row and not retrying may lose one. With `submit`, up to
+`max_in_flight` rows can be in that state at once. Delivery here is therefore
 AT LEAST ONCE under retry, and the library does not resolve it because it
 cannot: the ambiguity is in the publisher's knowledge, not in the log.
 
@@ -40,6 +41,9 @@ the two ways the loop goes wrong silently.
 
 from __future__ import annotations
 
+import asyncio
+import collections
+import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -52,6 +56,7 @@ from streamcast._client import _refusal
 from streamcast._codec import from_greeting
 from streamcast._cursor import Cursor
 from streamcast._protocol import (
+    MAX_IN_FLIGHT,
     Greeting,
     encode_publish,
     parse_greeting,
@@ -80,8 +85,12 @@ class Publication:
         "_cursor",
         "_info",
         "_outbound",
+        "_pending",
+        "_reader",
         "_resumed",
         "_stream",
+        "_window",
+        "_writing",
     )
 
     def __init__(
@@ -91,8 +100,24 @@ class Publication:
         stream: str,
         cursor: Cursor | None = None,
         resumed: int | None = None,
+        max_in_flight: int = MAX_IN_FLIGHT,
     ) -> None:
+        if max_in_flight < 1:
+            msg = f"max_in_flight={max_in_flight}: at least one send must be allowed"
+            raise ValueError(msg)
+
         self._connection = connection
+        # The replies still owed, in the order their frames went out. The
+        # server answers in that order, so the next reply is the oldest
+        # entry's — no correlation id.
+        self._pending: collections.deque[asyncio.Future[list[int | None]]] = (
+            collections.deque()
+        )
+        self._window = asyncio.Semaphore(max_in_flight)
+        # Queueing a reply's future and writing its frame are one step under
+        # this lock, so two tasks submitting at once cannot cross them.
+        self._writing = asyncio.Lock()
+        self._reader: asyncio.Task[None] | None = None
         self._info = info
         # Bytes to hex for a `base16` column, before encoding — the server
         # decodes each binary column with its declared encoding, and msgspec
@@ -145,6 +170,10 @@ class Publication:
     async def send(self, row: Row) -> int | None:
         """Publish one row. Returns its offset once it is durable.
 
+        Waits for the acknowledgement, so a loop of `await send(row)` has one
+        row in flight at a time: one round trip per row. To keep several in
+        flight — and let the server commit them together — use `submit`.
+
         `None` on a stream with no log, for the same reason `Stream.send`
         returns it: nothing assigned an offset.
 
@@ -153,10 +182,27 @@ class Publication:
         message naming the column. Nothing was committed, and the connection
         stays open, so a corrected row can be sent next.
         """
-        payload = dict(row) if self._outbound is None else self._outbound(row)
-        offsets = await self._round_trip(payload)
+        [offset] = await (await self.submit_many([row], single=True))
+        return offset
 
-        return offsets[0] if offsets else None
+    async def submit(self, row: Row) -> asyncio.Future[int | None]:
+        """Publish one row without waiting for it to be durable.
+
+        Returns once the frame is written — waiting first if `max_in_flight`
+        sends are already unacknowledged — with a future of the row's offset,
+        which resolves once the row is durable, or raises what `send` would.
+
+            futures = [await producer.submit(row) for row in rows]
+            offsets = await asyncio.gather(*futures)   # whenever you need them
+
+        **The lever for a single publisher.** A loop of `await send(row)` is
+        one round trip per row. A loop of `await submit(row)` keeps up to
+        `max_in_flight` rows on the wire, the server commits what arrived
+        while a commit was in flight together (`group_commit`), and the
+        acknowledgements come back in the order the rows were sent.
+        """
+        many = await self.submit_many([row], single=True)
+        return asyncio.ensure_future(_first(many))
 
     async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Publish a group in ONE transaction. Returns their offsets.
@@ -170,36 +216,57 @@ class Publication:
         behaviour worth having — a partially committed batch would leave the
         publisher unable to say which rows to send again.
         """
-        outbound = self._outbound
-        batch = [dict(row) if outbound is None else outbound(row) for row in rows]
-        if not batch:
+        rows = list(rows)
+        if not rows:
             return []
 
-        return await self._round_trip(batch)
+        return await (await self.submit_many(rows))
 
-    async def _round_trip(
-        self, payload: dict[str, object] | list[dict[str, object]]
-    ) -> list[int | None]:
-        """One publish, one reply.
+    async def submit_many(
+        self, rows: Iterable[Row], *, single: bool = False
+    ) -> asyncio.Future[list[int | None]]:
+        """`send_many` without waiting for it: a future of the group's offsets.
 
-        Strictly serial per connection, which is what makes the reply
-        unambiguous without a correlation id: one frame is outstanding at a
-        time, so the next reply is this one's. A publisher that wants more in
-        flight opens another connection — and gets another position in the
-        offset order, which is the honest representation of what it asked for.
+        One transaction, all or nothing, exactly as `send_many`; see `submit`
+        for the window and the order. `single` sends one row as a row rather
+        than a list of one — the shape `send` uses on the wire.
         """
+        outbound = self._outbound
+        batch = [dict(row) if outbound is None else outbound(row) for row in rows]
+        payload: dict[str, object] | list[dict[str, object]] = (
+            batch[0] if single else batch
+        )
+        await self._window.acquire()
         try:
-            # A TEXT frame, as every frame is: the payload is JSON.
-            await self._connection.send(encode_publish(payload), text=True)
-            offsets = parse_publish_reply(await self._connection.recv())
+            done: asyncio.Future[list[int | None]] = (
+                asyncio.get_running_loop().create_future()
+            )
+            async with self._writing:
+                self._pending.append(done)
+                try:
+                    # A TEXT frame, as every frame is: the payload is JSON.
+                    await self._connection.send(encode_publish(payload), text=True)
+                except BaseException:
+                    self._pending.pop()  # never written: no reply is owed
+                    raise
 
-        except ConnectionClosed as exc:
-            refusal = _refusal(exc, stream=self._stream, offset=None)
-            if refusal is None:
-                raise
+            if self._reader is None:
+                self._reader = asyncio.create_task(self._read())
 
-            raise refusal from None
+        except BaseException:
+            self._window.release()
+            raise
 
+        done.add_done_callback(self._settled)
+        return done
+
+    def _settled(self, done: asyncio.Future[list[int | None]]) -> None:
+        """An acknowledgement, or its failure: free the window, save the cursor."""
+        self._window.release()
+        if done.cancelled() or done.exception() is not None:
+            return
+
+        offsets = done.result()
         if self._cursor is not None:
             # **After the acknowledgement, never before**, which is the same
             # rule a consumer cursor follows for the mirrored reason. A
@@ -210,11 +277,41 @@ class Publication:
             # forward-only and throttled, so a burst of sends costs one
             # write a second rather than one each.
             highest = [offset for offset in offsets if offset is not None]
-            if highest:
+            if highest and (self._acked is None or max(highest) > self._acked):
                 self._acked = max(highest)
                 self._cursor.save(self._acked)
 
-        return offsets
+    async def _read(self) -> None:
+        """Match each reply to the oldest send still owed one, until the end.
+
+        The only reader of the connection. Replies arrive in the order frames
+        went out — the server queues and commits them in that order — so the
+        oldest pending future is always the one a reply answers.
+        """
+        failure: BaseException
+        try:
+            async for frame in self._connection:
+                done = self._pending.popleft()
+                try:
+                    offsets = parse_publish_reply(frame)
+                except Exception as exc:  # noqa: BLE001 — that send's to raise
+                    if not done.done():
+                        done.set_exception(exc)
+                else:
+                    if not done.done():
+                        done.set_result(offsets)
+
+            # An orderly close ends the iteration rather than raising: the
+            # exception it would have raised is the one to hand on.
+            failure = self._connection.protocol.close_exc
+        except ConnectionClosed as exc:
+            failure = _refusal(exc, stream=self._stream, offset=None) or exc
+
+        # Every send still owed a reply learns the connection is gone.
+        while self._pending:
+            done = self._pending.popleft()
+            if not done.done():
+                done.set_exception(failure)
 
     def commit(self, offset: int | None = None) -> None:
         """Save the cursor now, rather than waiting for the throttle.
@@ -245,8 +342,18 @@ class Publication:
         self._cursor.save(offset, force=True, rewind=True)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        """End the connection. Idempotent, and awaits the close handshake."""
+        """End the connection, once every send in flight is acknowledged.
+
+        Idempotent, and awaits the close handshake. A send still unanswered
+        when the connection ends raises from its own future.
+        """
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
+
         await self._connection.close(code, reason)
+        if self._reader is not None:
+            with contextlib.suppress(Exception):
+                await self._reader
 
 
 class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websockets`
@@ -271,6 +378,7 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     __slots__ = (
         "_cursor",
         "_kwargs",
+        "_max_in_flight",
         "_publication",
         "_remote",
         "_stream",
@@ -285,10 +393,12 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
         cursor_uri: str | None = None,
         s3_options: S3Options | None = None,
         upload_every: float = UPLOAD_EVERY,
+        max_in_flight: int = MAX_IN_FLIGHT,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._uri = uri
+        self._max_in_flight = max_in_flight
         self._stream = urlsplit(uri).path.lstrip("/")
         self._kwargs: dict[str, Any] = {"compression": compression, **kwargs}
         self._publication: Publication | None = None
@@ -340,7 +450,12 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
                 self._cursor.save(resumed, force=True, rewind=True)
 
         self._publication = Publication(
-            connection, info, self._stream, self._cursor, resumed
+            connection,
+            info,
+            self._stream,
+            self._cursor,
+            resumed,
+            max_in_flight=self._max_in_flight,
         )
         if self._remote is not None:
             self._remote.start()
@@ -376,4 +491,9 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
             await self._publication.close()
 
 
-__all__ = ["Publication", "publish"]
+async def _first(many: asyncio.Future[list[int | None]]) -> int | None:
+    [offset] = await many
+    return offset
+
+
+__all__ = ["MAX_IN_FLIGHT", "Publication", "publish"]

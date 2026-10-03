@@ -34,7 +34,7 @@ from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._maintain import ROLES, Maintain, Supervisor
-from streamcast._protocol import Publish, parse_subscribe, refusal
+from streamcast._protocol import MAX_IN_FLIGHT, Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stats import STATS_PATH, payload
 from streamcast._stream import Stream
@@ -328,6 +328,7 @@ def serve(
     maintain: bool | Maintain = True,
     replicate: bool = False,
     publish: bool = False,
+    max_in_flight: int = MAX_IN_FLIGHT,
     stats: bool | str = True,
     compression: str | None = None,
     **kwargs: Any,
@@ -476,7 +477,7 @@ def serve(
                 return
 
             try:
-                await stream.serve_publisher(connection)
+                await stream.serve_publisher(connection, max_in_flight=max_in_flight)
             except ConnectionClosed:
                 return
 

@@ -120,11 +120,12 @@ await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept curren
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
-                 publish=False, ...) -> Server
+                 publish=False, max_in_flight=64, ...) -> Server
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
 streamcast.publish(uri, ...) -> Publication          # server needs publish=True
     await producer.send(row) · await producer.send_many(rows)
+    await producer.submit(row) -> Future   # pipelined: up to max_in_flight=64 unanswered
 streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor
 streamcast.EARLIEST · streamcast.LATEST
 ```

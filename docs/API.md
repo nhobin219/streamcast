@@ -223,6 +223,7 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 
 ```python
 streamcast.serve(streams, host=None, port=None, *, maintain=True,
+                 replicate=False, publish=False, max_in_flight=64,
                  **websockets_kwargs) -> Server
 ```
 
@@ -546,10 +547,13 @@ and the `Subscriber` stays in the fan-out set for ever.
 
 ```python
 streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3_options=None,
-                   upload_every=30.0, **websockets_kwargs) -> Publication
+                   upload_every=30.0, max_in_flight=64,
+                   **websockets_kwargs) -> Publication
 
 await producer.send(row) -> int | None          # durable, then fanned out
 await producer.send_many(rows) -> list          # ONE transaction for the group
+await producer.submit(row) -> Future[int | None]        # written; the future: durable
+await producer.submit_many(rows) -> Future[list]        # the same, for a group
 producer.info -> Greeting                       # incl. the stream's schema
 producer.connection -> ClientConnection
 producer.resumed_from -> int | None              # the offset last acked, from `cursor`
@@ -586,7 +590,7 @@ client, so one address in a config file serves both ends.
 | **one writer** | any number of publishers, one `WriteHandle`, held by the server. Offsets stay contiguous and a batch stays one commit with publishers racing — I1 is what makes that free |
 | **`Rejected`** | a row the schema refuses, with litelink's message naming the column. Nothing committed; the connection stays open and the next row works |
 | **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
-| **serial per connection** | one frame outstanding at a time, so a reply needs no correlation id. More in flight means another connection |
+| **pipelined** | up to `max_in_flight` (64) frames unanswered per connection, answered in the order sent, so a reply needs no correlation id. `send` waits for its own; `submit` does not |
 
 **`cursor=` records the offset this publisher was last acknowledged for**, and
 `cursor_uri=` ships it to object storage so a producer can resume on another box — the
@@ -597,9 +601,26 @@ settled on a clean exit; `commit()` forces one, `commit(offset)` states what you
 settled. A cursor that lags only widens the recovery replay; one that leads would skip
 rows and duplicate them.
 
+**`submit` is the lever for one publisher.** A loop of `await producer.send(row)` waits a
+round trip per row: about 1,000 rows/s on localhost, less over any real network. A loop of
+`await producer.submit(row)` keeps up to `max_in_flight` rows on the wire; the server
+queues each as it reads it, so rows that arrive while a commit is in flight share the next
+(`group_commit`) — measured 8,198 rows/s from one publisher, against 998 with `send`.
+`submit` returns once the frame is written, waiting first if the window is full, with a
+future that resolves to the offset once the row is durable or raises what `send` would.
+Acknowledgements come back in the order rows were sent, and `close()` waits for the ones
+still owed. The server bounds what it will owe one connection with
+`serve(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
+
+```python
+async with streamcast.publish("ws://localhost:8765/trades") as producer:
+    futures = [await producer.submit(row) for row in rows]
+    offsets = await asyncio.gather(*futures)   # whenever you need them
+```
+
 **Publishing is at-least-once under retry.** A row is durable when `send` returns, but if
 the connection drops before the reply arrives the publisher cannot tell whether the append
-happened. Carry a publisher key and a per-publisher sequence as columns and recovery
+happened — and with `submit`, up to `max_in_flight` rows may be in that state at once. Carry a publisher key and a per-publisher sequence as columns and recovery
 becomes a query against the log — [`SPEC.md`](SPEC.md) §6b has the pattern and the
 arithmetic.
 

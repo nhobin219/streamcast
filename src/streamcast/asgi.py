@@ -60,7 +60,7 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from websockets.frames import Close as _CloseFrame
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
-from streamcast._protocol import Publish, parse_subscribe, refusal
+from streamcast._protocol import MAX_IN_FLIGHT, Publish, parse_subscribe, refusal
 from streamcast._server import _DETAIL_CHARS, _routes, _sidecars, _supervisors
 
 if TYPE_CHECKING:
@@ -277,6 +277,7 @@ class _Mounted:
     __slots__ = (
         "_children",
         "_maintain",
+        "_max_in_flight",
         "_publish",
         "_sidecars",
         "_started",
@@ -290,6 +291,7 @@ class _Mounted:
         maintain: bool | Maintain = True,
         replicate: bool = False,
         publish: bool = False,
+        max_in_flight: int = MAX_IN_FLIGHT,
     ) -> None:
         # Resolved here, synchronously, exactly as `serve` does: a stream-set
         # collision or a missing litestream should fail at the call rather
@@ -304,6 +306,7 @@ class _Mounted:
         self._sidecars: list[_Child] = [*_sidecars(self._streams, replicate)]
         self._children: list[_Child] = []
         self._publish = publish
+        self._max_in_flight = max_in_flight
         self._started = False
 
     def __repr__(self) -> str:
@@ -446,7 +449,7 @@ class _Mounted:
                 await peer.close(Close.BAD_REQUEST, refusal("publish_disabled"))
                 return
 
-            await stream.serve_publisher(peer)
+            await stream.serve_publisher(peer, max_in_flight=self._max_in_flight)
             return
 
         try:
@@ -471,6 +474,7 @@ def asgi(
     maintain: bool | Maintain = True,
     replicate: bool = False,
     publish: bool = False,
+    max_in_flight: int = MAX_IN_FLIGHT,
 ) -> _Mounted:
     """An ASGI app serving `streams`, for mounting in an existing service.
 
@@ -499,7 +503,13 @@ def asgi(
     what starts the maintainers, and Starlette does not run a mounted
     sub-app's lifespan for you.
     """
-    return _Mounted(streams, maintain=maintain, replicate=replicate, publish=publish)
+    return _Mounted(
+        streams,
+        maintain=maintain,
+        replicate=replicate,
+        publish=publish,
+        max_in_flight=max_in_flight,
+    )
 
 
 __all__ = ["asgi"]

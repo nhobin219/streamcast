@@ -59,12 +59,14 @@ def awaits(node: ast.AST) -> list[int]:
     return lines
 
 
-@pytest.mark.parametrize("name", ["_commit", "_deliver", "_fan_out"])
+@pytest.mark.parametrize("name", ["_submit", "_commit", "_deliver", "_fan_out"])
 def test_publishing_never_awaits(name):
     """The ordering guarantee.
 
-    `_commit` checks rows and queues them for the stream's writer thread in
-    one step, so they are committed in the order `send` was called. `_deliver`
+    `_submit` — what `send`, `send_many` and a pipelined publisher connection
+    all go through — and `_commit` check rows and queue them for the stream's
+    writer thread in one step, so they are committed in the order they were
+    submitted. `_deliver`
     takes each commit back in commit order and advances the frontier and
     offers the frame to every subscriber with nothing able to interleave. An
     `await` in either lets a second sender run in between, and a subscriber

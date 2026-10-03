@@ -36,6 +36,7 @@ with one publisher sending flat out. See `_writer`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from functools import partial
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
+from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
 from streamcast import (
@@ -59,6 +61,7 @@ from streamcast._codec import compile_codec
 from streamcast._errors import NotReplayable, ProtocolError
 from streamcast._protocol import (
     EARLIEST,
+    MAX_IN_FLIGHT,
     decode,
     decode_publish,
     encode,
@@ -983,28 +986,8 @@ class Stream:
         loop, or hand the group to `send_many` and let the subscribers take
         it at their own pace.
         """
-        now = time.time_ns()
-        codec = self._codec
-        if codec.check is not None:
-            # Before the append, where refusing costs nothing: a map sent as
-            # pairs would be stored, and then replayed as a different frame.
-            codec.check(row)
-
-        if self._validate is not None:
-            # A live-only stream with a schema: refused as `append` would,
-            # before anything is fanned out.
-            self._validate(row)
-
-        if self._writer is not None:
-            [offset] = await self._commit([row], now)
-            return offset
-
-        # Live-only: nothing to commit, so the delivery is this one step.
-        self._stamp(now)
-        wire = row if codec.outbound is None else codec.outbound(row)
-        self._fan_out(row, encode(None, self._wire_ts(now), wire, self._columns))
-
-        return None
+        [offset] = await self._submit([row])
+        return offset
 
     async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
         """Make a group of rows durable in ONE transaction, then fan each out.
@@ -1023,33 +1006,51 @@ class Stream:
         if not batch:
             return []
 
-        # ONE stamp for the group, not one per row: `send_many` is a single
-        # transaction and its rows commit together, so per-row values would
-        # imply a precision the commit does not have.
+        return list(await self._submit(batch))
+
+    def _submit(self, batch: list[Row]) -> asyncio.Future[list[int | None]]:
+        """Check `batch` and queue it — or, with no log, deliver it now.
+
+        NO AWAIT. One step that `send`, `send_many` and a pipelined publisher
+        connection all take, so the order rows are submitted in is the order
+        they are committed and delivered in. Returns what resolves to their
+        offsets once they are durable and fanned out; raises here, with
+        nothing queued, for a row the schema refuses.
+
+        ONE stamp for the batch, not one per row: a `send_many` is a single
+        transaction and its rows commit together, so per-row values would
+        imply a precision the commit does not have.
+        """
         now = time.time_ns()
         codec = self._codec
         if codec.check is not None:
-            # Every row, before the one transaction: one bad map refuses the
-            # group, as one bad row does inside litelink.
+            # Every row, before anything is queued: one bad map refuses the
+            # batch — a map sent as pairs would be stored, and then replayed
+            # as a different frame.
             for row in batch:
                 codec.check(row)
 
         if self._validate is not None:
-            # Every row before any is fanned out: one bad row refuses the
-            # group, as it would inside litelink's one transaction.
+            # A live-only stream with a schema: refused as `append` would,
+            # before anything is fanned out.
             for row in batch:
                 self._validate(row)
 
         if self._writer is not None:
-            return list(await self._commit(batch, now))
+            return self._commit(batch, now)  # ty: ignore[invalid-return-type]
 
+        # Live-only: nothing to commit, so the delivery is this one step.
         self._stamp(now)
         ts = self._wire_ts(now)
         for row in batch:
             wire = row if codec.outbound is None else codec.outbound(row)
             self._fan_out(row, encode(None, ts, wire, self._columns))
 
-        return [None] * len(batch)
+        done: asyncio.Future[list[int | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        done.set_result([None] * len(batch))
+        return done
 
     def _commit(self, rows: list[Row], now: int) -> asyncio.Future[list[int]]:
         """Check `rows`, queue them for the writer, and return what resolves
@@ -1210,7 +1211,9 @@ class Stream:
 
     # -- subscribe ---------------------------------------------------------
 
-    async def serve_publisher(self, connection: Peer) -> None:
+    async def serve_publisher(
+        self, connection: Peer, *, max_in_flight: int = MAX_IN_FLIGHT
+    ) -> None:
         """Take rows from a remote publisher and commit them as this process.
 
         **The whole point is that this adds no authority.** A publisher hands
@@ -1250,39 +1253,78 @@ class Stream:
             )
         )
 
-        async for frame in connection:
-            try:
-                rows = decode_publish(frame)
-            except ProtocolError as exc:
-                await connection.send(publish_error("bad_frame", detail=str(exc)))
-                continue
+        # **Pipelined.** Each frame is checked and queued for the writer the
+        # moment it is read — without waiting for the one before it to commit
+        # — and its reply follows in a task of its own, in frame order. So a
+        # publisher with several sends in flight keeps the writer fed, and
+        # its rows group into one commit rather than waiting a round trip
+        # each. The writer commits in queue order, so replies leave in the
+        # order frames arrived, and a refusal takes its place in that line.
+        # Bounded: a client that ignores its own window is held at the socket.
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None] = (
+            asyncio.Queue(maxsize=max_in_flight)
+        )
+        replying = asyncio.create_task(self._reply(connection, replies))
+        try:
+            async for frame in connection:
+                try:
+                    rows = decode_publish(frame)
+                except ProtocolError as exc:
+                    await replies.put(publish_error("bad_frame", detail=str(exc)))
+                    continue
 
-            try:
-                # **Text to bytes, before anything else.** A publisher over
-                # JSON can only send a binary value as text, in its column's
-                # encoding, and litelink refuses a `str` for a binary column.
-                inbound = self._codec.inbound
-                if inbound is not None:
-                    rows = (
-                        [inbound(row) for row in rows]
-                        if isinstance(rows, list)
-                        else inbound(rows)
-                    )
+                try:
+                    # **Text to bytes, before anything else.** A publisher over
+                    # JSON can only send a binary value as text, in its
+                    # column's encoding, and litelink refuses a `str` for a
+                    # binary column.
+                    inbound = self._codec.inbound
+                    if inbound is not None:
+                        rows = (
+                            [inbound(row) for row in rows]
+                            if isinstance(rows, list)
+                            else inbound(rows)
+                        )
 
-                if isinstance(rows, list):
-                    offsets = await self.send_many(rows)
-                else:
-                    offsets = [await self.send(rows)]
+                    batch: list[Row] = list(rows) if isinstance(rows, list) else [rows]
+                    queued = self._submit(batch) if batch else None
 
-            except (ValueError, TypeError) as exc:
-                # litelink names the column and what it found. Passed through
-                # rather than summarised: a publisher debugging a schema
-                # mismatch needs the column name more than it needs a tidy
-                # sentence.
-                await connection.send(publish_error("rejected", detail=str(exc)))
-                continue
+                except (ValueError, TypeError) as exc:
+                    # litelink names the column and what it found. Passed
+                    # through rather than summarised: a publisher debugging a
+                    # schema mismatch needs the column name more than it
+                    # needs a tidy sentence.
+                    await replies.put(publish_error("rejected", detail=str(exc)))
+                    continue
 
-            await connection.send(publish_ack(offsets))
+                await replies.put(queued if queued is not None else publish_ack([]))
+
+        finally:
+            # Every row read was queued and will commit; the replies still owed
+            # go out if the connection lets them.
+            await replies.put(None)
+            await replying
+
+    @staticmethod
+    async def _reply(
+        connection: Peer,
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None],
+    ) -> None:
+        """Send each queued frame's reply, in frame order, until told to stop."""
+        while (item := await replies.get()) is not None:
+            if isinstance(item, str):
+                reply = item
+            else:
+                try:
+                    reply = publish_ack(await item)
+                except Exception as exc:  # noqa: BLE001 — answered, not raised
+                    # The commit itself failed — the disk, SQLite — so nothing
+                    # landed. Answered for this frame alone; dying here would
+                    # leave the reader blocked on a queue nothing drains.
+                    reply = publish_error("commit_failed", detail=str(exc))
+
+            with contextlib.suppress(ConnectionClosed):
+                await connection.send(reply)
 
     async def serve_subscriber(
         self,

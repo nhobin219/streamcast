@@ -7,6 +7,30 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **litelink 0.8** (`>=0.8.0,<0.9`). Its one change, `ingest()` no longer
+  pushing a short tail on a log without `wal_replication`, does not touch
+  streamcast, which does not call `ingest()`.
+- **The server pipelines a publisher's frames.** Each is checked and queued
+  for the writer as it is read, without waiting for the one before it to
+  commit, and answered in the order it arrived; a refused or failed frame is
+  answered in its place and the rest carry on. `serve(max_in_flight=64)`
+  (and `asgi`) bounds the replies one connection may be owed, past which the
+  server stops reading it.
+
+### Added
+
+- **`Publication.submit(row)` and `submit_many(rows)`**: publish without
+  waiting for the acknowledgement. Each returns once the frame is written,
+  with a future of the offsets that resolves once the rows are durable. Up
+  to `max_in_flight` (`publish(max_in_flight=64)`) are unanswered at once,
+  and the server groups what arrives while a commit is in flight — measured
+  8,198 rows/s from one publisher against 998 with `send`, which still waits
+  for each. `close()` waits for the acknowledgements still owed.
+
 ## 0.12.0 — 2026-10-03
 
 ### Changed

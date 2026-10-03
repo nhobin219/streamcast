@@ -111,6 +111,19 @@ PUBLISH: Final = Publish()
 """What a `?publish` request resolves to, where an offset would otherwise be."""
 
 
+MAX_IN_FLIGHT: Final = 64
+"""Publish frames a connection may have unanswered — both ends' default.
+
+The client's window (`publish(max_in_flight=)`): enough that a publisher
+calling `submit` keeps the server's writer fed, so its rows group into one
+commit rather than one round trip each; few enough that a dropped connection
+leaves a short tail to check on reconnect (`docs/SPEC.md` §6b). The server's
+bound (`serve(max_in_flight=)`): how many replies it will owe one connection
+before it stops reading it — backpressure at the socket, not an error. One
+default, so a publisher on defaults is never held.
+"""
+
+
 def encode(
     offset: int | None,
     ts: int | None,
@@ -629,6 +642,7 @@ def subscribe_path(name: str, offset: int | None) -> str:
 
 
 __all__ = [
+    "MAX_IN_FLIGHT",
     "CLOSE_REASON_LIMIT",
     "EARLIEST",
     "VERSION",

@@ -1191,7 +1191,9 @@ next call works. Closing would make one bad row cost every good one behind it.
 ### Publishing is at-least-once under retry
 
 A row is durable when `send` returns. If the connection drops before the reply
-arrives, the publisher cannot tell whether the append happened. Retrying may
+arrives, the publisher cannot tell whether the append happened — and with
+`submit`, which keeps up to `max_in_flight` rows unanswered on one connection,
+that is true of every row still in flight. Retrying may
 duplicate the row; not retrying may lose it. **streamcast does not resolve
 this**, and the reason is that it cannot: the ambiguity is in the publisher's
 knowledge, not in the log.
@@ -1245,7 +1247,8 @@ than the WAL replica (§5), one layer out.
 
 **The offset and the key do different jobs, and both are needed.** The offset
 bounds *where to look*: `send` already returned it, so the replay covers only
-the rows written while one reply was in flight, however large the log is. The
+the rows written while the replies still owed were in flight — at most
+`max_in_flight` of this publisher's — however large the log is. The
 key identifies *what to look for*: the window holds other publishers' rows
 too, and `(publisher, seq)` is what picks yours out of it. A row that already
 carries a natural unique key needs no extra columns — match on that instead.
