@@ -9,10 +9,10 @@ authors = [
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 # litelink's floor, and for the same reason: 3.10 reaches end of life in
-# October 2026 and nothing here needs it. The ceiling is litelink's too — it
-# caps at <3.14 through pyiceberg — and a library whose whole durable tier is
-# that one cannot claim a wider range than it.
-requires-python = ">=3.11,<3.14"
+# October 2026 and nothing here needs it. The ceiling is litelink's too —
+# <3.15 since its 0.8.1 — and a library whose whole durable tier is that one
+# cannot claim a wider range than it.
+requires-python = ">=3.11,<3.15"
 keywords = ["websocket", "multicast", "broadcast", "tickerplant", "market-data"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -42,12 +42,13 @@ dependencies = [
     #
     # 0.5.0 for `column_statistics`, which the manifest is built from, and
     # for finite-only floats, which is what makes a float column prunable;
-    # 0.5.1 for seals sized by what the Arrow table actually weighs (#84).
+    # 0.5.1 for seals sized by what the Arrow table actually weighs (#84);
+    # 0.8.1 for Python 3.14.
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.8.0,<0.9",
+    "litelink>=0.8.1,<0.9",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

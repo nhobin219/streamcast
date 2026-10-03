@@ -7,6 +7,22 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **Python 3.14 support.** `requires-python` is now `>=3.11,<3.15`, and
+  litelink `>=0.8.1,<0.9`, the release that opened 3.14. CI tests the floor
+  and the top of the range, 3.11 and 3.14.
+- **litelink 0.8.1** (`>=0.8.1,<0.9`). Two of its fixes reach streamcast:
+  - **One S3 client per process.** A reader that reloads the published
+    tables (`Stream.live`, `Stream.snapshot`, catch-up) no longer builds a new
+    S3 client per load. On 3.14 those piled up to over a thousand idle
+    connections.
+  - **Offline credential chains.** S3 reads with credentials from a profile,
+    instance metadata or SSO no longer download DuckDB's `aws` extension on
+    first use, or fail offline as "no S3 credentials".
+
 ## 0.13.0 — 2026-10-03
 
 ### Changed
