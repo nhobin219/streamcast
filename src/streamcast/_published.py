@@ -97,15 +97,6 @@ class ReadCache:
             disk_cache_volume_limit,
         )
 
-    def keywords(self) -> dict[str, object]:
-        """Back to those keywords, for a call that takes them."""
-        return {
-            "memory_cache": self.memory_cache,
-            "disk_cache": self.disk_cache,
-            "cache_key": self.cache_key,
-            "disk_cache_volume_limit": self.disk_cache_volume_limit,
-        }
-
 
 DEFAULT_CACHE: Final = ReadCache()
 """litelink's defaults: memory on, disk off."""

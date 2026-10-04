@@ -63,7 +63,6 @@ from streamcast._errors import (
     TooSlow,
 )
 from streamcast._protocol import decode, parse_greeting, parse_refusal
-from streamcast._published import ReadCache
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
 if TYPE_CHECKING:
@@ -719,7 +718,6 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     """
 
     __slots__ = (
-        "_cache",
         "_catch_up",
         "_catch_up_retries",
         "_cursor",
@@ -748,22 +746,10 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         catch_up: bool = False,
         catch_up_retries: int = CATCH_UP_RETRIES,
         metadata: str | None = None,
-        memory_cache: bool = True,
-        disk_cache: bool = False,
-        cache_key: str | PathLike[str] | None = None,
-        disk_cache_volume_limit: float = 0.8,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._uri = uri
-        # How a catch-up's reads of the published tables are cached:
-        # litelink's settings, passed through. See `Stream.snapshot`.
-        self._cache = ReadCache.of(
-            memory_cache=memory_cache,
-            disk_cache=disk_cache,
-            cache_key=cache_key,
-            disk_cache_volume_limit=disk_cache_volume_limit,
-        )
         # `Any`, so the checker resolves `**self._kwargs` against
         # `websockets.connect`'s very precise signature rather than against a
         # value type inferred from `compression`.
@@ -865,7 +851,6 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             start,
             self._catch_up_retries,
             self._handshake,
-            self._cache,
         )
         # BEFORE handing anything back, so an unreadable table raises here
         # rather than from whatever line first calls `recv`. Entering the

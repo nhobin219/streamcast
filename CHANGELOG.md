@@ -13,8 +13,8 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 - **litelink's read-cache settings on every reader of the published tables**
   (#77): `memory_cache`, `disk_cache`, `cache_key` and
-  `disk_cache_volume_limit` on `Stream.snapshot`, `scan`, `sql`, `live`, and on
-  `connect` for a catch-up.
+  `disk_cache_volume_limit` on `Stream.snapshot`, `scan`, `sql` and `live`:
+  the reads that repeat. Not on `connect`, whose catch-up reads its gap once.
   - **litelink's defaults:** memory on, disk off.
   - **The key is the caller's:** relative to litelink's cache root, absolute,
     or its `default`. Nothing is keyed automatically.

@@ -126,7 +126,7 @@ streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
     await sub.recv() · async for offset, ts, row in sub
     async for batch in sub.batches(limit=500)   # what has arrived, never waiting for more
-# Every reader of the published tables also takes litelink's cache settings:
+# snapshot, scan, sql and live also take litelink's cache settings:
 #   memory_cache=True, disk_cache=False, cache_key=None, disk_cache_volume_limit=0.8
 streamcast.publish(uri, ...) -> Publication          # server needs publish=True
     await producer.send(row) · await producer.send_many(rows)

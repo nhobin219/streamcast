@@ -743,7 +743,8 @@ class Stream:
         caller knows what deserves a cache of its own, so nothing is keyed
         for it. Readers with different settings read through different
         databases; see `litelink.duckdb_connection`. The same keywords are on
-        `scan`, `sql`, `live` and `connect` (for a catch-up).
+        `scan`, `sql` and `live`. Not on `connect`: a catch-up reads its gap
+        once, which no cache helps.
         """
         return await _snapshot.snapshot(
             metadata_uri,
