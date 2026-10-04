@@ -165,10 +165,12 @@ def _refusal(
             # The sentence is built here for the same reason every other one
             # is: 123 bytes is not room for it, and the wire carries the name
             # so the English can be reworded without a protocol change.
+            # Sent only by a server from before every stream took
+            # publishers, started without `publish=True`.
             msg = (
-                f"{stream!r} does not accept publishers. The server decides "
-                f"this, not the stream — start it with "
-                f"serve(..., publish=True) to allow remote publishing."
+                f"{stream!r} does not accept publishers: the server is an older "
+                f"streamcast started without serve(..., publish=True). Upgrade "
+                f"it, or start it with that."
             )
 
             return ProtocolError(msg)

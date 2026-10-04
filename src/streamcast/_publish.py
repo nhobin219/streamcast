@@ -366,10 +366,8 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     added here rather than asked of the caller, so one address serves both
     ends and neither has to know the query string.
 
-    **The server must allow it**: `serve(..., publish=True)`. A server that
-    silently became writable on an upgrade would be a security change nobody
-    asked for, so the default refuses with `publish_disabled` and says which
-    setting to change.
+    Every served stream takes publishers. One that cannot be written — a
+    retired stream — refuses with 4410 (`StreamRetired`).
 
     `max_in_flight` (64) is how many sends `submit` keeps unacknowledged
     at once. A server that owes one connection fewer replies than that

@@ -117,9 +117,7 @@ async def main(root: Path, *, bug: bool = False, count: int = 200) -> dict[str, 
     }
     # No maintainer: a run this short never fills a log enough to seal it. A
     # pipeline that runs for real keeps `serve`'s default, which starts one.
-    server = await streamcast.serve(
-        streams.values(), "127.0.0.1", 0, publish=True, maintain=False
-    )
+    server = await streamcast.serve(streams.values(), "127.0.0.1", 0, maintain=False)
     base = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     running: list[asyncio.Task[None]] = []
     try:

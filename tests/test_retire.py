@@ -103,7 +103,7 @@ class TestARetiredStreamIsReadOnly:
         streamcast.Stream.retire("t", root=tmp_path)
         stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
 
-        async with serve(stream, publish=True) as uri:
+        async with serve(stream) as uri:
             # The history replays — from the published table, the only copy.
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                 assert [(await sub.recv())[0] for _ in range(7)] == list(range(1, 8))

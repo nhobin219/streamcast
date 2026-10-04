@@ -89,7 +89,7 @@ async def stopped_after(view: View, uri: str, offset: int) -> None:
 
 async def main(root: Path) -> dict[str, Any]:
     stream = streamcast.Stream.new("orders", root=root, schema=SCHEMA)
-    server = await streamcast.serve(stream, "127.0.0.1", 0, publish=True)
+    server = await streamcast.serve(stream, "127.0.0.1", 0)
     uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"
     path = root / "orders.db"
     try:

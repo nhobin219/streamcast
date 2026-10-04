@@ -13,7 +13,7 @@ separate processes, talking over sockets, and nothing below changes but the
 URI. `just demo otel` runs them as separate processes.
 
 1. **A broker** serves three streams, `logs`, `spans` and `metrics`, each
-   with a log, accepting remote publishers (`publish=True`).
+   with a log, accepting remote publishers.
 2. **The producer**: two services, checkout and payments, handle traced
    requests, log through the standard `logging` module, and count orders and
    time requests. OTel's SDK turns each into records, spans and metric data
@@ -90,7 +90,6 @@ async def main(root: Path) -> dict[str, Any]:
         [log_stream, span_stream, metric_stream],
         "127.0.0.1",
         0,
-        publish=True,
         maintain=False,
     )
     base = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"

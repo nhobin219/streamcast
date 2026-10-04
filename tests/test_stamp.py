@@ -173,7 +173,7 @@ class TestItIsTheServersToFill:
 
     async def test_a_remote_publisher_is_told_why(self, serve, stamped):
         stream = streamcast.Stream("trades", log=stamped)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(Exception, match="stamped by the server"):  # noqa: B017, PT011
                     await producer.send({**trade(0), _log.STAMP: 1})

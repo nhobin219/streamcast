@@ -66,6 +66,13 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
+- **BREAKING: `serve` and `asgi` no longer take `publish=`**, and every served
+  stream takes publishers. Whether a stream can be written is the stream's to
+  say: a retired one refuses publishers with 4410. A call passing `publish=`
+  raises `TypeError`. There's no authentication yet, for readers or writers,
+  so a reachable port is a readable and writable one, as it was for readers
+  already.
+
 - **`Stream.restore` works on a stream that never had WAL replication.**
   litelink rebuilds the log from its published table when there's no replica,
   fenced 2^40 above what the old log last recorded issuing (litelink#144).

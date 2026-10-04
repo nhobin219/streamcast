@@ -85,8 +85,8 @@ async def main(
                 )
             )
 
-    # `publish=True`: producers are clients, and publish over the socket.
-    async with streamcast.serve(streams, host, port, publish=True):
+    # Producers are clients, and publish over the socket.
+    async with streamcast.serve(streams, host, port):
         for stream in streams:
             where = "live-only" if live else f"durable, next offset {stream.end_offset}"
             print(f"ws://{host}:{port}/{stream.name}  ({where})", flush=True)

@@ -249,7 +249,7 @@ class TestRemotePublishers:
             "blob": "AP8A",
             "nested": {"m": {"b": "0102"}},
         }
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 assert await producer.send(wire) == 1
 
@@ -274,7 +274,7 @@ class TestRemotePublishers:
         """
         stream = stream_at(tmp_path)
         assert stream.log is not None
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 assert await producer.send(row(1)) == 1
                 assert await producer.send_many([row(2), row(3)]) == [2, 3]
@@ -288,7 +288,7 @@ class TestRemotePublishers:
 
     async def test_text_that_is_not_its_encoding_is_rejected(self, tmp_path, serve):
         stream = stream_at(tmp_path)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(Exception, match="binary in base16"):  # noqa: B017, PT011
                     await producer.send({**row(), "trace_id": "not hex"})

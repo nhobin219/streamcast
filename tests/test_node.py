@@ -86,7 +86,7 @@ async def test_a_browser_websocket_reads_and_writes_a_stream(tmp_path, serve, no
         "nested": {"m": {"b": "0102"}},
     }
 
-    async with serve(stream, publish=True, maintain=False) as uri:
+    async with serve(stream, maintain=False) as uri:
         process = await asyncio.create_subprocess_exec(
             node,
             str(CLIENT),

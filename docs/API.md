@@ -223,7 +223,7 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 
 ```python
 streamcast.serve(streams, host=None, port=None, *, maintain=True,
-                 replicate=False, publish=False, max_backlog=8192,
+                 replicate=False, max_backlog=8192,
                  max_inbound=65_536, max_in_flight=64,
                  **websockets_kwargs) -> Server
 ```
@@ -497,7 +497,7 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=False, publish=False,
+asgi(streams, *, maintain=True, replicate=False,
      max_backlog=8192, max_inbound=65_536, max_in_flight=64)
 ```
 
@@ -602,9 +602,10 @@ async with streamcast.publish("ws://localhost:8765/trades") as producer:
     offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
 ```
 
-**The server must allow it**: `serve(..., publish=True)`. Off by default, so an upgrade
-never makes a server writable on its own. A publisher meeting a server that does not
-allow it gets a `ProtocolError` naming the setting rather than a silent failure.
+**Every served stream takes publishers.** Whether a stream can be written is the
+stream's to say, not the server's: a retired one refuses a publisher with 4410
+(`StreamRetired`). There is no authentication yet, so a port any client can reach is
+one any client can read and write.
 
 The URI is the stream's, the same string `connect` takes — `?publish` is added by the
 client, so one address in a config file serves both ends.

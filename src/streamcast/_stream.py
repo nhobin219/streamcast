@@ -805,7 +805,7 @@ class Stream:
         From then on the stream is served READ-ONLY: `new` and `migrate` open
         it for reading — subscribers replay and catch up, a live view simply
         sees nothing new — every send raises `StreamRetired`, and `serve`
-        refuses it with `publish=True`. Its maintainers do not run.
+        refuses a publisher with 4410. Its maintainers do not run.
 
         **Undone by `restore(..., revive=True)`**, here or on another box: the
         stream continues on a new log starting where this one ended. Retiring

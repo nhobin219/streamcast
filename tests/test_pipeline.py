@@ -54,7 +54,7 @@ class TestOrder:
     async def test_submitted_rows_are_acknowledged_in_the_order_sent(
         self, stream, serve
     ):
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 futures = [await producer.submit({"i": n}) for n in range(500)]
                 offsets = await asyncio.gather(*futures)
@@ -66,7 +66,7 @@ class TestOrder:
     ):
         """What pipelining is for: a single publisher keeps the writer fed."""
         held, commits = hold_commits(stream, monkeypatch)
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 first = await producer.submit({"i": 0})
                 await asyncio.sleep(0.05)  # the server has it; its commit is held
@@ -83,7 +83,7 @@ class TestTheWindow:
         self, stream, serve, monkeypatch
     ):
         held, _commits = hold_commits(stream, monkeypatch)
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, max_in_flight=4) as producer:
                 inflight = [await producer.submit({"i": n}) for n in range(4)]
                 fifth = asyncio.ensure_future(producer.submit({"i": 4}))
@@ -101,7 +101,7 @@ class TestTheWindow:
     ):
         """The server's `max_in_flight`: past it, the server stops reading."""
         held, commits = hold_commits(stream, monkeypatch)
-        async with serve(stream, maintain=False, publish=True, max_in_flight=2) as uri:
+        async with serve(stream, maintain=False, max_in_flight=2) as uri:
             async with streamcast.publish(uri, max_in_flight=10) as producer:
                 futures = [await producer.submit({"i": n}) for n in range(10)]
                 await asyncio.sleep(0.1)
@@ -126,7 +126,7 @@ class TestTheWindow:
 
 class TestFailures:
     async def test_a_refused_row_fails_in_its_place(self, stream, serve):
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 good = await producer.submit({"i": 1})
                 bad = await producer.submit({"i": "not an integer"})
@@ -139,7 +139,7 @@ class TestFailures:
                 assert await after == 2
 
     async def test_close_waits_for_what_is_in_flight(self, stream, serve):
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             producer = await streamcast.publish(uri)
             futures = [await producer.submit({"i": n}) for n in range(50)]
             await producer.close()
@@ -151,7 +151,7 @@ class TestFailures:
     ):
         held, _commits = hold_commits(stream, monkeypatch)
         server_closed = False
-        async with serve(stream, maintain=False, publish=True) as uri:
+        async with serve(stream, maintain=False) as uri:
             producer = await streamcast.publish(uri)
             futures = [await producer.submit({"i": n}) for n in range(5)]
             await asyncio.sleep(0.05)

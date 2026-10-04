@@ -162,7 +162,7 @@ class TestOnTheWire:
 
     async def test_a_remote_publisher_is_told_why(self, serve):
         stream = live()
-        async with serve(stream, publish=True) as uri:
+        async with serve(stream) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(Exception, match="venue"):  # noqa: B017, PT011
                     await producer.send({**GOOD, "venue": "x"})

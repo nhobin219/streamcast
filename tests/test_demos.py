@@ -101,9 +101,7 @@ class TestTheBroker:
         stream = streamcast.Stream.new(
             "orders", root=tmp_path, schema=broker.schema("examples/book/schema.json")
         )
-        async with streamcast.serve(
-            stream, "127.0.0.1", 0, publish=True, maintain=False
-        ) as server:
+        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as server:
             uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"
             async with streamcast.publish(uri) as publication:
                 await publication.send(
