@@ -20,6 +20,16 @@ there was nothing to have changed from. Everything above it is ordinary.
   `empty` from an older server. Found as an intermittent CI failure in the
   keyed-table example, and the same race was in `Stream.live` at open.
 
+- **`recv_many` and `batches` cost less per row than `recv`, as documented.**
+  Each row added to a batch started a task and gave the loop a turn to learn
+  whether it had arrived: 10.6–13.9 µs of client CPU a row, against `recv`'s
+  ~2.5. It now looks at `websockets`' queue of received frames instead, and
+  costs 1.3 µs a row against `recv`'s 1.45. Rows from the socket are no longer
+  read ahead between batches; a catch-up still reads one ahead.
+  - **`websockets` is capped below 18:** that queue is private API.
+    `tests/test_batches.py` checks its shape against the installed release, so
+    raising the cap is a matter of that test passing.
+
 ## 0.14.0 — 2026-10-04
 
 ### Added

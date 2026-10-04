@@ -12,29 +12,43 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from types import SimpleNamespace
 
 import pytest
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close as CloseFrame
+from websockets.frames import Frame, Opcode
 
 import streamcast
-from streamcast._client import Subscription
+from streamcast._client import Subscription, _arrived
 from streamcast._errors import Close
 from streamcast._protocol import encode_projected, greeting, parse_greeting, refusal
 
+SCHEMA = {
+    "type": "object",
+    "properties": {"i": {"type": "integer"}},
+    "required": ["i"],
+}
+
 
 class FakeConnection:
-    """The two things `Subscription` asks of a connection: `recv` and `close`."""
+    """What `Subscription` asks of a connection: `recv`, `close`, and a look
+    at the queue of frames, at the same private path `websockets` keeps it.
+
+    `test_the_queue_it_looks_at_is_websockets` holds that path to the real one.
+    """
 
     def __init__(self) -> None:
-        self._frames: collections.deque[bytes] = collections.deque()
+        self._frames: collections.deque[Frame] = collections.deque()
+        self.recv_messages = SimpleNamespace(frames=SimpleNamespace(queue=self._frames))
         self._closed: ConnectionClosed | None = None
         self._arrived = asyncio.Event()
         self.reads = 0
 
     def arrive(self, *offsets: int) -> None:
         for offset in offsets:
-            self._frames.append(encode_projected(offset, 0, {"i": offset}))
+            data = encode_projected(offset, 0, {"i": offset})
+            self._frames.append(Frame(Opcode.TEXT, data))
 
         self._arrived.set()
 
@@ -51,7 +65,19 @@ class FakeConnection:
             await self._arrived.wait()  # cancelling here takes nothing
 
         self.reads += 1
-        return self._frames.popleft()
+        # A fragmented message, reassembled as `websockets` does.
+        parts = [self._frames.popleft()]
+        while not parts[-1].fin:
+            parts.append(self._frames.popleft())
+
+        return b"".join(bytes(part.data) for part in parts)
+
+    def arrive_fragmented(self, offset: int) -> None:
+        """One message in two frames: whole once the second is here."""
+        data = encode_projected(offset, 0, {"i": offset})
+        self._frames.append(Frame(Opcode.TEXT, data[:5], fin=False))
+        self._frames.append(Frame(Opcode.CONT, data[5:]))
+        self._arrived.set()
 
     async def close(self, code: int = 1000, reason: str = "") -> None:  # noqa: ARG002
         self.end(code)
@@ -108,6 +134,18 @@ class TestWhatABatchHolds:
         connection.arrive(4)
         assert (await sub.recv())[0] == 4  # `recv` takes it too
 
+    async def test_a_fragmented_message_ends_the_batch_and_loses_nothing(self):
+        """Only the head frame is looked at, so a message in fragments reads as
+        not arrived: the batch ends before it, and the next one starts with it."""
+        connection = FakeConnection()
+        connection.arrive(1)
+        connection.arrive_fragmented(2)
+        connection.arrive(3)
+        sub = subscription(connection)
+
+        assert offsets(await sub.recv_many()) == [1]
+        assert offsets(await sub.recv_many()) == [2, 3]
+
     def test_a_batch_holds_at_least_one_row(self):
         sub = subscription(FakeConnection())
         with pytest.raises(ValueError, match="limit=0"):
@@ -132,7 +170,9 @@ class TestWhatTheCallerHasSeen:
         await sub.recv_many()
         assert cursor.load() == 3  # the whole first batch, and no further
 
-    async def test_a_row_read_ahead_is_not_received(self, tmp_path):
+    async def test_from_the_socket_nothing_is_read_ahead(self, tmp_path):
+        """A row that has not arrived is never started: between batches,
+        everything not handed over is still in `websockets`' queue."""
         cursor = streamcast.Cursor(tmp_path / "cursor", every=0)
         connection = FakeConnection()
         connection.arrive(1)
@@ -140,15 +180,28 @@ class TestWhatTheCallerHasSeen:
 
         assert offsets(await sub.recv_many()) == [1]
         connection.arrive(2)
-        await asyncio.sleep(0.01)  # the waiting read takes row 2 off the socket
-        assert connection.reads == 2
+        await asyncio.sleep(0.01)
+        assert connection.reads == 1, "row 2 is still the socket's"
 
-        # But the caller never got it: it is not the offset, and a clean
-        # exit's commit does not save it.
         assert sub.offset == 1
         sub.commit()
         assert cursor.load() == 1
-        await sub.close()  # and closing with it still held is quiet
+        await sub.close()
+
+    async def test_a_batch_from_the_socket_starts_no_task(self, monkeypatch):
+        """What it costs: rows already arrived are taken without a task or a
+        turn of the loop, which had made a batch dearer per row than `recv`."""
+        connection = FakeConnection()
+        connection.arrive(*range(1, 101))
+        sub = subscription(connection)
+
+        def refused(*_: object, **__: object) -> None:
+            msg = "a task per row"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(asyncio, "ensure_future", refused)
+        monkeypatch.setattr(asyncio, "sleep", refused)
+        assert offsets(await sub.recv_many(limit=500)) == list(range(1, 101))
 
     async def test_a_failure_mid_batch_hands_over_the_rows_before_it(self):
         connection = FakeConnection()
@@ -203,13 +256,29 @@ class TestTheLoop:
 
 
 class TestAgainstAServer:
+    async def test_the_queue_it_looks_at_is_websockets(self, tmp_path, serve):
+        """`_arrived` reads a private queue: this is what says the installed
+        `websockets` still keeps it where it did, and pops it the same way."""
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        try:
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(uri) as sub:
+                    assert not _arrived(sub.connection)
+                    await stream.send_many([{"i": i} for i in range(3)])
+                    for _ in range(100):
+                        if len(sub.connection.recv_messages.frames) == 3:
+                            break
+
+                        await asyncio.sleep(0.01)
+
+                    assert _arrived(sub.connection)
+                    assert offsets(await sub.recv_many()) == [1, 2, 3]
+                    assert not _arrived(sub.connection)
+        finally:
+            await stream.aclose()
+
     async def test_every_row_once_in_order_within_the_limit(self, tmp_path, serve):
-        schema = {
-            "type": "object",
-            "properties": {"i": {"type": "integer"}},
-            "required": ["i"],
-        }
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
         await stream.send_many([{"i": i} for i in range(300)])
         try:
             async with serve(stream, maintain=False) as uri:

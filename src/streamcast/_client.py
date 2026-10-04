@@ -290,8 +290,9 @@ class Subscription:
         self._received: int | None = None
         # A read `recv_many` started and did not wait for: the next call's
         # first row. Kept rather than cancelled, because a cancelled read of
-        # the catch-up rows would end their generator (see `recv_many`).
-        self._ahead: asyncio.Task[Row] | None = None
+        # the catch-up rows would end their generator (see `recv_many`). Or a
+        # read that failed mid-batch, for the next call to raise.
+        self._ahead: asyncio.Future[Row] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -406,12 +407,33 @@ class Subscription:
 
         batch = [await self._take()]
         while len(batch) < limit:
-            # Whether a row is ready, asked the only way the public APIs
-            # allow: start a read and give it one turn of the loop. A ready
+            if self._prelude is None:
+                # From the socket, whether a row has arrived is a look at
+                # `websockets`' queue — no task and no turn of the loop, which
+                # cost the asking more per row than `recv` (measured at
+                # 16-36 µs a row against 12 on a 20k-row replay). The read
+                # cannot suspend, so a row that is not there is never started:
+                # nothing is held outside the queue between batches.
+                if not _arrived(self._live()):
+                    break
+
+                try:
+                    batch.append(await self._read())
+                except Exception as exc:  # noqa: BLE001 — raised by the next call
+                    failed: asyncio.Future[Row] = (
+                        asyncio.get_running_loop().create_future()
+                    )
+                    failed.set_exception(exc)
+                    self._ahead = failed
+                    break
+
+                continue
+
+            # From the catch-up generator, asked the only way its interface
+            # allows: start a read and give it one turn of the loop. A ready
             # row is taken; an unready read is KEPT as the next call's first
-            # row rather than cancelled, so it costs nothing, and a read of
-            # the catch-up generator — which a cancel would end — is never
-            # cancelled. One row at most is held outside `websockets`' queue.
+            # row rather than cancelled, since a cancel would end the
+            # generator. One row at most is held outside it.
             ahead = asyncio.ensure_future(self._read())
             await asyncio.sleep(0)
             if not ahead.done() or ahead.exception() is not None:
@@ -621,6 +643,22 @@ class Subscription:
 
         if self._connection is not None:
             await _close(self._connection, code, reason)
+
+
+def _arrived(connection: ClientConnection) -> bool:
+    """Whether a whole message is in `websockets`' queue, so `recv` returns it
+    without suspending.
+
+    **Private `websockets` API**: `Assembler.frames`, a `SimpleQueue` whose
+    `get` pops without awaiting when its deque is not empty — the same from 14
+    to 17, and the reason `pyproject.toml` caps the version.
+    `tests/test_batches.py` checks the shape against the installed release, so
+    an upgrade that moves it fails there rather than here. Only the head frame
+    is looked at: a fragmented message reads as not arrived, which ends the
+    batch early and loses nothing. The server never fragments a row.
+    """
+    frames = connection.recv_messages.frames.queue
+    return bool(frames) and frames[0].fin
 
 
 async def _close(connection: ClientConnection, code: int, reason: str) -> None:
