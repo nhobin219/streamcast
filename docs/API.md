@@ -1409,10 +1409,10 @@ DuckDB databases. A disk cache earns its keep where reads cross a network to obj
 storage; against a store on the same machine, it measured no faster than reading it
 again.
 
-**A cached reader still sees every publish.** The disk cache would serve an old
-`version-hint.text` for ever, pinning a reader to the first snapshot it saw
-(litelink#141), so streamcast reads the hint around DuckDB. Everything the hint names is
-written once, and caches safely.
+**A cached reader still sees every publish.** Each read resolves the table's current
+metadata with `litelink.current_metadata`, outside DuckDB's caches: through a disk-cached
+connection, `version-hint.text` would pin a reader to an old snapshot (litelink#141).
+Everything the hint names is written once, and caches safely.
 
 **Where the metadata file is.** With an `s3://` published location, the copy beside the
 tables, which reads from anywhere. Without one, every log publishes under its own

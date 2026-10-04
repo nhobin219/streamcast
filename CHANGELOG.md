@@ -51,12 +51,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
-- **A published table's `version-hint.text` is read around DuckDB.** With
-  litelink's disk cache on, `cache_httpfs` served an old hint for ever, in
-  the same process and after a restart, pinning a reader to the first
-  snapshot it saw (litelink#141). The hint is now read with the same uncached
-  filesystem as the metadata file; every file it names is written once and
-  caches safely.
+- **litelink 0.9** (`>=0.9.0,<0.10`), for `litelink.current_metadata`.
+- **A published table's current metadata is resolved outside DuckDB**, with
+  `litelink.current_metadata`. Through a disk-cached connection,
+  `version-hint.text` pinned a reader to the first snapshot it saw
+  (litelink#141, fixed in litelink 0.9 by that function). Every file the hint
+  names is written once and caches safely.
 
 - **The one-shot OTel demo runs without a maintainer**, as the migration demo
   does. Its maintainer processes were still opening the logs when the run

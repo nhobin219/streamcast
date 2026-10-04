@@ -43,12 +43,13 @@ dependencies = [
     # 0.5.0 for `column_statistics`, which the manifest is built from, and
     # for finite-only floats, which is what makes a float column prunable;
     # 0.5.1 for seals sized by what the Arrow table actually weighs (#84);
-    # 0.8.1 for Python 3.14.
+    # 0.8.1 for Python 3.14; 0.9.0 for `current_metadata`, a published
+    # table's current metadata read outside DuckDB's caches (litelink#141).
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.8.1,<0.9",
+    "litelink>=0.9.0,<0.10",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

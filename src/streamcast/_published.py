@@ -18,16 +18,15 @@ the `iceberg` and `httpfs` extensions litelink provisions rather than installs
 at first read, the S3 secret it creates, and the read caches the caller asks
 for (`ReadCache`).
 
-**The hint is read around DuckDB, never through it.** `version-hint.text` is
-the one object a reader touches that changes: everything it names — a
+**The hint is resolved around DuckDB, never through it.** `version-hint.text`
+is the one object a reader touches that changes: everything it names — a
 `metadata.json`, its manifests, the data files — is written once under a
-name of its own. So every cached layer is safe except for the hint, and
-`cache_httpfs`'s on-disk cache serves a hint that has since moved —
-measured: a rewritten hint read back as the old one in the same process
-(its file-handle cache, an hour) and in a new process sharing the cache
-directory (its data cache), and excluding the path left the first. A stale
-hint pins a reader to an old snapshot for ever, so it is read with the
-filesystem `read` uses, which caches nothing.
+name of its own, so every cache is safe for them. Read through a connection
+with the disk cache on, the hint goes through `cache_httpfs`, whose
+file-handle cache keeps its first handle for up to an hour: a reader would
+stay on an old snapshot, or since litelink 0.9 fail an ETag check
+(litelink#141). So it is resolved with `litelink.current_metadata`, which
+reads it outside DuckDB, and every query names the metadata file it returns.
 
 **One database per process, a connection per reader.** Loading `iceberg` into
 a fresh DuckDB database costs 400-580 ms (measured, `just bench-snapshot`), and
@@ -45,9 +44,8 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlsplit
 
 import pyarrow as pa
-from litelink import S3Options, duckdb_connection
+from litelink import S3Options, current_metadata, duckdb_connection
 
-from streamcast import _remote
 from streamcast._log import COLUMN
 
 if TYPE_CHECKING:
@@ -63,17 +61,6 @@ def path(uri: str) -> str:
         return unquote(urlsplit(uri).path)
 
     return uri
-
-
-def read(uri: str, s3_options: S3Options | None) -> bytes:
-    """The bytes at `uri`, local or `s3://`, uncached."""
-    if uri.startswith("file://"):
-        with open(path(uri), "rb") as file:  # noqa: PTH123
-            return file.read()
-
-    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
-    with filesystem.open_input_stream(key) as source:
-        return source.read()
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,10 +238,8 @@ class Table:
             else shared
         )
         try:
-            table = path(uri)
             # Not through `connected`: see the module docstring.
-            hint = read(f"{uri}/metadata/version-hint.text", s3_options).decode()
-            metadata = f"{table}/metadata/{hint.strip()}.metadata.json"
+            metadata = path(current_metadata(uri, s3_options=s3_options))
             scan = f"iceberg_scan({_quoted(metadata)})"
             schema = connected.execute(f"SELECT * FROM {scan} LIMIT 0").arrow().schema
             low, high, count = connected.execute(

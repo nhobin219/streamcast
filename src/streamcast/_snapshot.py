@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pyarrow as pa
 
-from streamcast import _log, _manifest, _published, _schema
+from streamcast import _log, _manifest, _published, _remote, _schema
 from streamcast._errors import NotReplayable, StreamcastError
 from streamcast._limits import MAX_TAIL
 from streamcast._metadata import Metadata
@@ -63,7 +63,14 @@ class SnapshotUnavailable(StreamcastError):
     """A snapshot that cannot be served as asked: what is missing, and why."""
 
 
-_read = _published.read
+def _read(uri: str, s3_options: S3Options | None) -> bytes:
+    if uri.startswith("file://"):
+        with open(_published.path(uri), "rb") as file:  # noqa: PTH123
+            return file.read()
+
+    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
+    with filesystem.open_input_stream(key) as source:
+        return source.read()
 
 
 def metadata(
