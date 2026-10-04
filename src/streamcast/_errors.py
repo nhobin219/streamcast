@@ -38,6 +38,10 @@ class Close(IntEnum):
     NO_SUCH_STREAM = 4404
     """Nothing is served at that path."""
 
+    RETIRED = 4410
+    """The stream is retired: finished, and taking no rows. Sent to a
+    publisher; a subscriber still reads its history. See `StreamRetired`."""
+
     NOT_REPLAYABLE = 4416
     """The requested offset cannot be served. `why` says which of the five
     reasons it is — see `NotReplayable`."""
@@ -83,6 +87,38 @@ class StreamNotFound(StreamcastError):
             else ""
         )
         super().__init__(f"no stream at {requested!r}{known}")
+
+
+class StreamRetired(StreamcastError):
+    """The stream is retired (`Stream.retire`): finished, and taking no rows.
+
+    Its history stays readable — served read-only, snapshotted, caught up
+    from — but nothing appends to it. `Stream.restore(..., revive=True)`
+    brings it back on a new log that starts where it ended.
+    """
+
+    def __init__(
+        self, stream: str, at: int | None = None, end_offset: int | None = None
+    ) -> None:
+        self.stream = stream
+        self.at = at
+        """When it was retired, in UTC microseconds; None if a refusal's
+        reason was trimmed to fit its close frame."""
+        self.end_offset = end_offset
+        """One past its last row; None as `at`."""
+        detail = ", ".join(
+            part
+            for part in (
+                None if at is None else f"at {at} us UTC",
+                None if end_offset is None else f"ending before offset {end_offset}",
+            )
+            if part is not None
+        )
+        super().__init__(
+            f"stream {stream!r} is retired{f' ({detail})' if detail else ''} and "
+            f"takes no rows; Stream.restore(..., revive=True) continues it on a "
+            f"new log"
+        )
 
 
 class _Missing(dict):
@@ -212,6 +248,7 @@ __all__ = [
     "ProtocolError",
     "Rejected",
     "StreamNotFound",
+    "StreamRetired",
     "StreamcastError",
     "TooSlow",
 ]

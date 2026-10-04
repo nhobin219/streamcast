@@ -23,7 +23,7 @@ class TestItPublishes:
     async def test_a_remote_publisher_appends_and_subscribers_see_it(self, serve, log):
         """The headline, end to end: publish over a socket, receive over another."""
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
                 async with streamcast.publish(uri) as producer:
                     offset = await producer.send(trade(0))
@@ -37,7 +37,7 @@ class TestItPublishes:
     async def test_send_many_is_one_transaction(self, serve, log):
         """Contiguous offsets, because it is the same call `Stream.send_many` is."""
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 offsets = await producer.send_many([trade(i) for i in range(20)])
 
@@ -45,7 +45,7 @@ class TestItPublishes:
 
     async def test_an_empty_batch_sends_nothing(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 assert await producer.send_many([]) == []
 
@@ -58,7 +58,7 @@ class TestItPublishes:
         it is about to send against the shape the server will accept.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 shape = producer.info.schema
                 assert isinstance(shape, dict)
@@ -82,7 +82,7 @@ class TestConcurrentPublishers:
         this is the behaviour that guard protects.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
 
             async def publisher(tag: int, count: int) -> list[int | None]:
                 async with streamcast.publish(uri) as producer:
@@ -105,7 +105,7 @@ class TestConcurrentPublishers:
         the log could see half a group.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
 
             async def batches() -> list[list[int | None]]:
                 out = []
@@ -134,28 +134,33 @@ class TestConcurrentPublishers:
 
 
 class TestWhatItRefuses:
-    async def test_publishing_is_off_unless_the_server_allows_it(self, serve, log):
-        """A server must not become writable on an upgrade.
-
-        Every other refusal is about what a caller asked for. This one is
-        about what the operator allowed, so it says so rather than pretending
-        the stream is missing.
-        """
+    async def test_every_served_stream_takes_publishers(self, serve, log):
+        """No switch on `serve`: whether a stream can be written is the
+        stream's to say — a retired one refuses publishers (`test_retire`) —
+        and the same port serves its readers."""
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, maintain=False) as uri:  # no publish=True
-            with pytest.raises(streamcast.ProtocolError) as raised:
-                await streamcast.publish(uri)
-
-            # The wire carries `publish_disabled`; the sentence is built by
-            # the client, and names the setting to change.
-            assert "does not accept publishers" in str(raised.value)
-            assert "publish=True" in str(raised.value)
-
-            # And the stream still serves readers, which is the point of the
-            # refusal being narrow.
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
-                await stream.send(trade(0))
+                async with streamcast.publish(uri) as producer:
+                    assert await producer.send(trade(0)) == 1
+
                 assert (await sub.recv())[0] == 1
+
+    def test_an_older_servers_refusal_still_names_the_setting(self):
+        """A server from before every stream took publishers sends
+        `publish_disabled`; the client still says what to change."""
+        from websockets.exceptions import ConnectionClosed  # noqa: PLC0415
+        from websockets.frames import Close as CloseFrame  # noqa: PLC0415
+
+        from streamcast._client import _refusal  # noqa: PLC0415
+        from streamcast._protocol import refusal  # noqa: PLC0415
+
+        closed = ConnectionClosed(
+            CloseFrame(streamcast.Close.BAD_REQUEST, refusal("publish_disabled")), None
+        )
+        error = _refusal(closed, stream="trades", offset=None)
+        assert isinstance(error, streamcast.ProtocolError)
+        assert "publish=True" in str(error)
 
     async def test_a_row_the_schema_refuses_is_rejected_not_committed(self, serve, log):
         """litelink's own message, and the connection survives it.
@@ -165,7 +170,7 @@ class TestWhatItRefuses:
         would make one bad row cost every good one behind it.
         """
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(streamcast.Rejected) as raised:
                     await producer.send({"event_ts": "not a number", "price": 1.0})
@@ -178,7 +183,7 @@ class TestWhatItRefuses:
 
     async def test_a_rejected_batch_commits_none_of_itself(self, serve, log):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 rows: list[dict[str, object]] = [
                     dict(trade(0)),
@@ -193,7 +198,7 @@ class TestWhatItRefuses:
     async def test_a_frame_that_is_not_a_row_is_refused(self, serve, log):
         """Answered rather than closed, like any other bad publish."""
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 await producer.connection.send('"just a string"')
                 with pytest.raises(streamcast.Rejected, match="not a row"):
@@ -205,7 +210,7 @@ class TestWhatItRefuses:
         self, serve, log
     ):
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             wrong = uri.replace("/trades", "/quotes")
             with pytest.raises(streamcast.StreamNotFound):
                 await streamcast.publish(wrong)
@@ -222,7 +227,7 @@ class TestTheProducerCursor:
         """
         cursor = tmp_path / "producer.offset"
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, cursor=cursor) as producer:
                 assert producer.resumed_from is None, "nothing to resume yet"
                 for i in range(5):
@@ -237,7 +242,7 @@ class TestTheProducerCursor:
         """The whole point: a new process knows where it got to."""
         cursor = tmp_path / "producer.offset"
         stream = streamcast.Stream("trades", log=log)
-        async with serve(stream, publish=True, maintain=False) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, cursor=cursor) as first:
                 for i in range(5):
                     await first.send(trade(i))
@@ -270,7 +275,7 @@ class TestTheProducerCursor:
         with handle:
             stream = streamcast.Stream("trades", log=handle)
             cursor = tmp_path / "producer.offset"
-            async with serve(stream, publish=True, maintain=False) as uri:
+            async with serve(stream, maintain=False) as uri:
                 async with streamcast.publish(uri, cursor=cursor) as producer:
                     for seq in range(5):
                         await producer.send({"publisher": "a", "seq": seq})

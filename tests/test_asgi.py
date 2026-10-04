@@ -225,15 +225,14 @@ class TestWhatItRefuses:
             with pytest.raises(streamcast.NotReplayable):
                 await streamcast.connect(f"{base}/trades", offset=9_999)
 
-    async def test_publishing_is_off_unless_the_mount_allows_it(self, log):
-        """The same opt-in `serve` has, and for the same reason."""
+    async def test_every_mounted_stream_takes_publishers(self, log):
+        """No switch, as `serve` has none: a stream that can be written takes
+        publishers, and one that cannot (a retired one) refuses them itself."""
         stream = streamcast.Stream("trades", log=log)
         app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base:
-            with pytest.raises(streamcast.ProtocolError) as raised:
-                await streamcast.publish(f"{base}/trades")
-
-            assert "does not accept publishers" in str(raised.value)
+            async with streamcast.publish(f"{base}/trades") as producer:
+                assert await producer.send(trade(0)) == 1
 
     async def test_an_http_request_gets_a_404_rather_than_a_traceback(self, log):
         """A routing mistake in the host app, answered rather than raised."""
@@ -364,7 +363,7 @@ class TestRemotePublishing:
         """`serve_publisher` iterates the connection, so this exercises
         `__aiter__` — the one method a subscription never touches."""
         stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False, publish=True)
+        app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base:
             async with streamcast.connect(f"{base}/trades") as sub:
                 async with streamcast.publish(f"{base}/trades") as producer:
@@ -377,7 +376,7 @@ class TestRemotePublishing:
 
     async def test_send_many_stays_one_transaction(self, log):
         stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False, publish=True)
+        app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base:
             async with streamcast.publish(f"{base}/trades") as producer:
                 offsets = await producer.send_many([trade(i) for i in range(20)])
@@ -386,7 +385,7 @@ class TestRemotePublishing:
 
     async def test_a_rejected_row_answers_and_keeps_the_connection(self, log):
         stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False, publish=True)
+        app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base:
             async with streamcast.publish(f"{base}/trades") as producer:
                 with pytest.raises(streamcast.Rejected) as raised:

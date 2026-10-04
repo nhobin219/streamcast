@@ -77,11 +77,18 @@ import pyarrow.fs as pafs
 from streamcast import _log, _remote, _schema
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pyarrow as pa
     from litelink import LogHandle, S3Options, TierStatistics
 
 VERSION: Final = 2
-READS: Final = frozenset({1, VERSION})
+RETIRED_VERSION: Final = 3
+"""A retired stream's file. Its own version so that a build that predates
+retirement refuses it rather than misreading it: such a build would find the
+current log retired, take it for a migration that died, and quietly start the
+next log — undoing the retirement without anyone asking."""
+READS: Final = frozenset({1, VERSION, RETIRED_VERSION})
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +116,29 @@ class Entry:
     """The lowest `streamcast_ts` the log holds, or None if not known yet."""
     end_ts: int | None = None
     """The highest, for a sealed log; None for the live one, whose end moves."""
+    sort_by: tuple[str, ...] | None = None
+    """The columns the log sorts each file by — `()` for none — or None when
+    not known: a log described before this was recorded, and not on this
+    disk to ask. With `schema` and `system_schema`, the log's whole shape,
+    which a restore from a published table needs (litelink 0.10.1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Retirement:
+    """That the stream is finished (`Stream.retire`), and what reviving it needs.
+
+    Everything a successor log has to agree with, kept here because the
+    retired log may be on a machine that no longer exists: where it ended,
+    how it was sorted, and the `streamcast_ts` span its rows cover.
+    """
+
+    at: int
+    """When, in UTC microseconds."""
+    end_offset: int
+    """One past the last row: where a revived stream's next log starts."""
+    sort_by: tuple[str, ...] | None = None
+    start_ts: int | None = None
+    end_ts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +152,10 @@ class Metadata:
     """The log being written. Its `end_offset` is None: its end is moving."""
     manifest: str | None = None
     """Where the sealed logs' statistics are (#27), or None until there are any."""
+    retirement: Retirement | None = None
+    """Set by `Stream.retire`: the live log is finished and takes no rows.
+
+    Not `retired`, which names the logs a migration sealed."""
 
     @property
     def logs(self) -> tuple[Entry, ...]:
@@ -160,6 +194,21 @@ class Metadata:
             self, sealed_logs=(*self.sealed_logs, sealed), live_log=successor
         )
 
+    def revive(self, successor: Entry) -> Metadata:
+        """The retired live log sealed where it ended, `successor` live after
+        it, and the stream no longer retired."""
+        retirement = self.retirement
+        if retirement is None:
+            msg = f"stream {self.stream!r} is not retired"
+            raise ValueError(msg)
+
+        revived = self.advance(
+            retirement.end_offset,
+            successor,
+            span=(retirement.start_ts, retirement.end_ts),
+        )
+        return replace(revived, retirement=None)
+
     def next_name(self) -> str:
         """`trades-v2`, `trades-v3`, … — named for its place in the sequence.
 
@@ -172,7 +221,9 @@ class Metadata:
         live = self.live_log
         return json.dumps(
             {
-                "streamcast_metadata": VERSION,
+                "streamcast_metadata": (
+                    VERSION if self.retirement is None else RETIRED_VERSION
+                ),
                 "stream": self.stream,
                 "stream_id": self.stream_id,
                 "sealed_logs": [
@@ -185,6 +236,7 @@ class Metadata:
                         "end_ts": entry.end_ts,
                         "schema": entry.schema,
                         "system_schema": entry.system_schema,
+                        "sort_by": _listed(entry.sort_by),
                     }
                     for entry in self.sealed_logs
                 ],
@@ -195,8 +247,26 @@ class Metadata:
                     "start_ts": live.start_ts,
                     "schema": live.schema,
                     "system_schema": live.system_schema,
+                    "sort_by": _listed(live.sort_by),
                 },
                 "manifest": self.manifest,
+                **(
+                    {}
+                    if self.retirement is None
+                    else {
+                        "retirement": {
+                            "at": self.retirement.at,
+                            "end_offset": self.retirement.end_offset,
+                            "sort_by": (
+                                None
+                                if self.retirement.sort_by is None
+                                else list(self.retirement.sort_by)
+                            ),
+                            "start_ts": self.retirement.start_ts,
+                            "end_ts": self.retirement.end_ts,
+                        }
+                    }
+                ),
             },
             indent=2,
         )
@@ -226,6 +296,7 @@ class Metadata:
                     published=entry.get("published"),
                     start_ts=entry.get("start_ts"),
                     end_ts=entry.get("end_ts"),
+                    sort_by=_tupled(entry.get("sort_by")),
                 )
                 for entry in fields["sealed_logs"]
             ),
@@ -237,13 +308,43 @@ class Metadata:
                 system_schema=live["system_schema"],
                 published=live.get("published"),
                 start_ts=live.get("start_ts"),
+                sort_by=_tupled(live.get("sort_by")),
             ),
             manifest=fields.get("manifest"),
+            retirement=(
+                None
+                if (retired := fields.get("retirement")) is None
+                else Retirement(
+                    at=int(retired["at"]),
+                    end_offset=int(retired["end_offset"]),
+                    sort_by=(
+                        None
+                        if retired.get("sort_by") is None
+                        else tuple(retired["sort_by"])
+                    ),
+                    start_ts=retired.get("start_ts"),
+                    end_ts=retired.get("end_ts"),
+                )
+            ),
         )
 
 
+def _listed(sort_by: tuple[str, ...] | None) -> list[str] | None:
+    return None if sort_by is None else list(sort_by)
+
+
+def _tupled(sort_by: list[str] | None) -> tuple[str, ...] | None:
+    return None if sort_by is None else tuple(sort_by)
+
+
 def describe(
-    name: str, start: int, end: int | None, schema: pa.Schema, *, published: str
+    name: str,
+    start: int,
+    end: int | None,
+    schema: pa.Schema,
+    *,
+    published: str,
+    sort_by: Sequence[str] | None = None,
 ) -> Entry:
     """An entry for a log whose table schema is `schema`: both halves of it."""
     return Entry(
@@ -253,6 +354,22 @@ def describe(
         _schema.from_arrow(_log.declared(schema)),
         _schema.from_arrow(_log.system(schema)),
         published=published,
+        sort_by=None if sort_by is None else tuple(sort_by),
+    )
+
+
+def _system_names(system_schema: dict[str, object]) -> list[str]:
+    properties = system_schema.get("properties")
+    return list(properties) if isinstance(properties, dict) else []
+
+
+def shape(entry: Entry) -> pa.Schema:
+    """The log's table schema, exactly, rebuilt from its entry: the declared
+    columns — binary encodings included, which no Iceberg schema keeps — and
+    the system columns that log has."""
+    return _log.with_system(
+        _schema.to_arrow(entry.schema),
+        names=_system_names(entry.system_schema),
     )
 
 
@@ -287,6 +404,7 @@ def single(stream: str, log: LogHandle) -> Metadata:
         None,
         log.schema,
         published=log.published,
+        sort_by=log.sort_by,
     )
     return Metadata(
         stream=stream,
@@ -307,17 +425,27 @@ def complete(metadata: Metadata, log: LogHandle) -> Metadata:
     root = Path(log.root)
 
     def located(entry: Entry) -> Entry:
-        if entry.published is not None:
+        if entry.published is not None and entry.sort_by is not None:
             return entry
 
         if entry.name == log.name:
-            return replace(entry, published=log.published)
+            return replace(
+                entry,
+                published=entry.published or log.published,
+                sort_by=tuple(log.sort_by),
+            )
 
         if (root / entry.name).is_dir():
             with litelink.open(root, entry.name, read_only=True) as sealed:
-                return replace(entry, published=sealed.published)
+                return replace(
+                    entry,
+                    published=entry.published or sealed.published,
+                    sort_by=tuple(sealed.sort_by),
+                )
 
-        return replace(entry, published=log.published)
+        # Not on this disk: the prefix is the live log's, and the sort is
+        # left unknown rather than guessed.
+        return replace(entry, published=entry.published or log.published)
 
     live = located(metadata.live_log)
     if live.start_ts is None:

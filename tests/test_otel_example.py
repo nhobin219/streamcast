@@ -150,9 +150,7 @@ class TestThePublisher:
 
         async def broker(port: int = 0):  # noqa: ANN202
             stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
-            return await streamcast.serve(
-                stream, "127.0.0.1", port, publish=True, maintain=False
-            )
+            return await streamcast.serve(stream, "127.0.0.1", port, maintain=False)
 
         server = await broker()
         port = server.sockets[0].getsockname()[1]

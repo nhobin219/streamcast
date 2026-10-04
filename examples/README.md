@@ -170,7 +170,7 @@ and the transport only carries frames. Which is why `/health` in that file reads
 `trades.end_offset` directly without asking the websocket layer anything.
 
 Three lines in the file are the whole of it: build the stream with `Stream.new`, wrap it
-with `asgi(..., publish=True)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
+with `asgi(...)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
 `async with streams` in the lifespan is **not** optional — Starlette does not run a
 mounted sub-app's lifespan, so that block is what starts the maintainer which seals the
 log, and what closes the log on the way out.

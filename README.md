@@ -119,7 +119,7 @@ await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept curren
     await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
-                 publish=False, max_backlog=8192,        # frames per subscriber
+                 max_backlog=8192,                       # frames per subscriber
                  max_inbound=65_536,                     # rows queued to commit
                  max_in_flight=64, ...) -> Server        # an int, or {stream: int}
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
@@ -128,7 +128,7 @@ streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
     async for batch in sub.batches(limit=500)   # what has arrived, never waiting for more
 # snapshot, scan, sql and live also take litelink's cache settings:
 #   memory_cache=True, disk_cache=False, cache_key=None, disk_cache_volume_limit=0.8
-streamcast.publish(uri, ...) -> Publication          # server needs publish=True
+streamcast.publish(uri, ...) -> Publication          # any served stream
     await producer.send(row) · await producer.send_many(rows)
     await producer.submit(row) -> Future   # pipelined: up to max_in_flight=64 unanswered
 streamcast.to_arrow · streamcast.from_arrow · streamcast.Cursor
@@ -412,8 +412,8 @@ other; `just bench-replay` prints the arithmetic for your hardware.
 ### Recovering a server
 
 A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
-rebuilds the log itself from its published table and the replicated WAL on a machine
-that never held it:
+rebuilds the log itself on a machine that never held it: from its replicated WAL when
+there is one, and otherwise from its published table alone:
 
 ```python
 stream = streamcast.Stream.restore(
@@ -421,8 +421,11 @@ stream = streamcast.Stream.restore(
 )
 ```
 
-Offsets are **fenced, not reissued** — litelink burns 2²⁰ — so no offset a consumer
-holds is ever handed out again carrying different data. The consumer resumes from the
+Offsets are **fenced, not reissued**, so no offset a consumer holds is ever handed out
+again carrying different data. From a replica, litelink skips 2²⁰ past what the replica
+recorded (`replica_reserve=`). From the published table alone, it skips 2⁴⁰ past what the
+old log last said it had issued (`published_reserve=`), since rows written after the last
+publish are lost with the machine. The consumer resumes from the
 cursor it already had and sees a gap, which `recv` allows.
 
 Existing consumers resume with no intervention, because `max_replay` counts **rows**
@@ -433,6 +436,11 @@ only a subscribe it would refuse pays to find out what the replay actually costs
 The local staging table comes back empty — its Parquet was on the dead machine — so a
 restored stream that should replay history serves it from the published table, with
 `replay_published=True`.
+
+The log comes back with its exact shape, read from the stream's metadata: its schema,
+binary encodings and system columns included, and its `sort_by`. Pass `schema=` and
+`sort_by=` for a stream whose metadata predates recording them, and `config=` for the
+restored log's policy, which is otherwise litelink's default when there was no replica.
 
 A **planned** cutover loses nothing — stop the writer, let the sidecar ship its last
 frames, then restore. Unplanned failover loses whatever never shipped.
@@ -513,7 +521,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from streamcast.asgi import asgi
 
-streams = asgi([trades, quotes], publish=True)
+streams = asgi([trades, quotes])
 
 @asynccontextmanager
 async def lifespan(app):
@@ -565,8 +573,7 @@ async with streamcast.publish("ws://localhost:8765/trades") as producer:
     offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
 ```
 
-The server must allow it — `serve(..., publish=True)`, off by default so an upgrade never
-makes a server writable on its own. `send` returns once the row is durable, exactly as the
+Every served stream takes publishers; a retired one refuses them with 4410. `send` returns once the row is durable, exactly as the
 local call does; `send_many` commits a group in one transaction and is the same throughput
 lever it is locally. A row the schema refuses raises `Rejected`, naming the column, and the
 connection stays open so the next row works.

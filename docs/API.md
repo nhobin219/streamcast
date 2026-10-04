@@ -223,7 +223,7 @@ Drops every subscriber with a 1001, concurrently. **Does not close the log.**
 
 ```python
 streamcast.serve(streams, host=None, port=None, *, maintain=True,
-                 replicate=False, publish=False, max_backlog=8192,
+                 replicate=False, max_backlog=8192,
                  max_inbound=65_536, max_in_flight=64,
                  **websockets_kwargs) -> Server
 ```
@@ -497,7 +497,7 @@ A mounted ASGI app gets no equivalent and needs none — it has routes already, 
 ```python
 from streamcast.asgi import asgi
 
-asgi(streams, *, maintain=True, replicate=False, publish=False,
+asgi(streams, *, maintain=True, replicate=False,
      max_backlog=8192, max_inbound=65_536, max_in_flight=64)
 ```
 
@@ -535,8 +535,8 @@ lifespan events alone starts no maintainer once mounted, and a log with nothing 
 buffers every row it ever receives. The app handles `lifespan` too, for the case where it is
 run directly rather than mounted; both routes are idempotent.
 
-Routing, refusals and close codes are identical to `serve`'s, including the 4400/4404/4416/
-4429 reasons, with one difference ASGI forces: the handshake is **accepted** before a
+Routing, refusals and close codes are identical to `serve`'s, including the 4400/4404/4410/
+4416/4429 reasons, with one difference ASGI forces: the handshake is **accepted** before a
 refusal can be sent, because a close code only exists on an accepted connection.
 `websockets` refuses after its handshake too, so what a client sees is the same; rejecting
 the upgrade instead would turn every refusal into an HTTP 403 with the reason discarded.
@@ -602,9 +602,10 @@ async with streamcast.publish("ws://localhost:8765/trades") as producer:
     offset = await producer.send({"event_ts": 1790038800123456, "price": 85565.0})
 ```
 
-**The server must allow it**: `serve(..., publish=True)`. Off by default, so an upgrade
-never makes a server writable on its own. A publisher meeting a server that does not
-allow it gets a `ProtocolError` naming the setting rather than a silent failure.
+**Every served stream takes publishers.** Whether a stream can be written is the
+stream's to say, not the server's: a retired one refuses a publisher with 4410
+(`StreamRetired`). There is no authentication yet, so a port any client can reach is
+one any client can read and write.
 
 The URI is the stream's, the same string `connect` takes — `?publish` is added by the
 client, so one address in a config file serves both ends.
@@ -1021,8 +1022,8 @@ StreamcastError
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.
 
-`Close` is the code enum: `BAD_REQUEST` 4400, `NO_SUCH_STREAM` 4404, `NOT_REPLAYABLE`
-4416, `TOO_SLOW` 4429.
+`Close` is the code enum: `BAD_REQUEST` 4400, `NO_SUCH_STREAM` 4404, `RETIRED` 4410,
+`NOT_REPLAYABLE` 4416, `TOO_SLOW` 4429.
 
 ## The schema is yours
 
@@ -1208,6 +1209,39 @@ column's type, ever, including after it has been removed. Re-adding a name takes
 it had. A stream's logs are read together with `UNION ALL BY NAME`, where a changed type
 coerces silently (`int64` beside `string` becomes a string column) rather than failing.
 Widening is refused too.
+
+### Finishing a stream: `Stream.retire`
+
+A stream that just stops being written isn't finished: its last rows stay on the box,
+because `publish` holds back the trailing run for compaction, and nothing refuses a late
+write. With the server stopped:
+
+```python
+streamcast.Stream.retire("trades", root="data")                 # finished
+stream = streamcast.Stream.restore(
+    "trades", root="data", published="s3://market-data/prod", revive=True,
+)                                                                # and undone
+```
+
+Retiring publishes every row (the trailing run included), retires the log in litelink so
+it refuses writers for good, and records it in `metadata.json`: when (`at`, UTC
+microseconds), where the log ended, its `sort_by` and its `streamcast_ts` span, locally
+and beside the tables. A retire that dies partway finishes on the rerun.
+
+**A retired stream is read-only, and still served.** `new` and `migrate` open its log for
+reading and set `stream.retirement`. Subscribers replay and catch up, always from the
+published table, its only copy; a `live` view sees nothing new. A local `send` raises
+`StreamRetired`, a publisher is refused with 4410, and it gets no maintainer or sidecar.
+
+**`restore(..., revive=True)` undoes it**, on the same box or another one: the stream
+continues on its next log, `trades-v2` or later, starting at exactly the retired end, with
+the same columns and sort. Retiring published everything first, so reviving loses nothing,
+and nothing is needed from the old box. Without `revive=True`, `restore` refuses a
+retired stream.
+
+A retired stream's `metadata.json` is version 3, so a streamcast build from before
+retirement refuses it, rather than taking the retired log for a migration that died and
+quietly starting the next one. Reviving writes version 2 again.
 
 **There is no rename.** Changing `price` to `px` removes one column and adds another.
 Nothing is backfilled or merged, so a read across the seam returns both, each null in the

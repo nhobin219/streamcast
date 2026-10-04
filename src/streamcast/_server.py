@@ -190,7 +190,13 @@ def _supervisors(
         return []
 
     plan = Maintain() if maintain is True else maintain
-    logs = [stream.log for stream in routes.values() if stream.log is not None]
+    # A retired stream's log takes no more passes: it is finished, and
+    # opened only for reading.
+    logs = [
+        stream.log
+        for stream in routes.values()
+        if stream.log is not None and stream.retirement is None
+    ]
 
     # **A name that matches nothing is a raise, not a shrug.** Silently
     # ignoring it puts the log back in the shared loop — the one thing the
@@ -265,7 +271,9 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     shipping = [
         stream.log
         for stream in routes.values()
-        if stream.log is not None and stream.log.config.wal_replication
+        if stream.log is not None
+        and stream.retirement is None
+        and stream.log.config.wal_replication
     ]
     if not replicate:
         if shipping:
@@ -328,7 +336,6 @@ def serve(
     *,
     maintain: bool | Maintain = True,
     replicate: bool = False,
-    publish: bool = False,
     max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
     max_inbound: int | Mapping[str, int] = MAX_INBOUND,
     max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
@@ -398,9 +405,8 @@ def serve(
     freshness threshold cannot live in a library. `stats="/_internal/streams"`
     moves it; `stats=False` turns it off.
 
-    **On by default, unlike `publish=`**, and the asymmetry is the point.
-    `publish` grants writes, which nothing else on this port grants. This
-    discloses strictly LESS than the socket beside it already does: a
+    **On by default.** It discloses strictly LESS than the socket beside it
+    already does: a
     wrong-path connect is answered with `serves=` naming every stream, the
     greeting carries `end_offset`, and anyone who can reach the port can
     subscribe and read every row in full. Everything here except the
@@ -481,18 +487,8 @@ def serve(
             return
 
         if isinstance(requested, Publish):
-            # **Opt-in, because a server that silently became writable on an
-            # upgrade would be a security change nobody asked for.** Every
-            # other refusal here is about what a caller asked for; this one is
-            # about what the operator allowed, so it says so rather than
-            # pretending the stream does not exist.
-            if not publish:
-                await connection.close(
-                    Close.BAD_REQUEST,
-                    refusal("publish_disabled"),
-                )
-                return
-
+            # Every stream takes publishers; whether it can be written is the
+            # stream's to say — a retired one refuses them itself (4410).
             try:
                 await stream.serve_publisher(connection)
             except ConnectionClosed:

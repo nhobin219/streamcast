@@ -62,7 +62,12 @@ from websockets.frames import Close as _CloseFrame
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
 from streamcast._protocol import Publish, parse_subscribe, refusal
-from streamcast._server import _DETAIL_CHARS, _routes, _sidecars, _supervisors
+from streamcast._server import (
+    _DETAIL_CHARS,
+    _routes,
+    _sidecars,
+    _supervisors,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Mapping
@@ -278,7 +283,6 @@ class _Mounted:
     __slots__ = (
         "_children",
         "_maintain",
-        "_publish",
         "_sidecars",
         "_started",
         "_streams",
@@ -290,7 +294,6 @@ class _Mounted:
         *,
         maintain: bool | Maintain = True,
         replicate: bool = False,
-        publish: bool = False,
         max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
         max_inbound: int | Mapping[str, int] = MAX_INBOUND,
         max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
@@ -309,13 +312,10 @@ class _Mounted:
         # as `app = asgi(...)` — should not do.
         self._sidecars: list[_Child] = [*_sidecars(self._streams, replicate)]
         self._children: list[_Child] = []
-        self._publish = publish
         self._started = False
 
     def __repr__(self) -> str:
-        return (
-            f"<streamcast.asgi serving={sorted(self._streams)} publish={self._publish}>"
-        )
+        return f"<streamcast.asgi serving={sorted(self._streams)}>"
 
     def _start(self) -> None:
         if self._started:
@@ -448,10 +448,6 @@ class _Mounted:
             return
 
         if isinstance(requested, Publish):
-            if not self._publish:
-                await peer.close(Close.BAD_REQUEST, refusal("publish_disabled"))
-                return
-
             await stream.serve_publisher(peer)
             return
 
@@ -476,7 +472,6 @@ def asgi(
     *,
     maintain: bool | Maintain = True,
     replicate: bool = False,
-    publish: bool = False,
     max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
     max_inbound: int | Mapping[str, int] = MAX_INBOUND,
     max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
@@ -512,7 +507,6 @@ def asgi(
         streams,
         maintain=maintain,
         replicate=replicate,
-        publish=publish,
         max_backlog=max_backlog,
         max_inbound=max_inbound,
         max_in_flight=max_in_flight,

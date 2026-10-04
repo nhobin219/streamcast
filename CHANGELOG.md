@@ -11,6 +11,31 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Stream.retire`** (#96): finish a stream for good.
+  - **What it does:** publishes every row (including the trailing run a plain
+    `publish` holds back), retires the log in litelink, and records the
+    retirement in `metadata.json`, locally and beside the tables.
+  - **Read-only from then on:** a retired stream is still served. Subscribers
+    replay and catch up from the published table. A local `send` raises
+    `StreamRetired`, a publisher is refused with the new close code 4410, and
+    it gets no maintainer or sidecar.
+  - **Undoing it:** `Stream.restore(..., revive=True)`, on any box, continues
+    it on a new log at exactly the retired end, losing nothing.
+  - **Older builds refuse it:** a retired stream's `metadata.json` is version
+    3, so an older streamcast refuses it instead of quietly starting a new log.
+- **`Stream.restore(replica_reserve=, published_reserve=)`**, litelink's offset
+  fences, passed through.
+- **`Stream.restore(schema=, sort_by=, config=)`.** The restored log's shape
+  comes from the stream's metadata by default: its exact schema (binary
+  encodings and system columns included, which an Iceberg schema doesn't keep)
+  and its `sort_by`. litelink 0.10.1 checks them against the replica or table,
+  and needs them for a table no 0.10 publish stamped. `schema=` and `sort_by=`
+  override, or cover a stream whose metadata predates recording them.
+  `config=` sets the restored log's policy, and the new log's on `revive=True`.
+- **`metadata.json` records each log's `sort_by`.** `serve` fills it in for an
+  existing stream from its open live log; a log not on the machine stays
+  unknown (`null`).
+
 - **litelink's read-cache settings on every reader of the published tables**
   (#77): `memory_cache`, `disk_cache`, `cache_key` and
   `disk_cache_volume_limit` on `Stream.snapshot`, `scan`, `sql` and `live`:
@@ -50,6 +75,17 @@ there was nothing to have changed from. Everything above it is ordinary.
     3.0.0, the first release that accepts metrics.
 
 ### Changed
+
+- **BREAKING: `serve` and `asgi` no longer take `publish=`**, and every served
+  stream takes publishers. Whether a stream can be written is the stream's to
+  say: a retired one refuses publishers with 4410. A call passing `publish=`
+  raises `TypeError`. There's no authentication yet, for readers or writers,
+  so a reachable port is a readable and writable one, as it was for readers
+  already.
+
+- **`Stream.restore` works on a stream that never had WAL replication.**
+  litelink rebuilds the log from its published table when there's no replica,
+  fenced 2^40 above what the old log last recorded issuing (litelink#144).
 
 - **litelink 0.9** (`>=0.9.0,<0.10`), for `litelink.current_metadata`.
 - **A published table's current metadata is resolved outside DuckDB**, with

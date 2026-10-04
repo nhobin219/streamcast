@@ -48,9 +48,9 @@ trades = streamcast.Stream.new(
 )
 
 # 2. The transport. No host, no port: the ASGI server this runs under owns the
-#    socket. `publish=True` because producers are clients: they publish over
-#    the socket, to the same mount subscribers read from.
-streams = asgi(trades, publish=True)
+#    socket. Producers are clients: they publish over the socket, to the
+#    same mount subscribers read from.
+streams = asgi(trades)
 
 
 @contextlib.asynccontextmanager

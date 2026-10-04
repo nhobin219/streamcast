@@ -289,6 +289,7 @@ would turn a rejected subscribe into an empty stream.
 |---|---|---|
 | 4400 | the path or query will not parse | `ProtocolError` |
 | 4404 | nothing served there | `StreamNotFound` |
+| 4410 | the stream is retired and takes no rows (to a publisher) | `StreamRetired` |
 | 4416 | that offset cannot be served | `NotReplayable` |
 | 4429 | you fell too far behind | `TooSlow` |
 | 1000/1001 | the server finished on purpose | ends the iteration |
@@ -1204,9 +1205,9 @@ it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 ## 6b. Remote publishing
 
 `streamcast.publish(uri)` hands rows to a server, which appends them with the
-same `Stream.send` / `send_many` a local publisher calls. Opt-in on the server
-(`serve(..., publish=True)`), because a server that became writable on an
-upgrade would be a change nobody asked for.
+same `Stream.send` / `send_many` a local publisher calls. Every served stream
+takes publishers; one that cannot be written, a retired stream, refuses them
+(4410).
 
 **It adds no authority, and that is the whole argument for it.** litelink
 allows one writer per log, refuses neither a second nor detects one, and has

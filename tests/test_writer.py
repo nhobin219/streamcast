@@ -242,9 +242,7 @@ class TestTheInboundCap:
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         held, _commits = hold(stream, monkeypatch)
         try:
-            async with serve(
-                stream, maintain=False, publish=True, max_inbound=2
-            ) as uri:
+            async with serve(stream, maintain=False, max_inbound=2) as uri:
                 async with streamcast.publish(uri) as producer:
                     futures = [await producer.submit({"i": n}) for n in range(20)]
                     await asyncio.sleep(0.1)
