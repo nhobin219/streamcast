@@ -11,6 +11,21 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Subscription.recv_many(limit=500)` and `Subscription.batches(limit=500)`**
+  (#86): a subscriber's version of group commit.
+  - **What a batch holds:** at least one row, then every row already on the
+    connection, up to `limit`. It never waits for more. A consumer that keeps
+    up gets small batches at `recv`'s latency; one that falls behind gets
+    everything that queued, and catch-up batches come full.
+  - **The same guarantees as `recv`:** the same rows in the same order, with
+    the same offset check.
+  - **The cursor:** it counts a batch as handled when the next is asked for,
+    so the automatic save is now right for batching consumers.
+  - **A connection that ends mid-batch:** the rows before the end are
+    returned, and the refusal is raised next, naming the last row delivered.
+  - **No new buffer:** one row at most is read ahead, outside `websockets`'
+    own bounded queue.
+
 - **Metrics in the OTel example** (`examples/otel/metrics.py`):
   - **`StreamMetricExporter`**, an OTel metric exporter that publishes each
     collection to a stream, one row per data point. It covers sums, gauges

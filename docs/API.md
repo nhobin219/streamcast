@@ -26,7 +26,7 @@ offsets, subscribers, replay — and holds no socket. `serve` puts it behind a p
 Stream            send · send_many · end_offset · subscribers · durable · aclose
   │
   ├─ serve(…)     ─► websockets.Server
-  └─ connect(…)   ─► Subscription      recv · __aiter__ · offset · info · close
+  └─ connect(…)   ─► Subscription      recv · recv_many · batches · __aiter__ · offset · info · close
 ```
 
 `SCHEMA` and `EARLIEST` are exported because they appear in calls you write: the first
@@ -687,6 +687,8 @@ some `recv`.
 ```python
 await sub.recv() -> tuple[int | None, int | None, dict[str, object]]   # (offset, ts, msg)
 async for offset, ts, msg in sub: ...
+await sub.recv_many(limit=500) -> list[tuple]   # at least one row, then what has arrived
+async for batch in sub.batches(limit=500): ...  # recv_many until an ordinary close
 await sub.close(code=1000, reason="") -> None   # drains what is in flight
 sub.commit(offset=None) -> None   # save the cursor now — see Resuming
 
@@ -712,6 +714,23 @@ column existed.
 Iteration **stops** on a normal close (1000/1001) and **raises** on anything else — the
 same contract as iterating a `websockets` connection, with the refusals below filling in
 for what a bare code cannot say.
+
+**`recv_many` takes what has already arrived, and never waits for more.** It waits for
+the first row as `recv` does, then takes every row already on the connection, up to
+`limit` — the rule group commit follows on the publishing side. A consumer that keeps up
+gets small batches at `recv`'s latency; one that falls behind gets everything that
+queued, which costs it less per row, so it catches up and the batches shrink again.
+Catch-up rows are in memory once read, so a catch-up's batches come full.
+
+```python
+async for batch in sub.batches(limit=500):
+    await database.insert_many(row for _offset, _ts, row in batch)
+```
+
+The same rows in the same order as `recv`, checked the same way. The cursor counts a
+batch as handled when the next one is asked for, so a handler that raises reads the whole
+batch again. If the connection ends partway through, the rows before it are returned and
+the next call raises the refusal, whose resume offset is the last row you were given.
 
 `info` is the greeting: `end_offset` (the server's frontier at subscribe), `replay` (the
 `[start, end)` about to be replayed, or `None`), `durable` (whether these offsets survive
@@ -834,9 +853,10 @@ which is neither. So four things are arranged around that:
 durable and correcting an optimistic value downward is the point. It also cancels the
 clean-exit save, so leaving the block does not undo it.
 
-**A batching consumer should not use the automatic save at all.** It advances as you read,
-which for a batch is ahead of what you have flushed. Drive `streamcast.Cursor` yourself —
-it is exported for exactly that — and save only what you have committed.
+**A consumer that batches with `recv_many` or `batches` can use the automatic save**: it
+counts a batch as handled when the next is asked for. One that builds its own batches out
+of `recv` should not — that save advances per row read, ahead of what it has flushed — and
+calls `commit()` once each batch is durable, or drives `streamcast.Cursor` itself.
 
 ```python
 sub.commit()          # force a save now — for a batching or non-idempotent consumer

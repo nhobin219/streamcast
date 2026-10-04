@@ -393,9 +393,9 @@ class TestTheCursorNeverRewinds:
                 assert (await sub.recv())[0] == 1
                 assert (await sub.recv())[0] == 2
 
-                # Rewind what the subscription believes it has seen, which is
+                # Rewind what the subscription believes it has read, which is
                 # indistinguishable from the next frame arriving stale.
-                sub._offset = 99  # noqa: SLF001
+                sub._received = 99  # noqa: SLF001
                 with pytest.raises(streamcast.ProtocolError, match="must increase"):
                     await sub.recv()
 
@@ -409,7 +409,7 @@ class TestTheCursorNeverRewinds:
 
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                 assert (await sub.recv())[0] == 1
-                sub._offset = -1000  # noqa: SLF001 — a large jump forward
+                sub._received = -1000  # noqa: SLF001 — a large jump forward
                 assert (await sub.recv())[0] == 2
 
     async def test_a_live_only_stream_has_no_offsets_to_check(self, serve):

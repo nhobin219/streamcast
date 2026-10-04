@@ -66,7 +66,7 @@ from streamcast._protocol import decode, parse_greeting, parse_refusal
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from os import PathLike
     from types import TracebackType
     from typing import Self
@@ -75,6 +75,16 @@ if TYPE_CHECKING:
 
     from streamcast._filter import Where
     from streamcast._protocol import Greeting
+
+Row = tuple[int | None, int | None, dict[str, object]]
+"""`(offset, ts, row)`, as `recv` returns it."""
+
+BATCH: Final = 500
+"""`recv_many`'s and `batches`' default `limit`: rows in one batch at most.
+
+A bound on what one batch holds and on the transaction it hands a consumer,
+not a target — a batch is what has arrived, up to this.
+"""
 
 _UNSET: Final = object()
 """Tells `offset=None` apart from "offset not given".
@@ -225,6 +235,7 @@ class Subscription:
     """A live subscription. Async-iterable, read-only, and offset-aware."""
 
     __slots__ = (
+        "_ahead",
         "_catcher",
         "_connection",
         "_cursor",
@@ -232,6 +243,7 @@ class Subscription:
         "_info",
         "_offset",
         "_prelude",
+        "_received",
         "_stream",
         "_unsaved",
     )
@@ -260,6 +272,15 @@ class Subscription:
         # saved value when the caller comes back for another message, which is
         # the only evidence this library has that the last one was finished.
         self._unsaved: int | None = None
+        # The last offset READ, which runs ahead of `_offset`, the last one
+        # handed to the caller, by the rows of a batch being built and by
+        # `_ahead`. The order check is against this; everything a caller can
+        # see — `offset`, the cursor, a refusal's resume point — is `_offset`.
+        self._received: int | None = None
+        # A read `recv_many` started and did not wait for: the next call's
+        # first row. Kept rather than cancelled, because a cancelled read of
+        # the catch-up rows would end their generator (see `recv_many`).
+        self._ahead: asyncio.Task[Row] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -324,7 +345,7 @@ class Subscription:
         details, and anything else this class deliberately does not wrap."""
         return self._live()
 
-    async def recv(self) -> tuple[int | None, int | None, dict[str, object]]:
+    async def recv(self) -> Row:
         """The next `(offset, ts, row)`.
 
         `ts` is `streamcast_ts`, when the server took the row, in UTC
@@ -341,14 +362,100 @@ class Subscription:
         if self._cursor is not None:
             self._cursor.save(self._unsaved)
 
+        row = await self._take()
+        self._offset = self._unsaved = row[0]
+        return row
+
+    async def recv_many(self, limit: int = BATCH) -> list[Row]:
+        """At least one row, then every row already arrived, up to `limit`.
+
+            async for batch in stream.batches():
+                await database.insert_many(batch)
+
+        **It never waits for a batch to fill.** It waits for the first row as
+        `recv` does, then takes only what has already arrived — so a consumer
+        that keeps up gets small batches at `recv`'s latency, and one that
+        falls behind gets everything that queued, which costs it less per row
+        and lets it catch up. Group commit's rule, on the other end of the
+        stream. Rows from the published tables during a catch-up are already
+        in memory, so those batches start full.
+
+        The same rows in the same order as `recv`, with the same check that
+        offsets increase. The cursor counts a batch as handled when the next
+        is asked for, never sooner: a consumer whose handler raises re-reads
+        the whole batch. If the connection ends partway, the rows read before
+        it are returned, and the next call raises the refusal.
+        """
+        if limit < 1:
+            msg = f"limit={limit}: a batch holds at least one row"
+            raise ValueError(msg)
+
+        if self._cursor is not None:
+            self._cursor.save(self._unsaved)
+
+        batch = [await self._take()]
+        while len(batch) < limit:
+            # Whether a row is ready, asked the only way the public APIs
+            # allow: start a read and give it one turn of the loop. A ready
+            # row is taken; an unready read is KEPT as the next call's first
+            # row rather than cancelled, so it costs nothing, and a read of
+            # the catch-up generator — which a cancel would end — is never
+            # cancelled. One row at most is held outside `websockets`' queue.
+            ahead = asyncio.ensure_future(self._read())
+            await asyncio.sleep(0)
+            if not ahead.done() or ahead.exception() is not None:
+                # A failed read is raised by the NEXT call, after the rows
+                # before it are handed over.
+                self._ahead = ahead
+                break
+
+            batch.append(ahead.result())
+
+        self._offset = self._unsaved = batch[-1][0]
+        return batch
+
+    async def batches(self, limit: int = BATCH) -> AsyncIterator[list[Row]]:
+        """`recv_many` as a loop: batches until an ordinary close, as iterating
+        the subscription yields rows until one."""
+        while True:
+            try:
+                batch = await self.recv_many(limit)
+            except ConnectionClosed as exc:
+                if exc.rcvd is not None and exc.rcvd.code in _ENDED:
+                    return
+
+                raise
+
+            yield batch
+
+    async def _take(self) -> Row:
+        """The next row for the caller: a read already started, or a new one.
+
+        A refusal is built HERE, at delivery, rather than where the read
+        failed: its resume point is the last row the caller was given, and
+        rows read before the failure may still have been on their way to it.
+        """
+        ahead, self._ahead = self._ahead, None
+        try:
+            return await (ahead if ahead is not None else self._read())
+        except ConnectionClosed as exc:
+            refusal = _refusal(exc, stream=self._stream, offset=self._offset)
+            if refusal is None:
+                raise
+
+            raise refusal from None
+
+    async def _read(self) -> Row:
+        """Read one row, from the catch-up or the socket. Delivers nothing.
+
+        Checks the order and advances `_received`; `_offset`, the cursor and
+        a refusal belong to the caller's side, `recv` and `recv_many`.
+        """
         if self._prelude is not None:
             caught = await anext(self._prelude, None)
             if caught is not None:
-                offset, ts, row = caught
-                self._offset = offset
-                self._unsaved = offset
-
-                return offset, ts, row
+                self._received = caught[0]
+                return caught
 
             # Exhausted, which means `Catcher.stream` returned — and it does
             # not return until it has a live connection. Everything below the
@@ -361,17 +468,9 @@ class Subscription:
                 self._info = catcher.info
                 self._inbound = _inbound(catcher.info)
 
-        try:
-            # `decode=False`: a data frame is a TEXT frame of JSON, and msgspec
-            # parses the bytes directly — no `str` built only to be parsed.
-            frame = await self._live().recv(decode=False)
-        except ConnectionClosed as exc:
-            refusal = _refusal(exc, stream=self._stream, offset=self._offset)
-            if refusal is None:
-                raise
-
-            raise refusal from None
-
+        # `decode=False`: a data frame is a TEXT frame of JSON, and msgspec
+        # parses the bytes directly — no `str` built only to be parsed.
+        frame = await self._live().recv(decode=False)
         offset, ts, row = decode(frame)
         # Binary columns arrive as text in their encoding, and a row that
         # came out of the published tables by catch-up carries bytes: decoded here so
@@ -388,7 +487,7 @@ class Subscription:
         # What it actually guards is the two places the offsets come from
         # somewhere TCP says nothing about:
         #
-        # * **The catch-up join.** `self._offset` above is set by rows read
+        # * **The catch-up join.** `self._received` is set by rows read
         #   out of OBJECT STORAGE, and the first frame off the socket is
         #   compared against it. Those are two different sources spliced into
         #   one stream, and the splice is computed by `Catcher.start` and the
@@ -408,28 +507,30 @@ class Subscription:
         # is usually assumed to cover cannot happen.
         #
         # It does NOT span a reconnect: a new `Subscription` starts with
-        # `_offset = None`, so nothing is compared across the gap. The log is
+        # `_received = None`, so nothing is compared across the gap. The log is
         # what makes that safe, not this.
         #
         # `<=` rather than `!= previous + 1`: litelink's offset space has
         # legitimate GAPS (a `restore` fences 2**20 of them), so a jump
         # forward is ordinary and only a step backwards is wrong.
-        if offset is not None and self._offset is not None and offset <= self._offset:
+        if (
+            offset is not None
+            and self._received is not None
+            and offset <= self._received
+        ):
             msg = (
                 f"offsets must increase within a subscription; received "
-                f"{offset} after {self._offset}"
+                f"{offset} after {self._received}"
             )
             raise ProtocolError(msg)
 
-        self._offset = offset
-        self._unsaved = offset
-
+        self._received = offset
         return offset, ts, row
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> tuple[int | None, int | None, dict[str, object]]:
+    async def __anext__(self) -> Row:
         """Stops on an ordinary close; raises on anything else.
 
         Same contract as iterating a `websockets` connection — a normal
@@ -455,9 +556,11 @@ class Subscription:
         it is you stating what is durable, and correcting an optimistic value
         downward is the point. The automatic saves never do — see `_cursor`.
 
-        A consumer that batches should not rely on the automatic save at all:
-        it advances as you read, which for a batch is ahead of what you have
-        flushed. Drive `streamcast.Cursor` yourself there.
+        A consumer that batches with `recv_many` or `batches` can rely on the
+        automatic save: it counts a batch as handled when the next is asked
+        for. One that builds its own batches out of `recv` should not — that
+        save advances per row read, ahead of what it has flushed — and calls
+        this once each batch is durable.
         """
         if self._cursor is None:
             return
@@ -478,6 +581,14 @@ class Subscription:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """End the subscription. Idempotent, and awaits the close handshake."""
+        # First: a read still running is reading the catch-up generator or the
+        # socket, and both are closed below. Its row was never handed over,
+        # so dropping it loses nothing the caller saw.
+        ahead, self._ahead = self._ahead, None
+        if ahead is not None:
+            ahead.cancel()
+            await asyncio.gather(ahead, return_exceptions=True)
+
         prelude, self._prelude = self._prelude, None
         catcher, self._catcher = self._catcher, None
         if prelude is not None:

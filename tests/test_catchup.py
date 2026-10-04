@@ -162,6 +162,43 @@ class TestItClosesTheGap:
 
         assert [offset for offset, _ts, _row in got] == list(range(1, TOTAL + 1))
 
+    async def test_batches_cross_the_join_whole_and_in_order(
+        self, serve, published_log, s3
+    ):
+        """`batches` over a catch-up: published rows, then the socket's.
+
+        The catch-up rows come from a generator a cancelled read would end.
+        The read after the last published row waits while the generator
+        connects to the server, so a batch that reaches the join ends there
+        with that read waiting — the case where it must be kept, never
+        cancelled. Every row once, in order, across the join.
+        """
+        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        await fill(stream, published_log)
+        # Not published: these can only come from the server, after the join.
+        live = 10
+        await stream.send_many(
+            [{"i": i, "pad": PAD} for i in range(TOTAL, TOTAL + live)]
+        )
+        assert published_log.published_through() == TOTAL  # inclusive
+
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3
+            ) as sub:
+                got: list[list[int | None]] = []
+                async for batch in sub.batches(limit=1500):
+                    got.append([offset for offset, _ts, _row in batch])
+                    if got[-1][-1] == TOTAL + live:
+                        break
+
+        flat = [offset for batch in got for offset in batch]
+        assert flat == list(range(1, TOTAL + live + 1))
+        # The published rows are in memory once read, so the first batch is
+        # full; the second stops at the join, its next read waiting on the
+        # connection. Deterministic: no handshake completes in one loop turn.
+        assert [len(batch) for batch in got[:2]] == [1500, TOTAL - 1500]
+
     @pytest.mark.slow
     async def test_nothing_published_during_the_catch_up_is_lost(
         self, serve, published_log, s3
