@@ -51,6 +51,7 @@ from websockets.exceptions import ConnectionClosed
 from streamcast import _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
 from streamcast._limits import MAX_TAIL
+from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -88,8 +89,12 @@ class Live:
         where: dict[str, object] | None = None,
         start: int | None = None,
         max_tail: int = MAX_TAIL,
+        cache: ReadCache = DEFAULT_CACHE,
     ) -> None:
         self._broker = broker
+        # How every read of the published tables is cached — the base, each
+        # rebase, and a catch-up — as `Stream.live` was asked.
+        self._cache = cache
         # What the view will hold from the broker, unpublished, before it
         # stops: a publisher that has stalled must not run this process out
         # of memory. See `_limits.MAX_TAIL`.
@@ -143,6 +148,7 @@ class Live:
             catch_up=True,
             s3_options=self._s3,
             where=self._where,
+            **self._cache.keywords(),  # ty: ignore[invalid-argument-type]
         )
         try:
             subscription = await connecting
@@ -257,6 +263,7 @@ class Live:
             _require(self._broker, self._uri),
             s3_options=self._s3,
             stream_id=self._stream_id,
+            cache=self._cache,
         )
         async with self._lock:
             # Converted against the old base first, so a pending row is judged
@@ -490,6 +497,7 @@ async def live(
     where: dict[str, object] | None = None,
     start_offset: int | None = None,
     max_tail: int = MAX_TAIL,
+    cache: ReadCache = DEFAULT_CACHE,
 ) -> Live:
     """See `Stream.live`."""
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
@@ -515,7 +523,7 @@ async def live(
         raise ValueError(msg)
 
     base = await _snapshot.snapshot(
-        uri, s3_options=s3_options, stream_id=greeting.stream_id
+        uri, s3_options=s3_options, stream_id=greeting.stream_id, cache=cache
     )
     view = Live(
         broker,
@@ -526,6 +534,7 @@ async def live(
         where=where,
         start=start,
         max_tail=max_tail,
+        cache=cache,
     )
     try:
         await view._start()  # noqa: SLF001

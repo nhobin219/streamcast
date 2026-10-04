@@ -199,6 +199,41 @@ class TestItClosesTheGap:
         # connection. Deterministic: no handshake completes in one loop turn.
         assert [len(batch) for batch in got[:2]] == [1500, TOTAL - 1500]
 
+    async def test_a_catch_up_reads_with_the_callers_cache_settings(
+        self, serve, published_log, s3, tmp_path, monkeypatch
+    ):
+        """`connect`'s cache keywords reach the catch-up's reads (#77)."""
+        from streamcast import _published  # noqa: PLC0415
+
+        asked: list[_published.ReadCache] = []
+        real = _published.connection
+
+        def recording(s3_options, *, remote, cache=_published.DEFAULT_CACHE):  # noqa: ANN001, ANN202
+            asked.append(cache)
+            return real(s3_options, remote=remote, cache=cache)
+
+        monkeypatch.setattr(_published, "connection", recording)
+        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        await fill(stream, published_log)
+
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.connect(
+                uri,
+                offset=1,
+                catch_up=True,
+                s3_options=s3,
+                disk_cache=True,
+                cache_key=tmp_path / "cache",
+            ) as sub:
+                assert (await sub.recv())[0] == 1
+
+        assert asked
+        assert all(
+            cache
+            == _published.ReadCache(disk_cache=True, cache_key=str(tmp_path / "cache"))
+            for cache in asked
+        )
+
     @pytest.mark.slow
     async def test_nothing_published_during_the_catch_up_is_lost(
         self, serve, published_log, s3

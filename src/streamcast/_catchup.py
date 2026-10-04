@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from streamcast import _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
+from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -135,6 +136,7 @@ class Catcher:
     """
 
     __slots__ = (
+        "_cache",
         "_first",
         "_handshake",
         "_name",
@@ -156,8 +158,10 @@ class Catcher:
         start: int,
         retries: int,
         handshake: Callable[[int], Awaitable[tuple[Any, Any]]],
+        cache: ReadCache = DEFAULT_CACHE,
     ) -> None:
         self._uri = uri
+        self._cache = cache
         self._stream_id = stream_id
         self._name = name
         self._s3 = s3_options
@@ -173,7 +177,10 @@ class Catcher:
     async def _open(self) -> _snapshot.Snapshot:
         try:
             return await _snapshot.snapshot(
-                self._uri, s3_options=self._s3, stream_id=self._stream_id
+                self._uri,
+                s3_options=self._s3,
+                stream_id=self._stream_id,
+                cache=self._cache,
             )
         except _snapshot.SnapshotUnavailable as exc:
             raise CatchUpUnavailable(str(exc)) from exc

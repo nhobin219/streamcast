@@ -11,6 +11,16 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **litelink's read-cache settings on every reader of the published tables**
+  (#77): `memory_cache`, `disk_cache`, `cache_key` and
+  `disk_cache_volume_limit` on `Stream.snapshot`, `scan`, `sql`, `live`, and on
+  `connect` for a catch-up.
+  - **litelink's defaults:** memory on, disk off.
+  - **The key is the caller's:** relative to litelink's cache root, absolute,
+    or its `default`. Nothing is keyed automatically.
+  - **Separate databases:** readers with different settings read through
+    different DuckDB databases.
+
 - **`Subscription.recv_many(limit=500)` and `Subscription.batches(limit=500)`**
   (#86): a subscriber's version of group commit.
   - **What a batch holds:** at least one row, then every row already on the
@@ -40,6 +50,13 @@ there was nothing to have changed from. Everything above it is ordinary.
     3.0.0, the first release that accepts metrics.
 
 ### Changed
+
+- **A published table's `version-hint.text` is read around DuckDB.** With
+  litelink's disk cache on, `cache_httpfs` served an old hint for ever, in
+  the same process and after a restart, pinning a reader to the first
+  snapshot it saw (litelink#141). The hint is now read with the same uncached
+  filesystem as the metadata file; every file it names is written once and
+  caches safely.
 
 - **The one-shot OTel demo runs without a maintainer**, as the migration demo
   does. Its maintainer processes were still opening the logs when the run

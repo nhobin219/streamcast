@@ -69,6 +69,7 @@ from streamcast._protocol import (
     publish_ack,
     publish_error,
 )
+from streamcast._published import ReadCache
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
 from streamcast._writer import Job, Writer
@@ -714,6 +715,10 @@ class Stream:
         broker: str | None = None,
         s3_options: S3Options | None = None,
         max_tail: int = MAX_TAIL,
+        memory_cache: bool = True,
+        disk_cache: bool = False,
+        cache_key: str | PathLike[str] | None = None,
+        disk_cache_volume_limit: float = 0.8,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -727,6 +732,18 @@ class Stream:
         does not write: `scan`, `sql` and `rows`, then `close` (or
         `async with`). See `_snapshot` for what each point means, when the
         broker is consulted, and what is refused rather than answered short.
+
+        **Caching is litelink's, and the caller's choice.** `memory_cache`
+        (on) keeps what was read in DuckDB's external file cache for the
+        process; `disk_cache` (off) keeps `s3://` reads on disk with
+        `cache_httpfs`, across restarts, under `cache_key` — a directory
+        relative to litelink's cache root (a stream id, say), absolute as
+        given, or None for its shared `default`. `disk_cache_volume_limit` is
+        how full that disk may get, everything on it counted. Only the
+        caller knows what deserves a cache of its own, so nothing is keyed
+        for it. Readers with different settings read through different
+        databases; see `litelink.duckdb_connection`. The same keywords are on
+        `scan`, `sql`, `live` and `connect` (for a catch-up).
         """
         return await _snapshot.snapshot(
             metadata_uri,
@@ -735,6 +752,12 @@ class Stream:
             broker=broker,
             s3_options=s3_options,
             max_tail=max_tail,
+            cache=ReadCache.of(
+                memory_cache=memory_cache,
+                disk_cache=disk_cache,
+                cache_key=cache_key,
+                disk_cache_volume_limit=disk_cache_volume_limit,
+            ),
         )
 
     @staticmethod
@@ -746,6 +769,10 @@ class Stream:
         broker: str | None = None,
         s3_options: S3Options | None = None,
         max_tail: int = MAX_TAIL,
+        memory_cache: bool = True,
+        disk_cache: bool = False,
+        cache_key: str | PathLike[str] | None = None,
+        disk_cache_volume_limit: float = 0.8,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -760,6 +787,10 @@ class Stream:
             broker=broker,
             s3_options=s3_options,
             max_tail=max_tail,
+            memory_cache=memory_cache,
+            disk_cache=disk_cache,
+            cache_key=cache_key,
+            disk_cache_volume_limit=disk_cache_volume_limit,
         ) as snap:
             return await snap.scan(
                 columns=columns,
@@ -779,6 +810,10 @@ class Stream:
         broker: str | None = None,
         s3_options: S3Options | None = None,
         max_tail: int = MAX_TAIL,
+        memory_cache: bool = True,
+        disk_cache: bool = False,
+        cache_key: str | PathLike[str] | None = None,
+        disk_cache_volume_limit: float = 0.8,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -795,6 +830,10 @@ class Stream:
             broker=broker,
             s3_options=s3_options,
             max_tail=max_tail,
+            memory_cache=memory_cache,
+            disk_cache=disk_cache,
+            cache_key=cache_key,
+            disk_cache_volume_limit=disk_cache_volume_limit,
         ) as snap:
             return await snap.sql(
                 query,
@@ -812,6 +851,10 @@ class Stream:
         where: dict[str, object] | None = None,
         start_offset: int | None = None,
         max_tail: int = MAX_TAIL,
+        memory_cache: bool = True,
+        disk_cache: bool = False,
+        cache_key: str | PathLike[str] | None = None,
+        disk_cache_volume_limit: float = 0.8,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -839,6 +882,12 @@ class Stream:
             where=where,
             start_offset=start_offset,
             max_tail=max_tail,
+            cache=ReadCache.of(
+                memory_cache=memory_cache,
+                disk_cache=disk_cache,
+                cache_key=cache_key,
+                disk_cache_volume_limit=disk_cache_volume_limit,
+            ),
         )
 
     @property

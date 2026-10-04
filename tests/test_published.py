@@ -155,3 +155,123 @@ def test_an_s3_table_reads_with_the_readers_own_credentials(tmp_path, s3, bucket
         assert table.scan().read_all().num_rows == 4
     finally:
         table.close()
+
+
+def publish(log: litelink.WriteHandle, start: int, count: int) -> None:
+    log.extend([{"i": i} for i in range(start, start + count)])
+    while log.seal(flush=True) is not None:
+        pass
+
+    log.publish(flush=True)
+
+
+class TestTheReadCache:
+    """litelink's read caches, as the caller asks for them (#77)."""
+
+    def test_different_caching_never_shares_a_database(self):
+        cached = _published.connection(None, remote=False)
+        uncached = _published.connection(
+            None, remote=False, cache=_published.ReadCache(memory_cache=False)
+        )
+        # Disk settings mean nothing to a local read, so they do not split it.
+        disk = _published.connection(
+            None,
+            remote=False,
+            cache=_published.ReadCache(disk_cache=True, cache_key="anything"),
+        )
+        setting = "SELECT current_setting('enable_external_file_cache')"
+        try:
+            assert cached.execute(setting).fetchone() == (True,)
+            assert uncached.execute(setting).fetchone() == (False,)
+            cached.execute("CREATE OR REPLACE TABLE cache_probe AS SELECT 1 AS x")
+            assert disk.execute("SELECT x FROM cache_probe").fetchall() == [(1,)]
+            with pytest.raises(Exception, match="cache_probe"):
+                uncached.execute("SELECT x FROM cache_probe")
+        finally:
+            cached.execute("DROP TABLE cache_probe")
+            for connected in (cached, uncached, disk):
+                connected.close()
+
+    def test_a_disk_cached_reader_sees_every_publish(self, tmp_path, s3, bucket):
+        """The hint is the one object that changes, and `cache_httpfs` would
+        serve an old one for ever (litelink#141): a reader pinned to the
+        first snapshot it saw. So it is read around the cache."""
+        cache = tmp_path / "cache"
+        connected = _published.connection(
+            s3,
+            remote=True,
+            cache=_published.ReadCache(disk_cache=True, cache_key=str(cache)),
+        )
+        log = litelink.new(
+            tmp_path / "data", "trades", schema=SCHEMA, published=bucket, s3_options=s3
+        )
+        try:
+            with log:
+                publish(log, 0, 100)
+                first = _published.Table.open(bucket, "trades", s3, shared=connected)
+                assert first.record_count == 100
+
+                publish(log, 100, 50)
+                again = _published.Table.open(bucket, "trades", s3, shared=connected)
+                assert again.record_count == 150
+                assert again.extent == (1, 151)
+
+            # And the disk cache is on: what was read is under the key.
+            assert any(path.is_file() for path in cache.rglob("*"))
+        finally:
+            connected.close()
+
+    async def test_the_settings_reach_every_read_of_a_stream(
+        self, tmp_path, serve, monkeypatch
+    ):
+        """`Stream.snapshot`, `live` — its base and every rebase — pass the
+        caller's settings to the connection every published read goes through."""
+        import streamcast  # noqa: PLC0415
+
+        asked: list[_published.ReadCache] = []
+        real = _published.connection
+
+        def recording(s3_options, *, remote, cache=_published.DEFAULT_CACHE):  # noqa: ANN001, ANN202
+            asked.append(cache)
+            return real(s3_options, remote=remote, cache=cache)
+
+        monkeypatch.setattr(_published, "connection", recording)
+        schema = {
+            "type": "object",
+            "properties": {"i": {"type": "integer"}},
+            "required": ["i"],
+        }
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
+        await stream.send_many([{"i": i} for i in range(3)])
+        assert stream.log is not None
+        while stream.log.seal(flush=True) is not None:
+            pass
+
+        stream.log.publish(flush=True)
+        key = tmp_path / "k"
+        wanted = _published.ReadCache(False, True, str(tmp_path / "k"), 0.5)
+        try:
+            async with serve(stream, maintain=False) as uri:
+                assert stream.metadata_uri is not None
+                async with await streamcast.Stream.snapshot(
+                    stream.metadata_uri,
+                    memory_cache=False,
+                    disk_cache=True,
+                    cache_key=key,
+                    disk_cache_volume_limit=0.5,
+                ):
+                    pass
+
+                async with await streamcast.Stream.live(
+                    uri,
+                    memory_cache=False,
+                    disk_cache=True,
+                    cache_key=key,
+                    disk_cache_volume_limit=0.5,
+                ) as live:
+                    await live.rebase()
+
+            # A snapshot, the live base, and the rebase.
+            assert asked == [wanted] * 3
+        finally:
+            await stream.aclose()
