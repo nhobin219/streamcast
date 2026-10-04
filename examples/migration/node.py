@@ -62,14 +62,6 @@ class Node:
             except streamcast.TooSlow:
                 self.drops += 1  # and resume after `done`: the log has the rest
 
-            except streamcast.NotReplayable as refused:
-                if refused.why != "empty":
-                    raise
-
-                # Nothing written yet: from the start and from now are the same.
-                async with streamcast.connect(self.source) as sub:
-                    await self._handle(sub)
-
     async def _handle(self, sub: streamcast.Subscription) -> None:
         async for offset, _ts, row in sub:
             assert offset is not None  # a pipeline's sources are durable

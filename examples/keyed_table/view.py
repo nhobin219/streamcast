@@ -126,17 +126,8 @@ class View:
         never inside `apply`'s transaction.
         """
         start = streamcast.EARLIEST if self.offset is None else self.offset + 1
-        try:
-            async with streamcast.connect(uri, offset=start, where=where) as sub:
-                await self._apply_all(sub)
-
-        except streamcast.NotReplayable as refused:
-            if refused.why != "empty":
-                raise
-
-            # Nothing written yet: from the start and from now are the same.
-            async with streamcast.connect(uri, where=where) as sub:
-                await self._apply_all(sub)
+        async with streamcast.connect(uri, offset=start, where=where) as sub:
+            await self._apply_all(sub)
 
     async def _apply_all(self, sub: streamcast.Subscription) -> None:
         async for offset, _ts, row in sub:

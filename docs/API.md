@@ -1012,7 +1012,7 @@ recovery hint, and refusing to start because a save was torn turns a crash into 
 StreamcastError
 ├── ProtocolError      the peer is not speaking streamcast, or sent a bad subscribe
 ├── StreamNotFound     nothing served at that path; `.serves` lists what is
-├── NotReplayable      that offset cannot be served; `.why` says which of five
+├── NotReplayable      that offset cannot be served; `.why` says which of four
 ├── CatchUpUnavailable `catch_up=True` could not read the gap; says what to change
 ├── Rejected           a published row the schema refuses; nothing committed
 ├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
@@ -1024,10 +1024,13 @@ StreamcastError
 | `.why` | what to do |
 |---|---|
 | `not_durable` | drop `offset=`, or give the server a log |
-| `empty` | subscribe live; there is nothing to replay yet |
 | `ahead` | your cursor is above the server's frontier — it was restored or rebuilt |
 | `too_old` | `catch_up=True`, or read the log directly and subscribe from where you stopped |
 | `evicted` | below what the scan's tier holds; `catch_up=True` if the published tables go back further, else accept the gap |
+
+`EARLIEST` on a log that holds nothing yet is not refused: it starts at the log's first
+row, and a row committed while the subscribe is being answered is replayed, not missed.
+An older server refuses it with `why == "empty"`.
 
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.

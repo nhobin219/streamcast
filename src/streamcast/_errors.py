@@ -142,8 +142,10 @@ _WHY: Final = {
         "server a log."
     ),
     "empty": (
-        "this stream's log holds no rows yet, so there is nothing to replay. "
-        "Subscribe without `offset=`."
+        "this stream's log holds no rows yet, and this server is older than "
+        "the one that starts EARLIEST at the log's first row. Subscribing "
+        "without `offset=` takes the live stream, but may miss a row committed "
+        "between the two; upgrading the server closes that."
     ),
     "ahead": (
         "offset {offset} is above {end_offset}, the next offset this stream "
@@ -187,8 +189,8 @@ fallback below and still gets the code, the numbers and a correct diagnosis of
 class NotReplayable(StreamcastError):
     """The requested offset cannot be served, and `why` says which reason.
 
-    Five distinct states arrive here and the caller's next move differs for
-    each: drop the offset and take the live stream, ask again from a different
+    Four distinct states arrive here — `empty` too, from an older server —
+    and the caller's next move differs for each: drop the offset and take the live stream, ask again from a different
     one, or stop asking the server and read the log directly. Collapsing them
     into one message was the first design and made every one of those a guess.
     """

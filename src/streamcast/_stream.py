@@ -1926,15 +1926,25 @@ class Stream:
             first = await asyncio.to_thread(
                 partial(_log.earliest, log, published=self._replay_published)
             )
-            if first is None:
+            if first is None and self._floor is not None:
                 # A migrated stream's new log is empty until its first send,
                 # and the stream is not: its history is in the retired logs.
                 # The earliest THIS server serves is where the current log
                 # begins, so that is what EARLIEST means here.
-                if self._floor is None:
-                    raise NotReplayable("empty")
-
                 first = self._floor
+
+            elif first is None:
+                # **Nothing to replay: EARLIEST starts at the frontier** — where
+                # a never-written log's first row will land, and all a log
+                # evicted dry can still serve ("everything the stream can
+                # still serve"; its history is a catch-up's to read). Not a
+                # refusal: a refusal made the client subscribe again, "from
+                # now", and any row committed between the two was in neither
+                # — replayed by nothing, sent live to nobody. `frontier` was
+                # read before the await above, so a row committed since is at
+                # or above it, and the replay to the frontier at attach (I2)
+                # carries it.
+                first = frontier
 
             requested = first
 
@@ -2179,7 +2189,7 @@ def _floor(metadata: _metadata.Metadata | None) -> int | None:
 
     None for a stream with no sealed log even though its metadata knows a
     start: below it there is nothing to point a subscriber at, and an empty
-    log's `EARLIEST` stays `empty`.
+    log's `EARLIEST` starts at its first row.
     """
     if metadata is None or not metadata.sealed_logs:
         return None

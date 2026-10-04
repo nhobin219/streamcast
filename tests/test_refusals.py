@@ -29,13 +29,57 @@ class TestNotReplayable:
         # rather than one.
         assert "without `offset=`" in str(raised.value)
 
-    async def test_a_log_that_holds_nothing_refuses_EARLIEST(self, serve, log):
+    async def test_EARLIEST_on_a_log_that_holds_nothing_starts_at_its_first_row(
+        self, serve, log
+    ):
+        """Not refused: "everything the stream can still serve" is, so far,
+        nothing — and then every row, from the first."""
         stream = streamcast.Stream("trades", log=log)
         async with serve(stream) as uri:
-            with pytest.raises(streamcast.NotReplayable) as raised:
-                await streamcast.connect(uri, offset=streamcast.EARLIEST)
+            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                await stream.send(trade(0))
+                assert (await sub.recv())[0] == 1
 
-        assert raised.value.why == "empty"
+    async def test_a_row_committed_while_EARLIEST_resolves_is_not_lost(
+        self, serve, log, monkeypatch
+    ):
+        """The race a refusal opened, forced rather than hoped for.
+
+        The subscribe asks the log where it starts and finds it empty; rows
+        commit before the subscriber joins. A refusal there sent the client
+        back "from now", past those rows — they were in neither the replay
+        nor the live queue. Starting at the frontier read before the
+        question means they are replayed.
+        """
+        import threading  # noqa: PLC0415
+
+        from streamcast import _log  # noqa: PLC0415
+
+        asked, release = threading.Event(), threading.Event()
+        real = _log.earliest
+
+        def held(handle, *, published=False):  # noqa: ANN001, ANN202
+            answer = real(handle, published=published)  # empty, at this moment
+            asked.set()
+            release.wait(5)  # while the rows below commit
+            return answer
+
+        monkeypatch.setattr(_log, "earliest", held)
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream) as uri:
+            opening = asyncio.ensure_future(
+                streamcast.connect(uri, offset=streamcast.EARLIEST).__aenter__()
+            )
+            assert await asyncio.to_thread(asked.wait, 5)
+            assert await stream.send_many([trade(i) for i in range(3)]) == [1, 2, 3]
+            release.set()
+
+            sub = await opening
+            try:
+                got = [(await asyncio.wait_for(sub.recv(), 5))[0] for _ in range(3)]
+                assert got == [1, 2, 3]
+            finally:
+                await sub.close()
 
     async def test_an_offset_above_the_frontier_is_refused_with_both_numbers(
         self, serve, log
@@ -106,7 +150,8 @@ class TestNotReplayable:
             before = len(asyncio.all_tasks())
             for _ in range(25):
                 with pytest.raises(streamcast.NotReplayable):
-                    await streamcast.connect(uri, offset=streamcast.EARLIEST)
+                    # Above the frontier: refused before the subscriber joins.
+                    await streamcast.connect(uri, offset=999)
 
             await asyncio.sleep(0.05)
             assert stream.subscribers == 0
@@ -206,7 +251,7 @@ async def test_a_refusal_inside_async_with_does_not_wedge_the_teardown(serve, lo
     stream = streamcast.Stream("trades", log=log)
     async with serve(stream) as uri:
         with pytest.raises(streamcast.NotReplayable):
-            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+            async with streamcast.connect(uri, offset=999) as sub:  # ahead
                 await sub.recv()
 
         await stream.send(trade(0))

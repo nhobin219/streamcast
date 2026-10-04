@@ -156,7 +156,10 @@ class Live:
             if refused.why != "empty":
                 raise
 
-            # Nothing in the log yet, so nothing to replay: from now is all.
+            # Only an older broker refuses EARLIEST on an empty
+            # log; a current one starts it at the log's first row. Against
+            # an old one this is the best left, and a row committed between
+            # the refusal and this subscribe is missed — upgrade the broker.
             subscription = await _client.connect(self._broker, where=self._where)
 
         # The latest word on where the history is: a restarted broker may

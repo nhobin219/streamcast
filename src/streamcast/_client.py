@@ -676,7 +676,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     `offset` is the resume point: absent for live-only, `streamcast.EARLIEST`
     for everything the stream still holds, or an offset to resume from
     inclusive. It is refused rather than ignored when the server cannot serve
-    it — see `NotReplayable`, which says which of the five reasons it is.
+    it — see `NotReplayable`, which says which reason it is.
 
     **`cursor=path` keeps the resume point on disk**, which is the loop every
     consumer otherwise writes by hand. The file holds the last offset finished
