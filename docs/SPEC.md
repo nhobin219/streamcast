@@ -976,18 +976,24 @@ no real log holds one and a defence nothing exercises can break unnoticed),
 and predicates over
 several terms.
 
-### The five refusals
+### The four refusals
 
 | `why` | when | the caller's next move |
 |---|---|---|
 | `not_durable` | no log attached | drop `offset=`, or give the server a log |
-| `empty` | the log holds nothing yet | subscribe live |
 | `ahead` | above the frontier | the server was restored or rebuilt; investigate |
 | `too_old` | further back than `max_replay` | `catch_up=True`, or read the log directly |
 | `evicted` | below what the scan's tier holds | `catch_up=True` if the published tables go back further, else accept the gap |
 
-Five rather than one, because the move differs for each and collapsing them made
+Four rather than one, because the move differs for each and collapsing them made
 every one of them a guess.
+
+`EARLIEST` on a log that holds nothing is not refused: it is a replay from the
+frontier read before the subscriber joins — empty, unless rows committed in
+between, which it then carries. An older server refused it as `empty`, and a
+client that took that as "subscribe from now" missed any row committed between
+the refusal and the second subscribe: in neither the replay nor the live queue.
+A client still understands `empty`, from such a server.
 
 `evicted` is the only one that cannot be decided before the scan opens, so
 `_replay_from` pulls the first row and compares it to the request. Serving from

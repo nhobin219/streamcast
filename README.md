@@ -716,8 +716,9 @@ published tables if they still hold them — it will say so if they do not — o
 with offset=streamcast.EARLIEST to take what is left and accept the gap.
 ```
 
-Five `why` values — `not_durable`, `empty`, `ahead`, `too_old`, `evicted` — because the
-caller's next move differs for each.
+Four `why` values — `not_durable`, `ahead`, `too_old`, `evicted` — because the caller's
+next move differs for each. `EARLIEST` on a log that holds nothing yet is not refused: it
+starts at the log's first row. (An older server refuses it as `empty`.)
 
 #### Recovering a consumer
 

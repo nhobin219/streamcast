@@ -7,6 +7,19 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- **`EARLIEST` on a log that holds nothing yet no longer loses rows.** The
+  server refused it as `NotReplayable("empty")`, and a client that then
+  subscribed "from now", as the message advised, missed any row committed
+  between the refusal and the second subscribe. `EARLIEST` now starts at the
+  log's first row: a replay from the frontier read before the subscriber joins,
+  which carries any row committed in between. A client still understands
+  `empty` from an older server. Found as an intermittent CI failure in the
+  keyed-table example, and the same race was in `Stream.live` at open.
+
 ## 0.14.0 — 2026-10-04
 
 ### Added
