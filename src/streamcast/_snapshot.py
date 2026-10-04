@@ -45,6 +45,7 @@ from streamcast import _log, _manifest, _published, _remote, _schema
 from streamcast._errors import NotReplayable, StreamcastError
 from streamcast._limits import MAX_TAIL
 from streamcast._metadata import Metadata
+from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
@@ -440,6 +441,7 @@ async def snapshot(
     s3_options: S3Options | None = None,
     stream_id: str | None = None,
     max_tail: int = MAX_TAIL,
+    cache: ReadCache = DEFAULT_CACHE,
 ) -> Snapshot:
     """See `Stream.snapshot`."""
     if as_of_offset is not None and as_of_ts is not None:
@@ -457,11 +459,11 @@ async def snapshot(
     found = await asyncio.to_thread(metadata, metadata_uri, s3_options, stream_id)
     return (
         await asyncio.to_thread(
-            _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3_options
+            _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3_options, cache
         )
         if broker is None or as_of_offset is None
         else await _with_tail(
-            metadata_uri, found, as_of_offset, broker, s3_options, max_tail
+            metadata_uri, found, as_of_offset, broker, s3_options, max_tail, cache
         )
     )
 
@@ -518,10 +520,11 @@ def _assemble(
     as_of_offset: int | None,
     as_of_ts: int | None,
     s3_options: S3Options | None,
+    cache: ReadCache = DEFAULT_CACHE,
 ) -> Snapshot:
     """Everything a snapshot needs but a broker: the pieces, the live pin, the end."""
     remote = any((entry.published or "").startswith("s3://") for entry in found.logs)
-    connection = _published.connection(s3_options, remote=remote)
+    connection = _published.connection(s3_options, remote=remote, cache=cache)
     try:
         pieces = _pieces(found, as_of_ts)
         live = next((p for p in pieces if p.entry is found.live_log), None)
@@ -603,12 +606,13 @@ async def _with_tail(
     broker: str,
     s3_options: S3Options | None,
     max_tail: int,
+    cache: ReadCache = DEFAULT_CACHE,
 ) -> Snapshot:
     """The published snapshot, then the broker's rows above it up to the point."""
     from streamcast import _client  # noqa: PLC0415 — the client imports this module
 
     published = await asyncio.to_thread(
-        _assemble, metadata_uri, found, None, None, s3_options
+        _assemble, metadata_uri, found, None, None, s3_options, cache
     )
     start = published.end_offset
     try:

@@ -653,7 +653,8 @@ arithmetic.
 ```python
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    s3_options=None, upload_every=30.0, catch_up=False,
-                   catch_up_retries=3, metadata=None,
+                   catch_up_retries=3, metadata=None, memory_cache=True,
+                   disk_cache=False, cache_key=None, disk_cache_volume_limit=0.8,
                    **websockets_kwargs) -> Subscription
 ```
 
@@ -1273,7 +1274,9 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 ```python
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3_options=None,
-                                 max_tail=1_000_000) -> Snapshot
+                                 max_tail=1_000_000, memory_cache=True,
+                                 disk_cache=False, cache_key=None,
+                                 disk_cache_volume_limit=0.8) -> Snapshot
 await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
                              filters=(), start_offset=None, end_offset=None) -> pa.Table
 await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
@@ -1389,6 +1392,28 @@ do not hold yet, which it keeps in memory. That stays small while publishing kee
 `max_tail` rows (1,000,000 by default, counted as read) the snapshot is refused, saying
 publishing is behind, rather than running the reader out of memory.
 
+**Caching what is read is litelink's, and yours to choose.** The four keywords are
+`litelink.duckdb_connection`'s, with its defaults, and the same on `snapshot`, `scan`,
+`sql`, `live` and `connect` (for a catch-up):
+
+| keyword | default | what it does |
+|---|---|---|
+| `memory_cache` | on | DuckDB's external file cache: what was read stays in memory for the process |
+| `disk_cache` | off | `s3://` reads kept on disk by `cache_httpfs`, across restarts |
+| `cache_key` | `None` | the disk cache's directory: relative to litelink's cache root (`cache_key="<stream id>"` is `~/.cache/litelink/<stream id>`), absolute as given, or `None` for its `default` |
+| `disk_cache_volume_limit` | 0.8 | how full the disk cache's volume may get, everything on it counted |
+
+Nothing chooses a key for you, because only you know what deserves a cache of its own: a
+stream id, a team, a job. Readers asking for different settings read through different
+DuckDB databases. A disk cache earns its keep where reads cross a network to object
+storage; against a store on the same machine, it measured no faster than reading it
+again.
+
+**A cached reader still sees every publish.** Each read resolves the table's current
+metadata with `litelink.current_metadata`, outside DuckDB's caches: through a disk-cached
+connection, `version-hint.text` would pin a reader to an old snapshot (litelink#141).
+Everything the hint names is written once, and caches safely.
+
 **Where the metadata file is.** With an `s3://` published location, the copy beside the
 tables, which reads from anywhere. Without one, every log publishes under its own
 directory and the URI is the local `file://` file, which reads only on the server's
@@ -1398,7 +1423,9 @@ machine. On another machine the read says so and suggests an `s3://` location.
 
 ```python
 await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
-                             start_offset=None, max_tail=1_000_000) -> Live
+                             start_offset=None, max_tail=1_000_000, memory_cache=True,
+                             disk_cache=False, cache_key=None,
+                             disk_cache_volume_limit=0.8) -> Live
 
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible

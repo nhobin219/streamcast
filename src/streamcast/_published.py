@@ -15,7 +15,18 @@ opens the table again.
 
 **The DuckDB connection is litelink's** (`litelink.duckdb_connection`), with
 the `iceberg` and `httpfs` extensions litelink provisions rather than installs
-at first read, and the S3 secret it creates.
+at first read, the S3 secret it creates, and the read caches the caller asks
+for (`ReadCache`).
+
+**The hint is resolved around DuckDB, never through it.** `version-hint.text`
+is the one object a reader touches that changes: everything it names — a
+`metadata.json`, its manifests, the data files — is written once under a
+name of its own, so every cache is safe for them. Read through a connection
+with the disk cache on, the hint goes through `cache_httpfs`, whose
+file-handle cache keeps its first handle for up to an hour: a reader would
+stay on an old snapshot, or since litelink 0.9 fail an ETag check
+(litelink#141). So it is resolved with `litelink.current_metadata`, which
+reads it outside DuckDB, and every query names the metadata file it returns.
 
 **One database per process, a connection per reader.** Loading `iceberg` into
 a fresh DuckDB database costs 400-580 ms (measured, `just bench-snapshot`), and
@@ -26,17 +37,20 @@ view and registered tail are its own.
 
 from __future__ import annotations
 
+import os
 import threading
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlsplit
 
 import pyarrow as pa
-from litelink import S3Options, duckdb_connection
+from litelink import S3Options, current_metadata, duckdb_connection
 
 from streamcast._log import COLUMN
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from os import PathLike
 
     import duckdb
 
@@ -49,18 +63,66 @@ def path(uri: str) -> str:
     return uri
 
 
+@dataclass(frozen=True, slots=True)
+class ReadCache:
+    """How a reader caches what it reads: `litelink.duckdb_connection`'s four
+    settings, with its defaults. Hashable, because it is part of the key a
+    database is shared under."""
+
+    memory_cache: bool = True
+    """DuckDB's external file cache, for the database's life."""
+    disk_cache: bool = False
+    """`cache_httpfs` on disk, surviving restarts. `s3://` tables only."""
+    cache_key: str | None = None
+    """The disk cache's directory: relative to litelink's cache root, absolute
+    as given, or None for its `default` directory. The caller's choice — only
+    it knows what deserves a cache of its own, a stream id for one."""
+    disk_cache_volume_limit: float = 0.8
+    """How full the disk cache's VOLUME may get, everything on it counted."""
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        memory_cache: bool,
+        disk_cache: bool,
+        cache_key: str | PathLike[str] | None,
+        disk_cache_volume_limit: float,
+    ) -> ReadCache:
+        """From the keywords the public calls take, which are litelink's."""
+        return cls(
+            memory_cache,
+            disk_cache,
+            None if cache_key is None else os.fspath(cache_key),
+            disk_cache_volume_limit,
+        )
+
+    def keywords(self) -> dict[str, object]:
+        """Back to those keywords, for a call that takes them."""
+        return {
+            "memory_cache": self.memory_cache,
+            "disk_cache": self.disk_cache,
+            "cache_key": self.cache_key,
+            "disk_cache_volume_limit": self.disk_cache_volume_limit,
+        }
+
+
+DEFAULT_CACHE: Final = ReadCache()
+"""litelink's defaults: memory on, disk off."""
+
+
 def _quoted(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-# The databases readers connect to, by what they can read with. Never evicted:
-# a process reads with a handful of credential sets at most.
-_DATABASES: dict[S3Options | None, duckdb.DuckDBPyConnection] = {}
+# The databases readers connect to, by what they can read with and how they
+# cache. Never evicted: a process reads with a handful of each at most.
+_DATABASES: dict[tuple[S3Options | None, ReadCache], duckdb.DuckDBPyConnection] = {}
 _LOCK = threading.Lock()
 
 
 def connection(
-    s3_options: S3Options | None, *, remote: bool
+    s3_options: S3Options | None, *, remote: bool, cache: ReadCache = DEFAULT_CACHE
 ) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection that can read published tables. The caller closes it.
 
@@ -77,15 +139,30 @@ def connection(
     `REFRESH auto`), so a database that outlives an STS session keeps reading.
     Keys rotated in the environment resolve to different options, and so to
     a database of their own.
+
+    **And one per `cache`**, because a cache belongs to the database too: two
+    readers asking for different caching, or different directories, cannot
+    share one. A local database caches only in memory — the disk cache is
+    for `s3://` reads — so its disk settings do not split it.
     """
-    key = (s3_options or S3Options()).resolved() if remote else None
+    credentials = (s3_options or S3Options()).resolved() if remote else None
+    if credentials is None:
+        cache = ReadCache(memory_cache=cache.memory_cache)
+
+    key = (credentials, cache)
     with _LOCK:
         database = _DATABASES.get(key)
         if database is None:
             database = (
-                duckdb_connection(s3_options=key)
-                if key is not None
-                else duckdb_connection()
+                duckdb_connection(
+                    s3_options=credentials,
+                    memory_cache=cache.memory_cache,
+                    disk_cache=cache.disk_cache,
+                    cache_key=cache.cache_key,
+                    disk_cache_volume_limit=cache.disk_cache_volume_limit,
+                )
+                if credentials is not None
+                else duckdb_connection(memory_cache=cache.memory_cache)
             )
             _DATABASES[key] = database
 
@@ -161,15 +238,8 @@ class Table:
             else shared
         )
         try:
-            table = path(uri)
-            hint = connected.execute(
-                f"SELECT content FROM read_text({_quoted(f'{table}/metadata/version-hint.text')})"
-            ).fetchone()
-            if hint is None:  # pragma: no cover — read_text yields a row or raises
-                msg = f"{uri} has no version-hint.text"
-                raise FileNotFoundError(msg)
-
-            metadata = f"{table}/metadata/{hint[0].strip()}.metadata.json"
+            # Not through `connected`: see the module docstring.
+            metadata = path(current_metadata(uri, s3_options=s3_options))
             scan = f"iceberg_scan({_quoted(metadata)})"
             schema = connected.execute(f"SELECT * FROM {scan} LIMIT 0").arrow().schema
             low, high, count = connected.execute(
