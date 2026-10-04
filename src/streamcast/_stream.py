@@ -39,11 +39,14 @@ import asyncio
 import contextlib
 import dataclasses
 import time
+import uuid
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import duckdb
 import litelink
+import pyarrow as pa
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
@@ -53,6 +56,7 @@ from streamcast import (
     _log,
     _manifest,
     _metadata,
+    _published,
     _replicate,
     _schema,
     _snapshot,
@@ -685,6 +689,166 @@ class Stream:
         return cls(
             name,
             log=log,
+            owns_log=True,
+            max_replay=max_replay,
+            floor=_floor(metadata),
+            retired=_retired(root, metadata),
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            replay_published=replay_published,
+            group_commit=group_commit,
+        )
+
+    @classmethod
+    def adopt(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        published: str,
+        schema: Mapping[str, object],
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
+        s3_options: object | None = None,
+        end_offset: int | None = None,
+        max_replay: int | None = MAX_REPLAY,
+        replay_published: bool = False,
+        group_commit: bool = True,
+    ) -> Stream:
+        """Continue a stream whose only remaining copy is its published table.
+
+            stream = streamcast.Stream.adopt(
+                "trades", root="data", published="s3://market-data/prod", schema=V2
+            )
+
+        The third way a stream arrives on a box, beside `new` and `restore`.
+        `new` refuses a published location that already holds a table, and
+        `restore` rebuilds the log from a replicated WAL — which a producer
+        that ran with `wal_replication` off never shipped. This is for that
+        producer's table once the producer is gone for good: the table is the
+        whole history, published in full, and the stream carries on from it.
+
+        **What it does, in `migrate`'s shape.** The published table joins the
+        stream's metadata as a RETIRED log, exactly as a log `migrate` sealed
+        would: `[start, end)` are its own offsets, read from the bucket. A new
+        log, `<name>-v2` (then `-v3`, …), is created at EXACTLY `end`, so the
+        offsets stay one dense sequence across the seam and no offset the old
+        producer issued is ever reissued. The metadata is written beside the
+        tables, and the stream is returned ready to `serve` and `send` to.
+        Snapshots and `connect(catch_up=True)` read the retired table through
+        the metadata like any retired log; the server itself replays only the
+        new one, and refuses a cursor below the seam with `evicted` naming it.
+
+        **No manifest for the retired table**, since its statistics were never
+        read on this box: a snapshot opens it unpruned, as it opens a live log.
+
+        `end_offset` is what the old producer said its log ended at, if it said
+        — one past its last row — and the table has to agree, or the producer
+        published short and NOTHING is adopted: the rows it holds would be lost
+        at the seam, and a short table is the one thing nobody notices later.
+        A stream already migrated once is adopted from its published metadata:
+        its current log's table is sealed at its end and the next name follows.
+
+        ⚠️ **Stop the old producer first, for good.** Nothing here can tell
+        that it is still alive, and two writers on one published table is the
+        corruption `restore` warns of. Where there is a replica, `restore`
+        keeps the rows a planned stop left unpublished; this keeps only what
+        the table holds, which after a full publish is everything.
+
+        Refused — `FileExistsError` — when this box already has the stream
+        (its metadata, or a log at its name): `migrate` opens that.
+        """
+        declared = _declaration(schema)
+        if _metadata.load(root, name) is not None or Path(root, name).exists():
+            msg = (
+                f"stream {name!r} is already at {root}; Stream.migrate opens it. "
+                f"adopt is for a box that never held the stream"
+            )
+            raise FileExistsError(msg)
+
+        # The published copy of the metadata, which only a remote location has:
+        # a `file://` one keeps it beside the log, on the box that is gone.
+        metadata = (
+            _metadata.fetch(published, name, s3_options)  # ty: ignore[invalid-argument-type]
+            if _metadata.remote(published)
+            else None
+        )
+        current = name if metadata is None else metadata.current.name
+        location = (
+            published if metadata is None else (metadata.current.published or published)
+        )
+        try:
+            table = _published.Table.open(location, current, s3_options)  # ty: ignore[invalid-argument-type]
+        except (FileNotFoundError, duckdb.IOException) as exc:
+            # No `version-hint.text` there: nothing was ever published at this
+            # location, or the prefix is wrong. Either way there is no table.
+            msg = (
+                f"no published table at {location}/{current}, so there is nothing "
+                f"to adopt ({exc}). Stream.new creates a stream; Stream.restore "
+                f"rebuilds one from its replica"
+            )
+            raise FileNotFoundError(msg) from exc
+        try:
+            extent = table.extent
+            held = pa.schema(
+                [field for field in table.schema if field.name != _log.COLUMN]
+            )
+        finally:
+            table.close()
+        if extent is None:
+            msg = (
+                f"{location}/{current} holds no rows, so there is nothing to adopt. "
+                f"Stream.new creates a stream; Stream.restore rebuilds one from its "
+                f"replica"
+            )
+            raise FileNotFoundError(msg)
+        start, end = extent
+        if end_offset is not None and end_offset != end:
+            short = end < end_offset
+            msg = (
+                f"{location}/{current} ends at offset {end} and the old producer said "
+                f"{end_offset}: the table is published "
+                f"{'short' if short else 'past what the producer reported'}. "
+                f"Publish it in full and adopt again; nothing was adopted"
+            )
+            raise ValueError(msg)
+
+        if metadata is None:
+            metadata = _metadata.Metadata(
+                stream=name,
+                stream_id=str(uuid.uuid4()),
+                sealed_logs=(),
+                live_log=_metadata.describe(
+                    name, start, None, held, published=published
+                ),
+            )
+        _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
+
+        new_log = litelink.new(
+            root,
+            metadata.next_name(),
+            schema=_log.with_system(declared),
+            sort_by=sort_by,
+            config=config,  # ty: ignore[invalid-argument-type]
+            published=published,
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            start_offset=end,
+        )
+        metadata = metadata.advance(
+            end,
+            _metadata.describe(
+                new_log.name, end, None, new_log.schema, published=new_log.published
+            ),
+        )
+        try:
+            _metadata.save(root, metadata)
+            if _metadata.remote(new_log.published):
+                _metadata.publish(metadata, new_log.published, s3_options)  # ty: ignore[invalid-argument-type]
+        except BaseException:
+            new_log.close()
+            raise
+        return cls(
+            name,
+            log=new_log,
             owns_log=True,
             max_replay=max_replay,
             floor=_floor(metadata),

@@ -11,6 +11,28 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`Stream.adopt(name, root=, published=, schema=, end_offset=)`**: continue
+  a stream whose only remaining copy is its published table. The third way a
+  stream arrives on a box: `new` refuses a location that already holds a
+  table, and `restore` rebuilds from a replicated WAL that a producer with
+  `wal_replication` off never shipped. `adopt` is for that producer's table
+  once the producer is stopped for good.
+  - **`migrate`'s shape at a seam nobody sealed:** the table joins the
+    stream's metadata as a retired log, `[start, end)` read from the bucket,
+    and a new log (`<name>-v2`, then `-v3`, …) is created at exactly `end`,
+    so offsets stay one dense sequence and nothing the old producer issued
+    is reissued. Snapshots and `connect(catch_up=True)` read both sides; the
+    server replays the new log and refuses a cursor below the seam with
+    `evicted`. A stream already migrated once is adopted from its published
+    metadata.
+  - **`end_offset`** is what the old producer said its log ended at; a table
+    that disagrees is published short (or long) and nothing is adopted.
+  - **Refused** when the box already holds the stream (`migrate` opens it),
+    when nothing is published there, and when a column's type differs from
+    what the table had.
+  - **No manifest** for the adopted table: its statistics were never read on
+    this box, so a snapshot opens it unpruned, as it does a live log.
+
 - **`Subscription.recv_many(limit=500)` and `Subscription.batches(limit=500)`**
   (#86): a subscriber's version of group commit.
   - **What a batch holds:** at least one row, then every row already on the
