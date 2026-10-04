@@ -75,11 +75,12 @@ policy is what decides who may read them, not this library. There is no
 switch to leave the location out of the greeting; if it is itself sensitive,
 the port should not be reachable by anyone who should not learn it.
 
-**A server that allows publishing accepts writes from anyone who can reach
-it.** `serve(..., publish=True)` is opt-in for that reason, and off by default
-so an upgrade cannot make a server writable on its own. With it on, the
-authentication above stops being optional: a published row is durable, every
-subscriber sees it, and no consumer cursor undoes it. `process_request` is the
+**A server accepts writes from anyone who can reach it.** Every served stream
+takes publishers — only a retired one refuses them — so the authentication
+above is not optional on a reachable port: a published row is durable, every
+subscriber sees it, and no consumer cursor undoes it. (Before 0.14.0 this was
+opt-in, `serve(..., publish=True)`; that switch is gone, and an upgraded server
+accepts publishers.) `process_request` is the
 hook — it sees the request before the WebSocket opens, including the
 `?publish` query that distinguishes a publisher from a subscriber, so a policy
 can allow reads and refuse writes on the same port.
@@ -87,5 +88,4 @@ can allow reads and refuse writes on the same port.
 What IS in scope: anything that lets a subscriber see messages from a stream it
 did not subscribe to, receive a stream that silently differs from another
 subscriber's, make the server exhaust memory through a path `max_backlog` is
-supposed to bound, or publish into a stream on a server where `publish=True`
-was not set.
+supposed to bound, or publish into a retired stream.

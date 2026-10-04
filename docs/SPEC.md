@@ -996,7 +996,7 @@ where it asked — a hole at the join, which is the one wrong answer a resume mu
 never give.
 
 **An empty scan below the frontier is not always a hole.** A restore fences
-2**20 offsets that were never issued, so a replay inside the fence reads
+2**20 offsets that were never issued (2**40 with no WAL replica), so a replay inside the fence reads
 nothing and there is nothing to refuse. Rows evicted from staging read nothing
 too. The published tier tells them apart: if it holds rows from the requested
 offset on, the rows exist and staging has dropped them, so the replay is
@@ -1349,8 +1349,8 @@ places an offset arrives from somewhere TCP does not cover:
 The first is the only one reachable today. What both would otherwise be is
 silent: processing a stream whose offsets went backwards means skipping data
 once a cursor is involved. `<=` rather than `!= previous + 1`, because
-litelink's offset space has legitimate gaps — a `restore` fences 2**20 of them
-— so a jump forward is ordinary and only a step backwards is wrong.
+litelink's offset space has legitimate gaps — a `restore` fences 2**20 of them,
+or 2**40 with no WAL replica — so a jump forward is ordinary and only a step backwards is wrong.
 
 It does **not** span a reconnect: a new `Subscription` starts with no previous
 offset, so nothing is compared across the gap. The log is what makes resuming
@@ -1374,6 +1374,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 | a replay outruns `max_backlog` | the subscriber is dropped right after catching up. Size the two together (§4) |
 | two publishers on one log | litelink refuses: one writer per log. A second server on the same directory fails to open |
 | the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
+| a publisher writes to a retired stream | refused with 4410 (`StreamRetired`); its readers are unaffected |
 | a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the published tables and then connects (§5) |
 | a catching-up consumer has no credentials | `CatchUpUnavailable` at `connect`, naming the endpoint, the credential source, and four ways out |
 
@@ -1382,16 +1383,23 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 ## 8b. Recovering a server
 
 `Stream.restore(name, root=…, published=…)` stands a stream up on a box that
-never held its log: litelink rebuilds it from the published table and the
-replicated WAL, and the result serves and appends like any other.
+never held its log: litelink rebuilds it from its replicated WAL when there is
+one, and otherwise from its published table alone (litelink 0.10), and the
+result serves and appends like any other. Its schema and `sort_by` come from
+the stream's metadata, exactly — an Iceberg schema keeps no Arrow field
+metadata, where a binary column's encoding lives — and litelink checks them
+against the replica or the table.
 
 **Offsets are fenced, not reissued**, and that is what makes the move safe for
-consumers. litelink burns 2**20 offsets, so the restored stream resumes above
-anything the dead machine may have served. No offset a consumer holds is ever
+consumers. litelink skips 2**20 past what a replica recorded, or 2**40 past what
+the published table says the log issued — rows written after the last publish
+are gone with the machine — so the restored stream resumes above anything the
+dead machine may have served. No offset a consumer holds is ever
 handed out again carrying different data — the one thing a resume cannot
 survive. `recv` permits a forward jump for exactly this reason (I4).
 
-**The fence is a million offsets wide, and it does not strand anyone,
+**The fence is a million offsets wide, or a trillion without a replica, and it
+does not strand anyone,
 because `max_replay` counts ROWS rather than offset distance.** A consumer
 150 rows behind a failed-over producer is 150 rows behind; measuring it as
 1,048,746 was a property of the proxy, not of the work.
@@ -1399,7 +1407,7 @@ because `max_replay` counts ROWS rather than offset distance.** A consumer
 `max_replay` exists to bound what a replay costs, and that cost is rows.
 Offset distance is a proxy for it and an exact one only while the offset space
 is dense — which litelink's is not, by design: a `restore` fences 2**20
-offsets that were never issued, and I4 already says a forward jump is
+offsets that were never issued (2**40 with no WAL replica), and I4 already says a forward jump is
 ordinary. So the distance check runs first, free, and only a subscribe it
 would REFUSE pays to find out what the replay actually costs:
 
@@ -1446,6 +1454,14 @@ and both published to the same table. Nothing refused, nothing warned.
 **Stop the old producer before restoring.** This is an operational
 requirement, not something either library enforces, and it is
 [tracked upstream](https://github.com/nhobin219/litelink/issues/75).
+
+**A planned move needs no fence: retire, then revive.** `Stream.retire` fixes
+the log's end — litelink stops appends and publishes every row before it — and
+records it in the metadata. `Stream.restore(..., revive=True)` then continues
+the stream on its next log at exactly that end, on any box: nothing after it
+was ever issued, so nothing is skipped, and nothing was left unpublished, so
+nothing is lost. Until revived, a retired stream is served read-only, from its
+published table.
 
 ---
 

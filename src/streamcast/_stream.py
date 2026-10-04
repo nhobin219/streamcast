@@ -1281,6 +1281,8 @@ class Stream:
     def retirement(self) -> _metadata.Retirement | None:
         """When the stream was retired and where it ended, or None if it is not.
 
+        Not `retired`, which lists the logs a migration sealed.
+
         A retired stream is served read-only: it replays, snapshots and
         catches up, and refuses every send with `StreamRetired`. See
         `Stream.retire`.
@@ -1329,9 +1331,10 @@ class Stream:
     def retired(self) -> tuple[tuple[Path, str], ...]:
         """The `(root, name)` of each retired log still on this disk.
 
-        Empty for a stream that has never migrated. `serve` maintains these
-        beside the current log, so their local retention keeps running; it
-        never writes to them.
+        The logs a MIGRATION sealed, not whether this stream is retired —
+        that is `retirement`. Empty for a stream that has never migrated.
+        `serve` maintains these beside the current log, so their local
+        retention keeps running; it never writes to them.
         """
         return self._retired
 
@@ -1960,7 +1963,7 @@ class Stream:
             # `max_replay` bounds the work a replay does, and that work is
             # rows — offset distance is a proxy, exact only while the offset
             # space is dense. It is not: a `restore` fences 2**20 offsets
-            # that were never issued, so a consumer 150 rows behind a
+            # that were never issued (2**40 with no WAL replica), so a consumer 150 rows behind a
             # failed-over producer measures as a million and is refused a
             # replay the server could serve instantly.
             #

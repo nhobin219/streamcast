@@ -336,7 +336,7 @@ def rows_from(log: LogHandle, offset: int, *, published: bool = False) -> int:
     **`max_replay` bounds the WORK a replay costs, and that work is rows.**
     Offset distance is a proxy for it, and an exact one only while the offset
     space is dense — which litelink's is not. A `restore` fences 2**20
-    offsets that were never issued, so a consumer 150 rows behind measures as
+    offsets that were never issued (2**40 without a WAL replica), so a consumer 150 rows behind measures as
     a million and a bounded server refuses a replay it could serve instantly.
 
     Asked only when the cheap proxy has already said "too far", so the common
