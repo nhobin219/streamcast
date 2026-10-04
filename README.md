@@ -814,8 +814,6 @@ Offsets are per server and are not translated between hops.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
-- **Not a query interface.** `catch_up` covers resuming from further back than
-  `max_replay`; querying history is `Stream.sql` and `Stream.scan`, or any Iceberg engine.
 - **Not a place for frames that are not rows.** A typed log has nowhere to put a
   subscription ack or a heartbeat; the feed handler drops them.
 
