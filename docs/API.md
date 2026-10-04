@@ -84,6 +84,14 @@ streamcast.Stream.new(name="", *, root, schema,          # creates or opens the 
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
                       max_replay=100_000)
+
+streamcast.Stream.migrate(name="", *, root, schema, ...)  # a new log, a new schema
+streamcast.Stream.restore(name="", *, root, published,    # on a box without the log
+                          s3_options=None, schema=None, sort_by=None, config=None,
+                          replica_reserve=None, published_reserve=None,
+                          revive=False, ...)
+streamcast.Stream.retire(name="", *, root, s3_options=None)  # for good; returns the
+                                                            # record: .at, .end_offset
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -1006,6 +1014,8 @@ StreamcastError
 ├── StreamNotFound     nothing served at that path; `.serves` lists what is
 ├── NotReplayable      that offset cannot be served; `.why` says which of five
 ├── CatchUpUnavailable `catch_up=True` could not read the gap; says what to change
+├── Rejected           a published row the schema refuses; nothing committed
+├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
 └── TooSlow            dropped for falling behind; `.offset` is where to resume
 ```
 

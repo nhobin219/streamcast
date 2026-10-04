@@ -68,7 +68,7 @@ stays small while publishing keeps up. Past this, a snapshot is refused and a
 live view stops, each saying the published tables are too far behind, rather
 than the reader running out of memory waiting on a publisher that has
 stalled. Counted in rows read, not offset distance, which a restore fence
-stretches by 2**20.
+stretches by 2**20, or 2**40 with no WAL replica.
 """
 
 

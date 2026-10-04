@@ -450,6 +450,23 @@ frames, then restore. Unplanned failover loses whatever never shipped.
 > succeeds — see [`SPEC.md`](docs/SPEC.md) §8b and
 > [litelink#75](https://github.com/nhobin219/litelink/issues/75).
 
+### Retiring a stream
+
+A stream that just stops being written leaves its last rows on the box, unpublished.
+`Stream.retire` finishes it: every row published, the log refusing writes for good, and
+the retirement recorded in its metadata. It is still served, read-only — subscribers
+replay and catch up, publishers are refused with 4410. `Stream.restore(..., revive=True)`
+undoes it on any box, continuing at exactly the retired end, so a planned move is
+`retire` on the old box and `revive` on the new one, losing nothing and skipping no
+offsets:
+
+```python
+streamcast.Stream.retire("trades", root="data")                     # old box, stopped
+stream = streamcast.Stream.restore(
+    "trades", root="data", published="s3://market-data/prod", revive=True,
+)                                                                    # new box
+```
+
 ### Serving the whole history
 
 `replay_published=True` with `max_replay=None` makes the server a complete gateway to the

@@ -522,7 +522,8 @@ class Subscription:
         # what makes that safe, not this.
         #
         # `<=` rather than `!= previous + 1`: litelink's offset space has
-        # legitimate GAPS (a `restore` fences 2**20 of them), so a jump
+        # legitimate GAPS (a `restore` fences 2**20 of them, or 2**40 with no
+        # WAL replica), so a jump
         # forward is ordinary and only a step backwards is wrong.
         if (
             offset is not None
