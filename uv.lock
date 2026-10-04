@@ -700,7 +700,7 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.10.1"
+version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "duckdb" },
@@ -708,12 +708,12 @@ dependencies = [
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/62/93de0c03314752e374dcf2184930b6f740acce00dd284dcbfd2775e1e252/litelink-0.10.1.tar.gz", hash = "sha256:9e22771b3ba7c046fde8234b776768f06e90766e140ee2caa5ff1b900b217c5b", size = 339945, upload-time = "2026-10-04T19:42:47.91Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/6a/6f7b7294f51fc18c851528137b4b3b24e34a52fefd0093e61eb396461d4b/litelink-0.10.2.tar.gz", hash = "sha256:13922e5ec0c68550976229bd04692bd4699186877d537cde5acdd9c37f920981", size = 340883, upload-time = "2026-10-04T23:12:54.452Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/9d/1a8668e052c70eb7bce1e5de995caa948c6cb892d7bdf302415d2f9a9f70/litelink-0.10.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:6142daf82e8a65ad823f5e3139af8b4be92b1d007e7fa735607a152d774222a3", size = 44224397, upload-time = "2026-10-04T19:42:34.92Z" },
-    { url = "https://files.pythonhosted.org/packages/2e/fe/9d67efa46ffe516c2c22a1b4ea73cf5bc24c2301af1ce25d4813e6bbeaec/litelink-0.10.1-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:e1eb9ab0004b846f45b42232e73719d2bfd0c6c8fcbec13aa99a2aa3df4cea03", size = 46945989, upload-time = "2026-10-04T19:42:38.221Z" },
-    { url = "https://files.pythonhosted.org/packages/bf/1b/bafebeae1cb064f73ce04e6cbe46882ec94c51196d2a1a7e8b2a04b2d277/litelink-0.10.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:cd637023bece7d3d9d1d3ab84ddf0593ddc7eb2c4da3ee7060e413fc18ad6e51", size = 56094995, upload-time = "2026-10-04T19:42:41.911Z" },
-    { url = "https://files.pythonhosted.org/packages/0f/13/d119a3386e5571d6f92289fd9f02fcfd433db7a62052959042c97d403778/litelink-0.10.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:801fdc227456a63ace88981e6dfef1e25f860daa532566e37c57cd9d3009fc72", size = 59992999, upload-time = "2026-10-04T19:42:45.292Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/08/f9277b41e891cf8be32023fc68fbe0799087c673ab9e62e8f64c4a0b004a/litelink-0.10.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:35257470680dac7efe9f66ff7fc26958eb4bb2563135e43ab7aaba5b1f138c71", size = 44225334, upload-time = "2026-10-04T23:12:38.772Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/02/53276c313b896563323f196f7b372da0fdb85a1891b2cb9add568cc97c08/litelink-0.10.2-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:05793b8d56fca905bb8c4fef902f7bc3d92a5b51f49b0f88ff434eccdc398623", size = 46946928, upload-time = "2026-10-04T23:12:43.018Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/69/ecff47ba4c8a64414da270b093a177875b6e12bc99c9a03f7b143e5d6847/litelink-0.10.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:1512917d1b43e919bd9959dede54719f2ede9494c2537d043cc5cbb3480f4e3a", size = 56095932, upload-time = "2026-10-04T23:12:46.996Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/5a/a31fd31f88d43e37427e20d7063023683cf653ec080f36b657ce3820b676/litelink-0.10.2-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b0cdc22065bb877c2b9684c4ae0875eb3dbd68d687a0b54d4df26e3d74c2c609", size = 59993935, upload-time = "2026-10-04T23:12:51.699Z" },
 ]
 
 [[package]]
@@ -2003,7 +2003,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litelink", specifier = ">=0.10.1,<0.11" },
+    { name = "litelink", specifier = ">=0.10.2,<0.11" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
     { name = "websockets", specifier = ">=14,<18" },

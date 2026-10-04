@@ -7,6 +7,14 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **litelink is `>=0.10.2,<0.11`.** 0.10.2's `retire` no longer walks every
+  manifest, which `Stream.retire` runs, and its publish re-applies the
+  published table's metadata properties.
+
 ## 0.14.1 — 2026-10-04
 
 ### Fixed
