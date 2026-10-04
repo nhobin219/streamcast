@@ -124,6 +124,8 @@ streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
                  max_in_flight=64, ...) -> Server        # an int, or {stream: int}
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
+    await sub.recv() · async for offset, ts, row in sub
+    async for batch in sub.batches(limit=500)   # what has arrived, never waiting for more
 streamcast.publish(uri, ...) -> Publication          # server needs publish=True
     await producer.send(row) · await producer.send_many(rows)
     await producer.submit(row) -> Future   # pipelined: up to max_in_flight=64 unanswered

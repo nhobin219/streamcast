@@ -490,6 +490,7 @@ Neither end can be run out of memory by the other, or by a stall:
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |
 | client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
 | client | a catch-up | one batch at a time | — |
+| client | a `recv_many` batch, and the read it leaves waiting | `limit` rows, plus one | — |
 | client | a snapshot's rows from the broker | `max_tail`, 1,000,000 rows | the snapshot is refused |
 | client | a live view's unpublished rows | `max_tail`, 1,000,000 rows | the view stops; its next query raises |
 
