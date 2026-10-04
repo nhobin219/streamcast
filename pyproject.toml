@@ -26,8 +26,10 @@ dependencies = [
     # floor because `websockets.asyncio` is what everything here imports: the
     # legacy `websockets.server`/`websockets.client` implementation is
     # deprecated, and the two have different connection objects, so a build
-    # that resolved 12 would import successfully and fail at `serve`.
-    "websockets>=14",
+    # that resolved 12 would import successfully and fail at `serve`. The cap
+    # is because `recv_many` reads a private queue (`_client._arrived`):
+    # raise it once `tests/test_batches.py` passes against the next major.
+    "websockets>=14,<18",
     # The durable tier. NOT optional, and that was a real decision: a
     # live-only broker needs nothing from it, and litelink pulls in duckdb,
     # pyarrow and pyiceberg, which is ~124 MB of wheel for a library whose own
