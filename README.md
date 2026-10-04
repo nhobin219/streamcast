@@ -412,8 +412,8 @@ other; `just bench-replay` prints the arithmetic for your hardware.
 ### Recovering a server
 
 A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
-rebuilds the log itself from its published table and the replicated WAL on a machine
-that never held it:
+rebuilds the log itself on a machine that never held it: from its replicated WAL when
+there is one, and otherwise from its published table alone:
 
 ```python
 stream = streamcast.Stream.restore(
@@ -421,8 +421,11 @@ stream = streamcast.Stream.restore(
 )
 ```
 
-Offsets are **fenced, not reissued** — litelink burns 2²⁰ — so no offset a consumer
-holds is ever handed out again carrying different data. The consumer resumes from the
+Offsets are **fenced, not reissued**, so no offset a consumer holds is ever handed out
+again carrying different data. From a replica, litelink skips 2²⁰ past what the replica
+recorded (`replica_reserve=`). From the published table alone, it skips 2⁴⁰ past what the
+old log last said it had issued (`published_reserve=`), since rows written after the last
+publish are lost with the machine. The consumer resumes from the
 cursor it already had and sees a gap, which `recv` allows.
 
 Existing consumers resume with no intervention, because `max_replay` counts **rows**

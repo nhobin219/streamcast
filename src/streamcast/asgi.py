@@ -62,7 +62,12 @@ from websockets.frames import Close as _CloseFrame
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
 from streamcast._protocol import Publish, parse_subscribe, refusal
-from streamcast._server import _DETAIL_CHARS, _routes, _sidecars, _supervisors
+from streamcast._server import (
+    _DETAIL_CHARS,
+    _routes,
+    _sidecars,
+    _supervisors,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Mapping

@@ -60,6 +60,7 @@ from streamcast._errors import (
     ProtocolError,
     StreamcastError,
     StreamNotFound,
+    StreamRetired,
     TooSlow,
 )
 from streamcast._protocol import decode, parse_greeting, parse_refusal
@@ -145,6 +146,14 @@ def _refusal(
         why = fields.pop("why", "")
 
         return NotReplayable(str(why), **fields)
+
+    if close.code == Close.RETIRED:
+        at, end = fields.get("at"), fields.get("end_offset")
+        return StreamRetired(
+            stream,
+            at if isinstance(at, int) else None,
+            end if isinstance(end, int) else None,
+        )
 
     if close.code == Close.TOO_SLOW:
         backlog = fields.get("backlog")

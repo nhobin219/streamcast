@@ -115,6 +115,7 @@ from streamcast._errors import (
     Rejected,
     StreamcastError,
     StreamNotFound,
+    StreamRetired,
     TooSlow,
 )
 from streamcast._limits import MAX_BACKLOG
@@ -155,6 +156,7 @@ __all__ = [
     "Stats",
     "Stream",
     "StreamNotFound",
+    "StreamRetired",
     "StreamcastError",
     "Subscription",
     "TooSlow",

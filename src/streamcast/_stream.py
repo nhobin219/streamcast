@@ -58,7 +58,7 @@ from streamcast import (
     _snapshot,
 )
 from streamcast._codec import compile_codec
-from streamcast._errors import NotReplayable, ProtocolError
+from streamcast._errors import Close, NotReplayable, ProtocolError, StreamRetired
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
 from streamcast._protocol import (
     EARLIEST,
@@ -68,6 +68,7 @@ from streamcast._protocol import (
     greeting,
     publish_ack,
     publish_error,
+    refusal,
 )
 from streamcast._published import ReadCache
 from streamcast._stats import Stats
@@ -79,7 +80,14 @@ if TYPE_CHECKING:
     from os import PathLike
 
     import pyarrow as pa
-    from litelink import LogHandle, Row, S3Options, TierStatistics, WriteHandle
+    from litelink import (
+        LocalReadHandle,
+        LogHandle,
+        Row,
+        S3Options,
+        TierStatistics,
+        WriteHandle,
+    )
 
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
@@ -161,6 +169,7 @@ class Stream:
         "_owned",
         "_replay_published",
         "_retired",
+        "_retirement",
         "_stream_id",
         "_s3",
         "_shape",
@@ -180,7 +189,7 @@ class Stream:
         self,
         name: str = "",
         *,
-        log: WriteHandle | None = None,
+        log: WriteHandle | LocalReadHandle | None = None,
         owns_log: bool = False,
         max_replay: int | None = MAX_REPLAY,
         floor: int | None = None,
@@ -189,6 +198,7 @@ class Stream:
         schema: Mapping[str, object] | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
+        retirement: _metadata.Retirement | None = None,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -281,10 +291,13 @@ class Stream:
         # waiting for that to fall below `max_inbound`. See `_room`.
         self._queued = 0
         self._waiting: list[asyncio.Future[None]] = []
+        # A retired stream is read-only: its log is opened for reading, and
+        # `_submit` refuses before anything could reach a writer.
+        self._retirement = retirement
         self._writer = (
             None
-            if log is None
-            else Writer(log, self._deliver, self._fail, group=group_commit)
+            if log is None or retirement is not None
+            else Writer(log, self._deliver, self._fail, group=group_commit)  # ty: ignore[invalid-argument-type]
         )
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish. Without
@@ -414,6 +427,19 @@ class Stream:
         replay holds a worker from the `to_thread` pool for its whole scan,
         and that pool is `min(32, cpu + 4)`.
         """
+        retired = _open_retired(root, name, schema=schema)
+        if retired is not None:
+            log, metadata = retired
+            return cls._read_only(
+                name,
+                root,
+                log,
+                metadata,
+                s3_options=s3_options,
+                max_replay=max_replay,
+                replay_published=replay_published,
+            )
+
         log, metadata = _open_or_create(
             root,
             name,
@@ -502,6 +528,21 @@ class Stream:
         which reads every log. A consumer that was caught up when the server
         stopped resumes exactly at the seam and loses nothing.
         """
+        opened = _open_retired(root, name, schema=schema)
+        if opened is not None:
+            # Retired, so served as it is: never migrated onto a new log, which
+            # is what reviving does (`restore(..., revive=True)`).
+            log, found = opened
+            return cls._read_only(
+                name,
+                root,
+                log,
+                found,
+                s3_options=s3_options,
+                max_replay=max_replay,
+                replay_published=replay_published,
+            )
+
         declared = _declaration(schema)
         metadata = _metadata.load(root, name)
         current = name if metadata is None else metadata.current.name
@@ -631,6 +672,9 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         max_replay: int | None = MAX_REPLAY,
+        replica_reserve: int | None = None,
+        published_reserve: int | None = None,
+        revive: bool = False,
     ) -> Stream:
         """Stand a stream up on a box that never held its log.
 
@@ -672,13 +716,51 @@ class Stream:
         # **The metadata first**, because it says which log is current. Without
         # it this would rebuild a migrated stream's FIRST log and serve that as
         # though nothing had happened since.
-        metadata = _metadata.fetch(published, name, s3_options)  # ty: ignore[invalid-argument-type]
+        metadata = (
+            _metadata.fetch(published, name, s3_options)  # ty: ignore[invalid-argument-type]
+            if _metadata.remote(published)
+            else None
+        )
+        if metadata is None:
+            # A local published location has no copy beside its tables; a box
+            # that holds the stream has the metadata itself. Read for one
+            # thing only — whether it is retired — so a revive works there.
+            local = _metadata.load(root, name)
+            if local is not None and local.retirement is not None:
+                metadata = local
+
+        if metadata is not None and metadata.retirement is not None:
+            if not revive:
+                retirement = metadata.retirement
+                raise StreamRetired(name, retirement.at, retirement.end_offset)
+
+            return cls._revive(
+                name,
+                root,
+                metadata,
+                published=published,
+                s3_options=s3_options,
+                max_replay=max_replay,
+                replay_published=replay_published,
+                group_commit=group_commit,
+            )
+
+        # litelink's own defaults unless the caller set them: one owner.
+        reserves = {
+            key: value
+            for key, value in (
+                ("replica_reserve", replica_reserve),
+                ("published_reserve", published_reserve),
+            )
+            if value is not None
+        }
         log = litelink.restore(
             root,
             name if metadata is None else metadata.current.name,
             published=published,
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             binary=binary,
+            **reserves,
         )
         if metadata is not None:
             _metadata.save(root, metadata)
@@ -690,6 +772,226 @@ class Stream:
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            replay_published=replay_published,
+            group_commit=group_commit,
+        )
+
+    @classmethod
+    def retire(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        s3_options: object | None = None,
+    ) -> _metadata.Retirement:
+        """Finish a stream for good: every row published, nothing more taken.
+
+            streamcast.Stream.retire("trades", root="data")
+
+        Run with the server stopped, as `migrate` is. In order:
+
+        1. **The published table is made complete.** litelink's `retire`
+           seals every buffered row and publishes the whole log — the
+           trailing run a plain `publish` holds back included — so the table
+           every other machine reads ends exactly where the log does. A stream
+           that merely stops being written leaves that tail on this disk.
+        2. **The log refuses writers**, from any handle, for good.
+        3. **The metadata records it** — when, where the log ended, how it was
+           sorted and the `streamcast_ts` span — locally and beside the
+           tables, with the log's statistics added to the manifest. That is
+           everything reviving needs, on a box that never held the log.
+
+        From then on the stream is served READ-ONLY: `new` and `migrate` open
+        it for reading — subscribers replay and catch up, a live view simply
+        sees nothing new — every send raises `StreamRetired`, and `serve`
+        refuses it with `publish=True`. Its maintainers do not run.
+
+        **Undone by `restore(..., revive=True)`**, here or on another box: the
+        stream continues on a new log starting where this one ended. Retiring
+        published everything first, so reviving loses nothing.
+
+        Safe to run again: an already retired stream returns its record, and
+        a retire that died partway finishes.
+        """
+        metadata = _metadata.load(root, name)
+        if metadata is not None and metadata.retirement is not None:
+            return metadata.retirement
+
+        current = name if metadata is None else metadata.current.name
+        finished = False
+        try:
+            log: LogHandle = litelink.open(root, current)
+        except litelink.RetiredError:
+            # litelink retired it — a retire that died before the metadata
+            # was written. Only the record is left to make.
+            log = litelink.open(root, current, read_only=True)
+            finished = True
+        except FileNotFoundError:
+            msg = f"there is no stream {name!r} at {root} to retire"
+            raise FileNotFoundError(msg) from None
+
+        try:
+            if metadata is None:
+                metadata = _metadata.single(name, log)
+
+            if not finished and isinstance(log, litelink.WriteHandle):
+                if log.config.wal_replication:
+                    with _replicate.retiring(log):
+                        log.retire()
+                else:
+                    log.retire()
+
+            # The whole log, now all of it published.
+            statistics = log.column_statistics()
+            end = log.end_offset()
+            schema = log.schema
+            sort_by = tuple(log.sort_by) or None
+            published = log.published
+        finally:
+            log.close()
+
+        start_ts, end_ts = _metadata.span(statistics)
+        live = metadata.live_log
+        retirement = _metadata.Retirement(
+            at=time.time_ns() // 1000,
+            end_offset=end,
+            sort_by=sort_by,
+            start_ts=live.start_ts if live.start_ts is not None else start_ts,
+            end_ts=end_ts,
+        )
+        # Its statistics join the manifest now, while they can be read: a
+        # revived stream seals this log without it, maybe on another box.
+        manifest = _manifest.extend(
+            _manifest.load(root, name),
+            _manifest.entry(live.name, live.start_offset, end, schema, statistics),
+        )
+        metadata = dataclasses.replace(
+            metadata, manifest=_manifest.name(name), retirement=retirement
+        )
+        # The manifest first, then the metadata that points at it (#27).
+        _manifest.save(root, name, manifest)
+        if _metadata.remote(published):
+            _manifest.publish(published, name, manifest, s3_options)  # ty: ignore[invalid-argument-type]
+
+        _metadata.save(root, metadata)
+        if _metadata.remote(published):
+            _metadata.publish(metadata, published, s3_options)  # ty: ignore[invalid-argument-type]
+
+        return retirement
+
+    @classmethod
+    def _read_only(
+        cls,
+        name: str,
+        root: str | PathLike[str],
+        log: LogHandle,
+        metadata: _metadata.Metadata,
+        *,
+        s3_options: object | None,
+        max_replay: int | None,
+        replay_published: bool,
+    ) -> Stream:
+        """A retired stream, opened to be read: it replays, and refuses sends.
+
+        Replays from the published table whatever `replay_published` says:
+        retiring evicted staging and emptied the buffer, so the table is the
+        log's only copy, and a replay of the local tiers would find nothing.
+        `replay_published` is taken, and ignored, so the call that opens a
+        stream reads the same retired or not.
+        """
+        del replay_published
+        return cls(
+            name,
+            log=log,  # ty: ignore[invalid-argument-type]
+            owns_log=True,
+            max_replay=max_replay,
+            floor=_floor(metadata),
+            retired=_retired(root, metadata),
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            replay_published=True,
+            retirement=metadata.retirement,
+        )
+
+    @classmethod
+    def _revive(
+        cls,
+        name: str,
+        root: str | PathLike[str],
+        metadata: _metadata.Metadata,
+        *,
+        published: str,
+        s3_options: object | None,
+        max_replay: int | None,
+        replay_published: bool,
+        group_commit: bool,
+    ) -> Stream:
+        """A retired stream continued on a new log, where the retired one ended.
+
+        The retired log is never written again — litelink refuses — so the
+        stream rotates, as `migrate` does: the next name, the same columns
+        and sort, starting at exactly the retired end, so the offsets stay
+        one dense sequence. Everything it needs is in the metadata, so the
+        retired log need not be on this box.
+        """
+        retirement = metadata.retirement
+        assert retirement is not None  # the caller checked
+        current = metadata.current
+        location = current.published or published
+        successor = metadata.next_name()
+        declared = _declaration(current.schema)
+        if (Path(root) / successor).exists():
+            # **A revive that died after creating the log** and before saving
+            # the metadata: carried on from, if it is what that run made.
+            log = litelink.open(root, successor)
+            if (
+                log.end_offset() != retirement.end_offset
+                or _log.lowest(log) is not None
+            ):
+                log.close()
+                msg = (
+                    f"{Path(root) / successor} exists and is not an empty log at "
+                    f"offset {retirement.end_offset}, where {current.name!r} was "
+                    f"retired; nothing was revived"
+                )
+                raise FileExistsError(msg)
+
+        else:
+            log = litelink.new(
+                root,
+                successor,
+                schema=_log.with_system(declared),
+                sort_by=retirement.sort_by,
+                published=None if not _metadata.remote(location) else location,
+                s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+                start_offset=retirement.end_offset,
+            )
+
+        revived = metadata.revive(
+            _metadata.describe(
+                log.name,
+                retirement.end_offset,
+                None,
+                log.schema,
+                published=log.published,
+            )
+        )
+        try:
+            _metadata.save(root, revived)
+            if _metadata.remote(log.published):
+                _metadata.publish(revived, log.published, s3_options)  # ty: ignore[invalid-argument-type]
+
+        except BaseException:
+            log.close()
+            raise
+
+        return cls(
+            name,
+            log=log,
+            owns_log=True,
+            max_replay=max_replay,
+            floor=_floor(revived),
+            retired=_retired(root, revived),
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
@@ -915,8 +1217,11 @@ class Stream:
 
         Closed by `aclose` when this `Stream` created it from `root=`+`schema=`,
         and never when it was passed in — that one is the caller's.
+
+        A retired stream's is opened read-only (`litelink.LocalReadHandle`):
+        reads work, writes are refused by litelink.
         """
-        return self._log
+        return self._log  # ty: ignore[invalid-return-type]
 
     @property
     def schema(self) -> dict[str, object] | None:
@@ -926,6 +1231,16 @@ class Stream:
         read the columns without this repo.
         """
         return None if self._shape is None else dict(self._shape)
+
+    @property
+    def retirement(self) -> _metadata.Retirement | None:
+        """When the stream was retired and where it ended, or None if it is not.
+
+        A retired stream is served read-only: it replays, snapshots and
+        catches up, and refuses every send with `StreamRetired`. See
+        `Stream.retire`.
+        """
+        return self._retirement
 
     @property
     def durable(self) -> bool:
@@ -1113,6 +1428,11 @@ class Stream:
         transaction and its rows commit together, so per-row values would
         imply a precision the commit does not have.
         """
+        if self._retirement is not None:
+            raise StreamRetired(
+                self._name, self._retirement.at, self._retirement.end_offset
+            )
+
         now = time.time_ns()
         codec = self._codec
         if codec.check is not None:
@@ -1339,7 +1659,22 @@ class Stream:
         because that is what the local call does: `send` raises, the caller
         catches it, and the next call works. Closing would make one bad row
         cost every good one behind it.
+
+        **A retired stream refuses publishers**, with 4410 (`Close.RETIRED`):
+        its log is open read-only and takes nothing. The stream decides, from
+        what it is; subscribers still read its history.
         """
+        if self._retirement is not None:
+            await connection.close(
+                Close.RETIRED,
+                refusal(
+                    "stream_retired",
+                    at=self._retirement.at,
+                    end_offset=self._retirement.end_offset,
+                ),
+            )
+            return
+
         await connection.send(
             greeting(
                 stream=self._name,
@@ -1516,7 +1851,7 @@ class Stream:
                 # number of live scans against one log.
                 await replay.aclose()
 
-    async def _resolve(self, requested: int | None) -> tuple[WriteHandle, int] | None:
+    async def _resolve(self, requested: int | None) -> tuple[LogHandle, int] | None:
         """The log and offset a replay should start at, or None for live-only.
 
         Every refusal here is cheap and answerable before a scan is opened.
@@ -1602,7 +1937,7 @@ class Stream:
 
     async def _replay_from(
         self,
-        log: WriteHandle,
+        log: LogHandle,
         start: int,
         frontier: int,
         where: Predicate | None = None,
@@ -1680,6 +2015,30 @@ class Stream:
             return stream
 
         return _prepend(first, stream)
+
+
+def _open_retired(
+    root: str | PathLike[str], name: str, *, schema: Mapping[str, object]
+) -> tuple[LogHandle, _metadata.Metadata] | None:
+    """The retired stream's log opened read-only, and its metadata — or None
+    if the stream is not retired. The declared schema is checked as for a
+    live stream: a declaration that disagreed would be silently ignored."""
+    metadata = _metadata.load(root, name)
+    if metadata is None or metadata.retirement is None:
+        return None
+
+    declared = _declaration(schema)
+    log = litelink.open(root, metadata.current.name, read_only=True)
+    if list(_log.declared(log.schema)) != list(declared):
+        found = list(_log.columns(log))
+        log.close()
+        msg = (
+            f"the retired stream {name!r} has columns {found}, and this call "
+            f"declares {declared.names}; declare the columns it has"
+        )
+        raise ValueError(msg)
+
+    return log, metadata
 
 
 def _open_or_create(

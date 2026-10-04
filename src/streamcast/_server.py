@@ -190,7 +190,13 @@ def _supervisors(
         return []
 
     plan = Maintain() if maintain is True else maintain
-    logs = [stream.log for stream in routes.values() if stream.log is not None]
+    # A retired stream's log takes no more passes: it is finished, and
+    # opened only for reading.
+    logs = [
+        stream.log
+        for stream in routes.values()
+        if stream.log is not None and stream.retirement is None
+    ]
 
     # **A name that matches nothing is a raise, not a shrug.** Silently
     # ignoring it puts the log back in the shared loop — the one thing the
@@ -265,7 +271,9 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     shipping = [
         stream.log
         for stream in routes.values()
-        if stream.log is not None and stream.log.config.wal_replication
+        if stream.log is not None
+        and stream.retirement is None
+        and stream.log.config.wal_replication
     ]
     if not replicate:
         if shipping:

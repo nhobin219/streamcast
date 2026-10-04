@@ -61,7 +61,7 @@ from streamcast._protocol import encode_projected as _encode_projected
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 
-    from litelink import LogHandle, WriteHandle
+    from litelink import LogHandle
 
     from streamcast._filter import Predicate
 
@@ -387,7 +387,7 @@ def lowest(log: LogHandle) -> int | None:
 
 
 async def replay(
-    log: WriteHandle,
+    log: Readable,
     start: int,
     stop: int,
     where: Predicate | None = None,

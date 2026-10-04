@@ -81,7 +81,12 @@ if TYPE_CHECKING:
     from litelink import LogHandle, S3Options, TierStatistics
 
 VERSION: Final = 2
-READS: Final = frozenset({1, VERSION})
+RETIRED_VERSION: Final = 3
+"""A retired stream's file. Its own version so that a build that predates
+retirement refuses it rather than misreading it: such a build would find the
+current log retired, take it for a migration that died, and quietly start the
+next log — undoing the retirement without anyone asking."""
+READS: Final = frozenset({1, VERSION, RETIRED_VERSION})
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +117,24 @@ class Entry:
 
 
 @dataclass(frozen=True, slots=True)
+class Retirement:
+    """That the stream is finished (`Stream.retire`), and what reviving it needs.
+
+    Everything a successor log has to agree with, kept here because the
+    retired log may be on a machine that no longer exists: where it ended,
+    how it was sorted, and the `streamcast_ts` span its rows cover.
+    """
+
+    at: int
+    """When, in UTC microseconds."""
+    end_offset: int
+    """One past the last row: where a revived stream's next log starts."""
+    sort_by: tuple[str, ...] | None = None
+    start_ts: int | None = None
+    end_ts: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Metadata:
     """A stream's logs: the sealed ones, oldest first, and the live one."""
 
@@ -122,6 +145,10 @@ class Metadata:
     """The log being written. Its `end_offset` is None: its end is moving."""
     manifest: str | None = None
     """Where the sealed logs' statistics are (#27), or None until there are any."""
+    retirement: Retirement | None = None
+    """Set by `Stream.retire`: the live log is finished and takes no rows.
+
+    Not `retired`, which names the logs a migration sealed."""
 
     @property
     def logs(self) -> tuple[Entry, ...]:
@@ -160,6 +187,21 @@ class Metadata:
             self, sealed_logs=(*self.sealed_logs, sealed), live_log=successor
         )
 
+    def revive(self, successor: Entry) -> Metadata:
+        """The retired live log sealed where it ended, `successor` live after
+        it, and the stream no longer retired."""
+        retirement = self.retirement
+        if retirement is None:
+            msg = f"stream {self.stream!r} is not retired"
+            raise ValueError(msg)
+
+        revived = self.advance(
+            retirement.end_offset,
+            successor,
+            span=(retirement.start_ts, retirement.end_ts),
+        )
+        return replace(revived, retirement=None)
+
     def next_name(self) -> str:
         """`trades-v2`, `trades-v3`, … — named for its place in the sequence.
 
@@ -172,7 +214,9 @@ class Metadata:
         live = self.live_log
         return json.dumps(
             {
-                "streamcast_metadata": VERSION,
+                "streamcast_metadata": (
+                    VERSION if self.retirement is None else RETIRED_VERSION
+                ),
                 "stream": self.stream,
                 "stream_id": self.stream_id,
                 "sealed_logs": [
@@ -197,6 +241,23 @@ class Metadata:
                     "system_schema": live.system_schema,
                 },
                 "manifest": self.manifest,
+                **(
+                    {}
+                    if self.retirement is None
+                    else {
+                        "retirement": {
+                            "at": self.retirement.at,
+                            "end_offset": self.retirement.end_offset,
+                            "sort_by": (
+                                None
+                                if self.retirement.sort_by is None
+                                else list(self.retirement.sort_by)
+                            ),
+                            "start_ts": self.retirement.start_ts,
+                            "end_ts": self.retirement.end_ts,
+                        }
+                    }
+                ),
             },
             indent=2,
         )
@@ -239,6 +300,21 @@ class Metadata:
                 start_ts=live.get("start_ts"),
             ),
             manifest=fields.get("manifest"),
+            retirement=(
+                None
+                if (retired := fields.get("retirement")) is None
+                else Retirement(
+                    at=int(retired["at"]),
+                    end_offset=int(retired["end_offset"]),
+                    sort_by=(
+                        None
+                        if retired.get("sort_by") is None
+                        else tuple(retired["sort_by"])
+                    ),
+                    start_ts=retired.get("start_ts"),
+                    end_ts=retired.get("end_ts"),
+                )
+            ),
         )
 
 
