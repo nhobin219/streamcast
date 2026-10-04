@@ -806,11 +806,11 @@ Offsets are per server and are not translated between hops.
 
 ## What it is not
 
-- **Not a message broker.** No topics beyond a name, no consumer groups, and no consumer
+- **Not a message queue.** No topics beyond a name, no consumer groups, and no consumer
   acknowledgements — where a subscriber has got to is its own cursor, not state the server
   keeps. A publisher does get an ack, the offset once the row is durable; nothing tracks
   what a subscriber has consumed. A subscriber needing at-least-once with server-side acks
-  wants a queue.
+  wants one.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
