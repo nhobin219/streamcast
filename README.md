@@ -437,6 +437,11 @@ The local staging table comes back empty — its Parquet was on the dead machine
 restored stream that should replay history serves it from the published table, with
 `replay_published=True`.
 
+The log comes back with its exact shape, read from the stream's metadata: its schema,
+binary encodings and system columns included, and its `sort_by`. Pass `schema=` and
+`sort_by=` for a stream whose metadata predates recording them, and `config=` for the
+restored log's policy, which is otherwise litelink's default when there was no replica.
+
 A **planned** cutover loses nothing — stop the writer, let the sidecar ship its last
 frames, then restore. Unplanned failover loses whatever never shipped.
 

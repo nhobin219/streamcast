@@ -59,7 +59,7 @@ from streamcast import _schema
 from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 
     from litelink import LogHandle
 
@@ -194,15 +194,20 @@ def system(schema: pa.Schema) -> pa.Schema:
     return pa.schema(owned)
 
 
-def with_system(schema: pa.Schema) -> pa.Schema:
+def with_system(schema: pa.Schema, names: Iterable[str] | None = None) -> pa.Schema:
     """`schema` with every `SYSTEM` column appended, for creating a log.
 
     Last rather than first so a `SELECT *` reads the application's columns in
     the order they were declared. Not nullable: every row this library writes
     carries them, and a log that says so is one a reader can rely on.
+
+    `names` appends only those, for rebuilding a log that has fewer — one
+    created before a system column existed — exactly as it is.
     """
+    wanted = None if names is None else set(names)
     for field in _SYSTEM_ARROW:
-        schema = schema.append(field)
+        if wanted is None or field.name in wanted:
+            schema = schema.append(field)
 
     return schema
 

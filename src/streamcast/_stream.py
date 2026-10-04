@@ -41,7 +41,7 @@ import dataclasses
 import time
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import litelink
 from websockets.exceptions import ConnectionClosed
@@ -616,7 +616,12 @@ class Stream:
         metadata = metadata.advance(
             start,
             _metadata.describe(
-                new_log.name, start, None, new_log.schema, published=new_log.published
+                new_log.name,
+                start,
+                None,
+                new_log.schema,
+                published=new_log.published,
+                sort_by=new_log.sort_by,
             ),
             span=_metadata.span(sealed),
         )
@@ -672,6 +677,9 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         max_replay: int | None = MAX_REPLAY,
+        schema: Mapping[str, object] | None = None,
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
         replica_reserve: int | None = None,
         published_reserve: int | None = None,
         revive: bool = False,
@@ -684,13 +692,16 @@ class Stream:
 
         Producer-side failover, and the counterpart to `connect(cursor=)` on
         the consumer side. `Stream.new` needs the log to be here already;
-        this rebuilds it from the published table and the replicated WAL, then hands
+        this rebuilds it from its replicated WAL when there is one, and
+        otherwise from its published table alone (litelink 0.10), then hands
         back a stream ready to `serve` and `send` to.
 
         **Offsets are fenced, not reissued, and that is what makes the move
-        invisible to consumers.** litelink burns 2**20 offsets, so the
-        restored stream resumes above anything the dead machine may have
-        served. A consumer reconnects with the cursor it already had, sees a
+        invisible to consumers.** litelink skips `replica_reserve` (2**20)
+        past what a replica recorded, or `published_reserve` (2**40) past what
+        the published table says the log issued — rows written after the last
+        publish are gone with the machine — so the restored stream resumes
+        above anything the dead machine may have served. A consumer reconnects with the cursor it already had, sees a
         gap, and carries on — no offset it holds is ever reused for different
         data, which is the one thing a resume cannot survive. `recv` allows a
         forward jump for exactly this reason.
@@ -705,6 +716,20 @@ class Stream:
         machine — so a replay from local tiers sees nothing below the buffer.
         Pass `replay_published=True` to serve history from the published
         table. Nothing copies published files back down.
+
+        **The log's shape comes from the stream's metadata**: its exact
+        schema — binary encodings and system columns included, which an
+        Iceberg schema does not keep — and its `sort_by`. litelink checks them
+        against the replica or the table, and needs them outright for a table
+        no litelink 0.10 publish stamped. `schema=` (JSON Schema, as `new`
+        takes) and `sort_by=` are for a stream whose metadata predates
+        recording them, or to override; `config=` replaces the restored
+        log's policy, which is otherwise the replica's, or litelink's default.
+
+        **A retired stream is refused** unless `revive=True`, which continues
+        it on its next log at exactly the retired end — no fence, since
+        retiring fixed the end — with the retired log's columns and sort and
+        `config`. See `Stream.retire`.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
         being reused; nothing stops the machine you are failing over FROM if
@@ -739,14 +764,28 @@ class Stream:
                 root,
                 metadata,
                 published=published,
+                config=config,
                 s3_options=s3_options,
                 max_replay=max_replay,
                 replay_published=replay_published,
                 group_commit=group_commit,
             )
 
-        # litelink's own defaults unless the caller set them: one owner.
-        reserves = {
+        # The shape, exactly as the stream recorded it, unless the caller
+        # says otherwise; a part not recorded is left to litelink to read.
+        current = None if metadata is None else metadata.current
+        shape = (
+            _log.with_system(_declaration(schema))
+            if schema is not None
+            else None
+            if current is None
+            else _metadata.shape(current)
+        )
+        if sort_by is None and current is not None:
+            sort_by = current.sort_by
+
+        # litelink's own reserves unless the caller set them: one owner.
+        reserves: dict[str, Any] = {
             key: value
             for key, value in (
                 ("replica_reserve", replica_reserve),
@@ -756,10 +795,13 @@ class Stream:
         }
         log = litelink.restore(
             root,
-            name if metadata is None else metadata.current.name,
+            name if current is None else current.name,
             published=published,
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             binary=binary,
+            schema=shape,
+            sort_by=sort_by,
+            config=config,  # ty: ignore[invalid-argument-type]
             **reserves,
         )
         if metadata is not None:
@@ -921,6 +963,7 @@ class Stream:
         metadata: _metadata.Metadata,
         *,
         published: str,
+        config: object | None,
         s3_options: object | None,
         max_replay: int | None,
         replay_published: bool,
@@ -962,6 +1005,7 @@ class Stream:
                 successor,
                 schema=_log.with_system(declared),
                 sort_by=retirement.sort_by,
+                config=config,  # ty: ignore[invalid-argument-type]
                 published=None if not _metadata.remote(location) else location,
                 s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                 start_offset=retirement.end_offset,
@@ -974,6 +1018,7 @@ class Stream:
                 None,
                 log.schema,
                 published=log.published,
+                sort_by=log.sort_by,
             )
         )
         try:

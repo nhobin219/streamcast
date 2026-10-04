@@ -25,6 +25,16 @@ there was nothing to have changed from. Everything above it is ordinary.
     3, so an older streamcast refuses it instead of quietly starting a new log.
 - **`Stream.restore(replica_reserve=, published_reserve=)`**, litelink's offset
   fences, passed through.
+- **`Stream.restore(schema=, sort_by=, config=)`.** The restored log's shape
+  comes from the stream's metadata by default: its exact schema (binary
+  encodings and system columns included, which an Iceberg schema doesn't keep)
+  and its `sort_by`. litelink 0.10.1 checks them against the replica or table,
+  and needs them for a table no 0.10 publish stamped. `schema=` and `sort_by=`
+  override, or cover a stream whose metadata predates recording them.
+  `config=` sets the restored log's policy, and the new log's on `revive=True`.
+- **`metadata.json` records each log's `sort_by`.** `serve` fills it in for an
+  existing stream from its open live log; a log not on the machine stays
+  unknown (`null`).
 
 - **litelink's read-cache settings on every reader of the published tables**
   (#77): `memory_cache`, `disk_cache`, `cache_key` and

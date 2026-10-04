@@ -77,6 +77,8 @@ import pyarrow.fs as pafs
 from streamcast import _log, _remote, _schema
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pyarrow as pa
     from litelink import LogHandle, S3Options, TierStatistics
 
@@ -114,6 +116,11 @@ class Entry:
     """The lowest `streamcast_ts` the log holds, or None if not known yet."""
     end_ts: int | None = None
     """The highest, for a sealed log; None for the live one, whose end moves."""
+    sort_by: tuple[str, ...] | None = None
+    """The columns the log sorts each file by — `()` for none — or None when
+    not known: a log described before this was recorded, and not on this
+    disk to ask. With `schema` and `system_schema`, the log's whole shape,
+    which a restore from a published table needs (litelink 0.10.1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +236,7 @@ class Metadata:
                         "end_ts": entry.end_ts,
                         "schema": entry.schema,
                         "system_schema": entry.system_schema,
+                        "sort_by": _listed(entry.sort_by),
                     }
                     for entry in self.sealed_logs
                 ],
@@ -239,6 +247,7 @@ class Metadata:
                     "start_ts": live.start_ts,
                     "schema": live.schema,
                     "system_schema": live.system_schema,
+                    "sort_by": _listed(live.sort_by),
                 },
                 "manifest": self.manifest,
                 **(
@@ -287,6 +296,7 @@ class Metadata:
                     published=entry.get("published"),
                     start_ts=entry.get("start_ts"),
                     end_ts=entry.get("end_ts"),
+                    sort_by=_tupled(entry.get("sort_by")),
                 )
                 for entry in fields["sealed_logs"]
             ),
@@ -298,6 +308,7 @@ class Metadata:
                 system_schema=live["system_schema"],
                 published=live.get("published"),
                 start_ts=live.get("start_ts"),
+                sort_by=_tupled(live.get("sort_by")),
             ),
             manifest=fields.get("manifest"),
             retirement=(
@@ -318,8 +329,22 @@ class Metadata:
         )
 
 
+def _listed(sort_by: tuple[str, ...] | None) -> list[str] | None:
+    return None if sort_by is None else list(sort_by)
+
+
+def _tupled(sort_by: list[str] | None) -> tuple[str, ...] | None:
+    return None if sort_by is None else tuple(sort_by)
+
+
 def describe(
-    name: str, start: int, end: int | None, schema: pa.Schema, *, published: str
+    name: str,
+    start: int,
+    end: int | None,
+    schema: pa.Schema,
+    *,
+    published: str,
+    sort_by: Sequence[str] | None = None,
 ) -> Entry:
     """An entry for a log whose table schema is `schema`: both halves of it."""
     return Entry(
@@ -329,6 +354,22 @@ def describe(
         _schema.from_arrow(_log.declared(schema)),
         _schema.from_arrow(_log.system(schema)),
         published=published,
+        sort_by=None if sort_by is None else tuple(sort_by),
+    )
+
+
+def _system_names(system_schema: dict[str, object]) -> list[str]:
+    properties = system_schema.get("properties")
+    return list(properties) if isinstance(properties, dict) else []
+
+
+def shape(entry: Entry) -> pa.Schema:
+    """The log's table schema, exactly, rebuilt from its entry: the declared
+    columns — binary encodings included, which no Iceberg schema keeps — and
+    the system columns that log has."""
+    return _log.with_system(
+        _schema.to_arrow(entry.schema),
+        names=_system_names(entry.system_schema),
     )
 
 
@@ -363,6 +404,7 @@ def single(stream: str, log: LogHandle) -> Metadata:
         None,
         log.schema,
         published=log.published,
+        sort_by=log.sort_by,
     )
     return Metadata(
         stream=stream,
@@ -383,17 +425,27 @@ def complete(metadata: Metadata, log: LogHandle) -> Metadata:
     root = Path(log.root)
 
     def located(entry: Entry) -> Entry:
-        if entry.published is not None:
+        if entry.published is not None and entry.sort_by is not None:
             return entry
 
         if entry.name == log.name:
-            return replace(entry, published=log.published)
+            return replace(
+                entry,
+                published=entry.published or log.published,
+                sort_by=tuple(log.sort_by),
+            )
 
         if (root / entry.name).is_dir():
             with litelink.open(root, entry.name, read_only=True) as sealed:
-                return replace(entry, published=sealed.published)
+                return replace(
+                    entry,
+                    published=entry.published or sealed.published,
+                    sort_by=tuple(sealed.sort_by),
+                )
 
-        return replace(entry, published=log.published)
+        # Not on this disk: the prefix is the live log's, and the sort is
+        # left unknown rather than guessed.
+        return replace(entry, published=entry.published or log.published)
 
     live = located(metadata.live_log)
     if live.start_ts is None:
