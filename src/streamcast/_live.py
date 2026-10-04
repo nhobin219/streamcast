@@ -92,8 +92,9 @@ class Live:
         cache: ReadCache = DEFAULT_CACHE,
     ) -> None:
         self._broker = broker
-        # How every read of the published tables is cached — the base, each
-        # rebase, and a catch-up — as `Stream.live` was asked.
+        # How the base and every rebase read the published tables, as
+        # `Stream.live` was asked. A catch-up, at open or after a dropped
+        # connection, reads its gap once and is left to litelink's defaults.
         self._cache = cache
         # What the view will hold from the broker, unpublished, before it
         # stops: a publisher that has stalled must not run this process out
@@ -148,7 +149,6 @@ class Live:
             catch_up=True,
             s3_options=self._s3,
             where=self._where,
-            **self._cache.keywords(),  # ty: ignore[invalid-argument-type]
         )
         try:
             subscription = await connecting

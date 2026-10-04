@@ -653,8 +653,7 @@ arithmetic.
 ```python
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    s3_options=None, upload_every=30.0, catch_up=False,
-                   catch_up_retries=3, metadata=None, memory_cache=True,
-                   disk_cache=False, cache_key=None, disk_cache_volume_limit=0.8,
+                   catch_up_retries=3, metadata=None,
                    **websockets_kwargs) -> Subscription
 ```
 
@@ -1394,7 +1393,7 @@ publishing is behind, rather than running the reader out of memory.
 
 **Caching what is read is litelink's, and yours to choose.** The four keywords are
 `litelink.duckdb_connection`'s, with its defaults, and the same on `snapshot`, `scan`,
-`sql`, `live` and `connect` (for a catch-up):
+`sql` and `live` — the reads that repeat:
 
 | keyword | default | what it does |
 |---|---|---|
@@ -1407,7 +1406,9 @@ Nothing chooses a key for you, because only you know what deserves a cache of it
 stream id, a team, a job. Readers asking for different settings read through different
 DuckDB databases. A disk cache earns its keep where reads cross a network to object
 storage; against a store on the same machine, it measured no faster than reading it
-again.
+again. `connect` takes none of them: a catch-up reads the gap to its cursor once, never
+the same files twice, so it reads with litelink's defaults, as does a `live` view's
+catch-up at open or after a dropped connection.
 
 **A cached reader still sees every publish.** Each read resolves the table's current
 metadata with `litelink.current_metadata`, outside DuckDB's caches: through a disk-cached
