@@ -69,9 +69,10 @@ duckdb.sql("""
 ```
 
 Rows land in a SQLite buffer first and seal into Parquet behind it, so the newest messages
-are in the buffer and the rest are columnar — a snapshot given `broker=` reads across
-both, and a reader anywhere else reads what the log has published. That is one store with tiers, not a
-transactional copy and an analytical copy that have to be reconciled.
+are in the buffer and the rest are columnar — a snapshot as of `LATEST`, given `broker=`,
+reads across both, and a reader anywhere else reads what the log has published. That is
+one store with tiers, not a transactional copy and an analytical copy that have to be
+reconciled.
 
 The tiering, the published-table layout, consistency guarantees, and costs are
 [litelink](https://github.com/nhobin219/litelink)'s, and its README and

@@ -135,15 +135,26 @@ The log is kept on purpose while the demo runs — it is what the replay reads, 
 it is there to poke at afterwards. It is a **table**, so ask it real questions:
 
 ```python
-import litelink
-with litelink.open("streamcast-data", "trades", read_only=True) as log:
-    print(log.sql("""
-        SELECT count(*) trades, min(price) low, max(price) high, sum(amount) btc
-        FROM log
-    """).read_all())
-    # and this prunes on Iceberg statistics rather than scanning payloads
-    print(log.scan(columns=["event_ts", "price"], where="side = 1").read_all())
+import asyncio
+from pathlib import Path
+
+import streamcast
+
+async def main():
+    uri = Path("streamcast-data/trades.metadata.json").resolve().as_uri()
+    async with await streamcast.Stream.snapshot(uri) as snapshot:
+        print(await snapshot.sql("""
+            SELECT count(*) trades, min(price) low, max(price) high, sum(amount) btc
+            FROM log
+        """))
+        print(await snapshot.scan(columns=["event_ts", "price"], where="side = 1"))
+
+asyncio.run(main())
 ```
+
+A snapshot reads what the stream has published. While the broker is running,
+`as_of_offset=streamcast.LATEST, broker="ws://127.0.0.1:8765/trades"` adds the
+rows it has not published yet.
 
 
 ## Mounted in a FastAPI service
