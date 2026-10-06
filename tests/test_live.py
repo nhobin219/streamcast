@@ -51,7 +51,7 @@ async def served(stream: streamcast.Stream) -> AsyncIterator[tuple[Any, str]]:
 
 
 async def offsets(live: _live.Live) -> list[int]:
-    table = await live.scan(columns=[_log.COLUMN])
+    table = await live.scan(columns=[_log.COLUMN]).read_all()
     return table.column(_log.COLUMN).to_pylist()
 
 
@@ -91,14 +91,14 @@ class TestItIsCurrent:
                 await live.wait_for(5)
                 result = await live.sql(
                     "SELECT count(*) AS n, max(price) AS top FROM log"
-                )
+                ).read_all()
                 assert result.to_pylist() == [{"n": 5, "top": 104.0}]
 
     async def test_broker_rows_carry_their_stamps(self, stream):
         async with served(stream) as (_server, broker):
             async with await streamcast.Stream.live(broker) as live:
                 await live.wait_for(5)
-                table = await live.scan(columns=[_log.COLUMN, _log.STAMP])
+                table = await live.scan(columns=[_log.COLUMN, _log.STAMP]).read_all()
 
         assert all(ts is not None for ts in table.column(_log.STAMP).to_pylist())
 
@@ -152,6 +152,40 @@ class TestMemory:
                 assert live.end_offset == 6
 
 
+class TestAReaderUnderTheView:
+    """A reader is the view as of when it was made, and keeps it."""
+
+    async def test_rows_received_while_it_is_read_are_not_in_it(self, stream):
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(broker) as live:
+                await live.wait_for(5)
+                reader = live.scan(columns=[_log.COLUMN])
+                await stream.send_many([row(i) for i in range(5, 8)])
+                await live.wait_for(8)
+                # A query made since moves the view on: not this reader.
+                assert await offsets(live) == list(range(1, 9))
+                table = await reader.read_all()
+
+                assert table.column(_log.COLUMN).to_pylist() == [1, 2, 3, 4, 5]
+
+    async def test_a_rebase_does_not_end_it(self, stream):
+        """The base a rebase replaces stays open for the readers begun on it,
+        and closes when the last of them finishes."""
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(broker) as live:
+                await live.wait_for(5)
+                old = live._base  # noqa: SLF001
+                async with live.scan(columns=[_log.COLUMN], batch_size=1) as reader:
+                    got = [await anext(reader)]
+                    await live.rebase()
+                    assert live._base is not old  # noqa: SLF001
+                    got += [batch async for batch in reader]
+
+                assert old._shut  # noqa: SLF001
+
+        assert [b.column(_log.COLUMN)[0].as_py() for b in got] == [1, 2, 3, 4, 5]
+
+
 class TestReconnecting:
     async def test_a_dropped_connection_comes_back_without_a_gap(self, stream):
         async with served(stream) as (server, broker):
@@ -191,7 +225,7 @@ class TestReconnecting:
                     await asyncio.wait_for(live.wait_for(100), timeout=5)
 
                 with pytest.raises(RuntimeError, match="stopped"):
-                    await live.scan()
+                    await live.scan().read_all()
 
 
 class TestWaitingForATime:
@@ -324,7 +358,7 @@ class TestStartingPoint:
 
 
 async def offsets_where(live: _live.Live, **kwargs: Any) -> list[int]:
-    table = await live.scan(columns=[_log.COLUMN], **kwargs)
+    table = await live.scan(columns=[_log.COLUMN], **kwargs).read_all()
     return table.column(_log.COLUMN).to_pylist()
 
 
@@ -367,7 +401,7 @@ class TestAMigrationUnderAnOpenView:
                 )
                 try:
                     await asyncio.wait_for(live.wait_for(5), timeout=10)
-                    table = await live.scan()
+                    table = await live.scan().read_all()
                 finally:
                     second.close()
                     await second.wait_closed()

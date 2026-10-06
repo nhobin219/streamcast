@@ -88,7 +88,7 @@ async def main(broker: str, every: float, window: float) -> None:
             async with await streamcast.Stream.live(uri) as live:
                 print(f"analysing {uri} live, every {every:.0f}s", flush=True)
                 while True:
-                    table = await live.sql(query(int(window * 1_000_000)))
+                    table = await live.sql(query(int(window * 1_000_000))).read_all()
                     report(table.to_pylist(), window, live.end_offset)
                     await asyncio.sleep(every)
 

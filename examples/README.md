@@ -146,8 +146,8 @@ async def main():
         print(await snapshot.sql("""
             SELECT count(*) trades, min(price) low, max(price) high, sum(amount) btc
             FROM log
-        """))
-        print(await snapshot.scan(columns=["event_ts", "price"], where="side = 1"))
+        """).read_all())
+        print(await snapshot.scan(columns=["event_ts", "price"], where="side = 1").read_all())
 
 asyncio.run(main())
 ```

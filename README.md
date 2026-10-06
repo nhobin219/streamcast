@@ -58,7 +58,7 @@ async with streamcast.publish(uri) as producer:
 async with await streamcast.Stream.snapshot(
     "s3://bucket/prefix/trades.metadata.json"
 ) as snapshot:
-    await snapshot.sql("SELECT count(*), max(price) FROM log WHERE side = 1")
+    await snapshot.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
 
 # Or from any Iceberg engine, with neither streamcast nor litelink installed.
 duckdb.sql("""
@@ -109,11 +109,12 @@ streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
 
 await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3_options=None) -> Snapshot
-    await snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=)
-    await snapshot.sql(query, *, filters=, start_offset=, end_offset=)  # table `log`
-await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
+    snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=) -> Reader
+    snapshot.sql(query, *, filters=, start_offset=, end_offset=) -> Reader  # table `log`
+        await reader.read_all() -> pa.Table · async for batch in reader   # streamed
+streamcast.Stream.scan(metadata_uri, ...) · streamcast.Stream.sql(uri, query) -> Reader
 await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
-    await live.scan(...) · await live.sql(query) · await live.wait_for(offset | ts=)
+    live.scan(...) · live.sql(query) -> Reader · await live.wait_for(offset | ts=)
 
 streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
                  max_backlog=8192,                       # frames per subscriber
@@ -255,9 +256,9 @@ What it captures is a table, queried from its published tables:
 
 ```python
 uri = stream.metadata_uri
-await streamcast.Stream.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log")
-await streamcast.Stream.scan(uri, columns=["litelink_offset", "price"], where="side = 1")
-await streamcast.Stream.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log")   # feed latency, us
+await streamcast.Stream.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log").read_all()
+await streamcast.Stream.scan(uri, columns=["litelink_offset", "price"], where="side = 1").read_all()
+await streamcast.Stream.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
 ```
 
 The table has two columns you did not declare. `litelink_offset` is the offset every frame
@@ -768,7 +769,7 @@ it also takes the rows the server has not published yet, up to an offset or the 
 async with await streamcast.Stream.snapshot(
     "s3://market-data/prod/trades.metadata.json"
 ) as snapshot:
-    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 # The same, completed from the server up to its newest row.
 async with await streamcast.Stream.snapshot(
@@ -786,7 +787,7 @@ a view of the stream *now* has to be listening to it:
 
 ```python
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
-    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 ```
 
 Choosing a point, pruning with `filters=` against `where=`, memory, reconnects and

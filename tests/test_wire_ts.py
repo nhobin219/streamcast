@@ -157,7 +157,7 @@ class TestRowsReadFromTheTables:
                     uri, as_of_offset=LATEST, broker=broker
                 ) as snap:
                     read = [(offset, ts) async for offset, ts, _ in snap.rows(1)]
-                    table = await snap.scan()
+                    table = await snap.scan().read_all()
 
             # Published rows and the broker's tail alike: the tail's stamps
             # came off the wire, and they are the stored ones.

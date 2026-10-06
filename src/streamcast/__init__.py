@@ -125,7 +125,7 @@ from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
-from streamcast._snapshot import LATEST, Snapshot, SnapshotUnavailable
+from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
 from streamcast._stream import MAX_REPLAY, Stream
 
@@ -141,6 +141,7 @@ __all__ = [
     "MAX_REPLAY",
     "CatchUpUnavailable",
     "Live",
+    "Reader",
     "Snapshot",
     "SnapshotUnavailable",
     "Close",

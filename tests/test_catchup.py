@@ -425,7 +425,9 @@ class TestTheLogIsNamedInTheGreeting:
             assert info.metadata is not None
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
-            table = await streamcast.Stream.scan(info.metadata, s3_options=s3)
+            table = await streamcast.Stream.scan(
+                info.metadata, s3_options=s3
+            ).read_all()
             assert table.num_rows == 800
 
 
@@ -816,4 +818,5 @@ def test_the_reads_cross_into_a_thread():
 
     source = inspect.getsource(snapshot_module.snapshot)
     assert source.count("asyncio.to_thread") >= 2
-    assert "asyncio.to_thread" in inspect.getsource(Snapshot.close)
+    # Closing the connection, wherever the last reader to finish does it.
+    assert "asyncio.to_thread" in inspect.getsource(Snapshot._shut_if_idle)  # noqa: SLF001

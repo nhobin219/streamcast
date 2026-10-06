@@ -532,7 +532,7 @@ class TestAStreamMigratedBeforeRetire:
             uri = stream.metadata_uri
             assert uri is not None
             stream.ensure_metadata()
-            table = await streamcast.Stream.scan(uri)
+            table = await streamcast.Stream.scan(uri).read_all()
             assert table.column("litelink_offset").to_pylist() == [1, 2, 3, 4, 5]
         finally:
             await stream.aclose()

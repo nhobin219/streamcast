@@ -9,6 +9,33 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Breaking
+
+- **`Snapshot.sql`/`scan` and `Live.sql`/`scan` return a `Reader`** (#108), not a
+  `pa.Table`. `await snapshot.sql(query).read_all()` is the table, as before;
+  `async for batch in snapshot.sql(query)` streams the result a
+  `pa.RecordBatch` at a time (`batch_size=`, 1,000,000 rows by default), so a
+  result larger than memory can be read — which offsets cannot page, since a
+  `GROUP BY` or a join has no offset order. Each reader runs its query once,
+  on a DuckDB cursor of its own, in a worker thread, and is valid while its
+  snapshot is open: a batch asked for after it closed raises. A `Live` reader
+  keeps the view as of the call, and a rebase keeps the base it reads open
+  until it is done. `Stream.sql` and `Stream.scan` return one too, as
+  litelink's `scan` and `sql` return a reader, and are no longer `async`: the
+  reader opens a snapshot of its own at its first read, where a refusal is
+  raised, and closes it once it is done.
+
+### Fixed
+
+- **`Snapshot.rows` no longer stops early when the snapshot is queried
+  meanwhile** (#108). Each log's rows streamed on the snapshot's shared DuckDB
+  connection, and any other query on that connection ended the stream at its
+  next batch boundary, exactly as if the log had ended: a snapshot queried
+  while its `rows` were read delivered 1,000,000 of 1,500,000 rows, and
+  reported success. Each stream now reads on a cursor of its own. Catch-up was
+  not affected: nothing else queries the snapshot it reads. Two `sql` calls at
+  once on one snapshot also shared its view `log`, and now do not.
+
 ### Changed
 
 - **litelink is `>=0.10.2,<0.11`.** 0.10.2's `retire` no longer walks every

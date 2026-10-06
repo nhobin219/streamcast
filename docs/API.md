@@ -752,7 +752,9 @@ stream's metadata file, which is what [`Stream.snapshot`](#reading-a-streams-his
 takes, and `stream_id` is the id that file records:
 
 ```python
-table = await streamcast.Stream.scan(sub.info.metadata, as_of_offset=sub.info.end_offset)
+table = await streamcast.Stream.scan(
+    sub.info.metadata, as_of_offset=sub.info.end_offset
+).read_all()
 ```
 
 Both are `None` when the stream has no log. Credentials are never published — they are
@@ -1323,10 +1325,10 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
                                  max_tail=1_000_000, memory_cache=True,
                                  disk_cache=False, cache_key=None,
                                  disk_cache_volume_limit=0.8) -> Snapshot
-await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
-                             filters=(), start_offset=None, end_offset=None) -> pa.Table
-await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
-                            start_offset=None, end_offset=None) -> pa.Table
+streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None, filters=(),
+                       start_offset=None, end_offset=None, batch_size=1_000_000) -> Reader
+streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(), start_offset=None,
+                      end_offset=None, batch_size=1_000_000) -> Reader
 
 stream.metadata_uri -> str | None     # on the server
 sub.info.metadata -> str | None       # on a subscriber
@@ -1342,7 +1344,7 @@ both present every log the stream has been through (migrations included) as one 
 | **answers as of** | one fixed point, chosen when it opens | the newest row, at every query |
 | **reads** | the published tables | the published tables, plus the broker's rows as they arrive |
 | **needs the server** | no — offline unless asked for rows not yet published | yes, always |
-| **holds in memory** | the query's result (and the broker's rows, if asked for them) | the rows not yet published |
+| **holds in memory** | a query's result, or one batch of it (and the broker's rows, if asked for them) | the rows not yet published |
 | **addressed by** | the stream's metadata file | the broker's URI |
 
 A stream is a sequence of logs — one per schema, after `Stream.migrate` — and its
@@ -1357,7 +1359,7 @@ s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS prof
 async with await streamcast.Stream.snapshot(
     "s3://market-data/prod/trades.metadata.json", s3_options=s3
 ) as snapshot:
-    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 ```
 
 The broker is consulted only for rows no table holds yet, and only when asked: a point
@@ -1366,13 +1368,16 @@ read of files.
 
 ```python
 async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
-    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
-    await snapshot.scan(columns=["price"], filters=[("price", ">", 500.0)])
+    await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
+    await snapshot.scan(columns=["price"], filters=[("price", ">", 500.0)]).read_all()
     async for offset, ts, row in snapshot.rows(1):
         ...
 ```
 
-`Stream.scan` and `Stream.sql` are the one-shot forms: open, read once, close.
+`Stream.scan` and `Stream.sql` are the one-shot forms: open, read once, close. They
+return a `Reader`, as litelink's `scan` and `sql` return a reader, on a snapshot of its
+own: opened at the reader's first read — which is where a refusal is raised — and closed
+once the reader is done.
 
 **A fixed point, three ways to name it** — at most one of them:
 
@@ -1388,10 +1393,28 @@ carrying on live subscribes there.
 
 | | |
 |---|---|
-| `scan(columns=, where=, filters=, start_offset=, end_offset=)` | rows in `[start_offset, end_offset)`, oldest first, as one Arrow table |
-| `sql(query, filters=, start_offset=, end_offset=)` | `query` over the snapshot, which it reads as the table `log`, holding only the rows in `[start_offset, end_offset)` that match `filters` |
+| `scan(columns=, where=, filters=, start_offset=, end_offset=, batch_size=)` | rows in `[start_offset, end_offset)`, oldest first, as a `Reader` |
+| `sql(query, filters=, start_offset=, end_offset=, batch_size=)` | `query` over the snapshot, which it reads as the table `log`, holding only the rows in `[start_offset, end_offset)` that match `filters`, as a `Reader` |
 | `rows(start, stop=None)` | one `(offset, ts, row)` at a time, built exactly as a server replays them |
 | `close()` | or `async with` |
+
+**`scan` and `sql` return a `Reader`: the result as it streams.** `await
+reader.read_all()` is the whole result as a `pa.Table`; `async for batch in reader` is one
+`pa.RecordBatch` at a time, `batch_size` rows (1,000,000 by default), so a result larger
+than memory can still be read — a `GROUP BY` or a join has no offset order to page by.
+
+```python
+async with snapshot.sql("SELECT id, max(litelink_offset) AS last FROM log GROUP BY id") as result:
+    result.schema                                  # once the query has run
+    async for batch in result:
+        ...
+```
+
+The query runs once, when the reader is first read, on a DuckDB cursor of its own and in
+a worker thread, so another read of the same snapshot cannot end it short and the event
+loop never waits on it. A reader is valid while its snapshot is open: a batch asked for
+after the snapshot closed raises rather than ending the result early. Reading it to the
+end, `read_all()`, `aclose()` or leaving `async with` releases its cursor.
 
 `where` is SQL over the stream's columns. `filters` are `(column, operator, value)` terms,
 ANDed with `where`. Across a migration the logs read as one table with `UNION ALL BY
@@ -1422,9 +1445,9 @@ await snapshot.scan(
     columns=["event_ts", "price"],
     filters=[("price", ">", 85_000.0)],            # skips whole logs that can't match
     where="side = 1 AND amount * price > 1000",    # any SQL, applied to rows
-)
+).read_all()
 await snapshot.sql("SELECT max(price) FROM log WHERE side = 1",
-                   filters=[("price", ">", 85_000.0)])   # narrows the table `log`
+                   filters=[("price", ">", 85_000.0)]).read_all()   # narrows `log`
 ```
 
 **Correct or it raises `SnapshotUnavailable`.** A missing metadata file, a file whose
@@ -1478,8 +1501,8 @@ await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, wher
 async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
     await live.wait_for(ts=t)                    # until every row stamped by t is
-    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
-    await live.scan(columns=["price"], filters=[("price", ">", 500.0)])
+    await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
+    await live.scan(columns=["price"], filters=[("price", ">", 500.0)]).read_all()
     live.end_offset                              # one above the newest row a query sees
 ```
 
@@ -1488,7 +1511,9 @@ the published tables as a base, and the broker's rows appended in memory as they
 so every `scan` and `sql` answers as of the newest row received. It is **online by
 design**: it takes only the broker's address, because a view of the stream *now* has to be
 listening to it. For an offline read, or a fixed point to come back to, use a snapshot. They take the same arguments as on a `Snapshot`, and the rows read the same
-— the broker's carry their `streamcast_ts` like published ones.
+— the broker's carry their `streamcast_ts` like published ones. A reader from `live.scan`
+or `live.sql` is the view as of the call: rows received while it is read are not in it,
+and a rebase keeps the base it reads open until it is done.
 
 | | |
 |---|---|

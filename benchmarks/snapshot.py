@@ -129,7 +129,7 @@ async def measure(uri: str, rows: int, repeat: int) -> dict[str, float]:
 
     started = time.perf_counter()
     async with await streamcast.Stream.snapshot(uri) as snap:
-        await snap.scan(start_offset=rows, end_offset=rows + 1)
+        await snap.scan(start_offset=rows, end_offset=rows + 1).read_all()
 
     results["cold: open + 1 row"] = (time.perf_counter() - started) * 1e3
 
@@ -139,35 +139,39 @@ async def measure(uri: str, rows: int, repeat: int) -> dict[str, float]:
     results["open"] = await median(repeat, opened)
 
     async def one_shot() -> None:
-        await streamcast.Stream.scan(uri, start_offset=rows, end_offset=rows + 1)
+        await streamcast.Stream.scan(
+            uri, start_offset=rows, end_offset=rows + 1
+        ).read_all()
 
     results["one-shot: open + 1 row + close"] = await median(repeat, one_shot)
 
     async with await streamcast.Stream.snapshot(uri) as snap:
-        await snap.scan()  # opens every table, so what follows is warm
+        await snap.scan().read_all()  # opens every table, so what follows is warm
 
         async def last_row() -> None:
-            await snap.scan(start_offset=rows, end_offset=rows + 1)
+            await snap.scan(start_offset=rows, end_offset=rows + 1).read_all()
 
         async def count() -> None:
-            await snap.sql("SELECT count(*) FROM log")
+            await snap.sql("SELECT count(*) FROM log").read_all()
 
         async def full() -> None:
-            await snap.scan()
+            await snap.scan().read_all()
 
         async def aggregate() -> None:
             await snap.sql(
                 "SELECT side, sum(amount), max(price) FROM log GROUP BY side"
-            )
+            ).read_all()
 
         async def where() -> None:
-            await snap.scan(where=f"price > {selective}")
+            await snap.scan(where=f"price > {selective}").read_all()
 
         async def filtered() -> None:
-            await snap.scan(filters=[("price", ">", selective)])
+            await snap.scan(filters=[("price", ">", selective)]).read_all()
 
         async def middle() -> None:
-            await snap.scan(start_offset=rows // 2, end_offset=rows // 2 + 1_000)
+            await snap.scan(
+                start_offset=rows // 2, end_offset=rows // 2 + 1_000
+            ).read_all()
 
         results["1 row (warm)"] = await median(repeat, last_row)
         results["1,000-row offset range"] = await median(repeat, middle)

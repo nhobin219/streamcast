@@ -102,6 +102,43 @@ DEFAULT_CACHE: Final = ReadCache()
 """litelink's defaults: memory on, disk off."""
 
 
+BATCH: Final = 1_000_000
+"""Rows per batch a scan hands back: DuckDB's own default, named so a test can
+make a replay span several batches without writing a million rows."""
+
+
+class Owning:
+    """A batch reader and the cursor it streams from, closed together.
+
+    The part of `pa.RecordBatchReader` that `_log.rows` uses — `schema`,
+    `read_next_batch` and `close` — so it stands in for litelink's reader.
+    """
+
+    __slots__ = ("_cursor", "_reader")
+
+    def __init__(
+        self, reader: pa.RecordBatchReader, cursor: duckdb.DuckDBPyConnection
+    ) -> None:
+        self._reader = reader
+        self._cursor = cursor
+
+    @property
+    def schema(self) -> pa.Schema:
+        return self._reader.schema
+
+    def read_next_batch(self) -> pa.RecordBatch:
+        return self._reader.read_next_batch()
+
+    def read_all(self) -> pa.Table:
+        return self._reader.read_all()
+
+    def close(self) -> None:
+        try:
+            self._reader.close()
+        finally:
+            self._cursor.close()
+
+
 def _quoted(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
@@ -173,6 +210,7 @@ class Table:
 
     __slots__ = (
         "_connection",
+        "_guard",
         "_owned",
         "extent",
         "metadata",
@@ -191,10 +229,13 @@ class Table:
         *,
         record_count: int = 0,
         owned: bool = True,
+        guard: threading.Lock | None = None,
     ) -> None:
         self.name = name
         self._connection = connection
         self._owned = owned
+        # Held while a cursor is taken from a connection other threads use.
+        self._guard = guard
         self.metadata = metadata
         """The pinned `metadata.json`: what every query on this table reads."""
         self.schema = schema
@@ -211,6 +252,7 @@ class Table:
         s3_options: S3Options | None,
         *,
         shared: duckdb.DuckDBPyConnection | None = None,
+        guard: threading.Lock | None = None,
     ) -> Table:
         """The table for log `name` under the `published` prefix, as it is now.
 
@@ -220,7 +262,8 @@ class Table:
 
         `shared` is a connection to read through rather than a new one, which
         is how a snapshot reads all of a stream's logs on one connection; it
-        is the caller's to close.
+        is the caller's to close. `guard` is the caller's lock on it, held
+        while each scan takes its cursor.
         """
         uri = f"{published.rstrip('/')}/{name}"
         connected = (
@@ -251,6 +294,7 @@ class Table:
             extent,
             record_count=int(count),
             owned=shared is None,
+            guard=guard,
         )
 
     def scan(
@@ -261,7 +305,7 @@ class Table:
         end_offset: int | None = None,
         where: str | None = None,
         published: bool = True,  # noqa: ARG002 — `_log.rows` passes it; this IS the published table
-    ) -> pa.RecordBatchReader:
+    ) -> Owning:
         """The pinned snapshot's rows in `[start_offset, end_offset)`, oldest first."""
         projection = "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
         terms = []
@@ -279,7 +323,27 @@ class Table:
             + (f" WHERE {' AND '.join(terms)}" if terms else "")
             + f' ORDER BY "{COLUMN}"'
         )
-        return self._connection.execute(query).to_arrow_reader()
+        # **On a cursor of its own.** A streaming result on a shared
+        # connection ends — `read_next_batch` raises StopIteration, as at the
+        # true end — the moment anything else runs a query on that
+        # connection. A replay pulled across awaits would then stop at the
+        # first batch boundary and report success: a snapshot queried while
+        # its `rows` were being read delivered 1,000,000 of 1,500,000 rows.
+        cursor = self._cursor()
+        try:
+            reader = cursor.execute(query).to_arrow_reader(BATCH)
+        except BaseException:
+            cursor.close()
+            raise
+
+        return Owning(reader, cursor)
+
+    def _cursor(self) -> duckdb.DuckDBPyConnection:
+        if self._guard is None:
+            return self._connection.cursor()
+
+        with self._guard:
+            return self._connection.cursor()
 
     def relation(self) -> str:
         """The pinned snapshot as a DuckDB table function, for composing queries."""

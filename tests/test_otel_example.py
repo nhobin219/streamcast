@@ -573,7 +573,9 @@ class TestTheAnalytics:
             async with serve(stream, maintain=False) as uri:
                 async with await streamcast.Stream.live(uri) as live:
                     await live.wait_for(len(rows))
-                    table = await live.sql(analytics.query(3_600 * 1_000_000))
+                    table = await live.sql(
+                        analytics.query(3_600 * 1_000_000)
+                    ).read_all()
 
             counts = [
                 {

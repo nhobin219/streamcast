@@ -77,7 +77,7 @@ class TestOneLog:
         uri = _metadata.uri("trades", litelink.open(tmp_path, "trades", read_only=True))
         async with await streamcast.Stream.snapshot(uri) as snap:
             assert snap.end_offset == 6
-            table = await snap.scan()
+            table = await snap.scan().read_all()
 
         assert offsets(table) == [1, 2, 3, 4, 5]
         assert table.column("price").to_pylist() == [100.0 + i for i in range(5)]
@@ -90,7 +90,7 @@ class TestOneLog:
         assert uri is not None
         await served_once(stream, serve)
 
-        table = await streamcast.Stream.scan(uri, as_of_offset=3)
+        table = await streamcast.Stream.scan(uri, as_of_offset=3).read_all()
         assert offsets(table) == [1, 2, 3]
 
     async def test_past_the_published_end_it_needs_the_broker(self, tmp_path, serve):
@@ -119,7 +119,7 @@ class TestTheBroker:
                 uri, as_of_offset=LATEST, broker=broker
             ) as snap:
                 assert snap.end_offset == 8
-                table = await snap.scan()
+                table = await snap.scan().read_all()
                 streamed = [(offset, ts) async for offset, ts, _row in snap.rows(1)]
 
         assert offsets(table) == list(range(1, 8))
@@ -139,7 +139,7 @@ class TestTheBroker:
         # Nothing listens here: reaching for the broker would fail.
         table = await streamcast.Stream.scan(
             uri, as_of_offset=2, broker="ws://127.0.0.1:9/trades"
-        )
+        ).read_all()
         assert offsets(table) == [1, 2]
 
     async def test_a_gap_neither_side_holds_is_refused_with_both_numbers(
@@ -176,7 +176,7 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(migrated, serve)
 
-        table = await streamcast.Stream.scan(uri)
+        table = await streamcast.Stream.scan(uri).read_all()
 
         # Dense across the seam, and the column the first log lacked is NULL there.
         assert offsets(table) == list(range(1, 9))
@@ -200,11 +200,11 @@ class TestAMigratedStream:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
         async with await streamcast.Stream.snapshot(uri) as snap:
-            table = await snap.scan(filters=[("price", ">", 500.0)])
+            table = await snap.scan(filters=[("price", ">", 500.0)]).read_all()
             assert offsets(table) == [6, 7, 8]
 
             with pytest.raises(Exception, match="version-hint|No files found|IO Error"):
-                await snap.scan()  # unfiltered: it is opened, and it is gone
+                await snap.scan().read_all()  # unfiltered: it is opened, and it is gone
 
     async def test_as_of_a_time_it_reads_what_was_stamped_by_then(
         self, tmp_path, serve
@@ -222,13 +222,13 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(stream, serve)
 
-        everything = await streamcast.Stream.scan(uri)
+        everything = await streamcast.Stream.scan(uri).read_all()
         stamps = everything.column("streamcast_ts").to_pylist()
         middle = sorted(stamps)[2]
 
         assert len(set(stamps)) == 5, "the stamps must differ for this to test anything"
 
-        table = await streamcast.Stream.scan(uri, as_of_ts=middle)
+        table = await streamcast.Stream.scan(uri, as_of_ts=middle).read_all()
         assert all(ts <= middle for ts in table.column("streamcast_ts").to_pylist())
         assert table.num_rows == 3
 
@@ -254,7 +254,7 @@ class TestAMigratedStream:
         )
 
         with pytest.raises(SnapshotUnavailable, match="holds 5 of the 6 rows"):
-            await streamcast.Stream.scan(uri)
+            await streamcast.Stream.scan(uri).read_all()
 
 
 class TestConditionsAcrossTheSeam:
@@ -282,9 +282,11 @@ class TestConditionsAcrossTheSeam:
     async def test_a_column_the_earlier_log_lacks_reads_as_null(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)
 
-        where = await streamcast.Stream.scan(uri, where="venue = 'x'")
-        filtered = await streamcast.Stream.scan(uri, filters=[("venue", "==", "x")])
-        missing = await streamcast.Stream.scan(uri, where="venue IS NULL")
+        where = await streamcast.Stream.scan(uri, where="venue = 'x'").read_all()
+        filtered = await streamcast.Stream.scan(
+            uri, filters=[("venue", "==", "x")]
+        ).read_all()
+        missing = await streamcast.Stream.scan(uri, where="venue IS NULL").read_all()
 
         assert offsets(where) == offsets(filtered) == [4, 6]
         assert offsets(missing) == [1, 2, 3]
@@ -300,11 +302,11 @@ class TestConditionsAcrossTheSeam:
             table = await snap.sql(
                 "SELECT litelink_offset FROM log ORDER BY 1",
                 filters=[("price", ">", 600.5)],
-            )
+            ).read_all()
             assert offsets(table) == [5, 6]
 
             with pytest.raises(Exception, match="version-hint|No files found|IO Error"):
-                await snap.sql("SELECT count(*) FROM log")
+                await snap.sql("SELECT count(*) FROM log").read_all()
 
     async def test_sql_offsets_narrow_the_table_and_prune(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)
@@ -313,7 +315,7 @@ class TestConditionsAcrossTheSeam:
 
         table = await streamcast.Stream.sql(
             uri, "SELECT litelink_offset FROM log ORDER BY 1", start_offset=5
-        )
+        ).read_all()
         assert offsets(table) == [5, 6]
 
         bounded = await streamcast.Stream.sql(
@@ -321,7 +323,7 @@ class TestConditionsAcrossTheSeam:
             "SELECT litelink_offset FROM log ORDER BY 1",
             start_offset=4,
             end_offset=6,
-        )
+        ).read_all()
         assert offsets(bounded) == [4, 5]
 
     async def test_as_of_a_time_keeps_an_unstamped_log_before_it(self, tmp_path, serve):
@@ -342,12 +344,12 @@ class TestConditionsAcrossTheSeam:
         assert uri is not None
         await served_once(migrated, serve)
 
-        stamps = (await streamcast.Stream.scan(uri, start_offset=4)).column(
+        stamps = (await streamcast.Stream.scan(uri, start_offset=4).read_all()).column(
             "streamcast_ts"
         )
         middle = sorted(stamps.to_pylist())[1]
 
-        table = await streamcast.Stream.scan(uri, as_of_ts=middle)
+        table = await streamcast.Stream.scan(uri, as_of_ts=middle).read_all()
         assert offsets(table) == [1, 2, 3, 4, 5]
 
 
@@ -363,10 +365,10 @@ class TestAnEmptyStream:
 
         result = await streamcast.Stream.sql(
             uri, "SELECT count(*) AS n, max(price) AS top FROM log WHERE price > 1"
-        )
+        ).read_all()
         assert result.to_pylist() == [{"n": 0, "top": None}]
 
-        table = await streamcast.Stream.scan(uri, where="price > 1")
+        table = await streamcast.Stream.scan(uri, where="price > 1").read_all()
         assert table.num_rows == 0
         assert {"litelink_offset", "streamcast_ts", "price"} <= set(table.column_names)
 
@@ -387,10 +389,12 @@ class TestALiveLogThatHasPublishedNothing:
         assert uri is not None
         await served_once(migrated, serve)
 
-        table = await streamcast.Stream.scan(uri)
+        table = await streamcast.Stream.scan(uri).read_all()
         assert table.column("litelink_offset").to_pylist() == [1, 2, 3]
         assert table.column("venue").to_pylist() == [None, None, None]
-        result = await streamcast.Stream.sql(uri, "SELECT count(venue) AS n FROM log")
+        result = await streamcast.Stream.sql(
+            uri, "SELECT count(venue) AS n FROM log"
+        ).read_all()
         assert result.to_pylist() == [{"n": 0}]
 
 
@@ -437,7 +441,7 @@ async def test_a_stream_published_to_s3_reads_from_there(tmp_path, s3, bucket, s
     assert uri.startswith(bucket)
     await served_once(stream, serve)
 
-    table = await streamcast.Stream.scan(uri, s3_options=s3)
+    table = await streamcast.Stream.scan(uri, s3_options=s3).read_all()
     assert offsets(table) == [1, 2, 3, 4]
 
 
@@ -459,5 +463,5 @@ class TestTheTailBound:
             # Within the bound, the same read works.
             table = await streamcast.Stream.scan(
                 uri, as_of_offset=LATEST, broker=broker, max_tail=5
-            )
+            ).read_all()
             assert offsets(table) == [1, 2, 3, 4, 5, 6, 7]

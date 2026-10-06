@@ -70,7 +70,7 @@ from streamcast._protocol import (
     publish_error,
     refusal,
 )
-from streamcast._published import ReadCache
+from streamcast._published import BATCH, ReadCache
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
 from streamcast._writer import Job, Writer
@@ -1109,7 +1109,7 @@ class Stream:
         )
 
     @staticmethod
-    async def scan(
+    def scan(
         metadata_uri: str,
         *,
         as_of_offset: int | None = None,
@@ -1126,30 +1126,43 @@ class Stream:
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """One `Snapshot.scan` on a snapshot opened for it, then closed."""
-        async with await Stream.snapshot(
-            metadata_uri,
-            as_of_offset=as_of_offset,
-            as_of_ts=as_of_ts,
-            broker=broker,
-            s3_options=s3_options,
-            max_tail=max_tail,
-            memory_cache=memory_cache,
-            disk_cache=disk_cache,
-            cache_key=cache_key,
-            disk_cache_volume_limit=disk_cache_volume_limit,
-        ) as snap:
-            return await snap.scan(
+        batch_size: int = BATCH,
+    ) -> _snapshot.Reader:
+        """`Snapshot.scan` on a snapshot of its own, as a `Reader`, as litelink's
+        `scan` is a reader.
+
+            table = await Stream.scan(uri, where="side = 1").read_all()
+
+        The snapshot opens at the reader's first read, so that is where a
+        refusal is raised, and closes once the reader is done.
+        """
+
+        async def opening() -> _snapshot.Reader:
+            snap = await Stream.snapshot(
+                metadata_uri,
+                as_of_offset=as_of_offset,
+                as_of_ts=as_of_ts,
+                broker=broker,
+                s3_options=s3_options,
+                max_tail=max_tail,
+                memory_cache=memory_cache,
+                disk_cache=disk_cache,
+                cache_key=cache_key,
+                disk_cache_volume_limit=disk_cache_volume_limit,
+            )
+            return snap.scan(
                 columns=columns,
                 where=where,
                 filters=filters,
                 start_offset=start_offset,
                 end_offset=end_offset,
+                batch_size=batch_size,
             )
 
+        return _snapshot.Reader._owning(opening)  # noqa: SLF001
+
     @staticmethod
-    async def sql(
+    def sql(
         metadata_uri: str,
         query: str,
         *,
@@ -1165,30 +1178,40 @@ class Stream:
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """One `Snapshot.sql` — over the table `log` — then closed.
+        batch_size: int = BATCH,
+    ) -> _snapshot.Reader:
+        """`Snapshot.sql` — over the table `log` — on a snapshot of its own, as
+        a `Reader`, as litelink's `sql` is a reader.
+
+            table = await Stream.sql(uri, "SELECT count(*) FROM log").read_all()
 
         `filters` and the offsets narrow `log` and prune whole logs; the
-        query's own `WHERE` does not prune. See `Snapshot.sql`.
+        query's own `WHERE` does not prune. See `Snapshot.sql`. The snapshot
+        opens at the reader's first read and closes once it is done.
         """
-        async with await Stream.snapshot(
-            metadata_uri,
-            as_of_offset=as_of_offset,
-            as_of_ts=as_of_ts,
-            broker=broker,
-            s3_options=s3_options,
-            max_tail=max_tail,
-            memory_cache=memory_cache,
-            disk_cache=disk_cache,
-            cache_key=cache_key,
-            disk_cache_volume_limit=disk_cache_volume_limit,
-        ) as snap:
-            return await snap.sql(
+
+        async def opening() -> _snapshot.Reader:
+            snap = await Stream.snapshot(
+                metadata_uri,
+                as_of_offset=as_of_offset,
+                as_of_ts=as_of_ts,
+                broker=broker,
+                s3_options=s3_options,
+                max_tail=max_tail,
+                memory_cache=memory_cache,
+                disk_cache=disk_cache,
+                cache_key=cache_key,
+                disk_cache_volume_limit=disk_cache_volume_limit,
+            )
+            return snap.sql(
                 query,
                 filters=filters,
                 start_offset=start_offset,
                 end_offset=end_offset,
+                batch_size=batch_size,
             )
+
+        return _snapshot.Reader._owning(opening)  # noqa: SLF001
 
     @staticmethod
     async def live(

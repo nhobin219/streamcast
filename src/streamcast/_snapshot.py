@@ -1,7 +1,7 @@
 """A stream's history, read from any machine, as of a fixed point (#32).
 
     snapshot = await streamcast.Stream.snapshot(metadata_uri)
-    rows = await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+    table = await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 A stream is a sequence of logs (`Stream.migrate`), each publishing an
 ordinary Iceberg table, and `<stream>.metadata.json` says which, in order,
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -48,7 +49,7 @@ from streamcast._metadata import Metadata
 from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     import duckdb
     from litelink import S3Options
@@ -122,6 +123,194 @@ class _Piece:
     table: _published.Table | None = None
 
 
+@dataclass(frozen=True)
+class _Frozen:
+    """What one read sees of a snapshot `Live` moves: its tail, and its end."""
+
+    tail: pa.Table | None
+    end: int
+
+
+class Reader:
+    """A query's result as it streams: batch by batch, or whole.
+
+        async with snapshot.sql("SELECT …") as result:
+            async for batch in result:                 # pa.RecordBatch
+                ...
+
+        table = await snapshot.sql("SELECT …").read_all()
+
+    The query runs once, when the result is first read — entering `async
+    with`, the first batch, or `read_all` — on a DuckDB cursor of its own, so
+    other reads of the same snapshot cannot end it short. Every DuckDB call is
+    in a worker thread: the event loop never waits on the read. One batch is
+    in memory at a time, unless `read_all` asks for every one.
+
+    **Valid while its snapshot is open.** A batch asked for after the snapshot
+    closed raises; it never ends the result early. Reading it to the end,
+    `read_all`, `aclose` or leaving `async with` closes the cursor. A reader
+    never read or closed keeps it, and keeps its snapshot's connection open,
+    until it is.
+
+    `Stream.sql` and `Stream.scan` return one with a snapshot of its own,
+    opened at its first read and closed once it is done.
+    """
+
+    __slots__ = (
+        "_cursor",
+        "_done",
+        "_opening",
+        "_pending",
+        "_plan",
+        "_reader",
+        "_schema",
+        "_snapshot",
+    )
+
+    def __init__(
+        self,
+        snapshot: Snapshot | None,
+        plan: Callable[[duckdb.DuckDBPyConnection], pa.RecordBatchReader] | None,
+        *,
+        opening: Callable[[], Awaitable[Reader]] | None = None,
+    ) -> None:
+        self._snapshot = snapshot
+        self._plan = plan
+        # For a reader with a snapshot of its own: opens it, and makes the
+        # reader on it whose query this one runs.
+        self._opening = opening
+        self._reader: pa.RecordBatchReader | None = None
+        self._cursor: duckdb.DuckDBPyConnection | None = None
+        self._schema: pa.Schema | None = None
+        self._pending: asyncio.Future[Any] | None = None
+        self._done = False
+        if snapshot is not None:
+            # Counted from creation, not from the first read: a `Live` rebase
+            # between the two must not close the base this was made against.
+            snapshot._acquire()
+
+    @classmethod
+    def _owning(cls, opening: Callable[[], Awaitable[Reader]]) -> Reader:
+        """A reader whose snapshot `opening` opens at the first read."""
+        return cls(None, None, opening=opening)
+
+    @property
+    def schema(self) -> pa.Schema:
+        """The result's schema, once the query has run."""
+        if self._schema is None:
+            msg = "the query has not run yet: enter `async with`, or read a batch"
+            raise RuntimeError(msg)
+
+        return self._schema
+
+    async def read_all(self) -> pa.Table:
+        """Every batch not yet read, as one table; then closed."""
+        table = await self._run(lambda: self._started().read_all())
+        await self.aclose()
+        return table
+
+    async def aclose(self) -> None:
+        """Release the cursor. Idempotent."""
+        if self._done:
+            return
+
+        self._done = True
+        if self._pending is not None and not self._pending.done():
+            # A read cancelled in its thread is still running there: the
+            # cursor is closed under it only once it has returned.
+            await asyncio.wait([self._pending])
+
+        reader, cursor = self._reader, self._cursor
+        self._reader = self._cursor = None
+        try:
+            if cursor is not None:
+                await asyncio.to_thread(_close, reader, cursor)
+
+        finally:
+            if self._snapshot is not None:
+                await self._snapshot._release()  # noqa: SLF001
+
+    def __aiter__(self) -> Reader:
+        return self
+
+    async def __anext__(self) -> pa.RecordBatch:
+        if self._done:
+            raise StopAsyncIteration
+
+        batch = await self._run(lambda: _log._next_batch(self._started()))  # noqa: SLF001
+        if batch is None:
+            await self.aclose()
+            raise StopAsyncIteration
+
+        return batch
+
+    async def __aenter__(self) -> Reader:
+        await self._run(self._started)
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
+
+    def _started(self) -> pa.RecordBatchReader:
+        """The query's reader, run on a new cursor the first time. In a thread."""
+        if self._reader is None:
+            assert self._snapshot is not None  # `_run` saw to it
+            assert self._plan is not None
+            cursor = self._snapshot._cursor()  # noqa: SLF001
+            try:
+                self._reader = self._plan(cursor)
+            except BaseException:
+                cursor.close()
+                raise
+
+            self._cursor = cursor
+            self._schema = self._reader.schema
+
+        return self._reader
+
+    async def _open(self) -> None:
+        """Open this reader's own snapshot, and take over the reader made on it."""
+        assert self._opening is not None
+        made = await self._opening()
+        snapshot = made._snapshot  # noqa: SLF001
+        assert snapshot is not None
+        # Its count on the snapshot is this reader's now; it is never read.
+        made._done = True  # noqa: SLF001
+        self._snapshot, self._plan = snapshot, made._plan  # noqa: SLF001
+        # Closed as soon as this reader is done, which is its only one.
+        await snapshot._retire()  # noqa: SLF001
+
+    async def _run(self, work: Callable[[], Any]) -> Any:
+        if self._done:
+            msg = "this result is closed"
+            raise RuntimeError(msg)
+
+        try:
+            if self._snapshot is None:
+                await self._open()
+
+            assert self._snapshot is not None
+            self._snapshot._check()  # noqa: SLF001
+            self._pending = asyncio.ensure_future(asyncio.to_thread(work))
+            return await asyncio.shield(self._pending)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self.aclose()
+            raise
+
+
+def _close(
+    reader: pa.RecordBatchReader | None, cursor: duckdb.DuckDBPyConnection
+) -> None:
+    try:
+        if reader is not None:
+            reader.close()
+
+    finally:
+        cursor.close()
+
+
 class Snapshot:
     """A stream as of one point: its published tables, plus a broker tail.
 
@@ -130,10 +319,15 @@ class Snapshot:
     """
 
     __slots__ = (
+        "_closed",
         "_connection",
+        "_guard",
         "_manifest",
         "_pieces",
+        "_readers",
+        "_retiring",
         "_s3",
+        "_shut",
         "_tail",
         "_ts",
         "end_offset",
@@ -160,10 +354,23 @@ class Snapshot:
         self._ts = ts
         self._manifest = manifest
         self._s3 = s3_options
+        # The connection is shared by every read, each from a worker thread:
+        # held while a table is opened or a cursor taken from it.
+        self._guard = threading.Lock()
+        # Reads still open — readers, `rows` — which keep the connection open
+        # past `close` or `_retire` until the last of them ends.
+        self._readers = 0
+        self._closed = False
+        self._retiring = False
+        self._shut = False
 
     # -- reading ---------------------------------------------------------------
 
     def _open(self, piece: _Piece) -> _published.Table:
+        with self._guard:
+            return self._opened(piece)
+
+    def _opened(self, piece: _Piece) -> _published.Table:
         if piece.table is None:
             published = piece.entry.published
             if published is None:  # pragma: no cover — `metadata` fills it in
@@ -171,7 +378,11 @@ class Snapshot:
                 raise SnapshotUnavailable(msg)
 
             table = _published.Table.open(
-                published, piece.entry.name, self._s3, shared=self._connection
+                published,
+                piece.entry.name,
+                self._s3,
+                shared=self._connection,
+                guard=self._guard,
             )
             expected = self._recorded(piece.entry)
             if expected is not None and table.record_count < expected:
@@ -205,14 +416,16 @@ class Snapshot:
         count = self._manifest.column("record_count")[names.index(entry.name)].as_py()
         return None if count is None else int(count)
 
-    def _bounds(self, start: int | None, stop: int | None, *, stamped: bool) -> str:
+    def _bounds(
+        self, start: int | None, stop: int | None, *, stamped: bool, end: int
+    ) -> str:
         """The snapshot's own limits, on columns one log is sure to have.
 
         The offset always; the `as_of_ts` bound only on a log that carries
         the stamp. `_pieces` keeps an unstamped log only when it lies wholly
         before the point, so every one of its rows is inside it.
         """
-        terms = [f'"{_log.COLUMN}" < {min(stop or self.end_offset, self.end_offset)}']
+        terms = [f'"{_log.COLUMN}" < {min(stop or end, end)}']
         if start is not None:
             terms.append(f'"{_log.COLUMN}" >= {int(start)}')
 
@@ -226,10 +439,12 @@ class Snapshot:
         start: int | None,
         stop: int | None,
         filters: Sequence[_manifest.Term] = (),
+        *,
+        end: int,
     ) -> list[_Piece]:
         """The pieces whose offsets meet `[start, stop)` and whose bounds might match."""
         low = start if start is not None else -math.inf
-        high = min(stop or self.end_offset, self.end_offset)
+        high = min(stop or end, end)
         pieces = [
             piece
             for piece in self._pieces
@@ -248,12 +463,19 @@ class Snapshot:
 
     def _select(
         self,
+        cursor: duckdb.DuckDBPyConnection,
+        frozen: _Frozen,
         start: int | None,
         stop: int | None,
         where: str | None,
         filters: Sequence[_manifest.Term],
     ) -> str:
         """The snapshot's rows in `[start, stop)` matching `where` and `filters`.
+
+        Read on `cursor`, which is where the tail is registered: a cursor does
+        not see what is registered on its parent. `frozen` is the tail and the
+        end the reader was created with — a `Live` view moves both on the
+        snapshot for each query, and an open reader must not see that.
 
         **The caller's conditions go OUTSIDE the union.** A log from before a
         migration added a column has no such column, so a condition on it
@@ -262,31 +484,30 @@ class Snapshot:
         for every other read. The snapshot's own limits stay inside, where
         they are sure to bind and push down into each table's scan.
         """
-        pieces = self._relevant(start, stop, filters)
+        end = frozen.end
+        pieces = self._relevant(start, stop, filters, end=end)
         parts = [
             f"SELECT * FROM {self._open(piece).relation()} "
-            f"WHERE {self._bounds(start, stop, stamped=_stamped(piece.entry))}"
+            f"WHERE {self._bounds(start, stop, stamped=_stamped(piece.entry), end=end)}"
             for piece in pieces
         ]
-        if self._tail is not None:
+        if frozen.tail is not None:
             # Broker rows: as of an offset only, so no stamp bound applies.
-            self._connection.register("streamcast_tail", self._tail)
+            cursor.register("streamcast_tail", frozen.tail)
             parts.append(
                 f"SELECT * FROM streamcast_tail "
-                f"WHERE {self._bounds(start, stop, stamped=False)}"
+                f"WHERE {self._bounds(start, stop, stamped=False, end=end)}"
             )
 
         live = self.metadata.live_log
-        if self._tail is None and not any(piece.entry is live for piece in pieces):
+        if frozen.tail is None and not any(piece.entry is live for piece in pieces):
             # Nothing read from the live log — it has published nothing, and
             # there is no tail — but its columns still belong in the table,
             # typed as it declares them: a column a migration added would
             # otherwise be missing until the live log first publishes, and a
             # query naming it would be a binder error rather than NULLs. With
             # nothing else to read either, this is the whole (empty) table.
-            self._connection.register(
-                "streamcast_empty", _tail_table(self.metadata.live_log, [])
-            )
+            cursor.register("streamcast_empty", _tail_table(self.metadata.live_log, []))
             parts.append("SELECT * FROM streamcast_empty")
 
         union = " UNION ALL BY NAME ".join(parts)
@@ -299,7 +520,7 @@ class Snapshot:
 
         return f"SELECT * FROM ({union}) WHERE {' AND '.join(conditions)}"
 
-    async def scan(
+    def scan(
         self,
         *,
         columns: Sequence[str] | None = None,
@@ -307,8 +528,11 @@ class Snapshot:
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """Rows in `[start_offset, end_offset)`, oldest first, as one Arrow table.
+        batch_size: int = _published.BATCH,
+    ) -> Reader:
+        """Rows in `[start_offset, end_offset)`, oldest first, as a `Reader`.
+
+            table = await snapshot.scan(where="side = 1").read_all()
 
         `where` is SQL over the stream's columns. `filters` are
         `(column, operator, value)` terms, ANDed with `where`, and the ones
@@ -317,26 +541,31 @@ class Snapshot:
         `filters` prune; see `sql` for why `where` does not.
         """
 
-        def run() -> pa.Table:
-            projection = (
-                "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
+        frozen = self._frozen()
+        projection = "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
+
+        def plan(cursor: duckdb.DuckDBPyConnection) -> pa.RecordBatchReader:
+            rows = self._select(
+                cursor, frozen, start_offset, end_offset, where, filters
             )
-            rows = self._select(start_offset, end_offset, where, filters)
-            return self._connection.execute(
+            return cursor.execute(
                 f'SELECT {projection} FROM ({rows}) ORDER BY "{_log.COLUMN}"'
-            ).to_arrow_table()
+            ).to_arrow_reader(batch_size)
 
-        return await asyncio.to_thread(run)
+        return Reader(self, plan)
 
-    async def sql(
+    def sql(
         self,
         query: str,
         *,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """`query` over the snapshot, which it reads as the table `log`.
+        batch_size: int = _published.BATCH,
+    ) -> Reader:
+        """`query` over the snapshot, which it reads as the table `log`, as a `Reader`.
+
+            table = await snapshot.sql("SELECT side, count(*) FROM log GROUP BY side").read_all()
 
         `filters` and `[start_offset, end_offset)` narrow what `log` holds,
         exactly as they narrow `scan`: rows outside them are not in it, and a
@@ -352,12 +581,16 @@ class Snapshot:
         pruning a caller wants is stated as `filters`.
         """
 
-        def run() -> pa.Table:
-            rows = self._select(start_offset, end_offset, None, filters)
-            self._connection.execute(f"CREATE OR REPLACE TEMP VIEW log AS {rows}")
-            return self._connection.execute(query).to_arrow_table()
+        frozen = self._frozen()
 
-        return await asyncio.to_thread(run)
+        def plan(cursor: duckdb.DuckDBPyConnection) -> pa.RecordBatchReader:
+            rows = self._select(cursor, frozen, start_offset, end_offset, None, filters)
+            # A temporary view is the cursor's own, so two readers' `log`
+            # never replace each other.
+            cursor.execute(f"CREATE OR REPLACE TEMP VIEW log AS {rows}")
+            return cursor.execute(query).to_arrow_reader(batch_size)
+
+        return Reader(self, plan)
 
     async def rows(
         self, start: int, stop: int | None = None
@@ -368,18 +601,29 @@ class Snapshot:
         read here is the row a subscriber would have been sent (I6). For a
         range too large to hold as one table, which is what catch-up reads.
         """
-        high = min(stop or self.end_offset, self.end_offset)
-        for piece in self._relevant(start, high):
-            table = await asyncio.to_thread(self._open, piece)
-            async for offset, ts, row in _log.rows(table, start, high):
-                yield offset, ts, row
+        self._check()
+        frozen = self._frozen()
+        high = min(stop or frozen.end, frozen.end)
+        self._acquire()
+        try:
+            for piece in self._relevant(start, high, end=frozen.end):
+                self._check()
+                table = await asyncio.to_thread(self._open, piece)
+                async for offset, ts, row in _log.rows(table, start, high):
+                    # Each row, not each log: one closed mid-log raises at the
+                    # next row rather than reading the rest of the log first.
+                    self._check()
+                    yield offset, ts, row
 
-        if self._tail is not None:
-            for record in self._tail.to_pylist():
-                offset = record.pop(_log.COLUMN)
-                ts = record.pop(_log.STAMP)
-                if start <= offset < high:
-                    yield offset, ts, record
+            if frozen.tail is not None:
+                for record in frozen.tail.to_pylist():
+                    offset = record.pop(_log.COLUMN)
+                    ts = record.pop(_log.STAMP)
+                    if start <= offset < high:
+                        yield offset, ts, record
+
+        finally:
+            await self._release()
 
     async def floor(self) -> int | None:
         """The lowest offset the snapshot holds, or None if it holds none.
@@ -398,7 +642,43 @@ class Snapshot:
         return None
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._connection.close)
+        """Close the snapshot. A reader still open raises at its next batch."""
+        self._closed = True
+        await self._shut_if_idle()
+
+    async def _retire(self) -> None:
+        """Close once the readers still open have finished, which carry on.
+
+        What `Live` does with the base a rebase replaced: a query begun on it
+        reads it to the end.
+        """
+        self._retiring = True
+        await self._shut_if_idle()
+
+    def _frozen(self) -> _Frozen:
+        self._check()
+        return _Frozen(self._tail, self.end_offset)
+
+    def _check(self) -> None:
+        if self._closed:
+            msg = "this snapshot is closed: read it inside its `async with`"
+            raise RuntimeError(msg)
+
+    def _cursor(self) -> duckdb.DuckDBPyConnection:
+        with self._guard:
+            return self._connection.cursor()
+
+    def _acquire(self) -> None:
+        self._readers += 1
+
+    async def _release(self) -> None:
+        self._readers -= 1
+        await self._shut_if_idle()
+
+    async def _shut_if_idle(self) -> None:
+        if (self._closed or self._retiring) and self._readers == 0 and not self._shut:
+            self._shut = True
+            await asyncio.to_thread(self._connection.close)
 
     async def __aenter__(self) -> Snapshot:
         return self
