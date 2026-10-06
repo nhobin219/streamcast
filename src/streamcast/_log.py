@@ -84,7 +84,15 @@ class Readable(Protocol):
         start_offset: int | None = None,
         end_offset: int | None = None,
         published: bool = True,
-    ) -> pa.RecordBatchReader: ...
+    ) -> BatchReader: ...
+
+
+class BatchReader(Protocol):
+    """The part of `pa.RecordBatchReader` a replay pulls from."""
+
+    def read_next_batch(self) -> pa.RecordBatch: ...
+
+    def close(self) -> None: ...
 
 
 STAMP: Final = "streamcast_ts"
@@ -226,7 +234,7 @@ def stamped(log: LogHandle) -> bool:
     return STAMP in system(log.schema).names
 
 
-def _next_batch(reader: pa.RecordBatchReader) -> pa.RecordBatch | None:
+def _next_batch(reader: BatchReader) -> pa.RecordBatch | None:
     """One batch, or None at the end.
 
     `StopIteration` is converted rather than propagated because this runs in a
