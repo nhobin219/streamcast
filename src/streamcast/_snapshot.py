@@ -49,7 +49,7 @@ from streamcast._metadata import Metadata
 from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     import duckdb
     from litelink import S3Options
@@ -151,11 +151,15 @@ class Reader:
     `read_all`, `aclose` or leaving `async with` closes the cursor. A reader
     never read or closed keeps it, and keeps its snapshot's connection open,
     until it is.
+
+    `Stream.sql` and `Stream.scan` return one with a snapshot of its own,
+    opened at its first read and closed once it is done.
     """
 
     __slots__ = (
         "_cursor",
         "_done",
+        "_opening",
         "_pending",
         "_plan",
         "_reader",
@@ -165,19 +169,30 @@ class Reader:
 
     def __init__(
         self,
-        snapshot: Snapshot,
-        plan: Callable[[duckdb.DuckDBPyConnection], pa.RecordBatchReader],
+        snapshot: Snapshot | None,
+        plan: Callable[[duckdb.DuckDBPyConnection], pa.RecordBatchReader] | None,
+        *,
+        opening: Callable[[], Awaitable[Reader]] | None = None,
     ) -> None:
         self._snapshot = snapshot
         self._plan = plan
+        # For a reader with a snapshot of its own: opens it, and makes the
+        # reader on it whose query this one runs.
+        self._opening = opening
         self._reader: pa.RecordBatchReader | None = None
         self._cursor: duckdb.DuckDBPyConnection | None = None
         self._schema: pa.Schema | None = None
         self._pending: asyncio.Future[Any] | None = None
         self._done = False
-        # Counted from creation, not from the first read: a `Live` rebase
-        # between the two must not close the base this was made against.
-        snapshot._acquire()
+        if snapshot is not None:
+            # Counted from creation, not from the first read: a `Live` rebase
+            # between the two must not close the base this was made against.
+            snapshot._acquire()
+
+    @classmethod
+    def _owning(cls, opening: Callable[[], Awaitable[Reader]]) -> Reader:
+        """A reader whose snapshot `opening` opens at the first read."""
+        return cls(None, None, opening=opening)
 
     @property
     def schema(self) -> pa.Schema:
@@ -212,7 +227,8 @@ class Reader:
                 await asyncio.to_thread(_close, reader, cursor)
 
         finally:
-            await self._snapshot._release()  # noqa: SLF001
+            if self._snapshot is not None:
+                await self._snapshot._release()  # noqa: SLF001
 
     def __aiter__(self) -> Reader:
         return self
@@ -238,6 +254,8 @@ class Reader:
     def _started(self) -> pa.RecordBatchReader:
         """The query's reader, run on a new cursor the first time. In a thread."""
         if self._reader is None:
+            assert self._snapshot is not None  # `_run` saw to it
+            assert self._plan is not None
             cursor = self._snapshot._cursor()  # noqa: SLF001
             try:
                 self._reader = self._plan(cursor)
@@ -250,12 +268,28 @@ class Reader:
 
         return self._reader
 
+    async def _open(self) -> None:
+        """Open this reader's own snapshot, and take over the reader made on it."""
+        assert self._opening is not None
+        made = await self._opening()
+        snapshot = made._snapshot  # noqa: SLF001
+        assert snapshot is not None
+        # Its count on the snapshot is this reader's now; it is never read.
+        made._done = True  # noqa: SLF001
+        self._snapshot, self._plan = snapshot, made._plan  # noqa: SLF001
+        # Closed as soon as this reader is done, which is its only one.
+        await snapshot._retire()  # noqa: SLF001
+
     async def _run(self, work: Callable[[], Any]) -> Any:
         if self._done:
             msg = "this result is closed"
             raise RuntimeError(msg)
 
         try:
+            if self._snapshot is None:
+                await self._open()
+
+            assert self._snapshot is not None
             self._snapshot._check()  # noqa: SLF001
             self._pending = asyncio.ensure_future(asyncio.to_thread(work))
             return await asyncio.shield(self._pending)

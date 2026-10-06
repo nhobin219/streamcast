@@ -425,7 +425,9 @@ class TestTheLogIsNamedInTheGreeting:
             assert info.metadata is not None
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
-            table = await streamcast.Stream.scan(info.metadata, s3_options=s3)
+            table = await streamcast.Stream.scan(
+                info.metadata, s3_options=s3
+            ).read_all()
             assert table.num_rows == 800
 
 

@@ -112,7 +112,7 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
     snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=) -> Reader
     snapshot.sql(query, *, filters=, start_offset=, end_offset=) -> Reader  # table `log`
         await reader.read_all() -> pa.Table · async for batch in reader   # streamed
-await streamcast.Stream.scan(metadata_uri, ...) · await streamcast.Stream.sql(uri, query)
+streamcast.Stream.scan(metadata_uri, ...) · streamcast.Stream.sql(uri, query) -> Reader
 await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
     live.scan(...) · live.sql(query) -> Reader · await live.wait_for(offset | ts=)
 
@@ -256,9 +256,9 @@ What it captures is a table, queried from its published tables:
 
 ```python
 uri = stream.metadata_uri
-await streamcast.Stream.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log")
-await streamcast.Stream.scan(uri, columns=["litelink_offset", "price"], where="side = 1")
-await streamcast.Stream.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log")   # feed latency, us
+await streamcast.Stream.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log").read_all()
+await streamcast.Stream.scan(uri, columns=["litelink_offset", "price"], where="side = 1").read_all()
+await streamcast.Stream.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
 ```
 
 The table has two columns you did not declare. `litelink_offset` is the offset every frame

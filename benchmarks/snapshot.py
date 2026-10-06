@@ -139,7 +139,9 @@ async def measure(uri: str, rows: int, repeat: int) -> dict[str, float]:
     results["open"] = await median(repeat, opened)
 
     async def one_shot() -> None:
-        await streamcast.Stream.scan(uri, start_offset=rows, end_offset=rows + 1)
+        await streamcast.Stream.scan(
+            uri, start_offset=rows, end_offset=rows + 1
+        ).read_all()
 
     results["one-shot: open + 1 row + close"] = await median(repeat, one_shot)
 

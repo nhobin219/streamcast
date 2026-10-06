@@ -195,3 +195,43 @@ class TestItsLifetime:
         await snap.close()
         with pytest.raises(RuntimeError, match="closed"):
             await anext(rows)  # the very next row, not the rest of the log first
+
+
+class TestTheOneShotForms:
+    """`Stream.sql` and `Stream.scan`: a reader with a snapshot of its own."""
+
+    async def test_it_streams_and_closes_its_snapshot_once_done(self, tmp_path):
+        uri = await published(tmp_path)
+        reader = streamcast.Stream.scan(uri, columns=["litelink_offset"], batch_size=50)
+        batches = [batch async for batch in reader]
+
+        assert offsets(batches) == list(range(1, ROWS + 1))
+        assert reader._snapshot is not None  # noqa: SLF001
+        assert reader._snapshot._shut  # noqa: SLF001
+
+    async def test_read_all_is_the_whole_answer(self, tmp_path):
+        uri = await published(tmp_path)
+        table = await streamcast.Stream.sql(
+            uri, "SELECT count(*) AS n FROM log WHERE side = 1"
+        ).read_all()
+        assert table.to_pylist() == [{"n": ROWS // 2}]
+
+    async def test_a_refusal_is_raised_at_the_first_read(self, tmp_path):
+        uri = await published(tmp_path)
+        reader = streamcast.Stream.scan(uri, as_of_offset=ROWS + 10)
+        with pytest.raises(streamcast.SnapshotUnavailable, match="broker="):
+            await reader.read_all()
+
+    async def test_one_closed_unread_opens_nothing(self, tmp_path, monkeypatch):
+        uri = await published(tmp_path)
+        opened = []
+        real = streamcast.Stream.snapshot
+
+        async def recording(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            opened.append(args)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(streamcast.Stream, "snapshot", recording)
+        reader = streamcast.Stream.sql(uri, "SELECT 1")
+        await reader.aclose()
+        assert opened == []

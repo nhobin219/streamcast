@@ -20,7 +20,10 @@ there was nothing to have changed from. Everything above it is ordinary.
   on a DuckDB cursor of its own, in a worker thread, and is valid while its
   snapshot is open: a batch asked for after it closed raises. A `Live` reader
   keeps the view as of the call, and a rebase keeps the base it reads open
-  until it is done. `Stream.sql` and `Stream.scan` still return a `pa.Table`.
+  until it is done. `Stream.sql` and `Stream.scan` return one too, as
+  litelink's `scan` and `sql` return a reader, and are no longer `async`: the
+  reader opens a snapshot of its own at its first read, where a refusal is
+  raised, and closes it once it is done.
 
 ### Fixed
 

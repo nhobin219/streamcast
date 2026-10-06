@@ -752,7 +752,9 @@ stream's metadata file, which is what [`Stream.snapshot`](#reading-a-streams-his
 takes, and `stream_id` is the id that file records:
 
 ```python
-table = await streamcast.Stream.scan(sub.info.metadata, as_of_offset=sub.info.end_offset)
+table = await streamcast.Stream.scan(
+    sub.info.metadata, as_of_offset=sub.info.end_offset
+).read_all()
 ```
 
 Both are `None` when the stream has no log. Credentials are never published — they are
@@ -1323,10 +1325,10 @@ await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=No
                                  max_tail=1_000_000, memory_cache=True,
                                  disk_cache=False, cache_key=None,
                                  disk_cache_volume_limit=0.8) -> Snapshot
-await streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None,
-                             filters=(), start_offset=None, end_offset=None) -> pa.Table
-await streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(),
-                            start_offset=None, end_offset=None) -> pa.Table
+streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None, filters=(),
+                       start_offset=None, end_offset=None, batch_size=1_000_000) -> Reader
+streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(), start_offset=None,
+                      end_offset=None, batch_size=1_000_000) -> Reader
 
 stream.metadata_uri -> str | None     # on the server
 sub.info.metadata -> str | None       # on a subscriber
@@ -1373,7 +1375,9 @@ async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
 ```
 
 `Stream.scan` and `Stream.sql` are the one-shot forms: open, read once, close. They
-return a `pa.Table`, since a reader would outlive the snapshot they opened.
+return a `Reader`, as litelink's `scan` and `sql` return a reader, on a snapshot of its
+own: opened at the reader's first read — which is where a refusal is raised — and closed
+once the reader is done.
 
 **A fixed point, three ways to name it** — at most one of them:
 
