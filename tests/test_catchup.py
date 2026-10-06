@@ -816,4 +816,5 @@ def test_the_reads_cross_into_a_thread():
 
     source = inspect.getsource(snapshot_module.snapshot)
     assert source.count("asyncio.to_thread") >= 2
-    assert "asyncio.to_thread" in inspect.getsource(Snapshot.close)
+    # Closing the connection, wherever the last reader to finish does it.
+    assert "asyncio.to_thread" in inspect.getsource(Snapshot._shut_if_idle)  # noqa: SLF001

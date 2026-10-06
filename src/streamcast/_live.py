@@ -1,7 +1,7 @@
 """A stream's history, kept current in memory: `Stream.live` (#59).
 
     async with await streamcast.Stream.live("ws://broker:8765/trades") as live:
-        await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
+        await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 A `Snapshot` is a fixed point. A `Live` is the same reader kept moving: the
 published tables as a base, and the broker's rows appended in memory as they
@@ -51,7 +51,7 @@ from websockets.exceptions import ConnectionClosed
 from streamcast import _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
 from streamcast._limits import MAX_TAIL
-from streamcast._published import DEFAULT_CACHE, ReadCache
+from streamcast._published import BATCH, DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -122,7 +122,6 @@ class Live:
         # Nothing below `start` is wanted, so the subscription begins there
         # when it is above what is published.
         self._end = max(base.end_offset, start or 0)
-        self._lock = asyncio.Lock()
         self._advanced = asyncio.Condition()
         self._failure: BaseException | None = None
         # The newest `streamcast_ts` received, for `wait_for(ts=)`.
@@ -268,26 +267,30 @@ class Live:
             stream_id=self._stream_id,
             cache=self._cache,
         )
-        async with self._lock:
-            # Converted against the old base first, so a pending row is judged
-            # by the base it arrived under; the cut below then trims it.
-            self._flush()
-            old, self._base = self._base, fresh
-            cut = fresh.end_offset
-            self._published_end = cut
-            # Each table is in offset order — rows arrive that way — so the
-            # rows the new base covers are a prefix.
-            trimmed = []
-            for table in self._tail:
-                offsets = table.column(_log.COLUMN).to_pylist()
-                kept = table.slice(bisect.bisect_left(offsets, cut))
-                if kept.num_rows:
-                    trimmed.append(kept)
+        # **No await from here to the swap's end.** A query's `_view` has
+        # none either, so it sees the old base and its tail or the new base
+        # and its trimmed tail — never one with the other's.
+        #
+        # Converted against the old base first, so a pending row is judged
+        # by the base it arrived under; the cut below then trims it.
+        self._flush()
+        old, self._base = self._base, fresh
+        cut = fresh.end_offset
+        self._published_end = cut
+        # Each table is in offset order — rows arrive that way — so the
+        # rows the new base covers are a prefix.
+        trimmed = []
+        for table in self._tail:
+            offsets = table.column(_log.COLUMN).to_pylist()
+            kept = table.slice(bisect.bisect_left(offsets, cut))
+            if kept.num_rows:
+                trimmed.append(kept)
 
-            self._tail = trimmed
-            self._end = max(self._end, cut)
-
-        await old.close()
+        self._tail = trimmed
+        self._end = max(self._end, cut)
+        # Closed once the readers begun on it have finished, which carry on
+        # reading it: a rebase does not end a query.
+        await old._retire()  # noqa: SLF001
 
     # -- reading ----------------------------------------------------------------
 
@@ -337,7 +340,11 @@ class Live:
         # Nothing received since opening is past `ts`, but the published rows
         # may be: an idle stream asked about an hour ago is already complete.
         newest = (
-            (await self.sql(f'SELECT max("{_log.STAMP}") AS newest FROM log'))
+            (
+                await self.sql(
+                    f'SELECT max("{_log.STAMP}") AS newest FROM log'
+                ).read_all()
+            )
             .column("newest")[0]
             .as_py()
         )
@@ -357,7 +364,7 @@ class Live:
 
         self._check()
 
-    async def scan(
+    def scan(
         self,
         *,
         columns: Sequence[str] | None = None,
@@ -365,35 +372,40 @@ class Live:
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """`Snapshot.scan`, as of the newest row received."""
-        async with self._lock:
-            view = self._view()
-            return await view.scan(
-                columns=columns,
-                where=where,
-                filters=(*self._filters, *filters),
-                start_offset=self._from(start_offset),
-                end_offset=end_offset,
-            )
+        batch_size: int = BATCH,
+    ) -> _snapshot.Reader:
+        """`Snapshot.scan`, as of the newest row received when it is called.
 
-    async def sql(
+        The reader keeps that point: rows received, and rebases, while it is
+        read are not in it.
+        """
+        return self._view().scan(
+            columns=columns,
+            where=where,
+            filters=(*self._filters, *filters),
+            start_offset=self._from(start_offset),
+            end_offset=end_offset,
+            batch_size=batch_size,
+        )
+
+    def sql(
         self,
         query: str,
         *,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
-    ) -> pa.Table:
-        """`Snapshot.sql` — over the table `log` — as of the newest row received."""
-        async with self._lock:
-            view = self._view()
-            return await view.sql(
-                query,
-                filters=(*self._filters, *filters),
-                start_offset=self._from(start_offset),
-                end_offset=end_offset,
-            )
+        batch_size: int = BATCH,
+    ) -> _snapshot.Reader:
+        """`Snapshot.sql` — over the table `log` — as of the newest row received
+        when it is called. The reader keeps that point, as `scan`'s does."""
+        return self._view().sql(
+            query,
+            filters=(*self._filters, *filters),
+            start_offset=self._from(start_offset),
+            end_offset=end_offset,
+            batch_size=batch_size,
+        )
 
     def _check(self) -> None:
         if self._failure is not None:

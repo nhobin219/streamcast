@@ -77,7 +77,7 @@ class TestOneLog:
         uri = _metadata.uri("trades", litelink.open(tmp_path, "trades", read_only=True))
         async with await streamcast.Stream.snapshot(uri) as snap:
             assert snap.end_offset == 6
-            table = await snap.scan()
+            table = await snap.scan().read_all()
 
         assert offsets(table) == [1, 2, 3, 4, 5]
         assert table.column("price").to_pylist() == [100.0 + i for i in range(5)]
@@ -119,7 +119,7 @@ class TestTheBroker:
                 uri, as_of_offset=LATEST, broker=broker
             ) as snap:
                 assert snap.end_offset == 8
-                table = await snap.scan()
+                table = await snap.scan().read_all()
                 streamed = [(offset, ts) async for offset, ts, _row in snap.rows(1)]
 
         assert offsets(table) == list(range(1, 8))
@@ -200,11 +200,11 @@ class TestAMigratedStream:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
         async with await streamcast.Stream.snapshot(uri) as snap:
-            table = await snap.scan(filters=[("price", ">", 500.0)])
+            table = await snap.scan(filters=[("price", ">", 500.0)]).read_all()
             assert offsets(table) == [6, 7, 8]
 
             with pytest.raises(Exception, match="version-hint|No files found|IO Error"):
-                await snap.scan()  # unfiltered: it is opened, and it is gone
+                await snap.scan().read_all()  # unfiltered: it is opened, and it is gone
 
     async def test_as_of_a_time_it_reads_what_was_stamped_by_then(
         self, tmp_path, serve
@@ -300,11 +300,11 @@ class TestConditionsAcrossTheSeam:
             table = await snap.sql(
                 "SELECT litelink_offset FROM log ORDER BY 1",
                 filters=[("price", ">", 600.5)],
-            )
+            ).read_all()
             assert offsets(table) == [5, 6]
 
             with pytest.raises(Exception, match="version-hint|No files found|IO Error"):
-                await snap.sql("SELECT count(*) FROM log")
+                await snap.sql("SELECT count(*) FROM log").read_all()
 
     async def test_sql_offsets_narrow_the_table_and_prune(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)

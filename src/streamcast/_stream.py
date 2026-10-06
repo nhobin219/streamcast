@@ -1127,7 +1127,8 @@ class Stream:
         start_offset: int | None = None,
         end_offset: int | None = None,
     ) -> pa.Table:
-        """One `Snapshot.scan` on a snapshot opened for it, then closed."""
+        """One `Snapshot.scan` on a snapshot opened for it, read whole, then
+        closed: a `pa.Table`, since a reader would outlive its snapshot."""
         async with await Stream.snapshot(
             metadata_uri,
             as_of_offset=as_of_offset,
@@ -1146,7 +1147,7 @@ class Stream:
                 filters=filters,
                 start_offset=start_offset,
                 end_offset=end_offset,
-            )
+            ).read_all()
 
     @staticmethod
     async def sql(
@@ -1166,7 +1167,8 @@ class Stream:
         start_offset: int | None = None,
         end_offset: int | None = None,
     ) -> pa.Table:
-        """One `Snapshot.sql` — over the table `log` — then closed.
+        """One `Snapshot.sql` — over the table `log` — read whole, then closed:
+        a `pa.Table`, since a reader would outlive its snapshot.
 
         `filters` and the offsets narrow `log` and prune whole logs; the
         query's own `WHERE` does not prune. See `Snapshot.sql`.
@@ -1188,7 +1190,7 @@ class Stream:
                 filters=filters,
                 start_offset=start_offset,
                 end_offset=end_offset,
-            )
+            ).read_all()
 
     @staticmethod
     async def live(
