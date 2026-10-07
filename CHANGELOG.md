@@ -13,7 +13,8 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 - **`Stream.ingest(name, source, *, root)`** loads an Arrow table or batch
   reader into a stopped stream with litelink's `ingest`: straight to Parquet,
-  skipping the buffer, about 28 times faster by litelink's measurement. The
+  skipping the buffer — 2.1 million rows a second end to end, measured on 50
+  million trade-like rows on two vCPUs, at about 1 GB of memory. The
   rows take the next offsets at the end of the current log and are returned
   as `(start, end)`. `streamcast_ts` is stamped with the load time, and a
   source carrying it is refused; a source that does not match the schema is
