@@ -7,6 +7,7 @@ Needs an endpoint — `just rustfs` — and skips without one, which
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import timedelta
 
 import litelink
@@ -42,6 +43,41 @@ SEAL_SIZE = 64 * 1024
 KEEP_FILES = 1_000
 
 
+# **What a log evicted dry takes since litelink 0.11.** Eviction keeps a
+# file local until it is finished and published: the in-progress file
+# compaction grows, and a seal a flushed publish pushed early, both wait for
+# the finished file that replaces them. Finished means `target_compact_size`
+# ON DISK, so a test that wants every row gone from the local tier makes the
+# target small, makes the rows incompressible so they reach it, and runs
+# compaction until it is done.
+DRY_COMPACT_SIZE = 16 * 1024
+
+
+def dry() -> litelink.LogConfig:
+    return litelink.LogConfig(
+        target_seal_size=SEAL_SIZE,
+        target_compact_size=DRY_COMPACT_SIZE,
+        staging_retention=timedelta(0),
+    )
+
+
+def incompressible() -> str:
+    return os.urandom(100).hex()
+
+
+async def evict_dry(log) -> None:
+    """Finish every file, publish them, and evict the local tier."""
+    for _ in range(50):
+        before = log.staging_files()
+        await asyncio.to_thread(log.compact)
+        if log.staging_files() == before:
+            break
+
+    await asyncio.to_thread(log.publish)
+    await asyncio.to_thread(log.evict)
+    assert log.staging_extent() is None, "the fixture must evict dry"
+
+
 @pytest.fixture
 def published_log(tmp_path, s3, bucket):
     """A log whose published table holds rows the server will no longer replay."""
@@ -61,10 +97,10 @@ def published_log(tmp_path, s3, bucket):
         yield handle
 
 
-async def fill(stream, log, total=TOTAL):
+async def fill(stream, log, total=TOTAL, pad=lambda: PAD):
     for start in range(0, total, BATCH):
         await stream.send_many(
-            [{"i": i, "pad": PAD} for i in range(start, start + BATCH)]
+            [{"i": i, "pad": pad()} for i in range(start, start + BATCH)]
         )
 
     while log.seal(flush=True) is not None:
@@ -454,20 +490,14 @@ class TestTheWholeHistoryGateway:
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
             s3_options=s3,
-            config=litelink.LogConfig(
-                target_seal_size=SEAL_SIZE,
-                compact_min_files=KEEP_FILES,
-                staging_retention=timedelta(0),
-            ),
+            config=dry(),
         )
         with handle:
             stream = streamcast.Stream(
                 "trades", log=handle, max_replay=None, replay_published=True
             )
-            await fill(stream, handle, total=800)
-            await asyncio.to_thread(handle.evict)
-
-            assert handle.staging_extent() is None, "the fixture must evict dry"
+            await fill(stream, handle, total=800, pad=incompressible)
+            await evict_dry(handle)
 
             async with serve(stream, maintain=False) as uri:
                 # Bounded by nothing: the default would refuse this as
@@ -495,18 +525,13 @@ class TestTheWholeHistoryGateway:
             s3_options=s3,
             replay_published=True,
             max_replay=None,
-            config=litelink.LogConfig(
-                target_seal_size=SEAL_SIZE,
-                compact_min_files=KEEP_FILES,
-                staging_retention=timedelta(0),
-            ),
+            config=dry(),
         )
         try:
             assert stream.log is not None
 
-            await fill(stream, stream.log, total=800)
-            await asyncio.to_thread(stream.log.evict)
-            assert stream.log.staging_extent() is None, "the fixture must evict dry"
+            await fill(stream, stream.log, total=800, pad=incompressible)
+            await evict_dry(stream.log)
 
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
@@ -547,20 +572,14 @@ class TestAnEvictedLog:
             schema=streamcast.to_arrow(SCHEMA),
             published=bucket,
             s3_options=s3,
-            config=litelink.LogConfig(
-                target_seal_size=SEAL_SIZE,
-                compact_min_files=KEEP_FILES,
-                # Evict on upload: the local tier is emptied as soon as the
-                # published table has the rows, which is the state under test.
-                staging_retention=timedelta(0),
-            ),
+            # Evict on upload: the local tier is emptied as soon as the
+            # published table has the rows, which is the state under test.
+            config=dry(),
         )
         with handle:
             stream = streamcast.Stream("trades", log=handle)
-            await fill(stream, handle, total=800)
-            await asyncio.to_thread(handle.evict)
-
-            assert handle.staging_extent() is None, "the fixture must evict dry"
+            await fill(stream, handle, total=800, pad=incompressible)
+            await evict_dry(handle)
 
             async with serve(stream, maintain=False) as uri:
                 with pytest.raises(streamcast.NotReplayable) as raised:
