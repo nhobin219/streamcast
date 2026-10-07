@@ -34,6 +34,8 @@ SCHEMA = {
     "required": ["event_ts", "price"],
 }
 SEAL_SIZE = 64 * 1024
+# A `target_compact_size`, on disk, that 200 of these rows fill several times.
+FINISHED = 512
 
 
 def row(i: int) -> dict[str, object]:
@@ -108,7 +110,13 @@ def ship(config: str, s3: litelink.S3Options, binary: Path) -> None:
         sidecar.wait(timeout=10)
 
 
-def produce(root: Path, bucket: str, s3: litelink.S3Options, count: int = 200):
+def produce(
+    root: Path,
+    bucket: str,
+    s3: litelink.S3Options,
+    count: int = 200,
+    **config: object,
+):
     """A stream on the box that is about to be lost."""
     handle = litelink.new(
         root,
@@ -116,7 +124,11 @@ def produce(root: Path, bucket: str, s3: litelink.S3Options, count: int = 200):
         schema=streamcast.to_arrow(SCHEMA),
         published=bucket,
         s3_options=s3,
-        config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
+        config=litelink.LogConfig(
+            target_seal_size=SEAL_SIZE,
+            wal_replication=True,
+            **config,  # ty: ignore[invalid-argument-type]
+        ),
     )
     stream = streamcast.Stream("trades", log=handle)
 
@@ -372,16 +384,17 @@ class TestCatchUpOnTopOfIt:
             await revived.aclose()
 
 
-class TestTheStagingTableComesBackEmpty:
-    async def test_a_restored_log_is_locally_empty(
+class TestTheStagingTableComesBack:
+    async def test_a_restored_log_brings_back_only_the_unfinished_tail(
         self, tmp_path, s3, bucket, litestream
     ):
-        """Nothing copies published files back, so say what that means.
+        """litelink 0.11 copies the published table's tail back, and no more.
 
-        The Parquet is on the machine that is gone and only the published table
-        has it, so the staging table comes back empty. A handle that reads local
-        files only sees nothing — which is correct, and surprising if nobody
-        wrote it down.
+        The files after the last one at `target_compact_size` — seals a flushed
+        publish pushed early — return to staging as recompaction candidates, so
+        the restored log finishes them as the dead machine would have. At these
+        sizes no file is finished, so that is every row; a finished file stays
+        in the published table only (the next test).
         """
         stream, handle = produce(tmp_path / "box_a", bucket, s3)
         with handle:
@@ -402,24 +415,34 @@ class TestTheStagingTableComesBackEmpty:
         )
         try:
             assert revived.log is not None
-            assert revived.log.staging_extent() is None, (
-                "the local table comes back empty; its Parquet was on the "
-                "machine that is gone"
-            )
+            assert revived.log.staging_extent() == (1, 201)
         finally:
             await revived.aclose()
 
     async def test_replay_published_serves_the_history_anyway(
         self, tmp_path, s3, bucket, litestream, serve
     ):
-        """What replaces copying files back: read them where they are."""
-        stream, handle = produce(tmp_path / "box_a", bucket, s3)
+        """A finished file is not copied back: read it where it is.
+
+        Finished means `target_compact_size` on disk, so the target is made
+        small enough for these rows to finish files, and compaction runs until
+        it has.
+        """
+        stream, handle = produce(
+            tmp_path / "box_a", bucket, s3, target_compact_size=FINISHED
+        )
         with handle:
             await stream.send_many([row(i) for i in range(200)])
             while handle.seal(flush=True) is not None:
                 pass
 
-            handle.advance()
+            for _ in range(50):
+                before = handle.staging_files()
+                handle.compact()
+                if handle.staging_files() == before:
+                    break
+
+            handle.publish()
             handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
@@ -433,7 +456,10 @@ class TestTheStagingTableComesBackEmpty:
         )
         try:
             assert revived.log is not None
-            assert revived.log.staging_extent() is None
+            extent = revived.log.staging_extent()
+            assert extent is None or extent[0] > 3, (
+                f"offsets 1-3 must be in the published table only, staging {extent}"
+            )
             async with serve(revived, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=1) as sub:
                     first = [(await sub.recv())[0] for _ in range(3)]

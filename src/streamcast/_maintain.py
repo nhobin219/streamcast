@@ -22,9 +22,9 @@ its own process when it is heavy on CPU or the network:
 
 | role | runs | why it stands alone |
 |---|---|---|
-| `seal` | `seal()` | pure-Python CPU work, and all that bounds the buffer |
+| `seal` | `seal()`, flushed per `flush_every` | pure-Python CPU work, and all that bounds the buffer |
 | `compact` | `compact()` | the heaviest CPU work; beside `seal` it would delay it |
-| `publish` | `publish()` | the network: one push to a slow bucket can take a minute |
+| `publish` | `publish()`, flushed per `flush_every` | the network: one push to a slow bucket can take a minute |
 | `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | local disk, freed promptly |
 | `clean-published` | `reclaim("published")`, `sweep("published")` | deletes and listing on the published table |
 
@@ -63,13 +63,14 @@ import argparse
 import asyncio
 import contextlib
 import itertools
+import math
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import litelink
 
@@ -90,8 +91,42 @@ PUBLISH_EVERY: Final = 10.0
 CLEAN_EVERY: Final = 10.0
 CLEAN_PUBLISHED_EVERY: Final = 60.0
 
+# **What bounds RPO without WAL replication, and how far the published table
+# trails the writer.** Since litelink 0.11 a plain `seal()` cuts only at
+# `target_seal_size` and a plain `publish()` pushes only finished files —
+# `target_compact_size`, 512 MiB on disk — so on a stream of 100 rows a second
+# the published table trailed by days, and every row in that gap existed on
+# this machine only. `seal(flush=True)` cuts whatever is buffered and
+# `publish(flush=True)` pushes whatever is sealed; both are needed, which is
+# why this is one interval and not one per role. What a flushed publish pushes
+# early is swapped for the finished file later, at the cost of uploading
+# those rows twice and one published commit per log per flush.
+#
+# A minute, because the published table is what a catch-up, a snapshot and a
+# `Live` view's base read: a `Live` view holds every unpublished row in
+# memory up to `max_tail`, and a published table hours behind is a view that
+# stops on a busy stream. litelink's own example flushes every 15 minutes,
+# for a table nothing reads live.
+FLUSH_EVERY: Final = 60.0
+
+# How far past each flush boundary the publish role flushes: after the seal
+# role has, so a boundary's publish pushes that boundary's seal rather than
+# leaving it for the next one. A seal is bounded by `target_seal_size`, and
+# seconds is generous for it.
+_PUBLISH_FLUSH_LAG: Final = 5.0
+
+FLUSHED: Final = frozenset({"seal", "publish"})
+"""The roles a flush applies to: `compact(flush=True)` rewrites the in-progress
+file every call, which litelink keeps for shutdown and tests."""
+
 # How long a maintainer gets to exit on its own before it is killed.
 _STOP_GRACE: Final = 5.0
+# The publish role pushes to the bucket on the way out, after the seal role has
+# cut at most `target_seal_size` locally — so the push gets the time, and the
+# seal the usual grace. The server keeps taking writes meanwhile, so this
+# delays only `close()`; the worst case, 5 + 20 + 5 s, is the 30 s a
+# container platform gives a stopping pod (Kubernetes' default).
+_PUBLISH_GRACE: Final = 20.0
 
 # How often a supervisor looks at its child. Polled rather than waited on;
 # see `_supervise` for why a thread is the wrong tool here.
@@ -118,6 +153,19 @@ class Maintain:
     clean_every: float = CLEAN_EVERY
     clean_published_every: float = CLEAN_PUBLISHED_EVERY
 
+    flush_every: float | None = FLUSH_EVERY
+    """Seal and publish with `flush=True` this often, in seconds: the RPO without
+    WAL replication, and how far the published table trails the writer.
+
+    Every other pass is unflushed, so files still come out at litelink's
+    targets. Flushes fall on wall-clock multiples of this, so the seal and
+    publish processes agree on when, across restarts; the publish role
+    flushes a few seconds after the seal role, to push what it cut. A row
+    reaches the published table about `flush_every + publish_every` after it
+    is written, plus the upload. None never flushes: the published table then
+    takes only finished files, and RPO is WAL replication's alone.
+    """
+
     dedicated: tuple[str, ...] = field(default=())
     """Logs that get their own five processes rather than sharing them.
 
@@ -137,6 +185,11 @@ class Maintain:
     interpreters sweeping nothing.
     """
 
+    def __post_init__(self) -> None:
+        if self.flush_every is not None and self.flush_every <= 0:
+            msg = f"flush_every={self.flush_every}: a positive interval, or None"
+            raise ValueError(msg)
+
     def every(self, role: str) -> float:
         """The cadence of `role`'s passes, in seconds."""
         return getattr(self, f"{role.replace('-', '_')}_every")
@@ -145,22 +198,22 @@ class Maintain:
 # -- the child ---------------------------------------------------------------
 
 
-def _seal(log: litelink.WriteHandle) -> None:
-    log.seal()
+def _seal(log: litelink.WriteHandle, flush: bool) -> None:
+    log.seal(flush=flush)
 
 
-def _compact(log: litelink.WriteHandle) -> None:
+def _compact(log: litelink.WriteHandle, _flush: bool) -> None:
     log.compact()
 
 
-def _publish(log: litelink.WriteHandle) -> None:
+def _publish(log: litelink.WriteHandle, flush: bool) -> None:
     # Every log publishes since litelink 0.6 — to an `s3://` prefix, or by
     # default a directory beside it — and must: eviction never deletes an
     # unpublished file, so a log that never published never frees its disk.
-    log.publish()
+    log.publish(flush=flush)
 
 
-def _clean(log: litelink.WriteHandle) -> None:
+def _clean(log: litelink.WriteHandle, _flush: bool) -> None:
     # In this order: eviction queues the files `reclaim` deletes. `evict()`
     # is both tables — the buffer rows staging now holds, and the staging
     # files the published table holds. `reclaim("buffer")` is a VACUUM only
@@ -171,12 +224,12 @@ def _clean(log: litelink.WriteHandle) -> None:
     log.sweep("staging")
 
 
-def _clean_published(log: litelink.WriteHandle) -> None:
+def _clean_published(log: litelink.WriteHandle, _flush: bool) -> None:
     log.reclaim("published")
     log.sweep("published")
 
 
-ROLES: Final[dict[str, Callable[[litelink.WriteHandle], None]]] = {
+ROLES: Final[dict[str, Callable[[litelink.WriteHandle, bool], None]]] = {
     "seal": _seal,
     "compact": _compact,
     "publish": _publish,
@@ -230,11 +283,23 @@ def finish_retiring(pending: Sequence[tuple[Path, str]]) -> list[tuple[Path, str
     return left
 
 
+def _flush_slot(role: str, flush_every: float) -> int:
+    """Which flush interval the wall clock is in, for `role`.
+
+    Wall clock rather than monotonic, so that two processes started apart —
+    or one restarted — agree on the boundaries.
+    """
+    # Capped at a quarter of the interval, so a short one keeps its meaning.
+    lag = min(_PUBLISH_FLUSH_LAG, flush_every / 4) if role == "publish" else 0.0
+    return math.floor((time.time() - lag) / flush_every)
+
+
 def sweep(
     logs: Sequence[tuple[str, litelink.WriteHandle]],
     role: str,
     every: float,
     retiring: Sequence[tuple[Path, str]] = (),
+    flush_every: float | None = None,
 ) -> None:
     """One role's passes over every log this process maintains, until SIGTERM.
 
@@ -251,8 +316,14 @@ def sweep(
     latency spike this file moved to a subprocess to avoid — reintroduced at
     1/N the frequency and N times the size. `seal` is not: an idle seal is an
     indexed read, and every log wants one every pass.
+
+    **A log's pass is flushed once per `flush_every` boundary** (`seal` and
+    `publish` only): the first pass after the boundary, and every pass after
+    that until one succeeds.
     """
     work = ROLES[role]
+    flushing = flush_every if role in FLUSHED else None
+    flushed = {name: _flush_slot(role, flushing) if flushing else 0 for name, _ in logs}
     pending = list(retiring)
     retry_at = time.monotonic()
     span = 0.0 if role == "seal" else every / max(len(logs), 1)
@@ -271,8 +342,10 @@ def sweep(
             # Scheduled before the work, so a pass that raises waits its full
             # interval rather than retrying on the next tick.
             due[name] = time.monotonic() + every
+            slot = _flush_slot(role, flushing) if flushing else 0
             try:
-                work(log)
+                work(log, slot > flushed[name])
+                flushed[name] = slot
 
             except RuntimeError as exc:
                 # Another owner holds a claim over the range this pass wanted.
@@ -294,6 +367,37 @@ def sweep(
         # Once per loop, not once per log: N logs share one sleep rather than
         # each waiting behind the others.
         time.sleep(min(every, SEAL_EVERY))
+
+
+def on_exit(
+    opened: Sequence[tuple[str, litelink.WriteHandle]],
+    role: str,
+    flush_every: float | None,
+) -> None:
+    """A role's last work on a graceful stop."""
+    # The seal role's last pass each on the way out, so a short-lived
+    # server does not leave its whole run in the buffer. `seal(flush=True)`
+    # rather than `seal()`: an orderly shutdown is the one moment closing
+    # the open group is right. Guarded per log, for the reason `sweep` is.
+    for _name, log in opened if role == "seal" else ():
+        with contextlib.suppress(Exception):
+            while log.seal(flush=True) is not None:
+                pass
+
+    # And the publish role's, so what is sealed leaves this machine: a
+    # graceful stop is often followed by losing the disk — a pod's
+    # ephemeral volume, a spot instance. **Not ordered after the seal
+    # role's**, and not given a longer grace: both start on the same
+    # SIGTERM, so rows that seal cuts on the way out can miss this push,
+    # and that is accepted. Holding the server's restart for an ordered
+    # drain would trade a few seconds of rows for a longer window with
+    # no broker at all. A push past `_STOP_GRACE` is killed, which loses
+    # nothing — a commit is atomic, and the rows are still on disk.
+    # Skipped with `flush_every=None`, which asks for finished files only.
+    flushing = role == "publish" and flush_every is not None
+    for _name, log in opened if flushing else ():
+        with contextlib.suppress(Exception):
+            log.publish(flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -324,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--role", choices=list(ROLES), required=True)
     parser.add_argument("--every", type=float, required=True)
+    parser.add_argument("--flush-every", type=float, default=None)
     args = parser.parse_args(argv)
 
     def stop(*_: object) -> None:
@@ -363,16 +468,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.role,
                 args.every,
                 [(Path(root), name) for root, name in args.retire],
+                args.flush_every,
             )
 
-        # The seal role's last pass each on the way out, so a short-lived
-        # server does not leave its whole run in the buffer. `seal(flush=True)`
-        # rather than `seal()`: an orderly shutdown is the one moment closing
-        # the open group is right. Guarded per log, for the reason `sweep` is.
-        for _name, log in opened if args.role == "seal" else ():
-            with contextlib.suppress(Exception):
-                while log.seal(flush=True) is not None:
-                    pass
+        on_exit(opened, args.role, args.flush_every)
 
     return 0
 
@@ -453,6 +552,8 @@ class Supervisor:
             argv += ["--retire", str(root), name]
 
         argv += ["--role", self._role, "--every", str(self._plan.every(self._role))]
+        if self._plan.flush_every is not None and self._role in FLUSHED:
+            argv += ["--flush-every", str(self._plan.flush_every)]
 
         return argv
 
@@ -530,8 +631,9 @@ class Supervisor:
         if process is None:
             return
 
+        grace = _PUBLISH_GRACE if self._role == "publish" else _STOP_GRACE
         try:
-            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=_STOP_GRACE)
+            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=grace)
         except TimeoutError:
             # It had its grace period. A maintainer wedged mid-commit would
             # otherwise hold the server's shutdown open indefinitely, and
@@ -539,3 +641,33 @@ class Supervisor:
             # lease expiry rather than consistency.
             process.kill()
             await asyncio.to_thread(process.wait)
+
+
+class _Stoppable(Protocol):
+    def terminate(self) -> None: ...
+
+    async def wait_closed(self) -> None: ...
+
+
+async def stop(children: Sequence[_Stoppable]) -> None:
+    """Stop a server's children in the order their last work needs.
+
+    The seal role first, and waited for, so its exit `seal(flush=True)` has cut
+    the buffer before the publish role's exit `publish(flush=True)` pushes
+    what is sealed; then everything else — compaction, cleanup, and
+    litestream, which keeps shipping the WAL until then.
+    """
+
+    def role(child: _Stoppable) -> str | None:
+        return child.role if isinstance(child, Supervisor) else None
+
+    for group in (
+        [c for c in children if role(c) == "seal"],
+        [c for c in children if role(c) == "publish"],
+        [c for c in children if role(c) not in FLUSHED],
+    ):
+        for child in group:
+            child.terminate()
+
+        for child in group:
+            await child.wait_closed()

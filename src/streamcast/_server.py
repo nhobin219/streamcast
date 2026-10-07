@@ -22,6 +22,7 @@ a second spelling of "no name".
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import warnings
 from pathlib import Path
@@ -34,7 +35,7 @@ from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
-from streamcast._maintain import ROLES, Maintain, Supervisor
+from streamcast._maintain import ROLES, Maintain, Supervisor, stop
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stats import STATS_PATH, payload
@@ -109,7 +110,7 @@ class _Served:
     to fix.
     """
 
-    __slots__ = ("_children", "_server", "_serving", "_streams")
+    __slots__ = ("_children", "_closing", "_server", "_serving", "_streams")
 
     def __init__(
         self, serving: Server, children: list[_Child], streams: list[Stream]
@@ -118,6 +119,7 @@ class _Served:
         self._children = children
         self._streams = streams
         self._server: Server | None = None
+        self._closing: asyncio.Future[None] | None = None
 
     async def _start(self) -> _Served:
         if self._server is None:
@@ -140,18 +142,32 @@ class _Served:
         await self.wait_closed()
 
     def close(self, close_connections: bool = True) -> None:
-        for child in self._children:
-            child.terminate()
+        """Begin closing: the maintainers' last work, then the listener.
 
-        if self._server is not None:
-            self._server.close(close_connections)
+        **The server keeps taking writes while the maintainers finish.** The
+        seal and publish roles flush on the way out, one after the other
+        (`_maintain.stop`), so that what this machine holds leaves it — and
+        a broker that stopped accepting for that long would turn the flush
+        into the longer window with no broker at all. Rows written meanwhile
+        miss the flush; they are on disk, for the next server. `wait_closed`
+        waits for all of it.
+        """
+        if self._closing is None:
+            self._closing = asyncio.ensure_future(self._close(close_connections))
+
+    async def _close(self, close_connections: bool) -> None:
+        try:
+            await stop(self._children)
+        finally:
+            if self._server is not None:
+                self._server.close(close_connections)
 
     async def wait_closed(self) -> None:
+        if self._closing is not None:
+            await self._closing
+
         if self._server is not None:
             await self._server.wait_closed()
-
-        for child in self._children:
-            await child.wait_closed()
 
         # LAST, and the order is the point: a replay in flight is reading the
         # log in a worker thread, so closing it before the connections are
