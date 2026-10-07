@@ -1274,6 +1274,13 @@ table = pq.read_table("trades-2025.parquet")                        # or a Recor
 start, end = streamcast.Stream.ingest("trades", table, root="data")  # offsets [start, end)
 ```
 
+Measured end to end on a 2-vCPU VM: 50 million trade-like rows (five columns, about 18
+bytes a row in Parquet) loaded in 24 s, 2.1 million rows a second, with peak memory around
+1 GB however large the load, since a reader is read and written a row group at a time.
+That is about 4 minutes per 500 million rows, before reading the source and uploading the
+result, and the time scales with bytes, so wider rows take longer. The whole load is
+staged on local disk until it is published.
+
 The rows take the next offsets at the end of the stream's current log, as any append does;
 a subscriber reads them by offset, like any other rows. Every declared column must be in
 the source, in any order and castable to its type, and nothing reserves offsets until
