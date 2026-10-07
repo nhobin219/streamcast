@@ -374,6 +374,17 @@ their freshness: a `Live` view holds every row not yet published in memory, up t
 streamcast.serve(stream, host, port, maintain=streamcast.Maintain(flush_every=900))  # 15 min
 ```
 
+**A graceful stop flushes too**, because one is often followed by losing the disk: a pod's
+ephemeral volume, a spot instance. `close()` stops the seal role first, which seals with
+`flush=True` on the way out, then the publish role, which publishes with `flush=True`, then
+the rest. The publish role gets 20 s before it is killed, and the others 5 s each, which
+fits the 30 s Kubernetes gives a stopping pod by default. **The server keeps taking
+writes until they are done** and only then stops listening. Making the broker unavailable for the
+length of a flush would be worse than the rows written meanwhile missing it; they stay on
+disk for the next server. Mounted with `asgi`, the host stops taking connections before
+the app's lifespan shutdown runs, so there the flushes come after the last write.
+`flush_every=None` skips the publish flush.
+
 **It is always a subprocess, and there is deliberately no thread option.** A seal is
 CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no
 lock — litelink measured appends running 45.2 ms behind an in-process seal. On a fan-out

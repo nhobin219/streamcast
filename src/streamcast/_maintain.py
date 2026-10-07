@@ -70,7 +70,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import litelink
 
@@ -121,6 +121,12 @@ file every call, which litelink keeps for shutdown and tests."""
 
 # How long a maintainer gets to exit on its own before it is killed.
 _STOP_GRACE: Final = 5.0
+# The publish role pushes to the bucket on the way out, after the seal role has
+# cut at most `target_seal_size` locally — so the push gets the time, and the
+# seal the usual grace. The server keeps taking writes meanwhile, so this
+# delays only `close()`; the worst case, 5 + 20 + 5 s, is the 30 s a
+# container platform gives a stopping pod (Kubernetes' default).
+_PUBLISH_GRACE: Final = 20.0
 
 # How often a supervisor looks at its child. Polled rather than waited on;
 # see `_supervise` for why a thread is the wrong tool here.
@@ -363,6 +369,37 @@ def sweep(
         time.sleep(min(every, SEAL_EVERY))
 
 
+def on_exit(
+    opened: Sequence[tuple[str, litelink.WriteHandle]],
+    role: str,
+    flush_every: float | None,
+) -> None:
+    """A role's last work on a graceful stop."""
+    # The seal role's last pass each on the way out, so a short-lived
+    # server does not leave its whole run in the buffer. `seal(flush=True)`
+    # rather than `seal()`: an orderly shutdown is the one moment closing
+    # the open group is right. Guarded per log, for the reason `sweep` is.
+    for _name, log in opened if role == "seal" else ():
+        with contextlib.suppress(Exception):
+            while log.seal(flush=True) is not None:
+                pass
+
+    # And the publish role's, so what is sealed leaves this machine: a
+    # graceful stop is often followed by losing the disk — a pod's
+    # ephemeral volume, a spot instance. **Not ordered after the seal
+    # role's**, and not given a longer grace: both start on the same
+    # SIGTERM, so rows that seal cuts on the way out can miss this push,
+    # and that is accepted. Holding the server's restart for an ordered
+    # drain would trade a few seconds of rows for a longer window with
+    # no broker at all. A push past `_STOP_GRACE` is killed, which loses
+    # nothing — a commit is atomic, and the rows are still on disk.
+    # Skipped with `flush_every=None`, which asks for finished files only.
+    flushing = role == "publish" and flush_every is not None
+    for _name, log in opened if flushing else ():
+        with contextlib.suppress(Exception):
+            log.publish(flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m streamcast maintain --log ROOT NAME [--log ROOT NAME ...]`
 
@@ -434,14 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.flush_every,
             )
 
-        # The seal role's last pass each on the way out, so a short-lived
-        # server does not leave its whole run in the buffer. `seal(flush=True)`
-        # rather than `seal()`: an orderly shutdown is the one moment closing
-        # the open group is right. Guarded per log, for the reason `sweep` is.
-        for _name, log in opened if args.role == "seal" else ():
-            with contextlib.suppress(Exception):
-                while log.seal(flush=True) is not None:
-                    pass
+        on_exit(opened, args.role, args.flush_every)
 
     return 0
 
@@ -601,8 +631,9 @@ class Supervisor:
         if process is None:
             return
 
+        grace = _PUBLISH_GRACE if self._role == "publish" else _STOP_GRACE
         try:
-            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=_STOP_GRACE)
+            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=grace)
         except TimeoutError:
             # It had its grace period. A maintainer wedged mid-commit would
             # otherwise hold the server's shutdown open indefinitely, and
@@ -610,3 +641,33 @@ class Supervisor:
             # lease expiry rather than consistency.
             process.kill()
             await asyncio.to_thread(process.wait)
+
+
+class _Stoppable(Protocol):
+    def terminate(self) -> None: ...
+
+    async def wait_closed(self) -> None: ...
+
+
+async def stop(children: Sequence[_Stoppable]) -> None:
+    """Stop a server's children in the order their last work needs.
+
+    The seal role first, and waited for, so its exit `seal(flush=True)` has cut
+    the buffer before the publish role's exit `publish(flush=True)` pushes
+    what is sealed; then everything else — compaction, cleanup, and
+    litestream, which keeps shipping the WAL until then.
+    """
+
+    def role(child: _Stoppable) -> str | None:
+        return child.role if isinstance(child, Supervisor) else None
+
+    for group in (
+        [c for c in children if role(c) == "seal"],
+        [c for c in children if role(c) == "publish"],
+        [c for c in children if role(c) not in FLUSHED],
+    ):
+        for child in group:
+            child.terminate()
+
+        for child in group:
+            await child.wait_closed()

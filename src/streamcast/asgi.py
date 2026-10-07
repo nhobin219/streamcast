@@ -61,6 +61,7 @@ from websockets.frames import Close as _CloseFrame
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
+from streamcast._maintain import stop
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._server import (
     _DETAIL_CHARS,
@@ -339,11 +340,10 @@ class _Mounted:
             return
 
         self._started = False
-        for child in self._children:
-            child.terminate()
-
-        for child in self._children:
-            await child.wait_closed()
+        # Seal, then publish, so the exit flushes push what the seal cut. The
+        # host has stopped taking connections by the time lifespan shutdown
+        # runs, so unlike `serve` there are no writes to keep taking.
+        await stop(self._children)
 
         # LAST, and the order is the same one `_Served.wait_closed` keeps: a
         # replay in flight is reading the log in a worker thread, so closing

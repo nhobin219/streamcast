@@ -529,6 +529,32 @@ class TestFlushing:
         with pytest.raises(ValueError, match="flush_every"):
             Maintain(flush_every=0)
 
+    def test_a_graceful_stop_publishes_what_is_sealed(self, wide_log):
+        """The publish role's last work, with no flush due: what is sealed
+        leaves the machine. Called directly, since a server stopped at once
+        would kill the child before its SIGTERM handler is installed."""
+        for r in rows(0, 50):
+            wide_log.append(r)
+
+        while wide_log.seal(flush=True) is not None:
+            pass
+
+        _maintain.on_exit([("trades", wide_log)], "compact", 60.0)
+        assert wide_log.published_through() == 0, "only the publish role pushes"
+
+        _maintain.on_exit([("trades", wide_log)], "publish", 60.0)
+        assert wide_log.published_through() == 50
+
+    def test_none_publishes_nothing_on_the_way_out(self, wide_log):
+        for r in rows(0, 50):
+            wide_log.append(r)
+
+        while wide_log.seal(flush=True) is not None:
+            pass
+
+        _maintain.on_exit([("trades", wide_log)], "publish", None)
+        assert wide_log.published_through() == 0
+
     async def test_a_served_row_reaches_the_published_table(self, wide_log):
         """End to end: unflushed, litelink publishes only 512 MiB files, so on
         this stream nothing would be published at all."""
@@ -544,4 +570,73 @@ class TestFlushing:
             assert wide_log.published_through() == 50
         finally:
             server.close()
+            await server.wait_closed()
+
+
+class Recording(Supervisor):
+    """A supervisor that runs nothing, and records when it is stopped."""
+
+    __slots__ = ("events",)
+
+    def __init__(self, role: str, events: list[str]) -> None:
+        super().__init__([], Maintain(), role)
+        self.events = events
+
+    def terminate(self) -> None:
+        self.events.append(f"terminate {self.role}")
+
+    async def wait_closed(self) -> None:
+        await asyncio.sleep(0)
+        self.events.append(f"closed {self.role}")
+
+
+class TestStopping:
+    """The order the exit flushes need, while the server keeps taking writes."""
+
+    async def test_seal_then_publish_then_the_rest(self):
+        events: list[str] = []
+        children = [Recording(role, events) for role in reversed(list(ROLES))]
+        await _maintain.stop(children)
+
+        assert events[:4] == [
+            "terminate seal",
+            "closed seal",
+            "terminate publish",
+            "closed publish",
+        ]
+        assert sorted(events[4:]) == sorted(
+            f"{step} {role}"
+            for role in ("compact", "clean", "clean-published")
+            for step in ("terminate", "closed")
+        )
+
+    async def test_the_server_takes_writes_while_the_maintainers_finish(
+        self, log, monkeypatch
+    ):
+        from streamcast import _server  # noqa: PLC0415
+
+        gate = asyncio.Event()
+
+        class Finishing:
+            def start(self) -> None:
+                pass
+
+            def terminate(self) -> None:
+                pass
+
+            async def wait_closed(self) -> None:
+                await gate.wait()
+
+        monkeypatch.setattr(_server, "_supervisors", lambda *_: [Finishing()])
+        stream = streamcast.Stream("trades", log=log)
+        server = await streamcast.serve(stream, "127.0.0.1", 0)
+        uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
+        server.close()
+        try:
+            async with streamcast.publish(uri) as producer:
+                offset = await asyncio.wait_for(producer.send(rows(0, 1)[0]), 5)
+
+            assert offset == 1
+        finally:
+            gate.set()
             await server.wait_closed()

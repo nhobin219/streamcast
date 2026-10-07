@@ -28,6 +28,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   up at litelink's targets. The flushes fall on wall-clock multiples of the
   interval, so the two processes agree on them across restarts. Without WAL
   replication this interval is the RPO. `flush_every=None` never flushes.
+- **A graceful stop flushes what this machine holds.** `close()` stops the
+  seal role (which seals with `flush=True` on the way out), then the publish
+  role, which now publishes with `flush=True` on the way out too, then the
+  rest. The publish role gets 20 s, the others 5 s. `serve` keeps taking writes until they
+  are done, and stops listening after; rows written meanwhile miss the flush
+  and stay on disk.
 
 ## 0.15.0 — 2026-10-06
 
