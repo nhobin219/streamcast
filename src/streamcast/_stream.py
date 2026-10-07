@@ -49,6 +49,7 @@ from websockets.frames import CloseCode
 
 from streamcast import (
     _filter,
+    _ingest,
     _live,
     _log,
     _manifest,
@@ -58,7 +59,13 @@ from streamcast import (
     _snapshot,
 )
 from streamcast._codec import compile_codec
-from streamcast._errors import Close, NotReplayable, ProtocolError, StreamRetired
+from streamcast._errors import (
+    Close,
+    IngestFailed,
+    NotReplayable,
+    ProtocolError,
+    StreamRetired,
+)
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
 from streamcast._protocol import (
     EARLIEST,
@@ -76,7 +83,7 @@ from streamcast._subscriber import Subscriber
 from streamcast._writer import Job, Writer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
     from os import PathLike
 
     import pyarrow as pa
@@ -967,6 +974,13 @@ class Stream:
         server's maintainer will), never ingest again, which would load them
         twice.
 
+        **A load that fails raises `IngestFailed`.** litelink commits a load
+        a group of files at a time, so files committed before the failure
+        stay, and the offsets of those written but never committed are a gap.
+        The error says what landed — the source's first `rows_loaded` rows,
+        at `loaded` — and, when the data was at fault, the batch and row that
+        was, so the load resumes with the source from `rows_loaded`.
+
         A retired stream raises `StreamRetired`: revive it first.
         """
         if source is None:
@@ -997,9 +1011,11 @@ class Stream:
                 msg = f"{_log.STAMP!r} is stamped by the server; a source cannot supply it"
                 raise ValueError(msg)
 
-            if _log.stamped(log):
-                reader = _stamped(reader)
-
+            loading = _ingest.Source(
+                reader,
+                stamp=_log.stamped(log),
+                keep_bytes=2 * log.config.target_row_group_size,
+            )
             # litelink loads only behind rows already in files, so what the
             # last server left in the buffer is cut first — what the seal
             # role does on a graceful stop, for a server that did not have one.
@@ -1007,7 +1023,11 @@ class Stream:
                 pass
 
             log.await_seal()
-            return log.ingest(reader, publish=publish, flush=flush)
+            before = log.end_offset()
+            try:
+                return log.ingest(loading.reader, publish=publish, flush=flush)
+            except Exception as exc:
+                raise _failed(name, log, loading, before, exc) from exc
 
     @classmethod
     def _read_only(
@@ -2430,19 +2450,37 @@ async def _prepend(
 __all__ = ["MAX_REPLAY", "Stream"]
 
 
-def _stamped(reader: pa.RecordBatchReader) -> pa.RecordBatchReader:
-    """`reader` with `streamcast_ts` appended to every batch: the time it was
-    loaded, which is when the server took those rows. Lazy, so a load larger
-    than memory stays one batch at a time."""
-    import pyarrow as pa  # noqa: PLC0415
+def _failed(
+    name: str,
+    log: WriteHandle,
+    loading: _ingest.Source,
+    before: int,
+    exc: Exception,
+) -> IngestFailed:
+    """What a failed `ingest` landed, and where in the source it failed.
 
-    field = pa.field(_log.STAMP, pa.int64(), nullable=False)
-    schema = reader.schema.append(field)
+    litelink commits files in groups as the load goes, so the committed part
+    ends where staging does; the offsets past that and below the log's end
+    were reserved for files never committed. Offsets follow the source's
+    order, so the committed part is its first rows.
 
-    def batches() -> Iterator[pa.RecordBatch]:
-        for batch in reader:
-            now = time.time_ns() // 1_000
-            stamp = pa.array([now] * batch.num_rows, pa.int64())
-            yield batch.append_column(field, stamp)
+    **Explaining the failure must never replace it.** Anything that goes wrong
+    working out where leaves litelink's message, with no location.
+    """
+    try:
+        found = loading.locate(log.schema)
+    except Exception:  # noqa: BLE001 — see the docstring
+        found = None
 
-    return pa.RecordBatchReader.from_batches(schema, batches())
+    extent = log.staging_extent()
+    committed = before if extent is None else max(before, extent[1])
+    end = log.end_offset()
+    batch, row, reason = (None, None, str(exc)) if found is None else found
+    return IngestFailed(
+        name,
+        reason,
+        loaded=(before, committed) if committed > before else None,
+        gap=(committed, end) if end > committed else None,
+        batch=batch,
+        row=row,
+    )

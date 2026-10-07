@@ -117,8 +117,10 @@ class TestWhatItRefuses:
 
     async def test_a_missing_column_before_anything_is_reserved(self, tmp_path):
         await stopped(tmp_path)
-        with pytest.raises(ValueError, match="missing"):
+        with pytest.raises(streamcast.IngestFailed, match="missing") as raised:
             streamcast.Stream.ingest("t", source(0, 3).drop(["blob"]), root=tmp_path)
+
+        assert (raised.value.loaded, raised.value.gap) == (None, None)
 
         # No hole: the next load takes the next offset.
         assert streamcast.Stream.ingest("t", source(0, 1), root=tmp_path) == (4, 5)
@@ -126,8 +128,10 @@ class TestWhatItRefuses:
     async def test_a_null_in_a_required_column(self, tmp_path):
         await stopped(tmp_path)
         rows = source(0, 3).set_column(0, "i", pa.array([1, None, 3], pa.int64()))
-        with pytest.raises(ValueError, match="null"):
+        with pytest.raises(streamcast.IngestFailed, match="null") as raised:
             streamcast.Stream.ingest("t", rows, root=tmp_path)
+
+        assert (raised.value.batch, raised.value.row) == (0, 1)
 
         assert streamcast.Stream.ingest("t", source(0, 1), root=tmp_path) == (4, 5)
 
@@ -140,3 +144,101 @@ class TestWhatItRefuses:
     def test_a_stream_that_is_not_there(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="no stream 't'"):
             streamcast.Stream.ingest("t", source(0, 3), root=tmp_path)
+
+
+PARTIAL: dict[str, Any] = {
+    "type": "object",
+    "properties": {"i": {"type": "integer"}, "x": {"type": "number"}},
+    "required": ["i", "x"],
+}
+PARTIAL_ARROW = pa.schema([("i", pa.int64()), ("x", pa.float64())])
+
+
+async def small_files(root) -> None:
+    """Three rows sent, and files small enough that a load commits in groups.
+
+    litelink commits a load 20 files at a time, so a failure past the 20th
+    file leaves the first 20 in the log; 500-row row groups at a tiny target
+    make every file 1,000 rows."""
+    stream = streamcast.Stream.new(
+        "t",
+        root=root,
+        schema=PARTIAL,
+        config=litelink.LogConfig(
+            target_compact_size=8 * 1024, target_row_group_rows=500
+        ),
+    )
+    try:
+        await stream.send_many([{"i": -1, "x": 0.0}] * 3)
+    finally:
+        await stream.aclose()
+
+
+def batch(lo: int, hi: int, nan_at: int | None = None) -> pa.RecordBatch:
+    xs = [n * 1.37 for n in range(lo, hi)]
+    if nan_at is not None:
+        xs[nan_at] = float("nan")
+
+    return pa.record_batch(
+        [pa.array(range(lo, hi), pa.int64()), pa.array(xs)], schema=PARTIAL_ARROW
+    )
+
+
+class TestAFailureMidway:
+    async def test_it_says_where_what_landed_and_where_to_resume(self, tmp_path):
+        await small_files(tmp_path)
+        batches = [batch(n, n + 1_000) for n in range(0, 30_000, 1_000)]
+        batches += [batch(30_000, 31_000, nan_at=7), batch(31_000, 32_000)]
+        reader = pa.RecordBatchReader.from_batches(PARTIAL_ARROW, iter(batches))
+
+        with pytest.raises(streamcast.IngestFailed, match="nan") as raised:
+            streamcast.Stream.ingest("t", reader, root=tmp_path)
+
+        failed = raised.value
+        assert (failed.batch, failed.row) == (30, 30_007)
+        assert failed.loaded == (4, 20_004), "the first 20 files, committed"
+        assert failed.rows_loaded == 20_000
+        assert failed.gap == (20_004, 30_004), "reserved, never committed"
+        assert isinstance(failed.__cause__, ValueError), "litelink's own, kept"
+
+        # Resuming from the row it names, with the bad value fixed, finishes
+        # the load: every source row once, in order, around the gap.
+        fixed = [batch(n, n + 1_000) for n in range(0, 32_000, 1_000)]
+        rest = pa.Table.from_batches(fixed).slice(failed.rows_loaded)
+        assert streamcast.Stream.ingest("t", rest, root=tmp_path) == (30_004, 42_004)
+        with litelink.open(tmp_path, "t", read_only=True) as log:
+            loaded = log.scan(columns=["i"], start_offset=4).read_all()
+
+        assert loaded.column("i").to_pylist() == list(range(32_000))
+
+    async def test_a_bad_row_early_in_a_row_group_is_still_found(self, tmp_path):
+        """litelink fails a row group, which is several 100-row batches here:
+        by then the bad row's batch is not the newest one read."""
+        await small_files(tmp_path)
+        batches = [batch(n, n + 100) for n in range(0, 2_000, 100)]
+        batches[5] = batch(500, 600, nan_at=7)  # the first of a 500-row group
+        reader = pa.RecordBatchReader.from_batches(PARTIAL_ARROW, iter(batches))
+
+        with pytest.raises(streamcast.IngestFailed) as raised:
+            streamcast.Stream.ingest("t", reader, root=tmp_path)
+
+        assert (raised.value.batch, raised.value.row) == (5, 507)
+
+    async def test_a_failure_that_is_not_the_data_keeps_its_message(
+        self, tmp_path, monkeypatch
+    ):
+        """A full disk, a killed process: nothing to locate, litelink's word."""
+        await small_files(tmp_path)
+
+        def full(self, reader, **_):  # noqa: ANN001, ANN003, ANN202
+            for _ in reader:
+                msg = "No space left on device"
+                raise OSError(msg)
+
+        monkeypatch.setattr(litelink.WriteHandle, "ingest", full)
+        reader = pa.RecordBatchReader.from_batches(PARTIAL_ARROW, iter([batch(0, 10)]))
+        with pytest.raises(streamcast.IngestFailed, match="No space") as raised:
+            streamcast.Stream.ingest("t", reader, root=tmp_path)
+
+        assert (raised.value.batch, raised.value.row) == (None, None)
+        assert raised.value.loaded is None

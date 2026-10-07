@@ -110,6 +110,7 @@ from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
+    IngestFailed,
     NotReplayable,
     ProtocolError,
     Rejected,
@@ -147,6 +148,7 @@ __all__ = [
     "Close",
     "Cursor",
     "Greeting",
+    "IngestFailed",
     "Maintain",
     "S3Options",
     "NotReplayable",

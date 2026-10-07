@@ -20,6 +20,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   refused before any offset is reserved. Run with the server stopped, as
   `migrate` and `retire` are: loaded rows are never fanned out, so a live
   subscriber would see a gap. A retired stream raises `StreamRetired`.
+- **`IngestFailed`**, raised by a load that fails. litelink commits a load as
+  it goes, so it says what landed — the source's first `rows_loaded` rows, at
+  `loaded` — the gap left by files never committed, and, when a value was
+  refused, the source `batch` and `row` that was. Located only on failure,
+  by checking again the batches litelink had been reading; a load that
+  succeeds pays nothing for it.
 
 ### Changed
 

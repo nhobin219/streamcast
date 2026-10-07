@@ -1054,6 +1054,7 @@ StreamcastError
 ├── CatchUpUnavailable `catch_up=True` could not read the gap; says what to change
 ├── Rejected           a published row the schema refuses; nothing committed
 ├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
+├── IngestFailed       `Stream.ingest` stopped partway; `.rows_loaded` is where to resume
 └── TooSlow            dropped for falling behind; `.offset` is where to resume
 ```
 
@@ -1286,6 +1287,27 @@ subscriber reading live would see the offsets jump past them, a gap it can't det
 stopped, every subscriber comes back by offset and replays them. Rows the last server left
 in the buffer are sealed first, which litelink needs. A retired stream raises
 `StreamRetired`.
+
+**A load that fails partway raises `IngestFailed`, which says where to resume.** litelink
+commits a load 20 files at a time, so a failure leaves the files committed before it in the
+log, and the offsets of files written but not yet committed become a gap. Offsets follow the
+source's order, so what landed is exactly the source's first `rows_loaded` rows:
+
+```python
+try:
+    streamcast.Stream.ingest("trades", table, root="data")
+except streamcast.IngestFailed as failed:
+    failed.loaded, failed.gap          # [start, end) of each, or None
+    failed.batch, failed.row           # where the data was refused, or None
+    # fix the data, then load the rest, before the server starts again
+    streamcast.Stream.ingest("trades", fixed.slice(failed.rows_loaded), root="data")
+```
+
+When litelink refuses a value (a null in a required column, a NaN, an integer too wide
+for its column), streamcast checks again the batches litelink had been reading, which is all
+the extra work a failure costs, and names the batch and row. litelink's own exception is
+`__cause__`. A failure that isn't the data's, such as a full disk, keeps litelink's message,
+with `batch` and `row` None.
 
 ### Finishing a stream: `Stream.retire`
 
