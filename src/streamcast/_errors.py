@@ -121,6 +121,67 @@ class StreamRetired(StreamcastError):
         )
 
 
+class IngestFailed(StreamcastError):
+    """`Stream.ingest` stopped partway: what landed, what failed, where to resume.
+
+    litelink commits a load as it goes, a group of files at a time, so a
+    failure leaves the files committed before it in the log and the rest of
+    the load out of it. Offsets follow the source's order, so what landed is
+    exactly its first `rows_loaded` rows: resume with the source from there —
+    `table.slice(exc.rows_loaded)` — before the server starts again. The
+    offsets reserved for files that were written and never committed are a
+    gap, and stay one.
+
+    The original exception is `__cause__`. When the failure is in the data,
+    `batch` and `row` locate it in the source; they are None for one that is
+    not — a full disk, a killed process — or that streamcast's checks did not
+    reproduce, in which case `reason` is litelink's message as it was.
+    """
+
+    def __init__(
+        self,
+        stream: str,
+        reason: str,
+        *,
+        loaded: tuple[int, int] | None,
+        gap: tuple[int, int] | None,
+        batch: int | None = None,
+        row: int | None = None,
+    ) -> None:
+        self.stream = stream
+        self.reason = reason
+        self.loaded = loaded
+        """`[start, end)`: the offsets the rows that landed took, or None."""
+        self.rows_loaded = 0 if loaded is None else loaded[1] - loaded[0]
+        """How many of the source's rows landed: its first this many."""
+        self.gap = gap
+        """`[start, end)`: offsets reserved and never committed, or None."""
+        self.batch = batch
+        """The failing batch's index in the source, from 0, or None."""
+        self.row = row
+        """The failing row's index in the whole source, from 0, or None."""
+        where = (
+            ""
+            if batch is None
+            else f" in source batch {batch}"
+            + ("" if row is None else f", at source row {row:,}")
+        )
+        landed = (
+            "none of the source was loaded"
+            if loaded is None
+            else (
+                f"the source's first {self.rows_loaded:,} rows were loaded, at "
+                f"offsets [{loaded[0]}, {loaded[1]}), and are not yet published"
+            )
+        )
+        hole = "" if gap is None else f"; offsets [{gap[0]}, {gap[1]}) are a gap"
+        super().__init__(
+            f"ingest into stream {stream!r} failed{where}: {reason}. {landed}{hole}. "
+            f"Resume with the source from row {self.rows_loaded:,}, before the "
+            f"server starts again."
+        )
+
+
 class _Missing(dict):
     """A format mapping that answers `?` for a key the wire did not carry.
 
@@ -246,6 +307,7 @@ class TooSlow(StreamcastError):
 
 __all__ = [
     "Close",
+    "IngestFailed",
     "NotReplayable",
     "ProtocolError",
     "Rejected",

@@ -9,6 +9,24 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **`Stream.ingest(name, source, *, root)`** loads an Arrow table or batch
+  reader into a stopped stream with litelink's `ingest`: straight to Parquet,
+  skipping the buffer, about 28 times faster by litelink's measurement. The
+  rows take the next offsets at the end of the current log and are returned
+  as `(start, end)`. `streamcast_ts` is stamped with the load time, and a
+  source carrying it is refused; a source that does not match the schema is
+  refused before any offset is reserved. Run with the server stopped, as
+  `migrate` and `retire` are: loaded rows are never fanned out, so a live
+  subscriber would see a gap. A retired stream raises `StreamRetired`.
+- **`IngestFailed`**, raised by a load that fails. litelink commits a load as
+  it goes, so it says what landed — the source's first `rows_loaded` rows, at
+  `loaded` — the gap left by files never committed, and, when a value was
+  refused, the source `batch` and `row` that was. Located only on failure,
+  by checking again the batches litelink had been reading; a load that
+  succeeds pays nothing for it.
+
 ### Changed
 
 - **litelink is `>=0.11.0,<0.12`.** litelink 0.11 sizes compacted files on

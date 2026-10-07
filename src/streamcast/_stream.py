@@ -49,6 +49,7 @@ from websockets.frames import CloseCode
 
 from streamcast import (
     _filter,
+    _ingest,
     _live,
     _log,
     _manifest,
@@ -58,7 +59,13 @@ from streamcast import (
     _snapshot,
 )
 from streamcast._codec import compile_codec
-from streamcast._errors import Close, NotReplayable, ProtocolError, StreamRetired
+from streamcast._errors import (
+    Close,
+    IngestFailed,
+    NotReplayable,
+    ProtocolError,
+    StreamRetired,
+)
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
 from streamcast._protocol import (
     EARLIEST,
@@ -921,6 +928,106 @@ class Stream:
             _metadata.publish(metadata, published, s3_options)  # ty: ignore[invalid-argument-type]
 
         return retirement
+
+    @classmethod
+    def ingest(
+        cls,
+        name: str = "",
+        source: pa.Table | pa.RecordBatchReader | None = None,
+        *,
+        root: str | PathLike[str],
+        s3_options: object | None = None,
+        publish: bool = True,
+        flush: bool | None = None,
+    ) -> tuple[int, int] | None:
+        """Append `source`, an Arrow table or batch reader, to a stopped stream.
+
+            reader = pq.ParquetFile("trades-2025.parquet").iter_batches()
+            streamcast.Stream.ingest("trades", pa.RecordBatchReader.from_batches(
+                schema, reader), root="data")
+
+        Returns the offsets the rows took, `[start, end)`, or None for a source
+        with no rows. litelink's `ingest`: the rows go straight to Parquet,
+        not through the buffer a `send` commits to — measured there at 5.1
+        million rows a second against 183 thousand — and take the next offsets
+        at the END of the stream's current log, as any append does. Old rows
+        loaded into a new stream before it goes live are the same call.
+
+        **Run with the server stopped**, as `migrate` and `retire` are. These
+        rows are never fanned out, so a subscriber reading live would see its
+        offsets jump past the range — a hole it cannot see. Stopped, every
+        subscriber comes back by offset and replays the range like any other.
+        litelink also claims the whole log for the load and needs its single
+        writer, so a server sharing it would have its appends and maintenance
+        held for the length of the load.
+
+        `streamcast_ts` is stamped here, at the time each batch is loaded — it
+        is when the server took the row — and a source that carries it is
+        refused, as a `send` is. Every declared column must be present, in any
+        order, and castable to its declared type; litelink checks that before
+        it reserves any offsets, so a refused source leaves no hole.
+
+        `publish` and `flush` are litelink's: the load is pushed to the
+        published table when it is durable, and its short last file too by
+        default when the log replicates its WAL, which cannot carry a load. A
+        push that fails leaves the rows loaded and raises: publish again (a
+        server's maintainer will), never ingest again, which would load them
+        twice.
+
+        **A load that fails raises `IngestFailed`.** litelink commits a load
+        a group of files at a time, so files committed before the failure
+        stay, and the offsets of those written but never committed are a gap.
+        The error says what landed — the source's first `rows_loaded` rows,
+        at `loaded` — and, when the data was at fault, the batch and row that
+        was, so the load resumes with the source from `rows_loaded`.
+
+        A retired stream raises `StreamRetired`: revive it first.
+        """
+        if source is None:
+            msg = "ingest needs a source: a pyarrow Table or RecordBatchReader"
+            raise TypeError(msg)
+
+        metadata = _metadata.load(root, name)
+        if metadata is not None and metadata.retirement is not None:
+            retirement = metadata.retirement
+            raise StreamRetired(name, retirement.at, retirement.end_offset)
+
+        current = name if metadata is None else metadata.current.name
+        try:
+            log = litelink.open(root, current, s3_options=s3_options)  # ty: ignore[invalid-argument-type]
+        except litelink.RetiredError:
+            # Retired in litelink by a retire that died before the metadata
+            # said so — rerunning `retire` finishes it, and reviving follows.
+            raise StreamRetired(name) from None
+        except FileNotFoundError:
+            msg = f"there is no stream {name!r} at {root} to ingest into"
+            raise FileNotFoundError(msg) from None
+
+        import pyarrow as pa  # noqa: PLC0415 — litelink has loaded it already
+
+        with log:
+            reader = source.to_reader() if isinstance(source, pa.Table) else source
+            if _log.STAMP in reader.schema.names:
+                msg = f"{_log.STAMP!r} is stamped by the server; a source cannot supply it"
+                raise ValueError(msg)
+
+            loading = _ingest.Source(
+                reader,
+                stamp=_log.stamped(log),
+                keep_bytes=2 * log.config.target_row_group_size,
+            )
+            # litelink loads only behind rows already in files, so what the
+            # last server left in the buffer is cut first — what the seal
+            # role does on a graceful stop, for a server that did not have one.
+            while log.seal(flush=True) is not None:
+                pass
+
+            log.await_seal()
+            before = log.end_offset()
+            try:
+                return log.ingest(loading.reader, publish=publish, flush=flush)
+            except Exception as exc:
+                raise _failed(name, log, loading, before, exc) from exc
 
     @classmethod
     def _read_only(
@@ -2341,3 +2448,39 @@ async def _prepend(
 
 
 __all__ = ["MAX_REPLAY", "Stream"]
+
+
+def _failed(
+    name: str,
+    log: WriteHandle,
+    loading: _ingest.Source,
+    before: int,
+    exc: Exception,
+) -> IngestFailed:
+    """What a failed `ingest` landed, and where in the source it failed.
+
+    litelink commits files in groups as the load goes, so the committed part
+    ends where staging does; the offsets past that and below the log's end
+    were reserved for files never committed. Offsets follow the source's
+    order, so the committed part is its first rows.
+
+    **Explaining the failure must never replace it.** Anything that goes wrong
+    working out where leaves litelink's message, with no location.
+    """
+    try:
+        found = loading.locate(log.schema)
+    except Exception:  # noqa: BLE001 — see the docstring
+        found = None
+
+    extent = log.staging_extent()
+    committed = before if extent is None else max(before, extent[1])
+    end = log.end_offset()
+    batch, row, reason = (None, None, str(exc)) if found is None else found
+    return IngestFailed(
+        name,
+        reason,
+        loaded=(before, committed) if committed > before else None,
+        gap=(committed, end) if end > committed else None,
+        batch=batch,
+        row=row,
+    )
