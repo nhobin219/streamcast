@@ -76,7 +76,7 @@ from streamcast._subscriber import Subscriber
 from streamcast._writer import Job, Writer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping, Sequence
     from os import PathLike
 
     import pyarrow as pa
@@ -921,6 +921,93 @@ class Stream:
             _metadata.publish(metadata, published, s3_options)  # ty: ignore[invalid-argument-type]
 
         return retirement
+
+    @classmethod
+    def ingest(
+        cls,
+        name: str = "",
+        source: pa.Table | pa.RecordBatchReader | None = None,
+        *,
+        root: str | PathLike[str],
+        s3_options: object | None = None,
+        publish: bool = True,
+        flush: bool | None = None,
+    ) -> tuple[int, int] | None:
+        """Append `source`, an Arrow table or batch reader, to a stopped stream.
+
+            reader = pq.ParquetFile("trades-2025.parquet").iter_batches()
+            streamcast.Stream.ingest("trades", pa.RecordBatchReader.from_batches(
+                schema, reader), root="data")
+
+        Returns the offsets the rows took, `[start, end)`, or None for a source
+        with no rows. litelink's `ingest`: the rows go straight to Parquet,
+        not through the buffer a `send` commits to — measured there at 5.1
+        million rows a second against 183 thousand — and take the next offsets
+        at the END of the stream's current log, as any append does. Old rows
+        loaded into a new stream before it goes live are the same call.
+
+        **Run with the server stopped**, as `migrate` and `retire` are. These
+        rows are never fanned out, so a subscriber reading live would see its
+        offsets jump past the range — a hole it cannot see. Stopped, every
+        subscriber comes back by offset and replays the range like any other.
+        litelink also claims the whole log for the load and needs its single
+        writer, so a server sharing it would have its appends and maintenance
+        held for the length of the load.
+
+        `streamcast_ts` is stamped here, at the time each batch is loaded — it
+        is when the server took the row — and a source that carries it is
+        refused, as a `send` is. Every declared column must be present, in any
+        order, and castable to its declared type; litelink checks that before
+        it reserves any offsets, so a refused source leaves no hole.
+
+        `publish` and `flush` are litelink's: the load is pushed to the
+        published table when it is durable, and its short last file too by
+        default when the log replicates its WAL, which cannot carry a load. A
+        push that fails leaves the rows loaded and raises: publish again (a
+        server's maintainer will), never ingest again, which would load them
+        twice.
+
+        A retired stream raises `StreamRetired`: revive it first.
+        """
+        if source is None:
+            msg = "ingest needs a source: a pyarrow Table or RecordBatchReader"
+            raise TypeError(msg)
+
+        metadata = _metadata.load(root, name)
+        if metadata is not None and metadata.retirement is not None:
+            retirement = metadata.retirement
+            raise StreamRetired(name, retirement.at, retirement.end_offset)
+
+        current = name if metadata is None else metadata.current.name
+        try:
+            log = litelink.open(root, current, s3_options=s3_options)  # ty: ignore[invalid-argument-type]
+        except litelink.RetiredError:
+            # Retired in litelink by a retire that died before the metadata
+            # said so — rerunning `retire` finishes it, and reviving follows.
+            raise StreamRetired(name) from None
+        except FileNotFoundError:
+            msg = f"there is no stream {name!r} at {root} to ingest into"
+            raise FileNotFoundError(msg) from None
+
+        import pyarrow as pa  # noqa: PLC0415 — litelink has loaded it already
+
+        with log:
+            reader = source.to_reader() if isinstance(source, pa.Table) else source
+            if _log.STAMP in reader.schema.names:
+                msg = f"{_log.STAMP!r} is stamped by the server; a source cannot supply it"
+                raise ValueError(msg)
+
+            if _log.stamped(log):
+                reader = _stamped(reader)
+
+            # litelink loads only behind rows already in files, so what the
+            # last server left in the buffer is cut first — what the seal
+            # role does on a graceful stop, for a server that did not have one.
+            while log.seal(flush=True) is not None:
+                pass
+
+            log.await_seal()
+            return log.ingest(reader, publish=publish, flush=flush)
 
     @classmethod
     def _read_only(
@@ -2341,3 +2428,21 @@ async def _prepend(
 
 
 __all__ = ["MAX_REPLAY", "Stream"]
+
+
+def _stamped(reader: pa.RecordBatchReader) -> pa.RecordBatchReader:
+    """`reader` with `streamcast_ts` appended to every batch: the time it was
+    loaded, which is when the server took those rows. Lazy, so a load larger
+    than memory stays one batch at a time."""
+    import pyarrow as pa  # noqa: PLC0415
+
+    field = pa.field(_log.STAMP, pa.int64(), nullable=False)
+    schema = reader.schema.append(field)
+
+    def batches() -> Iterator[pa.RecordBatch]:
+        for batch in reader:
+            now = time.time_ns() // 1_000
+            stamp = pa.array([now] * batch.num_rows, pa.int64())
+            yield batch.append_column(field, stamp)
+
+    return pa.RecordBatchReader.from_batches(schema, batches())

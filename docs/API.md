@@ -92,6 +92,8 @@ streamcast.Stream.restore(name="", *, root, published,    # on a box without the
                           revive=False, ...)
 streamcast.Stream.retire(name="", *, root, s3_options=None)  # for good; returns the
                                                             # record: .at, .end_offset
+streamcast.Stream.ingest(name="", source, *, root, s3_options=None,  # Arrow, in bulk;
+                         publish=True, flush=None)                    # -> (start, end)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -1258,6 +1260,32 @@ column's type, ever, including after it has been removed. Re-adding a name takes
 it had. A stream's logs are read together with `UNION ALL BY NAME`, where a changed type
 coerces silently (`int64` beside `string` becomes a string column) rather than failing.
 Widening is refused too.
+
+### Loading rows in bulk: `Stream.ingest`
+
+Rows sent one at a time are made durable one group commit at a time. A load you already
+have as Parquet or Arrow doesn't need that, and `Stream.ingest` writes it straight to the
+log's files with litelink's `ingest`: 5.1 million rows a second measured there, against
+183 thousand through the buffer. With the server stopped:
+
+```python
+table = pq.read_table("trades-2025.parquet")                        # or a RecordBatchReader
+start, end = streamcast.Stream.ingest("trades", table, root="data")  # offsets [start, end)
+```
+
+The rows take the next offsets at the end of the stream's current log, as any append does;
+a subscriber reads them by offset, like any other rows. Every declared column must be in
+the source, in any order and castable to its type, and nothing reserves offsets until
+litelink has checked that, so a refused source leaves no gap. `streamcast_ts` is stamped
+with the time each batch is loaded, and a source carrying it is refused. The load is
+published when it is durable (`publish=False` to skip). A push that fails leaves the rows
+loaded and raises: publish again rather than ingesting again.
+
+**Only with the server stopped.** Loaded rows are never sent to subscribers, so a
+subscriber reading live would see the offsets jump past them, a gap it can't detect;
+stopped, every subscriber comes back by offset and replays them. Rows the last server left
+in the buffer are sealed first, which litelink needs. A retired stream raises
+`StreamRetired`.
 
 ### Finishing a stream: `Stream.retire`
 
