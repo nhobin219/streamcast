@@ -7,6 +7,28 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **litelink is `>=0.11.0,<0.12`.** litelink 0.11 sizes compacted files on
+  disk (512 MiB by default) and streams compaction, bounds each log's staging
+  table at 4 GiB by default (`staging_max_bytes`), and publishes only finished
+  files unless asked to flush. streamcast sets none of its config: a log
+  created without `config=` takes litelink's defaults, and an existing log
+  is upgraded as litelink's changelog describes — including a one-time re-cut
+  of what its staging table holds into 512 MiB files.
+- **The maintainer flushes seals and publishes every `flush_every`** (new on
+  `Maintain`, 60 s by default). Under litelink 0.11 a plain `publish()`
+  pushes only finished 512 MiB files, so without it the published table —
+  what catch-up, snapshots and `Live` read — would trail the writer by days
+  on a modest stream, with every row in between on one machine only. Once
+  per interval the seal role passes `flush=True` and the publish role does
+  too a few seconds later; every other pass is unflushed, so files still end
+  up at litelink's targets. The flushes fall on wall-clock multiples of the
+  interval, so the two processes agree on them across restarts. Without WAL
+  replication this interval is the RPO. `flush_every=None` never flushes.
+
 ## 0.15.0 — 2026-10-06
 
 ### Breaking

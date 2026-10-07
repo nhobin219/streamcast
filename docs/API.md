@@ -316,9 +316,9 @@ server closes:
 
 | role | runs | every |
 |---|---|---|
-| `seal` | `seal()` | 0.25 s |
+| `seal` | `seal()`, and `seal(flush=True)` once per `flush_every` | 0.25 s |
 | `compact` | `compact()` | 10 s |
-| `publish` | `publish()` | 10 s |
+| `publish` | `publish()`, and `publish(flush=True)` once per `flush_every` | 10 s |
 | `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | 10 s |
 | `clean-published` | `reclaim("published")`, `sweep("published")` | 60 s |
 
@@ -344,12 +344,35 @@ streamcast.serve(stream, host, port,
 ```
 
 `Maintain` is a frozen dataclass of one cadence per role — `seal_every`, `compact_every`,
-`publish_every`, `clean_every`, `clean_published_every`, with the defaults above — and
-`dedicated`. The cadences differ by orders of magnitude because the costs do: `seal` is an
+`publish_every`, `clean_every`, `clean_published_every`, with the defaults above —
+`flush_every`, and `dedicated`. The cadences differ by orders of magnitude because the costs do: `seal` is an
 indexed read of one row when there is nothing to seal, compaction rewrites files, and the
 published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
 rows already in staging** (litelink's `evict("buffer")`): `seal` and `publish` move data
 and delete nothing, so a maintainer without it grows `buffer.db` without bound.
+
+**`flush_every` (60 s) is the RPO without WAL replication, and how far the published table
+trails the writer.** A plain `seal()` cuts only at litelink's `target_seal_size` and a plain
+`publish()` pushes only finished files — 512 MiB on disk since litelink 0.11 — so unflushed,
+the published table trails by up to a whole file per log: days, on a stream of 100 rows a
+second, all of it on this machine only. Once per `flush_every` the seal role passes
+`flush=True`, cutting whatever is buffered, and the publish role does too a few seconds
+later, pushing what was cut. A row then reaches the published table about `flush_every +
+publish_every` after it is written, plus the upload. Every other pass is unflushed, so files
+still end up at litelink's targets: what a flushed publish pushes early is swapped for the
+finished file later, at the cost of uploading those rows twice and one published commit per
+log per flush. Flushes fall on wall-clock multiples of the interval, so the two processes
+agree on them across restarts. `flush_every=None` never flushes, leaving RPO to WAL
+replication (`replicate=True`), which bounds it in seconds either way. Compaction is never
+flushed.
+
+The published table is what a catch-up, a snapshot and a `Live` view read, so this is also
+their freshness: a `Live` view holds every row not yet published in memory, up to
+`max_tail`.
+
+```python
+streamcast.serve(stream, host, port, maintain=streamcast.Maintain(flush_every=900))  # 15 min
+```
 
 **It is always a subprocess, and there is deliberately no thread option.** A seal is
 CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no

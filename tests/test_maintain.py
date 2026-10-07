@@ -21,6 +21,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
+from streamcast import _maintain
 from streamcast._maintain import ROLES, Maintain, Supervisor
 
 # ~140 bytes a row, so ROWS is ~560 KB — comfortably past SEAL_SIZE, at
@@ -414,6 +415,8 @@ def test_there_is_no_thread_mode_to_get_wrong():
         # sharing one — still not a thread, and there is no way to ask for
         # one.
         "dedicated",
+        # When `seal` and `publish` pass `flush=True`: the RPO interval.
+        "flush_every",
     }
 
     # And the child is a real subprocess, not a thread pretending to be one.
@@ -440,3 +443,105 @@ def in_buffer(log) -> int:
     path = Path(log.root) / log.name / "buffer.db"
     with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
         return db.execute("SELECT count(*) FROM buffer").fetchone()[0]
+
+
+class Recorder:
+    """A log that records whether each call was flushed."""
+
+    def __init__(self, failing: int = 0) -> None:
+        self.calls: list[tuple[str, bool]] = []
+        self._failing = failing
+
+    def _record(self, step: str, flush: bool) -> None:  # noqa: FBT001
+        self.calls.append((step, flush))
+        if flush and self._failing:
+            self._failing -= 1
+            msg = "the bucket is unreachable"
+            raise OSError(msg)
+
+    def seal(self, *, flush: bool = False) -> None:
+        self._record("seal", flush)
+
+    def publish(self, *, flush: bool = False) -> None:
+        self._record("publish", flush)
+
+    def compact(self) -> None:
+        self._record("compact", False)  # noqa: FBT003
+
+
+def passes(monkeypatch, role: str, log: Recorder, at: list[float]) -> list[bool]:
+    """Run `sweep` for one pass at each wall-clock time in `at`.
+
+    The clock is the test's; every pass is due, since what is under test is
+    which ones flush, not the cadence.
+    """
+    clock = iter(at)
+    now = [next(clock)]
+
+    def sleep(_: float) -> None:
+        try:
+            now[0] = next(clock)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    monkeypatch.setattr(_maintain.time, "time", lambda: now[0])
+    monkeypatch.setattr(_maintain.time, "sleep", sleep)
+    with contextlib.suppress(KeyboardInterrupt):
+        _maintain.sweep([("t", log)], role, 1e-9, flush_every=60.0)  # ty: ignore[invalid-argument-type]
+
+    return [flush for _step, flush in log.calls]
+
+
+class TestFlushing:
+    """`flush_every`: the seal and publish passes that bound RPO."""
+
+    def test_the_seal_flushes_once_per_boundary(self, monkeypatch):
+        # Boundaries at 1020 and 1080: the first pass after each flushes.
+        got = passes(monkeypatch, "seal", Recorder(), [1010, 1015, 1021, 1030, 1081])
+        assert got == [False, False, True, False, True]
+
+    def test_the_publish_flushes_after_the_seal_has(self, monkeypatch):
+        """A few seconds past the boundary, so it pushes what the seal cut."""
+        got = passes(monkeypatch, "publish", Recorder(), [1010, 1021, 1026, 1030])
+        assert got == [False, False, True, False]
+
+    def test_a_flush_that_failed_is_tried_again_next_pass(self, monkeypatch):
+        got = passes(
+            monkeypatch, "publish", Recorder(failing=1), [1010, 1026, 1027, 1030]
+        )
+        assert got == [False, True, True, False]
+
+    def test_compaction_is_never_flushed(self, monkeypatch):
+        """`compact(flush=True)` rewrites the in-progress file every call."""
+        got = passes(monkeypatch, "compact", Recorder(), [1010, 1021, 1081])
+        assert got == [False, False, False]
+
+    def test_only_seal_and_publish_are_told_the_interval(self, tmp_path):
+        plan = Maintain(flush_every=30.0)
+        for role in ROLES:
+            argv = Supervisor([(tmp_path, "t")], plan, role)._spawn_argv()  # noqa: SLF001
+            assert ("--flush-every" in argv) == (role in {"seal", "publish"}), role
+
+        argv = Supervisor([(tmp_path, "t")], Maintain(flush_every=None), "seal")
+        assert "--flush-every" not in argv._spawn_argv()  # noqa: SLF001
+
+    def test_the_interval_is_positive_or_none(self):
+        with pytest.raises(ValueError, match="flush_every"):
+            Maintain(flush_every=0)
+
+    async def test_a_served_row_reaches_the_published_table(self, wide_log):
+        """End to end: unflushed, litelink publishes only 512 MiB files, so on
+        this stream nothing would be published at all."""
+        stream = streamcast.Stream("trades", log=wide_log)
+        plan = Maintain(flush_every=1.0, publish_every=0.25, compact_every=60.0)
+        server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=plan)
+        try:
+            await stream.send_many(rows(0, 50))
+            deadline = time.monotonic() + 10
+            while wide_log.published_through() < 50 and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+
+            assert wide_log.published_through() == 50
+        finally:
+            server.close()
+            await server.wait_closed()
