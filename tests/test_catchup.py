@@ -134,6 +134,79 @@ async def fill(stream, log, total=TOTAL, pad=lambda: PAD):
     return through
 
 
+class TestTheFilterHoldsAcrossTheJoin:
+    """`where=` on rows read from the tables, as on what the server sends (#114).
+
+    The server filters what it sends, live and replayed; the rows a catch-up
+    reads never pass through it. Unfiltered, a subscriber of
+    `where={"recipient": me}` was handed everyone's rows after an outage
+    longer than `max_replay`.
+    """
+
+    async def test_only_matching_rows_arrive_from_either_side(
+        self, serve, published_log, s3
+    ):
+        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        await fill(stream, published_log)
+        wanted = list(range(0, TOTAL + 100, 100))
+
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.connect(
+                uri, offset=1, catch_up=True, s3_options=s3, where={"i": wanted}
+            ) as sub:
+                got = [await sub.recv() for _ in range(TOTAL // 100)]
+                # And live, after the join: the server's filter takes over.
+                await stream.send_many(
+                    [{"i": i, "pad": PAD} for i in range(TOTAL, TOTAL + 100)]
+                )
+                got.append(await asyncio.wait_for(sub.recv(), 5))
+
+        assert [row["i"] for _offset, _ts, row in got] == wanted
+        offsets = [offset for offset, _ts, _row in got]
+        assert offsets == [i + 1 for i in wanted], "each row once, at its own offset"
+
+    async def test_a_binary_column_is_compared_as_bytes(
+        self, tmp_path, serve, s3, bucket
+    ):
+        """The filter arrives as hex and the tables hold bytes: prepared once,
+        as the server prepares it, or no row would ever match."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "contentEncoding": "base16"},
+                "n": {"type": "integer"},
+            },
+            "required": ["to", "n"],
+        }
+        stream = streamcast.Stream.new(
+            "inbox",
+            root=tmp_path,
+            schema=schema,
+            published=bucket,
+            s3_options=s3,
+            max_replay=2,
+        )
+        try:
+            await stream.send_many(
+                [{"to": b"\xaa" if n % 2 else b"\xbb", "n": n} for n in range(10)]
+            )
+            assert stream.log is not None
+            while stream.log.seal(flush=True) is not None:
+                pass
+
+            await asyncio.to_thread(stream.log.publish, flush=True)
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(
+                    uri, offset=1, catch_up=True, s3_options=s3, where={"to": "aa"}
+                ) as sub:
+                    got = [await asyncio.wait_for(sub.recv(), 5) for _ in range(5)]
+
+            assert [row["n"] for _offset, _ts, row in got] == [1, 3, 5, 7, 9]
+            assert {row["to"] for _offset, _ts, row in got} == {b"\xaa"}
+        finally:
+            await stream.aclose()
+
+
 class TestItClosesTheGap:
     @pytest.mark.slow
     async def test_a_consumer_too_far_behind_is_caught_up_transparently(

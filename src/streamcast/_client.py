@@ -901,6 +901,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             start,
             self._catch_up_retries,
             self._handshake,
+            self._where,
         )
         # BEFORE handing anything back, so an unreadable table raises here
         # rather than from whatever line first calls `recv`. Entering the
