@@ -42,13 +42,15 @@ from __future__ import annotations
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Final
 
-from streamcast import _snapshot
+from streamcast import _filter, _metadata, _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
     from litelink import S3Options
+
+    from streamcast._filter import Predicate, Where
 
 # The `why` values a catch-up can answer. `not_durable`, `empty` and `ahead`
 # are not gaps in the published tables — they are a stream with no log, a log
@@ -142,6 +144,7 @@ class Catcher:
         "_s3",
         "_stream_id",
         "_uri",
+        "_where",
         "connection",
         "info",
         "start",
@@ -156,6 +159,7 @@ class Catcher:
         start: int,
         retries: int,
         handshake: Callable[[int], Awaitable[tuple[Any, Any]]],
+        where: Where | None = None,
     ) -> None:
         self._uri = uri
         self._stream_id = stream_id
@@ -164,6 +168,10 @@ class Catcher:
         self._retries = retries
         self._handshake = handshake
         self.start = start
+        # The subscription's filter. The server applies it to what it sends,
+        # live and replayed; the rows read here never pass through the
+        # server, so it is applied again to them (#114).
+        self._where = where
         self.connection: Any = None
         self.info: Any = None
         # The first round's snapshot, opened by `prepare` rather than inside
@@ -243,6 +251,7 @@ class Catcher:
             # and the first read are not two round trips.
             snap = self._first or await self._open()
             self._first = None
+            matches = _predicate(self._where, snap)
             try:
                 async for offset, ts, row in _rows(snap, self.start):
                     if not checked:
@@ -254,7 +263,13 @@ class Catcher:
                             # between `prepare` and the read.
                             raise _gap_below(self._name, self._uri, offset, requested)
 
-                    yield offset, ts, row
+                    # A row the filter refuses is skipped, not delivered, and
+                    # still moves `start` past it — as the server's filter
+                    # skips a live one — so the next round and the handshake
+                    # take up above it rather than reading it again.
+                    if matches(row):
+                        yield offset, ts, row
+
                     # Tracked per ROW, so a round that fails partway still
                     # leaves the next one starting where this one stopped.
                     self.start = offset + 1
@@ -300,6 +315,22 @@ class Catcher:
             f"once the server will serve it."
         )
         raise CatchUpUnavailable(msg)
+
+
+def _predicate(where: Where | None, snap: _snapshot.Snapshot) -> Predicate:
+    """`where` as the server compiles it, for rows read from `snap`.
+
+    Prepared against the live log's exact shape, so a binary column's filter
+    value is decoded to bytes once, as the server decodes it: a row from the
+    tables carries bytes, as a live row on the server does. The server
+    validated the filter when the probe connection subscribed with it, so a
+    bad column never gets this far.
+    """
+    if not where:
+        return _filter.compile_where({})
+
+    schema = _metadata.shape(snap.metadata.live_log)
+    return _filter.compile_where(_filter.prepare(where, schema))
 
 
 async def _refusing(read: Awaitable[Any]) -> Any:

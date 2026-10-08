@@ -7,6 +7,20 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- **`catch_up=True` applies `where=` to the rows it reads from the published
+  tables** (#114). The server filters what it sends, live and replayed, but a
+  catch-up's rows never pass through it, so a `where={"recipient": me}`
+  subscriber was handed every row in the gap after an outage longer than
+  `max_replay`. The client now applies the same predicate there, compiled as
+  the server compiles it — a binary column's value decoded to bytes — and a
+  filtered row still moves the catch-up past it. A `Stream.live` view with
+  `where=` held those rows in its tail after a reconnect too; its queries
+  filtered them out, but they counted against `max_tail`.
+
 ## 0.16.0 — 2026-10-07
 
 ### Added

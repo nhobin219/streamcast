@@ -824,6 +824,11 @@ socket. Refused with a 4400, naming the problem:
 Refused rather than accepted-and-silent, because a filter is the one request whose failure
 mode is indistinguishable from a quiet stream.
 
+**The filter holds for every row a subscription delivers:** live, replayed, and caught up.
+The server filters what it sends; rows a `catch_up` reads from the published tables never
+pass through it, so the client applies the same predicate to them, with a binary column's
+value compared as bytes as the server compares it.
+
 **Cost.** The predicate is compiled once at subscribe and specialised on its arity, then
 runs per message per filtered subscriber against the dict `send` was called with. Measured
 on a four-column row: 162 ns for one term, 260 ns for two, against 961 ns for the
