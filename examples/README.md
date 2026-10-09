@@ -221,6 +221,11 @@ exactly the next row. `keyed_table/orders.py` stops one partway, publishes
 more, and reopens it. It then asks the log the same question, as one window
 function over `litelink_offset`, and gets the same book.
 
+To fail over to another box, replicate the view's SQLite file with litestream at a long
+`sync-interval` (minutes, not its 1 s default): the view can always be rebuilt from the
+stream, so the replica only saves replaying it, and a long interval keeps the
+object-store writes cheap.
+
 **Branches** (`keyed_table/branches.py`) add a `branch_id` column. Production
 writes to `main`. A branch is a client's private database:
 
