@@ -262,3 +262,13 @@ class TestConfiguration:
         assert filesystem is not None
         explicit, _ = _filesystem("s3://bucket/key", s3)
         assert explicit is not None
+
+    def test_a_small_upload_is_one_request(self, s3):
+        """pyarrow's S3 stream opens a multipart upload as it opens: three
+        billed writes for a cursor of a few bytes. Delayed, it is one PutObject.
+        Read back off the filesystem, as litelink checks its own."""
+        from streamcast._remote import _filesystem
+
+        filesystem, _path = _filesystem("s3://bucket/key", s3)
+        _rebuild, (options,) = filesystem.__reduce__()
+        assert options["allow_delayed_open"] is True

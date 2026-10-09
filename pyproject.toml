@@ -52,12 +52,14 @@ dependencies = [
     # `retire` that does not walk every manifest, which `Stream.retire` runs,
     # and a publish that re-applies the table's metadata properties; 0.11.0
     # for `staging_max_bytes`, flushed publishes that are swapped for full
-    # files later, and compaction sized on disk.
+    # files later, and compaction sized on disk; 0.12.0 for small objects
+    # uploaded in one request, which needs pyarrow 21 — the floor this
+    # library's own S3 writes rely on too (`_remote._filesystem`).
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.11.0,<0.12",
+    "litelink>=0.12.0,<0.13",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a
