@@ -87,6 +87,15 @@ def _filesystem(
         options["endpoint_override"] = resolved.endpoint
         options["scheme"] = endpoint.scheme or "https"
 
+    # **One request for a small object, not three.** pyarrow's S3 stream
+    # starts a multipart upload as it opens, so every cursor upload — one per
+    # consumer every `UPLOAD_EVERY` — and every `metadata.json` and manifest
+    # was CreateMultipartUpload, UploadPart and CompleteMultipartUpload: three
+    # billed writes for a few bytes. Delayed, the stream buffers up to a part
+    # and sends a smaller object as one PutObject. pyarrow 21's option, which
+    # litelink 0.12 requires, and litelink sets for its own writes.
+    options["allow_delayed_open"] = True
+
     return pafs.S3FileSystem(**options), f"{split.netloc}{split.path}"
 
 

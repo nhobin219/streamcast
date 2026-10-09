@@ -9,6 +9,18 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Changed
+
+- **litelink is `>=0.12.0,<0.13`, and with it pyarrow 21 or later.**
+  litelink 0.12 writes a small object to S3 in one request rather than three,
+  and batches published snapshot expiry into about one commit per quarter of
+  `published_snapshot_retention`. For a log flushed every `flush_every`, that
+  is about a third of the write requests 0.11 made.
+- **streamcast's own small S3 writes are one request too.** A remote cursor
+  upload (every 30 s per consumer that has one), `metadata.json` and the
+  manifest went up as a three-request multipart upload, as litelink's did;
+  they are now one `PutObject`.
+
 ### Fixed
 
 - **`catch_up=True` applies `where=` to the rows it reads from the published
