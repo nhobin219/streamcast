@@ -56,14 +56,14 @@ async with streamcast.publish(uri) as producer:
 # tables: every log it has been through, as of a point, with no server
 # involved.
 async with await streamcast.Stream.snapshot(
-    "s3://bucket/prefix/trades.metadata.json"
+    "s3://bucket/prefix/trades/trades.metadata.json"
 ) as snapshot:
     await snapshot.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
 
 # Or from any Iceberg engine, with neither streamcast nor litelink installed.
 duckdb.sql("""
     SELECT count(*), max(price)
-    FROM iceberg_scan('s3://bucket/prefix/trades',
+    FROM iceberg_scan('s3://bucket/prefix/trades/trades',
                       version_name_format = '%s%s.metadata.json')
 """)
 ```
@@ -165,7 +165,7 @@ in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
 
 ```
 {"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"6f1c…","durable":true}
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json","stream_id":"6f1c…","durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 
@@ -215,7 +215,7 @@ SCHEMA = {
 }
 
 async def main():
-    # Creates the log at data/trades, or opens it if it is already there.
+    # Creates the stream in data/trades/, or opens it if it is already there.
     stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                    sort_by=("event_ts",))
 
@@ -767,13 +767,13 @@ it also takes the rows the server has not published yet, up to an offset or the 
 
 ```python
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades.metadata.json"
+    "s3://market-data/prod/trades/trades.metadata.json"
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 # The same, completed from the server up to its newest row.
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades.metadata.json",
+    "s3://market-data/prod/trades/trades.metadata.json",
     as_of_offset=streamcast.LATEST,
     broker="ws://localhost:8765/trades",
 ) as snapshot:

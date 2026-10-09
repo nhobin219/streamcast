@@ -37,28 +37,31 @@ async def produce(root: Path, count: int = 7, **kwargs: object) -> None:
 class TestRetiring:
     async def test_it_publishes_what_stopping_would_leave_behind(self, tmp_path):
         await produce(tmp_path)
-        with litelink.open(tmp_path, "t", read_only=True) as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
             # A plain stop: the rows are on this disk, none of them published.
             assert log.published_through() == 0
 
         retirement = streamcast.Stream.retire("t", root=tmp_path)
 
         assert retirement.end_offset == 8
-        with litelink.open(tmp_path, "t", read_only=True) as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
             assert log.published_through() == 7, "every row, the tail included"
 
     async def test_the_metadata_records_it_and_old_builds_refuse_it(self, tmp_path):
         await produce(tmp_path)
         retirement = streamcast.Stream.retire("t", root=tmp_path)
 
-        metadata = _metadata.load(tmp_path, "t")
+        metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
         assert metadata.retirement == retirement
         assert retirement.start_ts is not None
         assert retirement.end_ts is not None
         # Version 3, so a build that predates retirement refuses the file
         # rather than taking the retired log for a migration that died.
-        assert '"streamcast_metadata": 3' in _metadata.path(tmp_path, "t").read_text()
+        assert (
+            '"streamcast_metadata": 3'
+            in _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
+        )
 
     async def test_it_is_safe_to_run_again(self, tmp_path):
         await produce(tmp_path)
@@ -68,7 +71,7 @@ class TestRetiring:
     async def test_a_retire_that_died_after_litelinks_step_finishes(self, tmp_path):
         """litelink retired the log, then the metadata was never written."""
         await produce(tmp_path)
-        with litelink.open(tmp_path, "t") as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t") as log:
             log.retire()
 
         retirement = streamcast.Stream.retire("t", root=tmp_path)
@@ -158,7 +161,7 @@ class TestReviving:
         assert revived.log.name == "t-v2"
         assert await revived.send_many([{"i": 7}, {"i": 8}]) == [8, 9], "dense"
 
-        metadata = _metadata.load(tmp_path, "t")
+        metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
         assert metadata.retirement is None
         assert [(e.name, e.start_offset, e.end_offset) for e in metadata.logs] == [
@@ -166,7 +169,10 @@ class TestReviving:
             ("t-v2", 8, None),
         ]
         # Back to version 2: nothing a build before retirement cannot read.
-        assert '"streamcast_metadata": 2' in _metadata.path(tmp_path, "t").read_text()
+        assert (
+            '"streamcast_metadata": 2'
+            in _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
+        )
 
         async with serve(revived, maintain=False) as uri:
             async with streamcast.connect(uri, offset=1, catch_up=True) as sub:
@@ -209,7 +215,7 @@ class TestOnAnotherBox:
         box_a, box_b = tmp_path / "a", tmp_path / "b"
         await produce(box_a, published=bucket, s3_options=s3)
         streamcast.Stream.retire("t", root=box_a, s3_options=s3)
-        published_copy = _metadata.fetch(bucket, "t", s3)
+        published_copy = _metadata.fetch(f"{bucket}/t", "t", s3)
         assert published_copy is not None
         assert published_copy.retirement is not None
         shutil.rmtree(box_a)  # the old box is gone
@@ -225,7 +231,7 @@ class TestOnAnotherBox:
                 got = [(await sub.recv())[0] for _ in range(8)]
 
         assert got == list(range(1, 9))
-        fetched = _metadata.fetch(bucket, "t", s3)
+        fetched = _metadata.fetch(f"{bucket}/t", "t", s3)
         assert fetched is not None
         assert fetched.retirement is None, "flipped in the published copy too"
 

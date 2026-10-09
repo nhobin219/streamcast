@@ -87,7 +87,7 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ```
 {"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades.metadata.json","stream_id":"5f0c…",
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json","stream_id":"5f0c…",
  "durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
@@ -796,8 +796,9 @@ stopped:
 2. **The next log is created**, `trades-v2` and so on, starting at exactly the
    old log's `end_offset`.
 3. **The metadata records both**, the new one live, at
-   `root/<stream>.metadata.json` and, when the logs publish to S3,
-   `<published>/<stream>.metadata.json`.
+   `root/<stream>/<stream>.metadata.json` and, when the logs publish to S3,
+   `<published>/<stream>/<stream>.metadata.json` (`root/<stream>.metadata.json` and
+   `<published>/<stream>.metadata.json` for a stream created before 0.18).
 
 **Offline, so dense.** A live rotation would have to create the next log
 (100–300 ms, measured) while `send` kept writing the old one, and so could not

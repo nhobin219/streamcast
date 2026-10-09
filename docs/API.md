@@ -289,11 +289,37 @@ queued.
 server that should only serve its own box, which is the case this library is built for.
 TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECURITY.md).
 
+### Where a stream's files live
+
+Each stream has a directory of its own under `root`, so a root serving many streams lists
+one entry per stream:
+
+```
+data/                                s3://bucket/prefix/
+  trades/                              trades/
+    trades.metadata.json                 trades.metadata.json
+    trades.manifest.parquet              trades.manifest.parquet
+    trades/          the first log       trades/       its published table
+    trades-v2/       after a migrate     trades-v2/
+  quotes/                              quotes/
+```
+
+**A stream never changes layout.** One created before 0.18 keeps the one it has, for
+good: `data/trades.metadata.json` beside `data/trades/`, which is its first log's
+directory, with `<published>/trades.metadata.json` and `<published>/trades/` on the
+published side. Every log it adds keeps that layout too, through migrations, restores on
+another box and revivals. A new stream starts in its own directory and stays there.
+Which layout a stream has is read from what's on disk, or from where `restore` finds its
+metadata, and both layouts are served alike.
+
+To move a stream to the new layout, create a new stream and load the old one's rows into it
+with [`Stream.ingest`](#loading-rows-in-bulk-streamingest).
+
 ### The metadata file
 
-Before it listens, `serve` writes `root/<stream>.metadata.json` for every stream with a log
-that doesn't have one yet, and, when the log publishes to S3, makes sure
-`<published>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
+Before it listens, `serve` writes `root/<stream>/<stream>.metadata.json` for every stream
+with a log that doesn't have one yet, and, when the log publishes to S3, makes sure
+`<published>/<stream>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
 something changed. **If either fails, `serve` raises instead of starting.** The file is
 what lets anything other than this server read the stream (#32), so a broken one is found
 at deploy. The ASGI app does the same when its lifespan starts.
@@ -952,7 +978,7 @@ which of three things to change.
 |---|---|
 | `catch_up=False` *(default)* | the plain `NotReplayable` refusal; handle the gap yourself |
 | `catch_up_retries=3` | rounds of read-then-connect before giving up |
-| `metadata="s3://bucket/prefix/trades.metadata.json"` | the metadata file to read from; otherwise the greeting's |
+| `metadata="s3://bucket/prefix/trades/trades.metadata.json"` | the metadata file to read from; otherwise the greeting's |
 | `s3_options=streamcast.S3Options(...)` | credentials; otherwise the environment |
 
 **Where the metadata file comes from.** The greeting names it, with the stream's id, so a
@@ -1248,7 +1274,7 @@ async with streamcast.serve(stream, "localhost", 8765):
 
 The current log is retired: sealed for good, published in full, and refusing writers from
 then on. Then `trades-v2` is created with the new schema, starting at exactly the offset
-the old log ended at. `root/trades.metadata.json` (and a copy beside the published tables,
+the old log ended at. `root/trades/trades.metadata.json` (and a copy beside the published tables,
 when they are on S3) records the sequence. A migration that dies partway finishes on the
 rerun.
 Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
@@ -1453,7 +1479,7 @@ it never touches the server**:
 s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
 
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades.metadata.json", s3_options=s3
+    "s3://market-data/prod/trades/trades.metadata.json", s3_options=s3
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 ```
@@ -1633,7 +1659,7 @@ spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language
 
 ```
 {"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades.metadata.json",
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json",
  "stream_id":"5f0c…","schema":{...},"durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```

@@ -16,6 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
+from streamcast import _metadata
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -75,7 +76,7 @@ class TestIngesting:
     async def test_it_publishes_what_it_loaded(self, tmp_path):
         await stopped(tmp_path)
         streamcast.Stream.ingest("t", source(0, 10), root=tmp_path, flush=True)
-        with litelink.open(tmp_path, "t", read_only=True) as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
             assert log.published_through() == 13
 
     async def test_a_reader_is_loaded_batch_by_batch(self, tmp_path):
@@ -102,7 +103,9 @@ class TestIngesting:
 
         rows = source(0, 5).append_column("note", pa.array(["n"] * 5, pa.string()))
         assert streamcast.Stream.ingest("t", rows, root=tmp_path) == (4, 9)
-        with litelink.open(tmp_path, "t-v2", read_only=True) as log:
+        with litelink.open(
+            _metadata.home(tmp_path, "t"), "t-v2", read_only=True
+        ) as log:
             assert log.end_offset() == 9
 
 
@@ -206,7 +209,7 @@ class TestAFailureMidway:
         fixed = [batch(n, n + 1_000) for n in range(0, 32_000, 1_000)]
         rest = pa.Table.from_batches(fixed).slice(failed.rows_loaded)
         assert streamcast.Stream.ingest("t", rest, root=tmp_path) == (30_004, 42_004)
-        with litelink.open(tmp_path, "t", read_only=True) as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
             loaded = log.scan(columns=["i"], start_offset=4).read_all()
 
         assert loaded.column("i").to_pylist() == list(range(32_000))

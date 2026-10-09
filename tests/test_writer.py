@@ -17,6 +17,7 @@ import litelink
 import pytest
 
 import streamcast
+from streamcast import _metadata
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -122,7 +123,9 @@ class TestFailure:
         await made.aclose()
 
         assert [task.result() for task in pending] == list(range(1, 51))
-        with litelink.open(tmp_path, "trades", read_only=True) as log:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as log:
             assert log.end_offset() == 51
 
 

@@ -434,6 +434,13 @@ class Stream:
         replay holds a worker from the `to_thread` pool for its whole scan,
         and that pool is `min(32, cpu + 4)`.
         """
+        # Its own directory for a new stream, or the layout it already has;
+        # the published side follows (`_metadata.home`).
+        home = _metadata.home(root, name)
+        if published is not None and home != Path(root):
+            published = _metadata.within(published, name)
+
+        root = home
         retired = _open_retired(root, name, schema=schema)
         if retired is not None:
             log, metadata = retired
@@ -535,6 +542,7 @@ class Stream:
         which reads every log. A consumer that was caught up when the server
         stopped resumes exactly at the seam and loses nothing.
         """
+        root = _metadata.home(root, name)
         opened = _open_retired(root, name, schema=schema)
         if opened is not None:
             # Retired, so served as it is: never migrated onto a new log, which
@@ -748,11 +756,29 @@ class Stream:
         # **The metadata first**, because it says which log is current. Without
         # it this would rebuild a migrated stream's FIRST log and serve that as
         # though nothing had happened since.
-        metadata = (
-            _metadata.fetch(published, name, s3_options)  # ty: ignore[invalid-argument-type]
-            if _metadata.remote(published)
-            else None
-        )
+        #
+        # **Its own directory under the prefix first**, then the prefix
+        # itself, where a stream created before that layout keeps its copy —
+        # and the stream is rebuilt in the layout it was found in.
+        metadata = None
+        if _metadata.remote(published):
+            for prefix in (_metadata.within(published, name), published):
+                metadata = _metadata.fetch(prefix, name, s3_options)  # ty: ignore[invalid-argument-type]
+                if metadata is not None:
+                    break
+
+            if metadata is not None and prefix != published:
+                root = Path(root) / name
+
+            published = prefix
+
+        else:
+            home = _metadata.home(root, name)
+            if home != Path(root):
+                published = _metadata.within(published, name)
+
+            root = home
+
         if metadata is None:
             # A local published location has no copy beside its tables; a box
             # that holds the stream has the metadata itself. Read for one
@@ -766,6 +792,8 @@ class Stream:
                 retirement = metadata.retirement
                 raise StreamRetired(name, retirement.at, retirement.end_offset)
 
+            # In the layout the stream was found in, as every other log it
+            # makes: a stream never changes layout.
             return cls._revive(
                 name,
                 root,
@@ -863,6 +891,7 @@ class Stream:
         Safe to run again: an already retired stream returns its record, and
         a retire that died partway finishes.
         """
+        root = _metadata.home(root, name)
         metadata = _metadata.load(root, name)
         if metadata is not None and metadata.retirement is not None:
             return metadata.retirement
@@ -987,6 +1016,7 @@ class Stream:
             msg = "ingest needs a source: a pyarrow Table or RecordBatchReader"
             raise TypeError(msg)
 
+        root = _metadata.home(root, name)
         metadata = _metadata.load(root, name)
         if metadata is not None and metadata.retirement is not None:
             retirement = metadata.retirement

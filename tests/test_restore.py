@@ -556,7 +556,10 @@ class TestAMigratedStream:
             assert "venue" in revived.schema["properties"]  # ty: ignore[unsupported-operator]
             # The metadata came down with it, so the next `Stream.new` on
             # this box opens the same log.
-            assert _metadata.load(tmp_path / "box_b", "trades") is not None
+            assert (
+                _metadata.load(_metadata.home(tmp_path / "box_b", "trades"), "trades")
+                is not None
+            )
             # And the first log is not on this box, so nothing maintains it.
             assert revived.retired == ()
         finally:

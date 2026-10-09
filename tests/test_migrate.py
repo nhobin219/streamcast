@@ -91,10 +91,12 @@ class TestTheSeam:
 
         # Retired: litelink itself refuses a writer from here on.
         with pytest.raises(litelink.RetiredError):
-            litelink.open(tmp_path, "trades")
+            litelink.open(_metadata.home(tmp_path, "trades"), "trades")
 
         # And every row is in its published table, none left local.
-        with litelink.open(tmp_path, "trades", read_only=True) as old:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as old:
             coverage = old.coverage()
             assert coverage.buffer is None, "rows left in the buffer"
             assert coverage.staging is None, "rows left in the staging table"
@@ -104,7 +106,7 @@ class TestTheSeam:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert [(e.name, e.start_offset, e.end_offset) for e in metadata.logs] == [
             ("trades", 1, 6),
@@ -134,7 +136,7 @@ class TestTheSeam:
         finally:
             await stream.aclose()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert [e.name for e in metadata.logs] == ["trades", "trades-v2", "trades-v3"]
         assert metadata.logs[1].end_offset == 6
@@ -151,7 +153,7 @@ class TestItIsSafeAtEveryStart:
         try:
             assert again.log is not None
             assert again.log.name == "trades-v2"
-            assert not (tmp_path / "trades-v3").exists()
+            assert not (_metadata.home(tmp_path, "trades") / "trades-v3").exists()
         finally:
             await again.aclose()
 
@@ -198,7 +200,7 @@ class TestSystemColumns:
         litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(V1)).close()
         (await _migrated(tmp_path, V1)).close()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert [e.system_schema for e in metadata.logs] == [NO_SYSTEM, SYSTEM_NOW]
 
@@ -261,8 +263,8 @@ class TestATypeIsForLife:
             streamcast.Stream.migrate("trades", root=tmp_path, schema=narrowed)
 
         # Refused before anything changed: still one log, still current.
-        assert _metadata.load(tmp_path, "trades") is None
-        assert not (tmp_path / "trades-v2").exists()
+        assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None
+        assert not (_metadata.home(tmp_path, "trades") / "trades-v2").exists()
 
     async def test_widening_is_refused_too(self, tmp_path):
         await seeded(tmp_path)
@@ -316,7 +318,7 @@ class TestAnInterruptedMigration:
         # Died after creating the log and before saving the metadata.
         await seeded(tmp_path)
         litelink.new(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             "trades-v2",
             schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=6,
@@ -333,7 +335,7 @@ class TestAnInterruptedMigration:
     async def test_an_orphan_holding_rows_is_refused(self, tmp_path):
         await seeded(tmp_path)
         with litelink.new(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             "trades-v2",
             schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=6,
@@ -343,14 +345,14 @@ class TestAnInterruptedMigration:
         with pytest.raises(FileExistsError, match="does not name it"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
-        assert _metadata.load(tmp_path, "trades") is None
+        assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None
 
     async def test_an_orphan_whose_rows_end_at_the_seam_is_refused(self, tmp_path):
         # Its `end_offset` matches where the new log should start, so only
         # the question "does it hold anything" tells it from an empty one.
         await seeded(tmp_path)
         with litelink.new(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             "trades-v2",
             schema=_log.with_system(streamcast.to_arrow(V2)),
             start_offset=2,
@@ -435,11 +437,11 @@ class TestServingAMigratedStream:
         """
         await seeded(tmp_path)
         stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
-        manifest = _manifest.load(tmp_path, "trades")
+        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         counts = manifest.column("record_count").to_pylist()
         _manifest.save(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             "trades",
             manifest.set_column(
                 manifest.schema.get_field_index("record_count"),
@@ -483,16 +485,18 @@ class TestServingAMigratedStream:
         await seeded(tmp_path)
         stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
         try:
-            assert stream.retired == ((tmp_path, "trades"),)
+            assert stream.retired == ((_metadata.home(tmp_path, "trades"), "trades"),)
             made = _supervisors({"trades": stream}, True)
             for supervisor in made:
-                assert supervisor.targets == [(tmp_path, "trades-v2")]
+                assert supervisor.targets == [
+                    (_metadata.home(tmp_path, "trades"), "trades-v2")
+                ]
 
             # Handed to one process only, to finish what a migration before
             # streamcast 0.10 left undone; already retired, it skips it.
             assert [s.role for s in made if s.retiring] == ["publish"]
             [publish] = [s for s in made if s.retiring]
-            assert publish.retiring == [(tmp_path, "trades")]
+            assert publish.retiring == [(_metadata.home(tmp_path, "trades"), "trades")]
         finally:
             await stream.aclose()
 
@@ -520,14 +524,20 @@ class TestAStreamMigratedBeforeRetire:
             stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
         try:
-            with litelink.open(tmp_path, "trades") as old:  # a writer: not retired
+            with litelink.open(
+                _metadata.home(tmp_path, "trades"), "trades"
+            ) as old:  # a writer: not retired
                 assert old.published_through() == 0
 
             # What the publish role runs for the retired logs it is handed.
-            assert finish_retiring([(tmp_path, "trades")]) == []
-            assert retired(tmp_path, "trades")
+            assert (
+                finish_retiring([(_metadata.home(tmp_path, "trades"), "trades")]) == []
+            )
+            assert retired(_metadata.home(tmp_path, "trades"), "trades")
             # And again, as at the next start: already retired, nothing to do.
-            assert finish_retiring([(tmp_path, "trades")]) == []
+            assert (
+                finish_retiring([(_metadata.home(tmp_path, "trades"), "trades")]) == []
+            )
 
             uri = stream.metadata_uri
             assert uri is not None
@@ -546,7 +556,11 @@ class TestAStreamMigratedBeforeRetire:
             ]
             argv = publish._spawn_argv()  # noqa: SLF001
             index = argv.index("--retire")
-            assert argv[index : index + 3] == ["--retire", str(tmp_path), "trades"]
+            assert argv[index : index + 3] == [
+                "--retire",
+                str(_metadata.home(tmp_path, "trades")),
+                "trades",
+            ]
         finally:
             await stream.aclose()
 
@@ -567,7 +581,7 @@ class TestTheManifest:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        manifest = _manifest.load(tmp_path, "trades")
+        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         [found] = manifest.to_pylist()
         assert (found["log"], found["start_offset"], found["end_offset"]) == (
@@ -587,10 +601,10 @@ class TestTheManifest:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert metadata.manifest == "trades.manifest.parquet"
-        assert (tmp_path / metadata.manifest).exists(), (
+        assert (_metadata.home(tmp_path, "trades") / metadata.manifest).exists(), (
             "relative to the metadata file, so one pointer serves the published copy"
         )
 
@@ -602,7 +616,7 @@ class TestTheManifest:
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
 
-        manifest = _manifest.load(tmp_path, "trades")
+        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         assert manifest["log"].to_pylist() == ["trades", "trades-v2"]
         # `venue` is a string, and string bounds are truncated, so it has no
@@ -618,16 +632,20 @@ class TestTheManifest:
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         sealed = [entry.name for entry in metadata.sealed_logs]
         late = row(100)["event_ts"]
 
         assert _manifest.prune(
-            _manifest.load(tmp_path, "trades"), sealed, [("event_ts", ">=", late)]
+            _manifest.load(_metadata.home(tmp_path, "trades"), "trades"),
+            sealed,
+            [("event_ts", ">=", late)],
         ) == ["trades-v2"]
         assert _manifest.prune(
-            _manifest.load(tmp_path, "trades"), sealed, [("event_ts", "<", late)]
+            _manifest.load(_metadata.home(tmp_path, "trades"), "trades"),
+            sealed,
+            [("event_ts", "<", late)],
         ) == ["trades"]
 
     async def test_a_float_column_prunes_now_litelink_holds_only_finite_floats(
@@ -641,7 +659,7 @@ class TestTheManifest:
         await seeded(tmp_path)  # price in [100.0, 104.0]
         (await _migrated(tmp_path, V2)).close()
 
-        manifest = _manifest.load(tmp_path, "trades")
+        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         assert manifest["price"].to_pylist()[0]["nan_count"] == 0
         assert _manifest.prune(manifest, ["trades"], [("price", ">", 500.0)]) == []
@@ -661,9 +679,9 @@ class TestTheManifest:
         with pytest.raises(OSError, match="unreachable"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
-        assert not (tmp_path / "trades-v2").exists()
-        assert _manifest.load(tmp_path, "trades") is None
-        assert _metadata.load(tmp_path, "trades") is None
+        assert not (_metadata.home(tmp_path, "trades") / "trades-v2").exists()
+        assert _manifest.load(_metadata.home(tmp_path, "trades"), "trades") is None
+        assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None
 
     async def test_a_manifest_that_cannot_be_written_commits_nothing(
         self, tmp_path, monkeypatch
@@ -683,25 +701,35 @@ class TestTheManifest:
         with pytest.raises(OSError, match="disk full"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
-        assert _metadata.load(tmp_path, "trades") is None, "nothing committed"
+        assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None, (
+            "nothing committed"
+        )
 
         monkeypatch.setattr(_manifest, "save", original)
         (await _migrated(tmp_path, V2)).close()
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert metadata.live_log.name == "trades-v2"
-        assert _manifest.load(tmp_path, "trades")["log"].to_pylist() == ["trades"]  # ty: ignore[not-subscriptable]
+        assert _manifest.load(_metadata.home(tmp_path, "trades"), "trades")[
+            "log"
+        ].to_pylist() == ["trades"]  # ty: ignore[not-subscriptable]
 
     async def test_migrating_to_the_same_shape_leaves_it_alone(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
-        before = (tmp_path / "trades.manifest.parquet").stat().st_mtime_ns
+        before = (
+            (_metadata.home(tmp_path, "trades") / "trades.manifest.parquet")
+            .stat()
+            .st_mtime_ns
+        )
 
         again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
         await again.aclose()
 
-        assert (tmp_path / "trades.manifest.parquet").stat().st_mtime_ns == before
+        assert (
+            _metadata.home(tmp_path, "trades") / "trades.manifest.parquet"
+        ).stat().st_mtime_ns == before
 
 
 def test_extending_replaces_a_row_rather_than_duplicating_it():
@@ -742,25 +770,31 @@ class TestThePublishedCopy:
         )
         try:
             assert migrated.log is not None
-            assert migrated.log.published == bucket
+            assert migrated.log.published == f"{bucket}/trades"
         finally:
             await migrated.aclose()
 
-        published = _metadata.fetch(bucket, "trades", s3)
-        assert published == _metadata.load(tmp_path, "trades")
+        published = _metadata.fetch(f"{bucket}/trades", "trades", s3)
+        assert published == _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
 
         # And the manifest beside it, written before the metadata named it.
         import pyarrow.parquet as pq
 
         from streamcast import _remote
 
-        filesystem, key = _remote._filesystem(f"{bucket}/trades.manifest.parquet", s3)
+        filesystem, key = _remote._filesystem(
+            f"{bucket}/trades/trades.manifest.parquet", s3
+        )
         with filesystem.open_input_file(key) as source:
-            assert pq.read_table(source) == _manifest.load(tmp_path, "trades")
+            assert pq.read_table(source) == _manifest.load(
+                _metadata.home(tmp_path, "trades"), "trades"
+            )
 
         # And the retired log is in its published table whole, not just its
         # settled prefix: nothing will push its tail later.
-        with litelink.open(tmp_path, "trades", read_only=True) as old:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as old:
             assert old.published_through() == 5
 
     async def test_a_stream_that_never_migrated_has_no_metadata_there(
@@ -837,12 +871,16 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     async with serve(stream, maintain=False):
         pass
 
-    written = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    written = json.loads(
+        _metadata.path(_metadata.home(tmp_path, "trades"), "trades").read_text()
+    )
     written["streamcast_metadata"] = 1
     for key in ("published", "start_ts"):
         del written["live_log"][key]
 
-    _metadata.path(tmp_path, "trades").write_text(json.dumps(written))
+    _metadata.path(_metadata.home(tmp_path, "trades"), "trades").write_text(
+        json.dumps(written)
+    )
     again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
     assert again.log is not None
     while (
@@ -853,7 +891,9 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     async with serve(again, maintain=False):
         pass
 
-    upgraded = json.loads(_metadata.path(tmp_path, "trades").read_text())
+    upgraded = json.loads(
+        _metadata.path(_metadata.home(tmp_path, "trades"), "trades").read_text()
+    )
     assert upgraded["streamcast_metadata"] == 2
     assert upgraded["live_log"]["published"].startswith("file://")
     assert upgraded["live_log"]["start_ts"] is not None

@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
+from streamcast import _metadata
 from streamcast._schema import from_arrow, to_arrow
 
 
@@ -216,7 +217,9 @@ class TestTheStreamOwnsItsLog:
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
         try:
             assert stream.durable
-            assert (tmp_path / "trades" / "buffer.db").exists()
+            assert (
+                _metadata.home(tmp_path, "trades") / "trades" / "buffer.db"
+            ).exists()
             assert (
                 await stream.send(
                     {"event_ts": 1, "price": 1.0, "side": 0, "live": True}

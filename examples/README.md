@@ -141,7 +141,7 @@ from pathlib import Path
 import streamcast
 
 async def main():
-    uri = Path("streamcast-data/trades.metadata.json").resolve().as_uri()
+    uri = Path("streamcast-data/trades/trades.metadata.json").resolve().as_uri()
     async with await streamcast.Stream.snapshot(uri) as snapshot:
         print(await snapshot.sql("""
             SELECT count(*) trades, min(price) low, max(price) high, sum(amount) btc
