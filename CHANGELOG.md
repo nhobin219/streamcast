@@ -7,6 +7,15 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- **litelink is `>=0.12.2,<0.13`.** 0.12.1 adds `truncate(below=offset)`,
+  the way rows leave a log's published table, and 0.12.2 writes seals under
+  a log's `data/sealed/`; files sealed earlier stay where they are. Tooling
+  that matches published paths by prefix should expect both places.
+
 ## 0.17.0 — 2026-10-09
 
 ### Changed
