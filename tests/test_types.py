@@ -396,7 +396,7 @@ async def test_the_metadata_records_the_encodings(tmp_path, serve):
     async with serve(stream, maintain=False):
         pass
 
-    metadata = _metadata.load(tmp_path, "otel")
+    metadata = _metadata.load(_metadata.home(tmp_path, "otel"), "otel")
     assert metadata is not None
     spelled = metadata.live_log.schema["properties"]["trace_id"]  # ty: ignore[not-subscriptable]
     assert spelled["contentEncoding"] == "base16"

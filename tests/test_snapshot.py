@@ -74,7 +74,10 @@ class TestOneLog:
         await stream.send_many([row(i) for i in range(5, 8)])  # not published
         await served_once(stream, serve)
 
-        uri = _metadata.uri("trades", litelink.open(tmp_path, "trades", read_only=True))
+        uri = _metadata.uri(
+            "trades",
+            litelink.open(_metadata.home(tmp_path, "trades"), "trades", read_only=True),
+        )
         async with await streamcast.Stream.snapshot(uri) as snap:
             assert snap.end_offset == 6
             table = await snap.scan().read_all()
@@ -196,7 +199,9 @@ class TestAMigratedStream:
         await served_once(migrated, serve)
 
         # The first log's table, gone: reading it would fail.
-        with litelink.open(tmp_path, "trades", read_only=True) as old:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
         async with await streamcast.Stream.snapshot(uri) as snap:
@@ -243,12 +248,12 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(migrated, serve)
         # The manifest says the first log held one row more than its table does.
-        manifest = _manifest.load(tmp_path, "trades")
+        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         index = manifest.schema.get_field_index("record_count")
         counts = [count + 1 for count in manifest.column(index).to_pylist()]
         _manifest.save(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             "trades",
             manifest.set_column(index, "record_count", pa.array(counts, pa.int64())),
         )
@@ -293,7 +298,9 @@ class TestConditionsAcrossTheSeam:
 
     async def test_sql_filters_prune_and_filter(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)
-        with litelink.open(tmp_path, "trades", read_only=True) as old:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
         async with await streamcast.Stream.snapshot(uri) as snap:
@@ -310,7 +317,9 @@ class TestConditionsAcrossTheSeam:
 
     async def test_sql_offsets_narrow_the_table_and_prune(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)
-        with litelink.open(tmp_path, "trades", read_only=True) as old:
+        with litelink.open(
+            _metadata.home(tmp_path, "trades"), "trades", read_only=True
+        ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
         table = await streamcast.Stream.sql(

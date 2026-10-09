@@ -5,7 +5,7 @@ live log for good, creates the next one with the new schema starting at
 exactly the offset the last one ended at, and records both here — so a stream
 becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
 
-    root/trades.metadata.json
+    root/trades/trades.metadata.json
     {"streamcast_metadata": 2, "stream": "trades", "stream_id": "6f1c…",
      "sealed_logs": [{"name": "trades", "published": "s3://bucket/prod",
                       "start_offset": 1, "end_offset": 1001,
@@ -35,10 +35,20 @@ changes. Iceberg's `table-uuid` for the same reason: a `file://` path that
 exists on two machines names two different streams, and the id is how a
 reader tells them apart.
 
-**Beside the logs, not inside one.** `root/trades` IS the first log's
-directory, so a file in it would be a file inside a litelink log. And when the
-logs publish to S3 a copy goes to `<published>/trades.metadata.json`, because
+**Beside the logs, not inside one**, in the stream's HOME (`home`): a
+directory of its own, `root/trades/`, holding this file, the manifest and one
+directory per log — `root/trades/trades/`, `root/trades/trades-v2/` — so a
+root serving many streams lists one entry per stream. When the logs publish
+to S3 the same shape sits under the prefix — `<published>/trades/
+trades.metadata.json` beside `<published>/trades/trades/` — because
 `Stream.restore` and a remote reader have the bucket and not this disk.
+
+**A stream never changes layout.** One created before its own directory
+existed keeps the root itself as its home — `root/trades.metadata.json` beside
+`root/trades/`, the first log's directory — for good: every log it adds, by
+migration, restore or revival, goes where its others are. Moving one is not
+possible in place anyway: an Iceberg table records its files by absolute path,
+so a moved log's manifests would name files that are not there.
 
 **Each entry says where its log's rows are read from**: `published`, the
 prefix its published table sits under, at `<published>/<name>`. Per log,
@@ -458,8 +468,55 @@ def complete(metadata: Metadata, log: LogHandle) -> Metadata:
     )
 
 
+def home(root: str | os.PathLike[str], stream: str) -> Path:
+    """The directory `stream`'s files live in, under `root`: its own, or for a
+    stream created before that layout, `root` itself. Everything else that
+    takes a root — `path`, `load`, litelink's `open` — takes this.
+
+    **Decided by what is there**, never by a setting, so a stream keeps its
+    layout for its whole life. Its own directory if that holds its metadata or
+    its first log; the root if the root does, which is the layout every stream
+    had before. A stream with neither is new and gets its own directory. The
+    stream served at `/`, named `""`, has no name to make a directory of, and
+    lives in the root.
+    """
+    root = Path(root)
+    if not stream:
+        return root
+
+    own = root / stream
+    if path(own, stream).exists() or _is_log(own / stream):
+        return own
+
+    if path(root, stream).exists() or _is_log(own):
+        return root
+
+    return own
+
+
+def _is_log(directory: Path) -> bool:
+    """Whether `directory` is a litelink log: its buffer is always there."""
+    return (directory / "buffer.db").exists()
+
+
+def within(published: str, stream: str) -> str:
+    """The prefix a stream in its own directory publishes under: `<published>/<stream>`.
+
+    For a new stream only; one that exists already publishes where each of its
+    logs records, and a stream created before its own directory existed, at
+    `<published>` itself.
+    """
+    if not stream:
+        return published
+
+    return f"{published.rstrip('/')}/{stream}"
+
+
 def path(root: str | os.PathLike[str], stream: str) -> Path:
-    """Where a stream's metadata lives locally: beside its logs."""
+    """Where a stream's metadata lives locally: in its home, beside its logs.
+
+    `root` here is the stream's home (`home`), as litelink's `log.root` is.
+    """
     return Path(root) / f"{stream}.metadata.json"
 
 

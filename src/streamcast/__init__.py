@@ -58,7 +58,7 @@ per consumer.
 
 .. code-block:: python
 
-    # server — `new` creates the log at data/trades, or opens what is there
+    # server — `new` creates the stream in data/trades/, or opens what is there
     stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                sort_by=("event_ts",))
 

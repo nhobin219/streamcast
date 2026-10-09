@@ -29,6 +29,7 @@ from examples.otel import (  # noqa: E402
     metrics,
     spans,
 )
+from streamcast import _metadata  # noqa: E402
 
 
 class TestTheDemo:
@@ -179,7 +180,7 @@ class TestThePublisher:
         assert len(printed) == 2
         assert "is being dropped" in printed[0]
         assert "is being published again" in printed[1]
-        with litelink.open(tmp_path, "t", read_only=True) as log:
+        with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
             stored = log.sql("SELECT i FROM log ORDER BY litelink_offset").read_all()
 
         assert stored.column("i").to_pylist() == [1, 4]

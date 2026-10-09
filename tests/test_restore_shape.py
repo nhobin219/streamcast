@@ -45,12 +45,12 @@ class TestTheMetadataRecordsTheSort:
         finally:
             await stream.aclose()
 
-        metadata = _metadata.load(tmp_path, "t")
+        metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
         assert metadata.live_log.sort_by == SORT_BY
-        assert json.loads(_metadata.path(tmp_path, "t").read_text())["live_log"][
-            "sort_by"
-        ] == list(SORT_BY)
+        assert json.loads(
+            _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
+        )["live_log"]["sort_by"] == list(SORT_BY)
 
     async def test_a_file_from_before_it_gets_it_at_the_next_serve(self, tmp_path):
         stream = streamcast.Stream.new(
@@ -58,11 +58,11 @@ class TestTheMetadataRecordsTheSort:
         )
         try:
             stream.ensure_metadata()
-            path = _metadata.path(tmp_path, "t")
+            path = _metadata.path(_metadata.home(tmp_path, "t"), "t")
             older = json.loads(path.read_text())
             del older["live_log"]["sort_by"]
             path.write_text(json.dumps(older))
-            before = _metadata.load(tmp_path, "t")
+            before = _metadata.load(_metadata.home(tmp_path, "t"), "t")
             assert before is not None
             assert before.live_log.sort_by is None
 
@@ -70,7 +70,7 @@ class TestTheMetadataRecordsTheSort:
         finally:
             await stream.aclose()
 
-        after = _metadata.load(tmp_path, "t")
+        after = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert after is not None
         assert after.live_log.sort_by == SORT_BY
 
@@ -86,7 +86,7 @@ class TestTheMetadataRecordsTheSort:
         finally:
             await stream.aclose()
 
-        metadata = _metadata.load(tmp_path, "t")
+        metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
         rebuilt = _metadata.shape(metadata.live_log)
         assert rebuilt.equals(actual, check_metadata=True)

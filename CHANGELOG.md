@@ -11,6 +11,17 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
+- **A new stream lives in a directory of its own**:
+  `root/<stream>/<stream>.metadata.json`, its manifest, and one directory per
+  log, `root/<stream>/<stream>/` and `root/<stream>/<stream>-v2/`; and under
+  `<published>/<stream>/` when it publishes to S3. A root serving many streams
+  lists one entry per stream. **A stream never changes layout**: one created
+  before keeps the layout it has, through migrations, restores and
+  revivals, and a new one stays in its own directory. Which one a stream has
+  is read from what is on disk, or from where `restore` finds its metadata.
+  To move a stream to the new layout, create a new one and `Stream.ingest`
+  the old one's rows into it. Tooling that globs `root/*.metadata.json`
+  finds only streams created before.
 - **litelink is `>=0.12.2,<0.13`.** 0.12.1 adds `truncate(below=offset)`,
   the way rows leave a log's published table, and 0.12.2 writes seals under
   a log's `data/sealed/`; files sealed earlier stay where they are. Tooling

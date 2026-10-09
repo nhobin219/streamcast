@@ -35,16 +35,16 @@ def row(i: int, **extra: object) -> dict[str, object]:
 
 
 def written(root, stream: str = "trades") -> dict[str, Any]:
-    return json.loads(_metadata.path(root, stream).read_text())
+    return json.loads(_metadata.path(_metadata.home(root, stream), stream).read_text())
 
 
 class TestServeWritesIt:
     async def test_a_new_stream_gets_one_at_its_first_serve(self, tmp_path, serve):
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         try:
-            assert not _metadata.path(tmp_path, "trades").exists(), (
-                "Stream.new stays offline; the file is serve's to write"
-            )
+            assert not _metadata.path(
+                _metadata.home(tmp_path, "trades"), "trades"
+            ).exists(), "Stream.new stays offline; the file is serve's to write"
             async with serve(stream, maintain=False):
                 pass
 
@@ -117,11 +117,13 @@ class TestServeWritesIt:
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         try:
             streams = asgi(stream, maintain=False, replicate=False)
-            assert not _metadata.path(tmp_path, "trades").exists(), (
-                "constructed, often at import: no I/O yet"
-            )
+            assert not _metadata.path(
+                _metadata.home(tmp_path, "trades"), "trades"
+            ).exists(), "constructed, often at import: no I/O yet"
             async with streams:
-                assert _metadata.path(tmp_path, "trades").exists()
+                assert _metadata.path(
+                    _metadata.home(tmp_path, "trades"), "trades"
+                ).exists()
         finally:
             await stream.aclose()
 
@@ -159,18 +161,18 @@ class TestItNamesTheLiveLog:
         await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
 
         with pytest.raises(litelink.RetiredError):
-            litelink.open(tmp_path, "trades")
+            litelink.open(_metadata.home(tmp_path, "trades"), "trades")
 
-        metadata = _metadata.load(tmp_path, "trades")
+        metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         _metadata.save(
-            tmp_path,
+            _metadata.home(tmp_path, "trades"),
             dataclasses.replace(
                 metadata,
                 live_log=dataclasses.replace(metadata.live_log, name="trades-v3"),
             ),
         )
-        with litelink.open(tmp_path, "trades-v2") as unnamed:
+        with litelink.open(_metadata.home(tmp_path, "trades"), "trades-v2") as unnamed:
             with pytest.raises(ValueError, match="live log is 'trades-v3'"):
                 async with serve(streamcast.Stream("trades", log=unnamed)):
                     pass
@@ -186,10 +188,12 @@ class TestItNamesTheLiveLog:
         await stream.aclose()
         await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
 
-        with litelink.open(tmp_path, "trades-v2") as live:
+        with litelink.open(_metadata.home(tmp_path, "trades"), "trades-v2") as live:
             handed = streamcast.Stream("trades", log=live)
             async with serve(handed, maintain=False) as uri:
-                assert handed.retired == ((tmp_path, "trades"),)
+                assert handed.retired == (
+                    (_metadata.home(tmp_path, "trades"), "trades"),
+                )
                 with pytest.raises(streamcast.NotReplayable) as raised:
                     await streamcast.connect(uri, offset=2)
 
