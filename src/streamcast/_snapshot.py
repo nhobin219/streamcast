@@ -195,6 +195,20 @@ def metadata(
     return found
 
 
+def _from(start: int | None, piece: _Piece) -> int:
+    """Where a read of `piece` starts: the caller's start, never below the log's.
+
+    **The log's recorded start is the floor a reader sees.** Retention moves it
+    up first and deletes the rows below it only after readers' grace
+    (`_retention`), so a log can still hold rows the stream no longer has.
+    """
+    return (
+        piece.entry.start_offset
+        if start is None
+        else max(start, piece.entry.start_offset)
+    )
+
+
 def _stamped(entry: Entry) -> bool:
     return _log.STAMP in (entry.system_schema.get("properties") or {})  # ty: ignore[unsupported-operator]
 
@@ -572,7 +586,7 @@ class Snapshot:
         pieces = self._relevant(start, stop, filters, end=end)
         parts = [
             f"SELECT * FROM {self._open(piece).relation()} "
-            f"WHERE {self._bounds(start, stop, stamped=_stamped(piece.entry), end=end)}"
+            f"WHERE {self._bounds(_from(start, piece), stop, stamped=_stamped(piece.entry), end=end)}"
             for piece in pieces
         ]
         if frozen.tail is not None:
@@ -693,7 +707,9 @@ class Snapshot:
             for piece in self._relevant(start, high, end=frozen.end):
                 self._check()
                 table = await asyncio.to_thread(self._open, piece)
-                async for offset, ts, row in _log.rows(table, start, high):
+                async for offset, ts, row in _log.rows(
+                    table, _from(start, piece), high
+                ):
                     # Each row, not each log: one closed mid-log raises at the
                     # next row rather than reading the rest of the log first.
                     self._check()
@@ -717,8 +733,10 @@ class Snapshot:
         """
         for piece in self._pieces:
             table = await asyncio.to_thread(self._open, piece)
-            if table.extent is not None:
-                return table.extent[0]
+            if table.extent is not None and table.extent[1] > piece.entry.start_offset:
+                # Where the log's rows begin, or where the stream says it
+                # does, if retention moved that up (`_from`).
+                return max(table.extent[0], piece.entry.start_offset)
 
         if self._tail is not None and self._tail.num_rows:
             return int(self._tail.column(_log.COLUMN)[0].as_py())

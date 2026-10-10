@@ -249,12 +249,25 @@ def _supervisors(
     retired = [target for stream in routes.values() for target in stream.retired]
     # The shared set's publish role if there is one, else the first.
     owner = len(groups) - 1 if shared else 0
+    # **Retention runs where the stream's live log is cleaned up** — the
+    # slow, published-table role — with the handle its live log is truncated
+    # through. By the stream's name, which its metadata is filed under.
+    streams = {
+        stream.log.name: (Path(stream.log.root), stream.name or stream.log.name)
+        for stream in routes.values()
+        if stream.log is not None and stream.retirement is None
+    }
     return [
         Supervisor(
             group,
             plan,
             role,
             retiring=retired if (index == owner and role == "publish") else (),
+            streams=(
+                [streams[name] for _root, name in group if name in streams]
+                if role == "clean-published"
+                else ()
+            ),
         )
         for index, group in enumerate(groups)
         for role in ROLES

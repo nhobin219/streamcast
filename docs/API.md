@@ -92,6 +92,7 @@ streamcast.Stream.restore(name="", *, root, published,    # on a box without the
                           revive=False, ...)
 streamcast.Stream.retire(name="", *, root, s3_options=None)  # for good; returns the
                                                             # record: .at, .end_offset
+streamcast.Stream.retain(name="", *, root, max_age, s3_options=None)  # timedelta or None
 streamcast.Stream.ingest(name="", source, *, root, s3_options=None,  # Arrow, in bulk;
                          publish=True, flush=None)                    # -> (start, end)
 ```
@@ -1363,6 +1364,41 @@ for its column), streamcast checks again the batches litelink had been reading, 
 the extra work a failure costs, and names the batch and row. litelink's own exception is
 `__cause__`. A failure that isn't the data's, such as a full disk, keeps litelink's message,
 with `batch` and `row` None.
+
+### Keeping a window: `Stream.retain`
+
+**Nothing leaves a stream unless it is told to.** Given a window, the maintainer drops the
+rows older than it, by `streamcast_ts`, from every log of the stream: the live one and
+every retired one, including a retired log that now exists only as its published table.
+
+```python
+streamcast.Stream.retain("trades", root="data", max_age=timedelta(days=30))
+streamcast.Stream.retain("trades", root="data", max_age=None)   # keep everything again
+```
+
+The setting is recorded in the stream's metadata, so it holds wherever the stream is
+served and takes effect without a restart. It is an explicit call, like `migrate` and
+`retire`, so two servers can't keep different windows. A build from before ignores it, and
+one that rewrites the metadata drops it.
+
+**Each pass happens in two halves, an hour apart.** The `clean-published` maintainer
+process runs one pass an hour:
+
+1. **The new floor is published.** It is the smallest offset whose `streamcast_ts` is newer
+   than the cutoff, which also handles a clock that stepped backwards. A new version of the
+   stream's metadata starts the stream there: retired logs wholly older than the cutoff are
+   dropped from it, along with their statistics. From then on, a snapshot reads nothing
+   below the floor, and a catch-up asking below it is refused with a message naming
+   retention.
+2. **After the grace** (`_retention.GRACE`, an hour), the dropped logs are deleted entirely,
+   the retired log the floor cuts through is truncated, and the live log is truncated.
+   Readers that resolved the stream before the floor moved get that hour to finish, because
+   litelink deletes a retired log's files immediately.
+
+What still has to be done is recorded in the metadata, so a restart between the two halves
+loses nothing. Logs are truncated in whole files, so a log can keep rows just below the
+floor until the file holding them goes, though no reader sees them. The maintainer writes
+the metadata with credentials from the environment, as litelink does.
 
 ### Finishing a stream: `Stream.retire`
 
