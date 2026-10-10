@@ -206,10 +206,11 @@ class TestTheGreeting:
                 assert sub.info.group_commit is True
 
     def test_a_greeting_without_it_means_each_send_commits_alone(self):
-        from streamcast._protocol import parse_greeting
+        from streamcast._protocol import VERSION, parse_greeting
 
         info = parse_greeting(
-            '{"streamcast":4,"stream":"t","end_offset":1,"replay":null,"durable":true}'
+            f'{{"streamcast":{VERSION},"stream":"t","end_offset":1,'
+            '"replay":null,"durable":true}'
         )
         assert info.group_commit is False
 
