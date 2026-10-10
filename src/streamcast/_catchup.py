@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from streamcast import _filter, _metadata, _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
+from streamcast._protocol import EARLIEST
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -206,6 +207,14 @@ class Catcher:
         """
         first = await self._open()
         try:
+            floor = await _refusing(first.floor())
+            if self.start == EARLIEST:
+                # **From wherever the tables begin** — what EARLIEST asks the
+                # server for too (#128). Taken literally, offset 0 is below
+                # every table's floor, and the stream's first row would be
+                # reported lost. Nothing published reads as nothing above.
+                self.start = first.end_offset if floor is None else floor
+
             if first.end_offset <= self.start:
                 raise _nothing_above(
                     self._name, self._uri, first.end_offset, self.start
@@ -215,7 +224,6 @@ class Catcher:
             # not go back far enough to cover it, which used to be served
             # silently from wherever they did start — rows missing, and a
             # cursor advanced past them.
-            floor = await _refusing(first.floor())
             if floor is not None and floor > self.start:
                 raise _gap_below(
                     self._name,

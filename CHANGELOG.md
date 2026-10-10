@@ -26,6 +26,11 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- **`offset=EARLIEST` with `catch_up=True` takes everything the published
+  tables hold** (#128). It used to ask them for offset 0, find their floor at
+  1, and refuse with the stream's first row reported lost, so a consumer
+  with no resume point of its own could never catch up once the stream
+  outgrew `max_replay`. It now starts at the tables' floor, wherever that is.
 - **A stream's `S3Options` reach `serve`'s subprocesses.** The maintainer
   roles and the litestream sidecar open the logs themselves, and resolved
   credentials only from their environment, so explicit options given to
