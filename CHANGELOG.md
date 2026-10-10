@@ -35,10 +35,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   To move a stream to the new layout, create a new one and `Stream.ingest`
   the old one's rows into it. Tooling that globs `root/*.metadata.json`
   finds only streams created before.
-- **litelink is `>=0.12.2,<0.13`.** 0.12.1 adds `truncate(below=offset)`,
+- **litelink is `>=0.12.3,<0.13`.** 0.12.1 adds `truncate(below=offset)`,
   the way rows leave a log's published table, and 0.12.2 writes seals under
   a log's `data/sealed/`; files sealed earlier stay where they are. Tooling
-  that matches published paths by prefix should expect both places.
+  that matches published paths by prefix should expect both places. 0.12.3
+  truncates and deletes a retired log from its published table alone, and
+  reads each immutable Iceberg metadata file from object storage once.
 
 ## 0.17.0 — 2026-10-09
 
