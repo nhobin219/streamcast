@@ -9,6 +9,19 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **A stream's metadata is versioned behind a hint, so readers can cache it**
+  (#123). Each change writes an immutable `<stream>.metadata/<n>-<id>.metadata.json`
+  and its manifest, then rewrites `<stream>.metadata/version-hint.text`, keeping
+  the last ten versions, locally and under the published prefix. The greeting
+  gains `metadata_hint`. A reader opens the hint, and reads each version and
+  manifest once per process, per set of credentials, so reopening a stream (a
+  `Live` view every few seconds, a loop of snapshots) costs one small GET
+  rather than two of 1–17 KB. `metadata` and the plain `<stream>.metadata.json`
+  stay for readers from before; #124 removes them. A stream from before gets
+  its first version at its next `serve`.
+
 ### Changed
 
 - **A new stream lives in a directory of its own**:

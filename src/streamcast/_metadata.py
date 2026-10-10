@@ -619,19 +619,30 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     passed as `Stream(log=…)` — is refused, because serving it would append to
     a log the metadata says is sealed.
     """
+    from streamcast import _versions  # noqa: PLC0415 — it imports this module
+
     root = log.root
     found = load(root, stream)
+    # First, because it is what tells a missing BUCKET from a missing copy —
+    # and refuses the first, which an upload would only report as a failure.
+    published = (
+        fetch(log.published, stream, s3_options) if remote(log.published) else None
+    )
+    # A stream served by a build from before the versions has its metadata
+    # but no version of it: written now, here and beside the tables.
+    unversioned, unpublished = _versions.missing(
+        root, stream, published=log.published, s3_options=s3_options
+    )
+    changed = found is None
     if found is None:
         found = single(stream, log)
-        save(root, found)
 
     elif found.live_log.name == log.name:
         # Filled in where a version-1 file, or a live log with no rows when
         # it was written, left them unknown — and rewritten only if so.
         completed = complete(found, log)
-        if completed != found:
-            save(root, completed)
-            found = completed
+        changed = completed != found
+        found = completed
 
     else:
         msg = (
@@ -642,8 +653,13 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
         )
         raise ValueError(msg)
 
-    if remote(log.published):
-        sync(found, log.published, s3_options)
+    if changed or unversioned:
+        _versions.commit(root, found)
+
+    if remote(log.published) and (unpublished or published != found):
+        _versions.commit(
+            root, found, published=log.published, s3_options=s3_options, local=False
+        )
 
     return found
 

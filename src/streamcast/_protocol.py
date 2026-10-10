@@ -308,6 +308,17 @@ class Greeting:
     a greeting without the field, from a server that never grouped.
     """
 
+    metadata_hint: str | None = None
+    """Where the hint naming the stream's current metadata version is, or None.
+
+    What a reader opens rather than `metadata` (#123): every version the hint
+    names is immutable, so a reader that opens the stream again — a live
+    view every few seconds — reads only these few bytes. Beside `metadata`,
+    as an `s3://` or `file://` URI. None with no log, and from a server
+    from before the versions, whose readers open `metadata`. `metadata` is
+    the plain copy kept for those readers, and goes (#124).
+    """
+
 
 def greeting(
     *,
@@ -320,6 +331,7 @@ def greeting(
     metadata: str | None = None,
     stream_id: str | None = None,
     where: dict[str, object] | None = None,
+    metadata_hint: str | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
@@ -341,6 +353,7 @@ def greeting(
             "group_commit": group_commit,
             "schema": schema,
             "metadata": metadata,
+            "metadata_hint": metadata_hint,
             "stream_id": stream_id,
             "where": where,
         }
@@ -392,6 +405,9 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
         group_commit=bool(fields.get("group_commit", False)),
+        metadata_hint=hint
+        if isinstance(hint := fields.get("metadata_hint"), str)
+        else None,
     )
 
 

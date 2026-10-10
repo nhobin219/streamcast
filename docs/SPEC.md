@@ -87,8 +87,9 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 
 ```
 {"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata.json","stream_id":"5f0c…",
- "durable":true}
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json",
+ "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+ "stream_id":"5f0c…","durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
 

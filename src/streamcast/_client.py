@@ -886,7 +886,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         connection, probe = await self._handshake(None)
         await connection.close()
 
-        uri = self._metadata or probe.metadata
+        uri = self._metadata or probe.metadata_hint or probe.metadata
         if uri is None:
             raise nowhere_to_read(name)
 

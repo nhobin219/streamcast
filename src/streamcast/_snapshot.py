@@ -35,14 +35,16 @@ here; the broker's cost is one greeting and, when asked, a bounded tail.
 from __future__ import annotations
 
 import asyncio
+import collections
 import math
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import pyarrow as pa
+from litelink import S3Options
 
-from streamcast import _log, _manifest, _published, _remote, _schema
+from streamcast import _log, _manifest, _published, _remote, _schema, _versions
 from streamcast._errors import NotReplayable, StreamcastError
 from streamcast._limits import MAX_TAIL
 from streamcast._metadata import Metadata
@@ -52,7 +54,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     import duckdb
-    from litelink import S3Options
 
     from streamcast._metadata import Entry
 
@@ -64,14 +65,95 @@ class SnapshotUnavailable(StreamcastError):
     """A snapshot that cannot be served as asked: what is missing, and why."""
 
 
+CACHE_BYTES: Final = 16 * 1024 * 1024
+"""What the process keeps of the immutable metadata it has read, at most.
+
+A version and its manifest are a few KB each, so this holds thousands of
+streams' worth. Least recently used goes first, and nothing over a quarter of
+it is kept, so one large manifest cannot push out everything else."""
+
+_cache: collections.OrderedDict[tuple[str, tuple[object, ...]], bytes] = (
+    collections.OrderedDict()
+)
+_cached_bytes = 0
+_cache_lock = threading.Lock()
+
+
 def _read(uri: str, s3_options: S3Options | None) -> bytes:
+    """`uri`'s bytes, once per process for a versioned file on object storage.
+
+    **Only what cannot change is cached** (#123): a metadata version or the
+    manifest it names, whose names are never reused. The hint is read every
+    time — it is what says a new version exists — and so is every plain copy.
+    Nothing on local disk is cached: re-reading it costs no request.
+
+    **Each entry is the credentials' that fetched it**, keyed by them and the
+    endpoint as well as the URI. Keyed by the URI alone, a reader with wrong
+    or narrower credentials would be handed what another fetched: an open
+    that should fail would succeed, and one set of keys could read what only
+    another may. litelink found the same in its own cache (litelink#185).
+    """
     if uri.startswith("file://"):
         with open(_published.path(uri), "rb") as file:  # noqa: PTH123
             return file.read()
 
+    cacheable = _versions.immutable(uri)
+    entry = (uri, _identity(s3_options))
+    if cacheable:
+        with _cache_lock:
+            if entry in _cache:
+                _cache.move_to_end(entry)
+                return _cache[entry]
+
     filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
     with filesystem.open_input_stream(key) as source:
-        return source.read()
+        data = source.read()
+
+    if cacheable and len(data) <= CACHE_BYTES // 4:
+        _remember(entry, data)
+
+    return data
+
+
+def _identity(s3_options: S3Options | None) -> tuple[object, ...]:
+    """Who a read is made as, and where to: what a cache entry belongs to.
+
+    Resolved, so credentials from the environment are told apart too.
+    """
+    resolved = (s3_options or S3Options()).resolved()
+    return (
+        resolved.endpoint,
+        resolved.region,
+        resolved.access_key,
+        resolved.secret_key,
+    )
+
+
+def _remember(key: tuple[str, tuple[object, ...]], data: bytes) -> None:
+    global _cached_bytes  # noqa: PLW0603 — the cache is the process's
+    with _cache_lock:
+        if key in _cache:
+            return
+
+        _cache[key] = data
+        _cached_bytes += len(data)
+        while _cached_bytes > CACHE_BYTES:
+            _, evicted = _cache.popitem(last=False)
+            _cached_bytes -= len(evicted)
+
+
+def _resolve(uri: str, s3_options: S3Options | None) -> str:
+    """The metadata version a hint names, or `uri` itself if it is not a hint.
+
+    A hint is what the greeting gives a new reader (`metadata_hint`); a
+    `.metadata.json` URI — an older greeting's, or one written down — is read
+    as it is.
+    """
+    if not uri.endswith(f"/{_versions.HINT}"):
+        return uri
+
+    named = _read(uri, s3_options).decode().strip()
+    return f"{uri.rsplit('/', 1)[0]}/{named}"
 
 
 def metadata(
@@ -84,7 +166,9 @@ def metadata(
     another stream's history without a word; the id is what tells them apart.
     """
     try:
-        found = Metadata.from_json(_read(uri, s3_options).decode())
+        found = Metadata.from_json(
+            _read(_resolve(uri, s3_options), s3_options).decode()
+        )
     except FileNotFoundError:
         if uri.startswith("file://"):
             msg = (
