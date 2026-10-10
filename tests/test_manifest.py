@@ -475,23 +475,13 @@ class TestTheFile:
         assert "x" in manifest.column_names
         assert "tag" not in manifest.column_names, "string bounds are truncated"
 
-    def test_it_round_trips_on_disk(self, tmp_path):
-        manifest = build([one(pa.table({"x": pa.array([1, 2])}))])
-        path = _manifest.save(tmp_path, "trades", manifest)
-
-        assert path.name == "trades.manifest.parquet"
-        assert _manifest.load(tmp_path, "trades") == manifest
-        assert _manifest.load(tmp_path, "other") is None
-
-    @pytest.mark.replication
-    def test_it_publishes_beside_the_metadata(self, s3, bucket):
+    def test_one_from_before_the_versions_is_read(self, tmp_path):
+        """A stream from before the versions kept it beside its metadata,
+        unversioned; a version names its own (`test_versions`, `test_migrate`)."""
         import pyarrow.parquet as pq
 
-        from streamcast import _remote
-
         manifest = build([one(pa.table({"x": pa.array([1, 2])}))])
-        _manifest.publish(bucket, "trades", manifest, s3)
+        pq.write_table(manifest, tmp_path / _manifest.name("trades"))
 
-        filesystem, key = _remote._filesystem(f"{bucket}/trades.manifest.parquet", s3)
-        with filesystem.open_input_file(key) as source:
-            assert pq.read_table(source) == manifest
+        assert _manifest.load(tmp_path, "trades") == manifest
+        assert _manifest.load(tmp_path, "other") is None

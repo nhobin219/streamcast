@@ -2,7 +2,7 @@
 
 A new stream lives in `root/<name>/`: its metadata, its manifest, and one
 directory per log. A stream created before that layout keeps the one it had —
-`root/<name>.metadata.json` beside `root/<name>/`, the first log's directory —
+`root/<name>.metadata/` beside `root/<name>/`, the first log's directory —
 because an Iceberg table names its files by absolute path, so nothing can be
 moved in place. The published side follows the same shape under its prefix.
 """
@@ -16,7 +16,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _log, _metadata
+from streamcast import _log, _metadata, _versions
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -61,7 +61,7 @@ class TestANewStream:
         await made(tmp_path)
 
         assert sorted(p.name for p in tmp_path.iterdir()) == ["t"]
-        assert (tmp_path / "t" / "t.metadata.json").is_file()
+        assert (tmp_path / "t" / "t.metadata" / _versions.HINT).is_file()
         assert (tmp_path / "t" / "t" / "buffer.db").is_file(), "its first log"
 
     async def test_a_root_lists_one_entry_per_stream(self, tmp_path):
@@ -80,7 +80,7 @@ class TestANewStream:
         try:
             assert stream.end_offset == 4
             assert stream.metadata_uri == (
-                (tmp_path / "t" / "t.metadata.json").resolve().as_uri()
+                (tmp_path / "t" / "t.metadata" / _versions.HINT).resolve().as_uri()
             )
         finally:
             await stream.aclose()
@@ -93,9 +93,7 @@ class TestANewStream:
         assert sorted(p.name for p in (tmp_path / "t").iterdir()) == [
             "t",
             "t-v2",
-            "t.manifest.parquet",
             "t.metadata",
-            "t.metadata.json",
         ]
 
 
@@ -114,9 +112,7 @@ class TestAStreamFromBefore:
         assert sorted(p.name for p in tmp_path.iterdir()) == [
             "t",
             "t-v2",
-            "t.manifest.parquet",
             "t.metadata",
-            "t.metadata.json",
         ]
 
     async def test_a_log_without_its_metadata_is_found_too(self, tmp_path):
@@ -140,12 +136,12 @@ class TestThePublishedSide:
         await made(tmp_path / "a", published=bucket, s3_options=s3)
         stream = streamcast.Stream.new("t", root=tmp_path / "a", schema=SCHEMA)
         try:
-            assert stream.metadata_uri == f"{bucket}/t/t.metadata.json"
+            assert stream.metadata_uri == f"{bucket}/t/t.metadata/{_versions.HINT}"
         finally:
             await stream.aclose()
 
-        assert _metadata.fetch(f"{bucket}/t", "t", s3) is not None
-        assert _metadata.fetch(bucket, "t", s3) is None, "nothing at the prefix itself"
+        assert _versions.fetch(f"{bucket}/t", "t", s3) is not None
+        assert _versions.fetch(bucket, "t", s3) is None, "nothing at the prefix itself"
 
     async def test_restore_finds_it_and_rebuilds_it_in_its_layout(
         self, tmp_path, s3, bucket
@@ -169,7 +165,7 @@ class TestThePublishedSide:
         with litelink.open(tmp_path / "a", "t") as log:
             log.advance(flush=True)  # sealed, then published
 
-        assert _metadata.fetch(bucket, "t", s3) is not None, "at the prefix itself"
+        assert _versions.fetch(bucket, "t", s3) is not None, "at the prefix itself"
         shutil.rmtree(tmp_path / "a")
         restored = streamcast.Stream.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3
@@ -193,8 +189,8 @@ class TestThePublishedSide:
         try:
             assert revived.log is not None
             assert (revived.log.root, revived.log.name) == (tmp_path / "b", "t-v2")
-            assert revived.metadata_uri == f"{bucket}/t.metadata.json"
-            assert _metadata.fetch(f"{bucket}/t", "t", s3) is None
+            assert revived.metadata_uri == f"{bucket}/t.metadata/{_versions.HINT}"
+            assert _versions.fetch(f"{bucket}/t", "t", s3) is None
         finally:
             await revived.aclose()
 
@@ -212,6 +208,6 @@ class TestThePublishedSide:
                 tmp_path / "b" / "t",
                 "t-v2",
             )
-            assert revived.metadata_uri == f"{bucket}/t/t.metadata.json"
+            assert revived.metadata_uri == f"{bucket}/t/t.metadata/{_versions.HINT}"
         finally:
             await revived.aclose()

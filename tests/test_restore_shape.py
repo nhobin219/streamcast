@@ -18,6 +18,7 @@ import pytest
 
 import streamcast
 from streamcast import _metadata
+from tests.conftest import current_json
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -48,9 +49,9 @@ class TestTheMetadataRecordsTheSort:
         metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
         assert metadata.live_log.sort_by == SORT_BY
-        assert json.loads(
-            _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
-        )["live_log"]["sort_by"] == list(SORT_BY)
+        assert current_json(_metadata.home(tmp_path, "t"), "t")["live_log"][
+            "sort_by"
+        ] == list(SORT_BY)
 
     async def test_a_file_from_before_it_gets_it_at_the_next_serve(self, tmp_path):
         stream = streamcast.Stream.new(
@@ -59,7 +60,7 @@ class TestTheMetadataRecordsTheSort:
         try:
             stream.ensure_metadata()
             path = _metadata.path(_metadata.home(tmp_path, "t"), "t")
-            older = json.loads(path.read_text())
+            older = current_json(_metadata.home(tmp_path, "t"), "t")
             del older["live_log"]["sort_by"]
             path.write_text(json.dumps(older))
             # From before the versions too: the plain file is all there is.

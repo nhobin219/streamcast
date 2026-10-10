@@ -46,6 +46,19 @@ the round trip as NULL and come back the same way live or replayed.
 """
 
 
+def current_json(home: Path | str, stream: str) -> dict[str, Any]:
+    """The stream's current metadata version in `home`, as the JSON on disk:
+    the file its hint names (`_versions`)."""
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from streamcast import _versions  # noqa: PLC0415
+
+    directory = Path(home) / _versions.directory(stream)
+    named = (directory / _versions.HINT).read_text().strip()
+    return json.loads((directory / named).read_text())
+
+
 def trade(i: int) -> dict:
     """One row. `i` is recoverable from it, so ordering is checkable."""
     row = {

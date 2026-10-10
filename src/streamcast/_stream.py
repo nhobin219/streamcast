@@ -765,7 +765,7 @@ class Stream:
         metadata = None
         if _metadata.remote(published):
             for prefix in (_metadata.within(published, name), published):
-                metadata = _metadata.fetch(prefix, name, s3_options)  # ty: ignore[invalid-argument-type]
+                metadata = _versions.fetch(prefix, name, s3_options)  # ty: ignore[invalid-argument-type]
                 if metadata is not None:
                     break
 
@@ -1474,26 +1474,14 @@ class Stream:
 
     @property
     def metadata_uri(self) -> str | None:
-        """Where a reader finds this stream's metadata, or None with no log.
+        """Where a reader finds this stream's metadata, or None with no log:
+        the hint naming its current version, beside its published tables when
+        they are on `s3://`, else in the stream's home as an absolute
+        `file://` URI — readable on this machine only, which the `stream_id`
+        check catches anywhere else.
 
-        The copy beside its published tables when they are on `s3://`, else
-        the local file as an absolute `file://` URI — readable on this machine
-        only, which the `stream_id` check catches anywhere else.
-        """
-        if self._log is None:
-            return None
-
-        return _metadata.uri(self._name, self._log)
-
-    @property
-    def metadata_hint(self) -> str | None:
-        """Where a reader finds the hint naming this stream's current metadata
-        version, or None with no log: beside the published tables when they
-        are on `s3://`, else in the stream's home, as a `file://` URI.
-
-        What a reader should open (#123): every version it names is immutable,
-        so a reader that opens the stream again reads only the hint.
-        `metadata_uri` names the plain copy, for readers from before (#124).
+        Every version the hint names is immutable, so a reader that opens the
+        stream again reads only the hint (#123).
         """
         if self._log is None:
             return None
@@ -1981,7 +1969,6 @@ class Stream:
                 group_commit=self._group_commit,
                 schema=self._shape,
                 metadata=self.metadata_uri,
-                metadata_hint=self.metadata_hint,
                 stream_id=self._stream_id,
             )
         )
@@ -2135,7 +2122,6 @@ class Stream:
                     # checks the id against the file, so a file at the same
                     # path that belongs to another stream is refused.
                     metadata=self.metadata_uri,
-                    metadata_hint=self.metadata_hint,
                     stream_id=self._stream_id,
                     where=dict(where) if where is not None else None,
                 )

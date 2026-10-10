@@ -404,15 +404,15 @@ class TestRaces:
     async def test_a_pass_reads_the_version_it_compares_not_the_plain_copy(
         self, tmp_path, monkeypatch
     ):
-        """The plain copy is written after the hint: between the two — or
-        after a crash there — it is the old version under the new one's name.
-        A pass built on it would put the old window back over the new."""
+        """A plain `t.metadata.json` left beside the versions — by a build from
+        before them, or a delete that failed — is the stream as it was. A pass
+        built on it would put the old window back over the new."""
         stream = await one_log(tmp_path, monkeypatch)
         try:
-            plain = home(tmp_path) / "t.metadata.json"
-            before = plain.read_bytes()
+            before = _metadata.load(home(tmp_path), "t")
+            assert before is not None
             streamcast.Stream.retain("t", root=tmp_path, max_age=timedelta(days=30))
-            plain.write_bytes(before)  # as if the copy had not been written yet
+            (home(tmp_path) / "t.metadata.json").write_text(before.to_json())
 
             assert stream.log is not None
             _retention.run(home(tmp_path), "t", stream.log, now=NOW)
@@ -519,10 +519,10 @@ class TestThePublishedCopy:
     async def test_a_restart_never_takes_the_floor_off_the_published_copy(
         self, tmp_path, monkeypatch, s3, bucket
     ):
-        """A crash between the home's hint and its plain copy leaves the copy
-        a version behind. `serve` syncs the published copy at start; built on
-        the stale plain copy, that would publish the stream without its floor
-        while the home still deletes below it, with no grace for those readers."""
+        """A plain `t.metadata.json` left beside the versions is the stream as it
+        was. `serve` syncs the published copy at start; built on that, it
+        would publish the stream without its floor while the home still
+        deletes below it, with no grace for those readers."""
         stream = streamcast.Stream.new(
             "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
         )
@@ -532,10 +532,10 @@ class TestThePublishedCopy:
             stream.ensure_metadata()
             streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
             assert stream.log is not None
-            plain = home(tmp_path) / "t.metadata.json"
-            before = plain.read_bytes()
+            before = _metadata.load(home(tmp_path), "t")
+            assert before is not None
             _retention.run(home(tmp_path), "t", stream.log, s3_options=s3, now=NOW)
-            plain.write_bytes(before)  # the crash, as it left the home
+            (home(tmp_path) / "t.metadata.json").write_text(before.to_json())
 
             stream.ensure_metadata()  # what `serve` does at the restart
 

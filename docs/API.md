@@ -302,16 +302,14 @@ data/                                s3://bucket/prefix/
       version-hint.text                    version-hint.text
       00004-9f2c….metadata.json            00004-9f2c….metadata.json
       00004-9f2c….manifest.parquet         00004-9f2c….manifest.parquet
-    trades.metadata.json                 trades.metadata.json      a plain copy
-    trades.manifest.parquet              trades.manifest.parquet
     trades/          the first log       trades/       its published table
     trades-v2/       after a migrate     trades-v2/
   quotes/                              quotes/
 ```
 
 **A stream never changes layout.** One created before 0.18 keeps the one it has, for
-good: `data/trades.metadata.json` beside `data/trades/`, which is its first log's
-directory, with `<published>/trades.metadata.json` and `<published>/trades/` on the
+good: `data/trades.metadata/` beside `data/trades/`, which is its first log's
+directory, with `<published>/trades.metadata/` and `<published>/trades/` on the
 published side. Every log it adds keeps that layout too, through migrations, restores on
 another box and revivals. A new stream starts in its own directory and stays there.
 Which layout a stream has is read from what's on disk, or from where `restore` finds its
@@ -322,9 +320,10 @@ with [`Stream.ingest`](#loading-rows-in-bulk-streamingest).
 
 ### The metadata file
 
-Before it listens, `serve` writes `root/<stream>/<stream>.metadata.json` for every stream
-with a log that doesn't have one yet, and, when the log publishes to S3, makes sure
-`<published>/<stream>/<stream>.metadata.json` matches it. That costs one GET, plus a PUT only when
+Before it listens, `serve` writes the first version of the metadata, in
+`root/<stream>/<stream>.metadata/`, for every stream with a log that doesn't have one yet,
+and, when the log publishes to S3, makes sure the current version under
+`<published>/<stream>/<stream>.metadata/` matches it. That costs one GET, plus a PUT only when
 something changed. **If either fails, `serve` raises instead of starting.** The file is
 what lets anything other than this server read the stream (#32), so a broken one is found
 at deploy. The ASGI app does the same when its lifespan starts.
@@ -339,14 +338,17 @@ at deploy. The ASGI app does the same when its lifespan starts.
 migration, retirement, revival or restore writes an immutable
 `<stream>.metadata/<n>-<id>.metadata.json`, plus a new manifest beside it when there is
 one, and then rewrites `<stream>.metadata/version-hint.text` to name it. The last ten
-versions are kept. A reader opens the hint, which the greeting gives as `metadata_hint`. The
+versions are kept. A reader opens the hint, which the greeting gives as `metadata`. The
 version and manifest it names are never rewritten, so a reader that opens the stream again,
 such as a `Live` view every few seconds, reads only the hint, a few bytes. A reader
 caches each file per process, per set of credentials, up to 16 MiB in all.
-`<stream>.metadata.json`, the greeting's `metadata`, stays as a plain copy of the current
-version for readers from before; it will go
-([#124](https://github.com/nhobin219/streamcast/issues/124)). `Stream.snapshot` and
-`connect(metadata=)` take either.
+
+**There is no plain `<stream>.metadata.json` beside the versions.** A stream from before
+0.18 has only that file and `<stream>.manifest.parquet`. They're read until its first
+version is written at the next `serve`, and that commit deletes them, so nothing is left
+to show a reader the stream as it was. `Stream.snapshot` and `connect(metadata=)` still
+take a `<stream>.metadata.json` URI, an older greeting's or one written down, and read it
+through the hint beside it.
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
@@ -837,8 +839,9 @@ send is its own), `schema` (the stream's columns as JSON Schema), `metadata`,
 `stream_id`, `stream`, `version`.
 
 **`info.metadata` is enough to read the stream's history yourself.** It is the URI of the
-stream's metadata file, which is what [`Stream.snapshot`](#reading-a-streams-history)
-takes, and `stream_id` is the id that file records:
+hint naming the stream's current metadata, which is what
+[`Stream.snapshot`](#reading-a-streams-history) takes, and `stream_id` is the id that
+metadata records:
 
 ```python
 table = await streamcast.Stream.scan(
@@ -1005,7 +1008,7 @@ which of three things to change.
 |---|---|
 | `catch_up=False` *(default)* | the plain `NotReplayable` refusal; handle the gap yourself |
 | `catch_up_retries=3` | rounds of read-then-connect before giving up |
-| `metadata="s3://bucket/prefix/trades/trades.metadata.json"` | the metadata file to read from; otherwise the greeting's |
+| `metadata="s3://bucket/prefix/trades/trades.metadata/version-hint.text"` | the metadata to read from; otherwise the greeting's |
 | `s3_options=streamcast.S3Options(...)` | credentials; otherwise the environment |
 
 **Where the metadata file comes from.** The greeting names it, with the stream's id, so a
@@ -1281,7 +1284,7 @@ streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
 without this repo:
 
 ```json
-{"streamcast":4,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+{"streamcast":5,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
  "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
 ```
 
@@ -1305,8 +1308,8 @@ async with streamcast.serve(stream, "localhost", 8765):
 
 The current log is retired: sealed for good, published in full, and refusing writers from
 then on. Then `trades-v2` is created with the new schema, starting at exactly the offset
-the old log ended at. `root/trades/trades.metadata.json` (and a copy beside the published tables,
-when they are on S3) records the sequence. A migration that dies partway finishes on the
+the old log ended at. A new version of the metadata in `root/trades/trades.metadata/` (and
+one beside the published tables, when they are on S3) records the sequence. A migration that dies partway finishes on the
 rerun.
 Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
 log the metadata names as current.
@@ -1463,7 +1466,8 @@ of the current log.
 `sort_by` and `config` default to the current log's. `s3_options=` is what the metadata file is
 uploaded with, both here and at `serve`.
 
-Each migration also adds the retired log to `<stream>.manifest.parquet`: per-column bounds
+Each migration also adds the retired log to the stream's manifest, a Parquet file beside
+each version of its metadata: per-column bounds
 and counts, read from the log's own Iceberg statistics without opening a data file. It is
 what lets a reader of the whole stream skip logs that can't match (#32). The metadata file
 points to it.
@@ -1548,7 +1552,7 @@ it never touches the server**:
 s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
 
 async with await streamcast.Stream.snapshot(
-    "s3://market-data/prod/trades/trades.metadata.json", s3_options=s3
+    "s3://market-data/prod/trades/trades.metadata/version-hint.text", s3_options=s3
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 ```
@@ -1616,7 +1620,7 @@ result is the same either way; what differs is how much gets read.
 
 - **`filters=`** is a list of `(column, operator, value)` terms — `==`, `<`, `<=`, `>`, `>=`,
   `in` — ANDed together. Because each term is that simple, it can be checked against every
-  log's per-column min and max (`<stream>.manifest.parquet`) *before the log is opened*: a
+  log's per-column min and max (the stream's manifest) *before the log is opened*: a
   log whose prices all sit below 85,000 is never read. The terms are then applied to the
   rows too, so what you get never depends on what was skipped. Numeric and boolean columns
   skip; others still filter, they just can't rule out a log.
@@ -1727,9 +1731,8 @@ message: the offset, the time the server took the row, then the row. Reading a r
 spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata.json",
- "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+{"streamcast":5,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"5f0c…","schema":{...},"durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```

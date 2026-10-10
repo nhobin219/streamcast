@@ -5,7 +5,7 @@ live log for good, creates the next one with the new schema starting at
 exactly the offset the last one ended at, and records both here — so a stream
 becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
 
-    root/trades/trades.metadata.json
+    root/trades/trades.metadata/00004-9f2c….metadata.json   (one version; `_versions`)
     {"streamcast_metadata": 2, "stream": "trades", "stream_id": "6f1c…",
      "sealed_logs": [{"name": "trades", "published": "s3://bucket/prod",
                       "start_offset": 1, "end_offset": 1001,
@@ -14,7 +14,7 @@ becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
      "live_log": {"name": "trades-v2", "published": "s3://bucket/prod",
                   "start_offset": 1001, "start_ts": 1790003600000412,
                   "schema": {...}, "system_schema": {...}},
-     "manifest": "trades.manifest.parquet"}
+     "manifest": "00004-9f2c….manifest.parquet"}
 
 **Named after Iceberg's `metadata.json`**, which plays the same part for a
 table: the JSON that says what it currently is. "Manifest" is Iceberg's word
@@ -40,11 +40,11 @@ directory of its own, `root/trades/`, holding this file, the manifest and one
 directory per log — `root/trades/trades/`, `root/trades/trades-v2/` — so a
 root serving many streams lists one entry per stream. When the logs publish
 to S3 the same shape sits under the prefix — `<published>/trades/
-trades.metadata.json` beside `<published>/trades/trades/` — because
+trades.metadata/` beside `<published>/trades/trades/` — because
 `Stream.restore` and a remote reader have the bucket and not this disk.
 
 **A stream never changes layout.** One created before its own directory
-existed keeps the root itself as its home — `root/trades.metadata.json` beside
+existed keeps the root itself as its home — `root/trades.metadata/` beside
 `root/trades/`, the first log's directory — for good: every log it adds, by
 migration, restore or revival, goes where its others are. Moving one is not
 possible in place anyway: an Iceberg table records its files by absolute path,
@@ -82,9 +82,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
-import pyarrow.fs as pafs
 
-from streamcast import _log, _remote, _schema
+from streamcast import _log, _schema
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -576,12 +575,18 @@ def within(published: str, stream: str) -> str:
     return f"{published.rstrip('/')}/{stream}"
 
 
+def plain_name(stream: str) -> str:
+    """The file a stream from before the versions kept its metadata in, beside
+    its logs: read until its first version is written, which deletes it."""
+    return f"{stream}.metadata.json"
+
+
 def path(root: str | os.PathLike[str], stream: str) -> Path:
-    """Where a stream's metadata lives locally: in its home, beside its logs.
+    """Where a stream from before the versions kept its metadata locally.
 
     `root` here is the stream's home (`home`), as litelink's `log.root` is.
     """
-    return Path(root) / f"{stream}.metadata.json"
+    return Path(root) / plain_name(stream)
 
 
 def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
@@ -599,35 +604,13 @@ def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
 
 
 def plain(root: str | os.PathLike[str], stream: str) -> Metadata | None:
-    """The plain `<stream>.metadata.json`: a stream with no version yet."""
+    """The plain `<stream>.metadata.json` of a stream with no version yet."""
     try:
         text = path(root, stream).read_text()
     except FileNotFoundError:
         return None
 
     return Metadata.from_json(text)
-
-
-def save(root: str | os.PathLike[str], metadata: Metadata) -> None:
-    """Write it atomically: a reader sees the old metadata or the new, never half.
-
-    fsynced before the rename and the directory after it, because the rename
-    is what commits a migration — a metadata file that survived the crash as an
-    empty file would name no current log at all.
-    """
-    target = path(root, metadata.stream)
-    staging = target.with_suffix(".json.tmp")
-    with staging.open("w") as file:
-        file.write(metadata.to_json())
-        file.flush()
-        os.fsync(file.fileno())
-
-    staging.replace(target)
-    directory = os.open(target.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
 
 
 def remote(published: str) -> bool:
@@ -645,44 +628,6 @@ def default_published(log: LogHandle) -> bool:
     return (
         log.published.rstrip("/") == (Path(log.root) / log.name / "published").as_uri()
     )
-
-
-def uri(stream: str, log: LogHandle) -> str:
-    """Where a reader finds `stream`'s metadata: the copy beside its published
-    tables if they are remote, else this file, as an absolute `file://` URI —
-    absolute because a relative root means nothing on another machine, or in
-    another working directory."""
-    if remote(log.published):
-        return _uri(log.published, stream)
-
-    return path(log.root, stream).resolve().as_uri()
-
-
-def _uri(published: str, stream: str) -> str:
-    return f"{published.rstrip('/')}/{stream}.metadata.json"
-
-
-def publish(metadata: Metadata, published: str, s3_options: S3Options | None) -> None:
-    """Copy the metadata to `published`, beside the logs' published tables.
-
-    Raises rather than logging: a stream whose published copy does not name
-    its current log is one `Stream.restore` would rebuild as the wrong log.
-    """
-    uri = _uri(published, metadata.stream)
-    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
-    with filesystem.open_output_stream(key) as stream:
-        stream.write(metadata.to_json().encode())
-
-
-def sync(metadata: Metadata, published: str, s3_options: S3Options | None) -> None:
-    """Make the published copy match `metadata`, uploading only if it differs.
-
-    Run at every `serve`, so an upload that failed is repaired by the next
-    start rather than by whoever notices, and a stream that has not changed
-    costs one GET. Raises on any failure but absence — see `fetch`.
-    """
-    if fetch(published, metadata.stream, s3_options) != metadata:
-        publish(metadata, published, s3_options)
 
 
 def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadata:
@@ -704,7 +649,9 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     # First, because it is what tells a missing BUCKET from a missing copy —
     # and refuses the first, which an upload would only report as a failure.
     published = (
-        fetch(log.published, stream, s3_options) if remote(log.published) else None
+        _versions.fetch(log.published, stream, s3_options)
+        if remote(log.published)
+        else None
     )
     # A stream served by a build from before the versions has its metadata
     # but no version of it: written now, here and beside the tables.
@@ -725,7 +672,8 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     else:
         msg = (
             f"stream {stream!r} is being served from log {log.name!r}, and its "
-            f"metadata at {path(root, stream)} says the live log is "
+            f"metadata in {Path(root) / _versions.directory(stream)} says the "
+            f"live log is "
             f"{found.live_log.name!r}. A sealed log is never written to again; "
             f"open the live one, or use Stream.new, which does."
         )
@@ -740,33 +688,6 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
         )
 
     return found
-
-
-def fetch(published: str, stream: str, s3_options: S3Options | None) -> Metadata | None:
-    """The published copy, or None if there is none there.
-
-    Only a MISSING object is None. Anything else — bad credentials, an
-    unreachable endpoint — raises, because treating it as "one log" would
-    restore the stream's first log as though it were its current one.
-    """
-    uri = _uri(published, stream)
-    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
-    try:
-        with filesystem.open_input_stream(key) as source:
-            text = source.read().decode()
-    except FileNotFoundError:
-        # **pyarrow says "not found" for a missing BUCKET too**, in exactly
-        # the words it uses for a missing key — measured against rustfs. A
-        # mistyped bucket would otherwise read as "no copy yet", and a restore
-        # would go on to rebuild the stream's first log as though it were live.
-        bucket = key.split("/", 1)[0]
-        if filesystem.get_file_info(bucket).type == pafs.FileType.NotFound:
-            msg = f"the published location's bucket {bucket!r} does not exist ({published})"
-            raise FileNotFoundError(msg) from None
-
-        return None
-
-    return Metadata.from_json(text)
 
 
 def check_types(history: tuple[Entry, ...], declared: dict[str, object]) -> None:
@@ -812,12 +733,9 @@ __all__ = [
     "check_types",
     "describe",
     "ensure",
-    "fetch",
     "load",
     "path",
     "plain",
-    "publish",
-    "save",
+    "plain_name",
     "single",
-    "sync",
 ]
