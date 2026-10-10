@@ -996,25 +996,38 @@ class Stream:
             raise ValueError(msg)
 
         root = _metadata.home(root, name)
-        metadata = _metadata.load(root, name)
-        if metadata is None:
-            # Not served yet, so no metadata: what serve would write.
-            try:
-                log = litelink.open(root, name, read_only=True)
-            except FileNotFoundError:
-                msg = f"there is no stream {name!r} at {root} to set retention on"
-                raise FileNotFoundError(msg) from None
-
-            with log:
-                metadata = _metadata.single(name, log)
-
         retention = None if max_age is None else int(max_age.total_seconds() * 1e6)
-        _versions.commit(
-            root,
-            dataclasses.replace(metadata, retention=retention),
-            published=metadata.live_log.published,
-            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
-        )
+        # Over the version read, or not at all: a retention pass committing
+        # meanwhile would otherwise have its floor undone, and this retried
+        # against what it wrote (`_versions.commit`'s `expected`).
+        for attempt in range(5):
+            read = _versions.version(root, name)
+            metadata = _metadata.load(root, name)
+            if metadata is None:
+                # Not served yet, so no metadata: what serve would write.
+                try:
+                    log = litelink.open(root, name, read_only=True)
+                except FileNotFoundError:
+                    msg = f"there is no stream {name!r} at {root} to set retention on"
+                    raise FileNotFoundError(msg) from None
+
+                with log:
+                    metadata = _metadata.single(name, log)
+
+            try:
+                _versions.commit(
+                    root,
+                    dataclasses.replace(metadata, retention=retention),
+                    published=metadata.live_log.published,
+                    s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+                    expected=read,
+                )
+            except _versions.Conflict:
+                if attempt == 4:
+                    raise
+
+            else:
+                return
 
     @classmethod
     def ingest(

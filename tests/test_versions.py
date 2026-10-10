@@ -48,7 +48,7 @@ def versions(home) -> list[str]:
     return sorted(
         path.name
         for path in (home / "t.metadata").iterdir()
-        if path.name != _versions.HINT
+        if path.name != _versions.HINT and not path.name.startswith(".")
     )
 
 

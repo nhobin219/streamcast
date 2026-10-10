@@ -9,6 +9,8 @@ passes run at chosen times, rather than waiting out a window.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import timedelta
 from typing import Any
 
@@ -16,7 +18,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _metadata, _retention, _stream
+from streamcast import _metadata, _retention, _stream, _versions
 from streamcast._maintain import Maintain, Supervisor
 
 SCHEMA: dict[str, Any] = {
@@ -258,6 +260,10 @@ class TestRetiredLogs:
             assert retired.published is not None
             with litelink.open(home(tmp_path), "t", read_only=True) as old:
                 assert lowest(old) == 4, "its old file is gone"
+
+            # And it is still readable: its manifest row counts what it holds
+            # now, or every read would refuse it as published short.
+            assert await offsets(tmp_path) == [4, 5, 6, 7]
         finally:
             await migrated.aclose()
 
@@ -314,3 +320,83 @@ def test_one_stream_failing_does_not_stop_the_others(tmp_path, monkeypatch, caps
 
     assert ran == ["a", "b"]
     assert "[retain] a: skipped" in capsys.readouterr().err
+
+
+class TestRaces:
+    async def test_a_row_written_while_the_floor_is_found_is_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """Nothing newer than the cutoff, and a row lands between the query
+        and the end it reads: that row must not be under the floor."""
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        try:
+            await write(stream, monkeypatch, T0, [0, 1, 2])
+            stream.ensure_metadata()
+            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            log = stream.log
+            assert log is not None
+            now = T0 + 2 * DAY
+            loop = asyncio.get_running_loop()
+            sent = threading.Event()
+
+            async def send() -> None:
+                with monkeypatch.context() as patched:
+                    patched.setattr(_stream.time, "time_ns", lambda: now * 1_000)
+                    await stream.send({"i": 99})
+
+                sent.set()
+
+            class Racing:
+                """The live log, with a row landing as its query returns."""
+
+                def __getattr__(self, name: str):  # noqa: ANN204
+                    return getattr(log, name)
+
+                def sql(self, query: str):  # noqa: ANN202
+                    read = log.sql(query).read_all()
+                    asyncio.run_coroutine_threadsafe(send(), loop)
+                    sent.wait(10)
+                    return type("Read", (), {"read_all": lambda _self: read})()
+
+            begun = await asyncio.to_thread(
+                _retention.run,
+                home(tmp_path),
+                "t",
+                Racing(),  # ty: ignore[invalid-argument-type]
+                now=now,
+            )
+            assert begun is not None
+            assert begun.pending is not None
+            assert begun.pending.floor == 4
+            while log.seal(flush=True) is not None:
+                pass
+
+            log.publish(flush=True)
+            assert await offsets(tmp_path) == [4]
+        finally:
+            await stream.aclose()
+
+    async def test_a_pass_never_writes_over_a_newer_setting(
+        self, tmp_path, monkeypatch
+    ):
+        """`Stream.retain` committing while a pass is in flight: the pass is
+        refused, rather than putting the old window back."""
+        stream = await one_log(tmp_path, monkeypatch)
+        try:
+            assert stream.log is not None
+            real = _retention._newest  # noqa: SLF001
+
+            def widened(live, s3_options):  # noqa: ANN001, ANN202
+                streamcast.Stream.retain("t", root=tmp_path, max_age=None)
+                return real(live, s3_options)
+
+            monkeypatch.setattr(_retention, "_newest", widened)
+            with pytest.raises(_versions.Conflict):
+                _retention.run(home(tmp_path), "t", stream.log, now=NOW)
+
+            after = _metadata.load(home(tmp_path), "t")
+            assert after is not None
+            assert after.retention is None, "the operator's setting stands"
+            assert after.pending is None
+        finally:
+            await stream.aclose()

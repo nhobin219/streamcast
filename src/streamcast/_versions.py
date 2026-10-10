@@ -27,7 +27,9 @@ So listing the directory to keep the last `KEEP` versions is cheap.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import fcntl
 import io
 import os
 import re
@@ -193,6 +195,38 @@ def current(store: _Store) -> tuple[int, str] | None:
     return int(found.group(1)), name
 
 
+class Conflict(RuntimeError):
+    """The stream's metadata changed since the caller read it: read it again."""
+
+
+UNCHECKED: Final = object()
+"""`commit`'s `expected` when the caller checks nothing."""
+
+
+def version(home: str | os.PathLike[str], stream: str) -> str | None:
+    """The name of the stream's current version in its home, or None."""
+    found = current(_Local(Path(home), stream))
+    return None if found is None else found[1]
+
+
+@contextlib.contextmanager
+def _locked(home: Path, stream: str):  # noqa: ANN202
+    """Every local commit of a stream's metadata, one at a time on this box.
+
+    A commit reads the current version and writes the next; two at once —
+    a retention pass and a `Stream.retain`, say — would each build on what
+    the other is replacing. An `flock`, held for the write, beside the hint.
+    """
+    directory_ = home / directory(stream)
+    directory_.mkdir(parents=True, exist_ok=True)
+    with (directory_ / ".lock").open("a") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
 def commit(
     home: str | os.PathLike[str],
     metadata: _metadata.Metadata,
@@ -201,6 +235,7 @@ def commit(
     published: str | None = None,
     s3_options: S3Options | None = None,
     local: bool = True,
+    expected: object = UNCHECKED,
 ) -> None:
     """Write `metadata` as the stream's next version: in its home unless
     `local` is false, and under `published` when that is remote.
@@ -208,7 +243,39 @@ def commit(
     `manifest` is a new manifest to go with it. Without one, the version names
     the manifest the current version does — carried over, since a manifest
     changes only with a sealed log.
+
+    **`expected` makes it a compare-and-swap**: the version name (`version`)
+    the caller read `metadata` from, or None for none. If the home's current
+    version is another by the time the lock is held, `Conflict` is raised and
+    nothing is written — the caller's `metadata` was built on a version that
+    is no longer current, and writing it would undo whatever replaced it.
     """
+    if not local:
+        _commit(home, metadata, manifest, published, s3_options, local=False)
+        return
+
+    with _locked(Path(home), metadata.stream):
+        if expected is not UNCHECKED:
+            found = version(home, metadata.stream)
+            if found != expected:
+                msg = (
+                    f"stream {metadata.stream!r}'s metadata changed since it was "
+                    f"read ({expected} is now {found}); read it again"
+                )
+                raise Conflict(msg)
+
+        _commit(home, metadata, manifest, published, s3_options, local=True)
+
+
+def _commit(
+    home: str | os.PathLike[str],
+    metadata: _metadata.Metadata,
+    manifest: pa.Table | None,
+    published: str | None,
+    s3_options: S3Options | None,
+    *,
+    local: bool,
+) -> None:
     stores: list[_Store] = []
     if local:
         stores.append(_Local(Path(home), metadata.stream))
@@ -335,10 +402,13 @@ def missing(
 __all__ = [
     "HINT",
     "KEEP",
+    "UNCHECKED",
+    "Conflict",
     "commit",
     "current",
     "directory",
     "hint_uri",
     "immutable",
     "missing",
+    "version",
 ]

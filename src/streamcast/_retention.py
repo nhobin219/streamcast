@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import litelink
+import pyarrow as pa
 
 from streamcast import _log, _manifest, _metadata, _published, _versions
 
@@ -76,13 +77,19 @@ def run(
 ) -> Metadata | None:
     """One pass: the second half if one is due, else the first if there is
     anything to drop. Returns the metadata it committed, or None."""
+    # The version read, so each half commits only over it: a `Stream.retain`
+    # or a migration that committed meanwhile makes this pass a `Conflict`,
+    # retried on the next, rather than undone by it.
+    read = _versions.version(home, stream)
     metadata = _metadata.load(home, stream)
     if metadata is None:
         return None
 
     at = now_us() if now is None else now
     if metadata.pending is not None:
-        return finish(home, metadata, live, s3_options=s3_options, now=at)
+        return finish(
+            home, metadata, live, s3_options=s3_options, now=at, expected=read
+        )
 
     if metadata.retention is None:
         return None
@@ -93,6 +100,7 @@ def run(
         newest=_newest(live, s3_options),
         s3_options=s3_options,
         now=at,
+        expected=read,
     )
 
 
@@ -140,6 +148,7 @@ def begin(
     newest: Callable[[Entry, int], int | None],
     s3_options: S3Options | None = None,
     now: int,
+    expected: object = _versions.UNCHECKED,
 ) -> Metadata | None:
     """The first half: publish the stream starting at its floor."""
     assert metadata.retention is not None  # the caller checked
@@ -184,6 +193,7 @@ def begin(
         manifest=manifest if dropped and kept else None,
         published=live.published,
         s3_options=s3_options,
+        expected=expected,
     )
     return moved_to
 
@@ -195,6 +205,7 @@ def finish(
     *,
     s3_options: S3Options | None = None,
     now: int,
+    expected: object = _versions.UNCHECKED,
 ) -> Metadata | None:
     """The second half, once readers have had their grace: delete, truncate."""
     pending = metadata.pending
@@ -212,6 +223,7 @@ def finish(
                 root=home if local.is_dir() else None,
             )
 
+    manifest = None
     if metadata.sealed_logs:
         straddled = metadata.sealed_logs[0]
         if straddled.published is not None:
@@ -221,6 +233,12 @@ def finish(
                 below=pending.floor,
                 s3_options=s3_options,
             )
+            # **Its manifest row counted the rows it had.** A reader checks a
+            # retired log's table against that count, to catch one published
+            # short — and a truncated table is short by design. The row is
+            # corrected to what the table now holds, or every read of the log
+            # would be refused, the rows inside the window too.
+            manifest = _recounted(home, metadata, straddled, s3_options)
 
     else:
         # The floor is in the live log. A held claim raises: the record stays,
@@ -231,10 +249,38 @@ def finish(
     _versions.commit(
         home,
         done,
+        manifest=manifest,
         published=metadata.live_log.published,
         s3_options=s3_options,
+        expected=expected,
     )
     return done
+
+
+def _recounted(
+    home: str | Path, metadata: Metadata, entry: Entry, s3_options: S3Options | None
+) -> pa.Table | None:
+    """The stream's manifest with `entry`'s row counting what its table holds."""
+    manifest = _manifest.load(home, metadata.stream)
+    if manifest is None or entry.published is None:
+        return None
+
+    names = manifest.column(_manifest.KEY).to_pylist()
+    if entry.name not in names:
+        return None
+
+    opened = _published.Table.open(entry.published, entry.name, s3_options)
+    try:
+        count = opened.record_count
+    finally:
+        opened.close()
+
+    counts = manifest.column("record_count").to_pylist()
+    counts[names.index(entry.name)] = count
+    index = manifest.schema.get_field_index("record_count")
+    return manifest.set_column(
+        index, manifest.schema.field(index), pa.array(counts, pa.int64())
+    )
 
 
 def _newest(
@@ -248,14 +294,20 @@ def _newest(
             if _log.STAMP not in live.schema.names:
                 return entry.start_offset  # no stamps: never older than anything
 
+            # **Read before the query, not after.** The server appends while
+            # this runs, in another process: a row landing between the two
+            # would be counted below an end read afterwards, and dropped though
+            # it is newer than anything. Read first, every row the query does
+            # not see is at or above it.
+            end = live.end_offset()
             table = live.sql(
                 f'SELECT min("{_log.COLUMN}") AS first FROM log '
                 f'WHERE "{_log.STAMP}" > {int(cutoff)}'
             ).read_all()
             first = table.column("first")[0].as_py()
             if first is None:
-                # Nothing newer: the floor is past every row the log holds.
-                return live.end_offset()
+                # Nothing newer: the floor is past every row the log held.
+                return end
 
             return int(first)
 
