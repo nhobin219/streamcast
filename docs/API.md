@@ -1129,6 +1129,10 @@ StreamcastError
 row, and a row committed while the subscribe is being answered is replayed, not missed.
 An older server refuses it with `why == "empty"`.
 
+`EARLIEST` with `catch_up=True` takes everything the published tables still hold, from
+wherever they begin: the stream's first row, or the floor retention has moved it to. Nothing
+below that is reported lost, because `EARLIEST` asks for what is left.
+
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.
 

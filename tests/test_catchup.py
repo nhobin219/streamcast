@@ -718,6 +718,53 @@ class TestTheGapItCannotClose:
         assert "400" in message, message
 
 
+class TestFromTheEarliest:
+    """`offset=EARLIEST` with `catch_up=True` takes everything the stream
+    still holds (#128). EARLIEST is 0, below every published table's floor:
+    taken literally, the stream's first row was reported lost."""
+
+    async def test_it_takes_every_row_from_the_first(self, serve, published_log, s3):
+        stream = streamcast.Stream("trades", log=published_log, max_replay=50)
+        await fill(stream, published_log, total=400)
+
+        async with serve(stream, maintain=False) as uri:
+            with pytest.raises(streamcast.NotReplayable):
+                await streamcast.connect(uri, offset=streamcast.EARLIEST)
+
+            async with streamcast.connect(
+                uri, offset=streamcast.EARLIEST, catch_up=True, s3_options=s3
+            ) as sub:
+                got = [(await sub.recv())[0] for _ in range(400)]
+
+        assert got == list(range(1, 401))
+
+    async def test_it_starts_where_the_tables_do(self, tmp_path, s3, bucket, serve):
+        """Not at 1: the log's first offset, wherever that is. Below it was
+        never issued, and nothing is reported lost."""
+        handle = litelink.new(
+            tmp_path / "data",
+            "trades",
+            schema=streamcast.to_arrow(SCHEMA),
+            published=bucket,
+            s3_options=s3,
+            start_offset=500,
+            config=litelink.LogConfig(
+                target_seal_size=SEAL_SIZE, compact_min_files=KEEP_FILES
+            ),
+        )
+        with handle:
+            stream = streamcast.Stream("trades", log=handle, max_replay=50)
+            await fill(stream, handle, total=400)
+
+            async with serve(stream, maintain=False) as uri:
+                async with streamcast.connect(
+                    uri, offset=streamcast.EARLIEST, catch_up=True, s3_options=s3
+                ) as sub:
+                    got = [(await sub.recv())[0] for _ in range(400)]
+
+        assert got == list(range(500, 900))
+
+
 class TestWhereTheHistoryIsRead:
     async def test_the_greeting_names_the_metadata_and_the_stream(
         self, serve, published_log, s3
