@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import _log, _manifest, _metadata, _schema
+from streamcast import _log, _manifest, _metadata, _schema, _versions
 from streamcast._maintain import finish_retiring
 from streamcast._server import _supervisors
 
@@ -440,10 +440,14 @@ class TestServingAMigratedStream:
         manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         counts = manifest.column("record_count").to_pylist()
-        _manifest.save(
-            _metadata.home(tmp_path, "trades"),
-            "trades",
-            manifest.set_column(
+        # A new version naming the doctored manifest, as a reader finds it.
+        home = _metadata.home(tmp_path, "trades")
+        current = _metadata.load(home, "trades")
+        assert current is not None
+        _versions.commit(
+            home,
+            current,
+            manifest=manifest.set_column(
                 manifest.schema.get_field_index("record_count"),
                 "record_count",
                 pa.array([count + 2 for count in counts], pa.int64()),
@@ -686,18 +690,18 @@ class TestTheManifest:
     async def test_a_manifest_that_cannot_be_written_commits_nothing(
         self, tmp_path, monkeypatch
     ):
-        """The manifest comes before metadata.json, so a failure there is retried.
+        """A commit that fails is retried: nothing names the new log until one lands.
 
         The new log exists by then — an orphan the metadata does not name —
         and the retry adopts it, because it is empty and of the right shape.
         """
         await seeded(tmp_path)
-        original = _manifest.save
+        original = _versions.commit
 
         def refuse(*_args, **_kwargs):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_manifest, "save", refuse)
+        monkeypatch.setattr(_versions, "commit", refuse)
         with pytest.raises(OSError, match="disk full"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
 
@@ -705,7 +709,7 @@ class TestTheManifest:
             "nothing committed"
         )
 
-        monkeypatch.setattr(_manifest, "save", original)
+        monkeypatch.setattr(_versions, "commit", original)
         (await _migrated(tmp_path, V2)).close()
 
         metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")

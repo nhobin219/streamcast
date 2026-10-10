@@ -16,7 +16,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _metadata
+from streamcast import _metadata, _versions
 
 SCHEMA = {
     "type": "object",
@@ -185,19 +185,19 @@ class TestReviving:
     ):
         await produce(tmp_path)
         streamcast.Stream.retire("t", root=tmp_path)
-        real = _metadata.save
+        real = _versions.commit
 
         def failing(*_: object, **__: object) -> None:
             msg = "disk full, mid-revive"
             raise OSError(msg)
 
-        monkeypatch.setattr(_metadata, "save", failing)
+        monkeypatch.setattr(_versions, "commit", failing)
         with pytest.raises(OSError, match="mid-revive"):
             streamcast.Stream.restore(
                 "t", root=tmp_path, published=tmp_path.as_uri(), revive=True
             )
 
-        monkeypatch.setattr(_metadata, "save", real)
+        monkeypatch.setattr(_versions, "commit", real)
         revived = streamcast.Stream.restore(
             "t", root=tmp_path, published=tmp_path.as_uri(), revive=True
         )

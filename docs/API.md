@@ -297,7 +297,11 @@ one entry per stream:
 ```
 data/                                s3://bucket/prefix/
   trades/                              trades/
-    trades.metadata.json                 trades.metadata.json
+    trades.metadata/                     trades.metadata/
+      version-hint.text                    version-hint.text
+      00004-9f2c….metadata.json            00004-9f2c….metadata.json
+      00004-9f2c….manifest.parquet         00004-9f2c….manifest.parquet
+    trades.metadata.json                 trades.metadata.json      a plain copy
     trades.manifest.parquet              trades.manifest.parquet
     trades/          the first log       trades/       its published table
     trades-v2/       after a migrate     trades-v2/
@@ -329,6 +333,19 @@ at deploy. The ASGI app does the same when its lifespan starts.
  "sealed_logs": [], "live_log": {"name": "trades", "published": "s3://…",
  "start_offset": 1, "start_ts": 1790038800123456, …}, "manifest": null}
 ```
+
+**Each change is a new version, behind a hint**, as an Iceberg table's metadata is. A
+migration, retirement, revival or restore writes an immutable
+`<stream>.metadata/<n>-<id>.metadata.json`, plus a new manifest beside it when there is
+one, and then rewrites `<stream>.metadata/version-hint.text` to name it. The last ten
+versions are kept. A reader opens the hint, which the greeting gives as `metadata_hint`. The
+version and manifest it names are never rewritten, so a reader that opens the stream again,
+such as a `Live` view every few seconds, reads only the hint, a few bytes. A reader
+caches each file per process, per set of credentials, up to 16 MiB in all.
+`<stream>.metadata.json`, the greeting's `metadata`, stays as a plain copy of the current
+version for readers from before; it will go
+([#124](https://github.com/nhobin219/streamcast/issues/124)). `Stream.snapshot` and
+`connect(metadata=)` take either.
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
@@ -1660,6 +1677,7 @@ spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language
 ```
 {"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
  "metadata":"s3://market-data/prod/trades/trades.metadata.json",
+ "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"5f0c…","schema":{...},"durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```

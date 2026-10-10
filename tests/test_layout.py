@@ -94,6 +94,7 @@ class TestANewStream:
             "t",
             "t-v2",
             "t.manifest.parquet",
+            "t.metadata",
             "t.metadata.json",
         ]
 
@@ -114,6 +115,7 @@ class TestAStreamFromBefore:
             "t",
             "t-v2",
             "t.manifest.parquet",
+            "t.metadata",
             "t.metadata.json",
         ]
 

@@ -57,6 +57,7 @@ from streamcast import (
     _replicate,
     _schema,
     _snapshot,
+    _versions,
 )
 from streamcast._codec import compile_codec
 from streamcast._errors import (
@@ -656,13 +657,13 @@ class Stream:
         )
         metadata = dataclasses.replace(metadata, manifest=_manifest.name(name))
         try:
-            _manifest.save(root, name, manifest)
-            if _metadata.remote(new_log.published):
-                _manifest.publish(new_log.published, name, manifest, s3_options)  # ty: ignore[invalid-argument-type]
-
-            _metadata.save(root, metadata)
-            if _metadata.remote(new_log.published):
-                _metadata.publish(metadata, new_log.published, s3_options)  # ty: ignore[invalid-argument-type]
+            _versions.commit(
+                root,
+                metadata,
+                manifest=manifest,
+                published=new_log.published,
+                s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            )
 
         except BaseException:
             new_log.close()
@@ -840,7 +841,7 @@ class Stream:
             **reserves,
         )
         if metadata is not None:
-            _metadata.save(root, metadata)
+            _versions.commit(root, metadata)
 
         return cls(
             name,
@@ -948,13 +949,13 @@ class Stream:
             metadata, manifest=_manifest.name(name), retirement=retirement
         )
         # The manifest first, then the metadata that points at it (#27).
-        _manifest.save(root, name, manifest)
-        if _metadata.remote(published):
-            _manifest.publish(published, name, manifest, s3_options)  # ty: ignore[invalid-argument-type]
-
-        _metadata.save(root, metadata)
-        if _metadata.remote(published):
-            _metadata.publish(metadata, published, s3_options)  # ty: ignore[invalid-argument-type]
+        _versions.commit(
+            root,
+            metadata,
+            manifest=manifest,
+            published=published,
+            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+        )
 
         return retirement
 
@@ -1159,9 +1160,12 @@ class Stream:
             )
         )
         try:
-            _metadata.save(root, revived)
-            if _metadata.remote(log.published):
-                _metadata.publish(revived, log.published, s3_options)  # ty: ignore[invalid-argument-type]
+            _versions.commit(
+                root,
+                revived,
+                published=log.published,
+                s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            )
 
         except BaseException:
             log.close()
@@ -1410,6 +1414,21 @@ class Stream:
             return None
 
         return _metadata.uri(self._name, self._log)
+
+    @property
+    def metadata_hint(self) -> str | None:
+        """Where a reader finds the hint naming this stream's current metadata
+        version, or None with no log: beside the published tables when they
+        are on `s3://`, else in the stream's home, as a `file://` URI.
+
+        What a reader should open (#123): every version it names is immutable,
+        so a reader that opens the stream again reads only the hint.
+        `metadata_uri` names the plain copy, for readers from before (#124).
+        """
+        if self._log is None:
+            return None
+
+        return _versions.hint_uri(self._log.root, self._name, self._log.published)
 
     @property
     def name(self) -> str:
@@ -1892,6 +1911,7 @@ class Stream:
                 group_commit=self._group_commit,
                 schema=self._shape,
                 metadata=self.metadata_uri,
+                metadata_hint=self.metadata_hint,
                 stream_id=self._stream_id,
             )
         )
@@ -2045,6 +2065,7 @@ class Stream:
                     # checks the id against the file, so a file at the same
                     # path that belongs to another stream is refused.
                     metadata=self.metadata_uri,
+                    metadata_hint=self.metadata_hint,
                     stream_id=self._stream_id,
                     where=dict(where) if where is not None else None,
                 )
