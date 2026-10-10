@@ -1,6 +1,6 @@
 [project]
 name = "streamcast"
-version = "0.17.0"
+version = "0.18.0"
 description = "A JSON WebSocket pubsub framework for structured data. Every message lands in an Iceberg table: no ETL, no second copy."
 readme = "README.md"
 authors = [
@@ -55,12 +55,14 @@ dependencies = [
     # files later, and compaction sized on disk; 0.12.0 for small objects
     # uploaded in one request, which needs pyarrow 21 — the floor this
     # library's own S3 writes rely on too (`_remote._filesystem`); 0.12.2
-    # for `truncate` (0.12.1) and seals under `data/sealed/`.
+    # for `truncate` (0.12.1) and seals under `data/sealed/`; 0.12.3 for
+    # truncating and deleting a retired log from its published table, which
+    # retention needs, and metadata read from object storage once.
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.12.2,<0.13",
+    "litelink>=0.12.3,<0.13",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a
