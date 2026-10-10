@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.19.0 — 2026-10-10
 
 ### Added
 
@@ -41,6 +41,13 @@ there was nothing to have changed from. Everything above it is ordinary.
   variables, laid over the server's environment, and streams with different
   options get processes of their own. A migration's or retirement's
   litestream gets them too.
+
+### Packaging
+
+- **litelink 0.12.4.** A failure inside a claim's commit now raises its real
+  error and orphans no claim (litelink#187). Before, a stop signal landing
+  there could reach the maintainer as an error it caught and retried, and
+  the claim refused every overlapping pass for 30 s.
 
 ## 0.18.0 — 2026-10-10
 
