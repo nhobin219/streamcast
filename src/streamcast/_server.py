@@ -234,8 +234,10 @@ def _supervisors(
     # **One environment per set of `S3Options`**, so a set is a group of its
     # own: the children open the logs by name, and take the options from
     # their environment (`_process.environment`) or not at all.
+    # By root and name, as the targets are: a name alone is not unique
+    # across roots, and another stream's options would win for both.
     key = {
-        stream.log.name: _credentials(stream)
+        (Path(stream.log.root), stream.log.name): _credentials(stream)
         for stream in routes.values()
         if stream.log is not None
     }
@@ -254,11 +256,11 @@ def _supervisors(
     # `_maintain.finish_retiring`.
     shared_groups: dict[tuple[tuple[str, str | None], ...], list[tuple[Path, str]]] = {}
     for target in shared:
-        shared_groups.setdefault(key[target[1]], []).append(target)
+        shared_groups.setdefault(key[target], []).append(target)
 
     dedicated = len(groups)
     groups.extend(shared_groups.values())
-    environments = [key[group[0][1]] for group in groups]
+    environments = [key[group[0]] for group in groups]
 
     # Each stream's retired logs to the publish role of a group with its
     # options: the shared group with them if there is one, else the first
@@ -279,7 +281,10 @@ def _supervisors(
     # slow, published-table role — with the handle its live log is truncated
     # through. By the stream's name, which its metadata is filed under.
     streams = {
-        stream.log.name: (Path(stream.log.root), stream.name or stream.log.name)
+        (Path(stream.log.root), stream.log.name): (
+            Path(stream.log.root),
+            stream.name or stream.log.name,
+        )
         for stream in routes.values()
         if stream.log is not None and stream.retirement is None
     }
@@ -290,7 +295,7 @@ def _supervisors(
             role,
             retiring=retiring.get(index, []) if role == "publish" else (),
             streams=(
-                [streams[name] for _root, name in group if name in streams]
+                [streams[target] for target in group if target in streams]
                 if role == "clean-published"
                 else ()
             ),

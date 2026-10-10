@@ -398,3 +398,40 @@ def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
     finally:
         for log in logs:
             log.close()
+
+
+def test_logs_named_alike_in_two_roots_keep_their_own_options(tmp_path):
+    """A log's name is not unique across roots: grouped by it, one stream's
+    options would reach both logs, and the other's maintainer would publish
+    to an endpoint its log is not on — for good."""
+    from streamcast._maintain import Maintain
+    from streamcast._server import _supervisors
+
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    plain = litelink.new(tmp_path / "r1", "x", schema=schema)
+    keyed = litelink.new(tmp_path / "r2", "x", schema=schema)
+    try:
+        routes = {
+            "a": streamcast.Stream("a", log=plain),
+            "b": streamcast.Stream("b", log=keyed, s3_options=KEYS),
+        }
+        made = _supervisors(routes, Maintain())
+
+        envs = {
+            tuple(root.name for root, _name in sup.targets): sup._env  # noqa: SLF001
+            for sup in made
+        }
+        assert envs == {("r1",): {}, ("r2",): _process.environment(KEYS)}
+
+        retained = {
+            tuple(root.name for root, _name in sup.targets): sup._streams  # noqa: SLF001
+            for sup in made
+            if sup.role == "clean-published"
+        }
+        assert retained == {
+            ("r1",): [(tmp_path / "r1", "a")],
+            ("r2",): [(tmp_path / "r2", "b")],
+        }, "each stream's retention runs on its own log"
+    finally:
+        plain.close()
+        keyed.close()
