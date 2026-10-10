@@ -219,7 +219,7 @@ def load(
     store = _Local(Path(home), stream)
     found = current(store)
     if found is None:
-        return None, _metadata.load(home, stream), _manifest.load(home, stream)
+        return None, _metadata.plain(home, stream), _manifest.plain(home, stream)
 
     raw = store.read(found[1])
     if raw is None:  # pragma: no cover — a hint is written after its version

@@ -585,7 +585,21 @@ def path(root: str | os.PathLike[str], stream: str) -> Path:
 
 
 def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
-    """The stream's local metadata, or None if it has none yet."""
+    """The stream's local metadata, or None if it has none yet.
+
+    **The current version, not the plain copy** (`_versions.load`). The copy
+    is written after the hint, so a crash between the two leaves it a version
+    behind — and a commit built on it would undo the one it missed: `ensure`
+    at the next `serve` would publish it, taking a retention floor back off
+    the copy readers elsewhere resolve while the home still deletes below it.
+    """
+    from streamcast import _versions  # noqa: PLC0415 — it imports this module
+
+    return _versions.load(root, stream)[1]
+
+
+def plain(root: str | os.PathLike[str], stream: str) -> Metadata | None:
+    """The plain `<stream>.metadata.json`: a stream with no version yet."""
     try:
         text = path(root, stream).read_text()
     except FileNotFoundError:
@@ -801,6 +815,7 @@ __all__ = [
     "fetch",
     "load",
     "path",
+    "plain",
     "publish",
     "save",
     "single",

@@ -105,7 +105,15 @@ def publish(
 
 
 def load(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
-    """The local manifest, or None if the stream has no sealed log yet."""
+    """The local manifest, or None if the stream has no sealed log yet: the
+    one the current version names, as `_metadata.load` reads that version."""
+    from streamcast import _versions  # noqa: PLC0415 — it imports this module
+
+    return _versions.load(root, stream)[2]
+
+
+def plain(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
+    """The plain `<stream>.manifest.parquet`: a stream with no version yet."""
     target = Path(root) / name(stream)
     if not target.exists():
         return None
@@ -113,4 +121,15 @@ def load(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
     return pq.read_table(target)
 
 
-__all__ = ["KEY", "Term", "entry", "extend", "load", "name", "prune", "publish", "save"]
+__all__ = [
+    "KEY",
+    "Term",
+    "entry",
+    "extend",
+    "load",
+    "name",
+    "plain",
+    "prune",
+    "publish",
+    "save",
+]

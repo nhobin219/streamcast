@@ -515,3 +515,35 @@ class TestThePublishedCopy:
             assert lowest(stream.log) == 4
         finally:
             await stream.aclose()
+
+    async def test_a_restart_never_takes_the_floor_off_the_published_copy(
+        self, tmp_path, monkeypatch, s3, bucket
+    ):
+        """A crash between the home's hint and its plain copy leaves the copy
+        a version behind. `serve` syncs the published copy at start; built on
+        the stale plain copy, that would publish the stream without its floor
+        while the home still deletes below it, with no grace for those readers."""
+        stream = streamcast.Stream.new(
+            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        )
+        try:
+            await write(stream, monkeypatch, T0, [0, 1, 2])
+            await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
+            stream.ensure_metadata()
+            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
+            assert stream.log is not None
+            plain = home(tmp_path) / "t.metadata.json"
+            before = plain.read_bytes()
+            _retention.run(home(tmp_path), "t", stream.log, s3_options=s3, now=NOW)
+            plain.write_bytes(before)  # the crash, as it left the home
+
+            stream.ensure_metadata()  # what `serve` does at the restart
+
+            hint = _versions.hint_uri(home(tmp_path), "t", stream.log.published)
+            async with await streamcast.Stream.snapshot(hint, s3_options=s3) as snap:
+                assert snap.metadata.pending is not None, "the floor is still there"
+                read = await snap.scan(columns=["litelink_offset"]).read_all()
+
+            assert read.column("litelink_offset").to_pylist() == [4, 5, 6]
+        finally:
+            await stream.aclose()
