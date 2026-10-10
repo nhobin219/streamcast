@@ -9,6 +9,7 @@ replay" — the hole at the join invariant 4 exists to prevent.
 from __future__ import annotations
 
 import json
+import shutil
 from typing import Any
 
 import litelink
@@ -885,6 +886,8 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     _metadata.path(_metadata.home(tmp_path, "trades"), "trades").write_text(
         json.dumps(written)
     )
+    # From before the versions too: the plain file is all there is.
+    shutil.rmtree(_metadata.home(tmp_path, "trades") / "trades.metadata")
     again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
     assert again.log is not None
     while (

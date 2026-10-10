@@ -62,6 +62,8 @@ class TestTheMetadataRecordsTheSort:
             older = json.loads(path.read_text())
             del older["live_log"]["sort_by"]
             path.write_text(json.dumps(older))
+            # From before the versions too: the plain file is all there is.
+            shutil.rmtree(_metadata.home(tmp_path, "t") / "t.metadata")
             before = _metadata.load(_metadata.home(tmp_path, "t"), "t")
             assert before is not None
             assert before.live_log.sort_by is None
