@@ -20,6 +20,7 @@ import streamcast
 from streamcast import _log, _manifest, _metadata, _schema, _versions
 from streamcast._maintain import finish_retiring
 from streamcast._server import _supervisors
+from tests.conftest import current_json
 
 V1: dict[str, Any] = {
     "type": "object",
@@ -609,8 +610,10 @@ class TestTheManifest:
         metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
         assert metadata.manifest == "trades.manifest.parquet"
-        assert (_metadata.home(tmp_path, "trades") / metadata.manifest).exists(), (
-            "relative to the metadata file, so one pointer serves the published copy"
+        version = current_json(_metadata.home(tmp_path, "trades"), "trades")
+        directory = _metadata.home(tmp_path, "trades") / "trades.metadata"
+        assert (directory / version["manifest"]).exists(), (
+            "beside the version naming it, so one pointer serves the published copy"
         )
 
     async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
@@ -723,18 +726,13 @@ class TestTheManifest:
     async def test_migrating_to_the_same_shape_leaves_it_alone(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
-        before = (
-            (_metadata.home(tmp_path, "trades") / "trades.manifest.parquet")
-            .stat()
-            .st_mtime_ns
-        )
+        home = _metadata.home(tmp_path, "trades")
+        before = current_json(home, "trades")["manifest"]
 
         again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
         await again.aclose()
 
-        assert (
-            _metadata.home(tmp_path, "trades") / "trades.manifest.parquet"
-        ).stat().st_mtime_ns == before
+        assert current_json(home, "trades")["manifest"] == before
 
 
 def test_extending_replaces_a_row_rather_than_duplicating_it():
@@ -779,21 +777,22 @@ class TestThePublishedCopy:
         finally:
             await migrated.aclose()
 
-        published = _metadata.fetch(f"{bucket}/trades", "trades", s3)
+        published = _versions.fetch(f"{bucket}/trades", "trades", s3)
         assert published == _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
 
-        # And the manifest beside it, written before the metadata named it.
+        # And the manifest beside the version naming it, written before it.
+        import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from streamcast import _remote
-
-        filesystem, key = _remote._filesystem(
-            f"{bucket}/trades/trades.manifest.parquet", s3
+        store = _versions._Remote(f"{bucket}/trades", "trades", s3)  # noqa: SLF001
+        found = _versions.current(store)
+        assert found is not None
+        version = json.loads(store.read(found[1]) or b"")
+        raw = store.read(version["manifest"])
+        assert raw is not None
+        assert pq.read_table(pa.BufferReader(raw)) == _manifest.load(
+            _metadata.home(tmp_path, "trades"), "trades"
         )
-        with filesystem.open_input_file(key) as source:
-            assert pq.read_table(source) == _manifest.load(
-                _metadata.home(tmp_path, "trades"), "trades"
-            )
 
         # And the retired log is in its published table whole, not just its
         # settled prefix: nothing will push its tail later.
@@ -805,7 +804,7 @@ class TestThePublishedCopy:
     async def test_a_stream_that_never_migrated_has_no_metadata_there(
         self, tmp_path, s3, bucket
     ):
-        assert _metadata.fetch(bucket, "trades", s3) is None
+        assert _versions.fetch(bucket, "trades", s3) is None
 
 
 def test_the_metadata_round_trips():
@@ -876,9 +875,7 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     async with serve(stream, maintain=False):
         pass
 
-    written = json.loads(
-        _metadata.path(_metadata.home(tmp_path, "trades"), "trades").read_text()
-    )
+    written = current_json(_metadata.home(tmp_path, "trades"), "trades")
     written["streamcast_metadata"] = 1
     for key in ("published", "start_ts"):
         del written["live_log"][key]
@@ -898,9 +895,7 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     async with serve(again, maintain=False):
         pass
 
-    upgraded = json.loads(
-        _metadata.path(_metadata.home(tmp_path, "trades"), "trades").read_text()
-    )
+    upgraded = current_json(_metadata.home(tmp_path, "trades"), "trades")
     assert upgraded["streamcast_metadata"] == 2
     assert upgraded["live_log"]["published"].startswith("file://")
     assert upgraded["live_log"]["start_ts"] is not None

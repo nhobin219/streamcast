@@ -5,7 +5,7 @@ message after it is a three-element array — the offset, the time the server
 took the row, then the row itself. How another language reads a row, binary
 columns included, is `docs/SPEC.md` §2, "Reading a row in another language":
 
-    {"streamcast":4,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
+    {"streamcast":5,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
     [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0}]
 
 **The server's fields are POSITIONAL, and the row is untouched.** The offset
@@ -73,12 +73,14 @@ _DECODER: Final = msgspec.json.Decoder()
 #
 # There is no key name here on purpose. That is the point.
 
-VERSION: Final = 4
+VERSION: Final = 5
 """The protocol this build speaks. A greeting naming any other is refused.
 
 One number for the whole protocol rather than a feature list, because there is
 nothing yet to negotiate: a server and a subscriber that disagree about the
-frame layout disagree about all of it.
+frame layout disagree about all of it. 5 is 4 with `metadata` naming the
+hint rather than a plain copy of the current version (#124): a 4 client would
+read the hint as metadata, so it is refused instead.
 """
 
 EARLIEST: Final = 0
@@ -249,10 +251,13 @@ class Greeting:
     """
 
     metadata: str | None
-    """Where the stream's metadata file is, or None for a stream with no log.
+    """Where the hint naming the stream's current metadata version is, or None
+    for a stream with no log.
 
     What `Stream.snapshot` opens to read the stream's history without this
-    server — every log, where each is published, and what each holds. An
+    server — every log, where each is published, and what each holds. Every
+    version the hint names is immutable, so a reader that opens the stream
+    again — a live view every few seconds — reads only the hint (#123). An
     `s3://` URI beside the published tables, or for a stream without one a
     `file://` path on the server's machine, readable there and nowhere else.
     Credentials are the reader's own; a server that sent them would be
@@ -308,17 +313,6 @@ class Greeting:
     a greeting without the field, from a server that never grouped.
     """
 
-    metadata_hint: str | None = None
-    """Where the hint naming the stream's current metadata version is, or None.
-
-    What a reader opens rather than `metadata` (#123): every version the hint
-    names is immutable, so a reader that opens the stream again — a live
-    view every few seconds — reads only these few bytes. Beside `metadata`,
-    as an `s3://` or `file://` URI. None with no log, and from a server
-    from before the versions, whose readers open `metadata`. `metadata` is
-    the plain copy kept for those readers, and goes (#124).
-    """
-
 
 def greeting(
     *,
@@ -331,7 +325,6 @@ def greeting(
     metadata: str | None = None,
     stream_id: str | None = None,
     where: dict[str, object] | None = None,
-    metadata_hint: str | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
@@ -353,7 +346,6 @@ def greeting(
             "group_commit": group_commit,
             "schema": schema,
             "metadata": metadata,
-            "metadata_hint": metadata_hint,
             "stream_id": stream_id,
             "where": where,
         }
@@ -405,9 +397,6 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
         group_commit=bool(fields.get("group_commit", False)),
-        metadata_hint=hint
-        if isinstance(hint := fields.get("metadata_hint"), str)
-        else None,
     )
 
 

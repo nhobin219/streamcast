@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import litelink
@@ -18,6 +19,7 @@ import pytest
 import streamcast
 from streamcast import _log, _metadata, _versions
 from streamcast.asgi import asgi
+from tests.conftest import current_json
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -35,16 +37,21 @@ def row(i: int, **extra: object) -> dict[str, object]:
 
 
 def written(root, stream: str = "trades") -> dict[str, Any]:
-    return json.loads(_metadata.path(_metadata.home(root, stream), stream).read_text())
+    return current_json(_metadata.home(root, stream), stream)
+
+
+def hint(root, stream: str = "trades") -> Path:
+    home = _metadata.home(root, stream)
+    return home / _versions.directory(stream) / _versions.HINT
 
 
 class TestServeWritesIt:
     async def test_a_new_stream_gets_one_at_its_first_serve(self, tmp_path, serve):
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         try:
-            assert not _metadata.path(
-                _metadata.home(tmp_path, "trades"), "trades"
-            ).exists(), "Stream.new stays offline; the file is serve's to write"
+            assert not hint(tmp_path).exists(), (
+                "Stream.new stays offline; the file is serve's to write"
+            )
             async with serve(stream, maintain=False):
                 pass
 
@@ -117,13 +124,11 @@ class TestServeWritesIt:
         stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
         try:
             streams = asgi(stream, maintain=False, replicate=False)
-            assert not _metadata.path(
-                _metadata.home(tmp_path, "trades"), "trades"
-            ).exists(), "constructed, often at import: no I/O yet"
+            assert not hint(tmp_path).exists(), (
+                "constructed, often at import: no I/O yet"
+            )
             async with streams:
-                assert _metadata.path(
-                    _metadata.home(tmp_path, "trades"), "trades"
-                ).exists()
+                assert hint(tmp_path).exists()
         finally:
             await stream.aclose()
 
@@ -213,9 +218,10 @@ class TestThePublishedCopy:
         finally:
             await stream.aclose()
 
-        assert _metadata.fetch(bucket, "trades", s3) == _metadata.load(
-            tmp_path, "trades"
-        )
+        home = _metadata.home(tmp_path, "trades")
+        published = _versions.fetch(f"{bucket}/trades", "trades", s3)
+        assert published is not None
+        assert published == _metadata.load(home, "trades")
 
     async def test_an_unchanged_stream_is_not_uploaded_again(
         self, tmp_path, serve, s3, bucket, monkeypatch
@@ -231,13 +237,13 @@ class TestThePublishedCopy:
         )
         try:
             uploads: list[str] = []
-            original = _metadata.publish
+            original = _versions._Remote.write  # noqa: SLF001
             monkeypatch.setattr(
-                _metadata,
-                "publish",
-                lambda metadata, *a: (
-                    uploads.append(metadata.stream),
-                    original(metadata, *a),
+                _versions._Remote,  # noqa: SLF001
+                "write",
+                lambda store, name, data: (
+                    uploads.append(name),
+                    original(store, name, data),
                 ),
             )
             async with serve(stream, maintain=False, replicate=False):
@@ -264,7 +270,7 @@ class TestThePublishedCopy:
     async def test_a_missing_bucket_is_not_a_missing_copy(self, s3):
         # pyarrow reports both as "not found"; only the second means "none".
         with pytest.raises(FileNotFoundError, match="does not exist"):
-            _metadata.fetch(f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/p", "t", s3)
+            _versions.fetch(f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/p", "t", s3)
 
 
 def test_an_unknown_version_is_refused():

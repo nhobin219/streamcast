@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import LATEST, SnapshotUnavailable, _manifest, _metadata
+from streamcast import LATEST, SnapshotUnavailable, _manifest, _metadata, _versions
 
 V1: dict[str, Any] = {
     "type": "object",
@@ -74,10 +74,8 @@ class TestOneLog:
         await stream.send_many([row(i) for i in range(5, 8)])  # not published
         await served_once(stream, serve)
 
-        uri = _metadata.uri(
-            "trades",
-            litelink.open(_metadata.home(tmp_path, "trades"), "trades", read_only=True),
-        )
+        home = _metadata.home(tmp_path, "trades")
+        uri = (home / _versions.directory("trades") / _versions.HINT).resolve().as_uri()
         async with await streamcast.Stream.snapshot(uri) as snap:
             assert snap.end_offset == 6
             table = await snap.scan().read_all()
@@ -248,14 +246,19 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(migrated, serve)
         # The manifest says the first log held one row more than its table does.
-        manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
+        home = _metadata.home(tmp_path, "trades")
+        metadata = _metadata.load(home, "trades")
+        manifest = _manifest.load(home, "trades")
+        assert metadata is not None
         assert manifest is not None
         index = manifest.schema.get_field_index("record_count")
         counts = [count + 1 for count in manifest.column(index).to_pylist()]
-        _manifest.save(
-            _metadata.home(tmp_path, "trades"),
-            "trades",
-            manifest.set_column(index, "record_count", pa.array(counts, pa.int64())),
+        _versions.commit(
+            home,
+            metadata,
+            manifest=manifest.set_column(
+                index, "record_count", pa.array(counts, pa.int64())
+            ),
         )
 
         with pytest.raises(SnapshotUnavailable, match="holds 5 of the 6 rows"):
