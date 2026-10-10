@@ -501,15 +501,24 @@ platform litelink ships no binary for.
 
 ### Credentials
 
-**Both subprocesses resolve credentials from the environment**, because litelink never
-persists them — its model is the ordinary AWS chain at the point of use, so a profile,
-instance metadata or SSO all work untouched. An `S3Options` you passed to `litelink.new`
-does **not** reach them.
+**Both subprocesses get the stream's `S3Options`, through their environment.** litelink
+never persists credentials, so a child that opens a log by name has no other way to learn
+them. `serve` starts each child with the variables below set from the `S3Options` the
+`Stream` was given (`Stream.new(..., s3_options=)`), laid over the server's own
+environment. Explicit keys also remove an inherited `AWS_SESSION_TOKEN`, which belongs to
+other keys. A field you leave unset is left to that environment, so a profile, instance
+metadata or SSO all work untouched, and a stream with no `S3Options` resolves in its
+children exactly as it does in the server. The environment is used rather than the command
+line because only the process's own user can read it, while anyone on the box can see a
+command line in `ps`.
 
 ```bash
-AWS_ENDPOINT_URL=...  AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...   # the maintainer
-LITESTREAM_ACCESS_KEY_ID=...  LITESTREAM_SECRET_ACCESS_KEY=...           # litestream
+AWS_ENDPOINT_URL=...  AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...  AWS_REGION=...  # the maintainer
+LITESTREAM_ACCESS_KEY_ID=...  LITESTREAM_SECRET_ACCESS_KEY=...                         # litestream
 ```
+
+One environment holds one set of options, so streams given different `S3Options` are
+maintained, and replicated, by processes of their own: one per role per set.
 
 litestream reads its own pair rather than the AWS ones, which is why the config litelink
 generates carries no secret and is safe to commit. On AWS with an instance role, none of
@@ -1401,7 +1410,7 @@ process runs one pass an hour:
 What still has to be done is recorded in the metadata, so a restart between the two halves
 loses nothing. Logs are truncated in whole files, so a log can keep rows just below the
 floor until the file holding them goes, though no reader sees them. The maintainer writes
-the metadata with credentials from the environment, as litelink does.
+the metadata with the stream's `S3Options` (see [Credentials](#credentials)).
 
 ### Finishing a stream: `Stream.retire`
 

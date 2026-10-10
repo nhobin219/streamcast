@@ -78,7 +78,7 @@ from streamcast import _metadata, _retention
 from streamcast._process import popen
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 # Cadences per role, litelink's own (`examples/adsb/maintainer.py`). They
 # differ by orders of magnitude because the costs do: `seal` is an indexed
@@ -539,6 +539,7 @@ class Supervisor:
     """
 
     __slots__ = (
+        "_env",
         "_names",
         "_plan",
         "_process",
@@ -557,8 +558,12 @@ class Supervisor:
         role: str,
         retiring: Sequence[tuple[Path, str]] = (),
         streams: Sequence[tuple[Path, str]] = (),
+        env: Mapping[str, str | None] | None = None,
     ) -> None:
         self._targets = list(targets)
+        # The logs' `S3Options`, as the child's environment (`_process`): it
+        # opens the logs itself, by name, and has no other way to get them.
+        self._env = dict(env or {})
         self._retiring = list(retiring)
         self._streams = list(streams)
         self._names = f"{role}: " + ", ".join(sorted(name for _root, name in targets))
@@ -587,7 +592,7 @@ class Supervisor:
         # A fresh interpreter rather than a fork. A forked child would inherit
         # this process's event loop and its open SQLite connections, and
         # litelink's handles are not built to be used across a fork.
-        return popen(self._spawn_argv())
+        return popen(self._spawn_argv(), self._env)
 
     def _spawn_argv(self) -> list[str]:
         argv = [sys.executable, "-m", "streamcast", "maintain"]

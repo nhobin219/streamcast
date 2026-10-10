@@ -917,7 +917,7 @@ class Stream:
 
             if not finished and isinstance(log, litelink.WriteHandle):
                 if log.config.wal_replication:
-                    with _replicate.retiring(log):
+                    with _replicate.retiring(log, s3_options=s3_options):  # ty: ignore[invalid-argument-type]
                         log.retire()
                 else:
                     log.retire()
@@ -2500,7 +2500,7 @@ def _seal_and_succeed(
         msg = f"{old.name} must be opened as a writer to retire it"
         raise TypeError(msg)
     elif old.config.wal_replication:
-        with _replicate.retiring(old):
+        with _replicate.retiring(old, s3_options=s3_options):  # ty: ignore[invalid-argument-type]
             old.retire()
     else:
         old.retire()

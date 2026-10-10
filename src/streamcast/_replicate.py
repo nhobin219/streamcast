@@ -68,12 +68,12 @@ from typing import TYPE_CHECKING, Final
 
 from litelink._replication import litestream_binary
 
-from streamcast._process import popen
+from streamcast._process import environment, popen
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
-    from litelink import WriteHandle
+    from litelink import S3Options, WriteHandle
 
 # How often a supervisor looks at its child, and how often a standby retries
 # the lock. Polled rather than waited on: `asyncio.to_thread(process.wait)`
@@ -108,6 +108,7 @@ class Sidecar:
     __slots__ = (
         "_binary",
         "_config",
+        "_env",
         "_locks",
         "_logs",
         "_owned",
@@ -118,7 +119,12 @@ class Sidecar:
     )
 
     def __init__(
-        self, *, logs: Sequence[tuple[str, Path]], binary: str, workdir: Path
+        self,
+        *,
+        logs: Sequence[tuple[str, Path]],
+        binary: str,
+        workdir: Path,
+        env: Mapping[str, str | None] | None = None,
     ) -> None:
         """Takes built values and does no I/O. Construct through `new`.
 
@@ -135,9 +141,17 @@ class Sidecar:
         self._process: subprocess.Popen[bytes] | None = None
         self._stopping = False
         self._watch: asyncio.Task[None] | None = None
+        # The logs' credentials, as litestream's environment (`_process`):
+        # litelink writes none into the config, by design.
+        self._env = dict(env or {})
 
     @classmethod
-    def new(cls, logs: Sequence[WriteHandle], binary: str | None = None) -> Sidecar:
+    def new(
+        cls,
+        logs: Sequence[WriteHandle],
+        binary: str | None = None,
+        s3_options: S3Options | None = None,
+    ) -> Sidecar:
         """Write each log's config, resolve litestream, and build the sidecar.
 
         **Both ordering guarantees the initialiser used to carry are kept
@@ -175,6 +189,7 @@ class Sidecar:
             logs=written,
             binary=resolved,
             workdir=Path(tempfile.mkdtemp(prefix="streamcast-litestream-")),
+            env=environment(s3_options),
         )
 
     @property
@@ -263,7 +278,9 @@ class Sidecar:
         self._config.write_text("\n".join(lines) + "\n")
 
     def _spawn(self) -> subprocess.Popen[bytes]:
-        return popen([self._binary, "replicate", "-config", str(self._config)])
+        return popen(
+            [self._binary, "replicate", "-config", str(self._config)], self._env
+        )
 
     def start(self) -> None:
         self._watch = asyncio.create_task(self._supervise())
@@ -381,7 +398,9 @@ class Sidecar:
 
 
 @contextlib.contextmanager
-def retiring(log: WriteHandle, binary: str | None = None) -> Iterator[None]:
+def retiring(
+    log: WriteHandle, binary: str | None = None, s3_options: S3Options | None = None
+) -> Iterator[None]:
     """A litestream for `log` alone, for as long as its `retire()` runs.
 
     `retire()` on a log with `wal_replication` flushes the replica through
@@ -406,7 +425,8 @@ def retiring(log: WriteHandle, binary: str | None = None) -> Iterator[None]:
             raise RuntimeError(msg) from None
 
         process = popen(
-            [litestream_binary(binary), "replicate", "-config", str(config)]
+            [litestream_binary(binary), "replicate", "-config", str(config)],
+            environment(s3_options),
         )
         try:
             deadline = time.monotonic() + 30

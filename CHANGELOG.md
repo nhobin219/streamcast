@@ -24,6 +24,19 @@ there was nothing to have changed from. Everything above it is ordinary.
   pending half is recorded in the metadata and survives a restart. A catch-up
   below the floor is refused with a message naming retention.
 
+### Fixed
+
+- **A stream's `S3Options` reach `serve`'s subprocesses.** The maintainer
+  roles and the litestream sidecar open the logs themselves, and resolved
+  credentials only from their environment, so explicit options given to
+  `Stream.new` reached the server and nothing else. A stream on a MinIO or
+  rustfs endpoint, or with keys from a secrets manager, uploaded its metadata
+  but was never published, cleaned up or replicated. Each child is now
+  started with the stream's options as the `AWS_*` and `LITESTREAM_*`
+  variables, laid over the server's environment, and streams with different
+  options get processes of their own. A migration's or retirement's
+  litestream gets them too.
+
 ## 0.18.0 — 2026-10-10
 
 ### Added
