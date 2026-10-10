@@ -217,7 +217,13 @@ class Catcher:
             # cursor advanced past them.
             floor = await _refusing(first.floor())
             if floor is not None and floor > self.start:
-                raise _gap_below(self._name, self._uri, floor, self.start)
+                raise _gap_below(
+                    self._name,
+                    self._uri,
+                    floor,
+                    self.start,
+                    retained=first.metadata.retention is not None,
+                )
         except BaseException:
             await first.close()
             raise
@@ -261,7 +267,13 @@ class Catcher:
                             # `prepare` checks the tables' own extent; this is
                             # the backstop for retention moving the floor up
                             # between `prepare` and the read.
-                            raise _gap_below(self._name, self._uri, offset, requested)
+                            raise _gap_below(
+                                self._name,
+                                self._uri,
+                                offset,
+                                requested,
+                                retained=snap.metadata.retention is not None,
+                            )
 
                     # A row the filter refuses is skipped, not delivered, and
                     # still moves `start` past it — as the server's filter
@@ -376,7 +388,7 @@ def _nothing_above(name: str, uri: str, end: int, start: int) -> CatchUpUnavaila
 
 
 def _gap_below(
-    name: str, uri: str, earliest: int, requested: int
+    name: str, uri: str, earliest: int, requested: int, *, retained: bool = False
 ) -> CatchUpUnavailable:
     """The published tables do not go back as far as the offset being asked for.
 
@@ -385,7 +397,19 @@ def _gap_below(
     Raised rather than served from wherever the tables do start, because a
     consumer handed a stream that silently begins above where it asked has
     lost data and been told it recovered.
+
+    `retained` says the stream has a retention window (`Stream.retain`), so
+    the rows were dropped on purpose rather than lost.
     """
+    if retained:
+        return CatchUpUnavailable(
+            f"{name!r} asked to catch up from offset {requested}, but the stream "
+            f"starts at {earliest}: it keeps rows for its retention window, and "
+            f"the {earliest - requested} below that are past it and dropped "
+            f"(Stream.retain). Reconnect with offset=streamcast.EARLIEST, or with "
+            f"offset={earliest}, to carry on from what the stream keeps."
+        )
+
     return CatchUpUnavailable(
         f"{name!r} asked to catch up from offset {requested}, but its published "
         f"tables ({uri}) start at {earliest} — the {earliest - requested} rows "

@@ -17,6 +17,13 @@ by an orderly shutdown and nothing else.
 signal fires when that thread exits. Both supervisors spawn from the event
 loop's thread, which lives as long as the server. Spawning from a pool
 worker would kill the child whenever that worker was retired.
+
+**A stream's `S3Options` reach its children through their environment**
+(`environment`): the variables litelink's `S3Options.resolved()` and
+litestream both read. Not argv, which every user on the box can read in `ps`
+— a process's environment is its owner's alone. And not the litestream config
+either, which litelink keeps free of credentials so it can be copied around.
+One environment holds one set, so the server starts one child per set.
 """
 
 from __future__ import annotations
@@ -29,7 +36,9 @@ import sys
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+
+    from litelink import S3Options
 
 _PR_SET_PDEATHSIG: Final = 1
 
@@ -43,7 +52,46 @@ def _die_with(parent: int) -> None:  # pragma: no cover — runs between fork an
         os._exit(1)
 
 
-def popen(argv: Sequence[str]) -> subprocess.Popen[bytes]:
+_ENVIRONMENT: Final = {
+    "endpoint": "AWS_ENDPOINT_URL",
+    "access_key": "AWS_ACCESS_KEY_ID",
+    "secret_key": "AWS_SECRET_ACCESS_KEY",
+    "region": "AWS_REGION",
+}
+"""Where `S3Options.resolved()` reads each field it was not given."""
+
+
+def environment(s3_options: S3Options | None) -> dict[str, str | None]:
+    """The variables that give a child `s3_options`: each field set in them.
+
+    A field left unset is left to what the child inherits, as `resolved()`
+    leaves it to this process's own environment. Explicit keys are static
+    keys, so an inherited `AWS_SESSION_TOKEN` is removed (None) beside them:
+    paired with keys it was not issued for, it would fail every call.
+    """
+    if s3_options is None:
+        return {}
+
+    found: dict[str, str | None] = {
+        variable: value
+        for field, variable in _ENVIRONMENT.items()
+        if (value := getattr(s3_options, field)) is not None
+    }
+    if s3_options.access_key is not None:
+        found["AWS_SESSION_TOKEN"] = None
+        # litestream's own pair, which it reads before the AWS one: an
+        # inherited pair would otherwise win over these keys.
+        found["LITESTREAM_ACCESS_KEY_ID"] = s3_options.access_key
+
+    if s3_options.secret_key is not None:
+        found["LITESTREAM_SECRET_ACCESS_KEY"] = s3_options.secret_key
+
+    return found
+
+
+def popen(
+    argv: Sequence[str], env: Mapping[str, str | None] | None = None
+) -> subprocess.Popen[bytes]:
     """Start `argv` as a child the kernel kills when this process dies.
 
     **In a session of its own**, so a terminal's signals reach the server and
@@ -52,10 +100,25 @@ def popen(argv: Sequence[str]) -> subprocess.Popen[bytes]:
     it, and the maintainer, already in its last seal pass when the server's
     SIGTERM arrived, abandoned that pass mid-transaction. The server owns its
     children's lifetimes, and stops them itself.
+
+    `env` is laid over this process's environment (`environment`): a value
+    replaces the variable, and None removes it.
     """
     parent = os.getpid()
     return subprocess.Popen(  # noqa: S603
         argv,
+        env=None if not env else _overlaid(env),
         preexec_fn=(lambda: _die_with(parent)) if sys.platform == "linux" else None,  # noqa: PLW1509
         start_new_session=True,
     )
+
+
+def _overlaid(env: Mapping[str, str | None]) -> dict[str, str]:
+    merged = dict(os.environ)
+    for variable, value in env.items():
+        if value is None:
+            merged.pop(variable, None)
+        else:
+            merged[variable] = value
+
+    return merged

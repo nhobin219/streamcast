@@ -27,7 +27,9 @@ So listing the directory to keep the last `KEEP` versions is cheap.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import fcntl
 import io
 import os
 import re
@@ -35,13 +37,13 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
+import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
 from streamcast import _manifest, _metadata, _remote
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from litelink import S3Options
 
 HINT: Final = "version-hint.text"
@@ -193,6 +195,71 @@ def current(store: _Store) -> tuple[int, str] | None:
     return int(found.group(1)), name
 
 
+class Conflict(RuntimeError):
+    """The stream's metadata changed since the caller read it: read it again."""
+
+
+UNCHECKED: Final = object()
+"""`commit`'s `expected` when the caller checks nothing."""
+
+
+def load(
+    home: str | os.PathLike[str], stream: str
+) -> tuple[str | None, _metadata.Metadata | None, pa.Table | None]:
+    """The current version's name, its metadata and the manifest it names,
+    read from the versioned files — one consistent state.
+
+    **Not the plain copies**, which are written after the hint: a reader
+    between the two would pair the new version's name with the old version's
+    content, and a compare-and-swap on that name would let a stale commit
+    through. The metadata's `manifest` is given back as the plain name, which
+    is what a commit expects to be handed. A stream with no version yet is
+    read from its plain files, under the name None.
+    """
+    store = _Local(Path(home), stream)
+    found = current(store)
+    if found is None:
+        return None, _metadata.plain(home, stream), _manifest.plain(home, stream)
+
+    raw = store.read(found[1])
+    if raw is None:  # pragma: no cover — a hint is written after its version
+        msg = f"the hint names {found[1]}, which is not there"
+        raise FileNotFoundError(msg)
+
+    metadata = _metadata.Metadata.from_json(raw.decode())
+    manifest = None
+    if metadata.manifest is not None:
+        data = store.read(metadata.manifest)
+        manifest = None if data is None else pq.read_table(pa.BufferReader(data))
+        metadata = dataclasses.replace(metadata, manifest=_manifest.name(stream))
+
+    return found[1], metadata, manifest
+
+
+def version(home: str | os.PathLike[str], stream: str) -> str | None:
+    """The name of the stream's current version in its home, or None."""
+    found = current(_Local(Path(home), stream))
+    return None if found is None else found[1]
+
+
+@contextlib.contextmanager
+def _locked(home: Path, stream: str):  # noqa: ANN202
+    """Every local commit of a stream's metadata, one at a time on this box.
+
+    A commit reads the current version and writes the next; two at once —
+    a retention pass and a `Stream.retain`, say — would each build on what
+    the other is replacing. An `flock`, held for the write, beside the hint.
+    """
+    directory_ = home / directory(stream)
+    directory_.mkdir(parents=True, exist_ok=True)
+    with (directory_ / ".lock").open("a") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
 def commit(
     home: str | os.PathLike[str],
     metadata: _metadata.Metadata,
@@ -201,14 +268,61 @@ def commit(
     published: str | None = None,
     s3_options: S3Options | None = None,
     local: bool = True,
-) -> None:
+    expected: object = UNCHECKED,
+    published_first: bool = False,
+) -> str | None:
     """Write `metadata` as the stream's next version: in its home unless
     `local` is false, and under `published` when that is remote.
 
     `manifest` is a new manifest to go with it. Without one, the version names
     the manifest the current version does — carried over, since a manifest
     changes only with a sealed log.
+
+    **`expected` makes it a compare-and-swap**: the version name (`version`)
+    the caller read `metadata` from, or None for none. If the home's current
+    version is another by the time the lock is held, `Conflict` is raised and
+    nothing is written — the caller's `metadata` was built on a version that
+    is no longer current, and writing it would undo whatever replaced it.
+
+    **`published_first` writes the published copy before the home's**, so a
+    version in the home is one readers elsewhere were already shown: the home's
+    write follows only once the remote one has succeeded. Retention needs that,
+    because its grace is counted from the home's version (`_retention`).
     """
+    if not local:
+        return _commit(home, metadata, manifest, published, s3_options, local=False)
+
+    with _locked(Path(home), metadata.stream):
+        if expected is not UNCHECKED:
+            found = version(home, metadata.stream)
+            if found != expected:
+                msg = (
+                    f"stream {metadata.stream!r}'s metadata changed since it was "
+                    f"read ({expected} is now {found}); read it again"
+                )
+                raise Conflict(msg)
+
+        return _commit(
+            home,
+            metadata,
+            manifest,
+            published,
+            s3_options,
+            local=True,
+            published_first=published_first,
+        )
+
+
+def _commit(
+    home: str | os.PathLike[str],
+    metadata: _metadata.Metadata,
+    manifest: pa.Table | None,
+    published: str | None,
+    s3_options: S3Options | None,
+    *,
+    local: bool,
+    published_first: bool = False,
+) -> str | None:
     stores: list[_Store] = []
     if local:
         stores.append(_Local(Path(home), metadata.stream))
@@ -217,14 +331,16 @@ def commit(
         stores.append(_Remote(published, metadata.stream, s3_options))
 
     if not stores:
-        return
+        return None
 
     # One number for every store, so a version has one name wherever it is.
     latest = [found[0] for found in map(current, stores) if found is not None]
     tag = f"{max(latest, default=0) + 1:05d}-{uuid.uuid4().hex}"
     raw = None if manifest is None else _parquet(manifest)
-    for store in stores:
+    for store in reversed(stores) if published_first else stores:
         _write(store, metadata, tag, raw)
+
+    return f"{tag}.metadata.json"
 
 
 def _write(
@@ -335,10 +451,14 @@ def missing(
 __all__ = [
     "HINT",
     "KEEP",
+    "UNCHECKED",
+    "Conflict",
     "commit",
+    "load",
     "current",
     "directory",
     "hint_uri",
     "immutable",
     "missing",
+    "version",
 ]

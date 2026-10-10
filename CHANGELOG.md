@@ -7,6 +7,36 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **Time-based retention, off unless set** (#118).
+  `Stream.retain(name, *, root, max_age)` records a window in the stream's
+  metadata, and the maintainer drops rows older than it, by `streamcast_ts`,
+  from every log of the stream: the live one and every retired one, including
+  one that is now only a published table. The floor is the smallest offset
+  newer than the cutoff, so a clock that stepped backwards never drops newer
+  rows. Each pass has two halves: the floor is published first, in a new
+  metadata version that drops retired logs wholly past the window, so readers
+  stop seeing those rows at once; an hour later the files are deleted and
+  truncated, so a reader that resolved the stream before has finished. The
+  pending half is recorded in the metadata and survives a restart. A catch-up
+  below the floor is refused with a message naming retention.
+
+### Fixed
+
+- **A stream's `S3Options` reach `serve`'s subprocesses.** The maintainer
+  roles and the litestream sidecar open the logs themselves, and resolved
+  credentials only from their environment, so explicit options given to
+  `Stream.new` reached the server and nothing else. A stream on a MinIO or
+  rustfs endpoint, or with keys from a secrets manager, uploaded its metadata
+  but was never published, cleaned up or replicated. Each child is now
+  started with the stream's options as the `AWS_*` and `LITESTREAM_*`
+  variables, laid over the server's environment, and streams with different
+  options get processes of their own. A migration's or retirement's
+  litestream gets them too.
+
 ## 0.18.0 — 2026-10-10
 
 ### Added

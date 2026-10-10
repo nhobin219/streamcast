@@ -188,13 +188,12 @@ def s3() -> Iterator[litelink.S3Options]:
 
         pytest.skip(f"no S3 endpoint ({exc}); `just rustfs` starts one")
 
-    # **Into the environment, because the children read it from there.**
-    # `serve` starts two subprocesses — the maintainer and litestream — and
-    # neither is handed an `S3Options`: litelink deliberately never persists
-    # credentials, and its model is that they resolve from the ordinary AWS
-    # chain at the point of use. Without this the maintainer talks to real
-    # AWS and reports NO_SUCH_BUCKET about the local one, which is how this
-    # was first found.
+    # **Into the environment, for the tests that pass no `S3Options`** —
+    # most of them build their streams without any, and litelink resolves
+    # what it was not given from the ordinary AWS chain. A stream's own
+    # options reach `serve`'s subprocesses through their environment
+    # (`_process.environment`); `test_process.py` checks that with this
+    # environment cleared.
     #
     # litestream reads its own pair rather than the AWS ones, because the
     # config litelink generates is safe to commit and carries no secret.

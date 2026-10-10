@@ -152,6 +152,33 @@ class Retirement:
 
 
 @dataclass(frozen=True, slots=True)
+class Dropped:
+    """A log retention removed from the stream, to delete once readers' grace
+    has passed: its name and the prefix its published table is under."""
+
+    name: str
+    published: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Pending:
+    """A retention pass's first half, published and waiting out readers' grace.
+
+    The stream already starts at `floor` for every reader that resolves this
+    metadata, and the logs in `dropped` are already out of it. What is left —
+    deleting `dropped`, truncating what the floor cut through — waits until
+    `at` plus the grace, so a reader that resolved the version before finishes
+    first. Kept here so a restart between the halves finishes the second.
+    """
+
+    floor: int
+    """The offset the stream now starts at."""
+    at: int
+    """When the floor was published, in UTC microseconds."""
+    dropped: tuple[Dropped, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Metadata:
     """A stream's logs: the sealed ones, oldest first, and the live one."""
 
@@ -166,6 +193,11 @@ class Metadata:
     """Set by `Stream.retire`: the live log is finished and takes no rows.
 
     Not `retired`, which names the logs a migration sealed."""
+    retention: int | None = None
+    """How long the stream keeps a row, in microseconds of `streamcast_ts`; None
+    keeps everything, which is the default (`Stream.retain`)."""
+    pending: Pending | None = None
+    """A retention pass whose files are not deleted yet (`_retention`)."""
 
     @property
     def logs(self) -> tuple[Entry, ...]:
@@ -260,6 +292,21 @@ class Metadata:
                     "sort_by": _listed(live.sort_by),
                 },
                 "manifest": self.manifest,
+                **({} if self.retention is None else {"retention": self.retention}),
+                **(
+                    {}
+                    if self.pending is None
+                    else {
+                        "pending": {
+                            "floor": self.pending.floor,
+                            "at": self.pending.at,
+                            "dropped": [
+                                {"name": dropped.name, "published": dropped.published}
+                                for dropped in self.pending.dropped
+                            ],
+                        }
+                    }
+                ),
                 **(
                     {}
                     if self.retirement is None
@@ -334,6 +381,23 @@ class Metadata:
                     ),
                     start_ts=retired.get("start_ts"),
                     end_ts=retired.get("end_ts"),
+                )
+            ),
+            retention=(
+                None if fields.get("retention") is None else int(fields["retention"])
+            ),
+            pending=(
+                None
+                if (pending := fields.get("pending")) is None
+                else Pending(
+                    floor=int(pending["floor"]),
+                    at=int(pending["at"]),
+                    dropped=tuple(
+                        Dropped(
+                            name=dropped["name"], published=dropped.get("published")
+                        )
+                        for dropped in pending.get("dropped", ())
+                    ),
                 )
             ),
         )
@@ -521,7 +585,21 @@ def path(root: str | os.PathLike[str], stream: str) -> Path:
 
 
 def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
-    """The stream's local metadata, or None if it has none yet."""
+    """The stream's local metadata, or None if it has none yet.
+
+    **The current version, not the plain copy** (`_versions.load`). The copy
+    is written after the hint, so a crash between the two leaves it a version
+    behind — and a commit built on it would undo the one it missed: `ensure`
+    at the next `serve` would publish it, taking a retention floor back off
+    the copy readers elsewhere resolve while the home still deletes below it.
+    """
+    from streamcast import _versions  # noqa: PLC0415 — it imports this module
+
+    return _versions.load(root, stream)[1]
+
+
+def plain(root: str | os.PathLike[str], stream: str) -> Metadata | None:
+    """The plain `<stream>.metadata.json`: a stream with no version yet."""
     try:
         text = path(root, stream).read_text()
     except FileNotFoundError:
@@ -737,6 +815,7 @@ __all__ = [
     "fetch",
     "load",
     "path",
+    "plain",
     "publish",
     "save",
     "single",

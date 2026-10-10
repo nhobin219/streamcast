@@ -36,6 +36,7 @@ from websockets.http11 import Response
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
 from streamcast._maintain import ROLES, Maintain, Supervisor, stop
+from streamcast._process import environment
 from streamcast._protocol import Publish, parse_subscribe, refusal
 from streamcast._replicate import Sidecar
 from streamcast._stats import STATS_PATH, payload
@@ -230,6 +231,16 @@ def _supervisors(
         )
         raise ValueError(msg)
 
+    # **One environment per set of `S3Options`**, so a set is a group of its
+    # own: the children open the logs by name, and take the options from
+    # their environment (`_process.environment`) or not at all.
+    # By root and name, as the targets are: a name alone is not unique
+    # across roots, and another stream's options would win for both.
+    key = {
+        (Path(stream.log.root), stream.log.name): _credentials(stream)
+        for stream in routes.values()
+        if stream.log is not None
+    }
     groups = [
         [(Path(log.root), log.name)] for log in logs if log.name in plan.dedicated
     ]
@@ -243,18 +254,52 @@ def _supervisors(
     # to try. One `publish` process is handed them anyway, to retire through
     # litelink any that a migration before streamcast 0.10 only sealed — see
     # `_maintain.finish_retiring`.
-    if shared:
-        groups.append(shared)
+    shared_groups: dict[tuple[tuple[str, str | None], ...], list[tuple[Path, str]]] = {}
+    for target in shared:
+        shared_groups.setdefault(key[target], []).append(target)
 
-    retired = [target for stream in routes.values() for target in stream.retired]
-    # The shared set's publish role if there is one, else the first.
-    owner = len(groups) - 1 if shared else 0
+    dedicated = len(groups)
+    groups.extend(shared_groups.values())
+    environments = [key[group[0]] for group in groups]
+
+    # Each stream's retired logs to the publish role of a group with its
+    # options: the shared group with them if there is one, else the first
+    # with them, else — a retired stream whose options no served log has —
+    # the first.
+    owners: dict[tuple[tuple[str, str | None], ...], int] = {}
+    for index, wanted in enumerate(environments):
+        if index >= dedicated or wanted not in owners:
+            owners[wanted] = index
+
+    retiring: dict[int, list[tuple[Path, str]]] = {}
+    for stream in routes.values():
+        if stream.retired:
+            index = owners.get(_credentials(stream), 0)
+            retiring.setdefault(index, []).extend(stream.retired)
+
+    # **Retention runs where the stream's live log is cleaned up** — the
+    # slow, published-table role — with the handle its live log is truncated
+    # through. By the stream's name, which its metadata is filed under.
+    streams = {
+        (Path(stream.log.root), stream.log.name): (
+            Path(stream.log.root),
+            stream.name or stream.log.name,
+        )
+        for stream in routes.values()
+        if stream.log is not None and stream.retirement is None
+    }
     return [
         Supervisor(
             group,
             plan,
             role,
-            retiring=retired if (index == owner and role == "publish") else (),
+            retiring=retiring.get(index, []) if role == "publish" else (),
+            streams=(
+                [streams[target] for target in group if target in streams]
+                if role == "clean-published"
+                else ()
+            ),
+            env=dict(environments[index]),
         )
         for index, group in enumerate(groups)
         for role in ROLES
@@ -303,7 +348,25 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
 
         return []
 
-    return [Sidecar.new(shipping)] if shipping else []
+    # One per set of `S3Options`, as the maintainer is: litestream takes its
+    # credentials from its environment, and one environment holds one set.
+    by_options: dict[tuple[tuple[str, str | None], ...], list[Stream]] = {}
+    for stream in routes.values():
+        if stream.log is not None and stream.log in shipping:
+            by_options.setdefault(_credentials(stream), []).append(stream)
+
+    return [
+        Sidecar.new(
+            [stream.log for stream in streams if stream.log is not None],
+            s3_options=streams[0]._s3,  # noqa: SLF001
+        )
+        for streams in by_options.values()
+    ]
+
+
+def _credentials(stream: Stream) -> tuple[tuple[str, str | None], ...]:
+    """What a child of `stream` needs in its environment, as a grouping key."""
+    return tuple(sorted(environment(stream._s3).items()))  # noqa: SLF001
 
 
 def _info_hook(streams: list[Stream], path: str, chained: Any) -> Any:

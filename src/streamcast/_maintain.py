@@ -74,10 +74,11 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import litelink
 
+from streamcast import _metadata, _retention
 from streamcast._process import popen
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 # Cadences per role, litelink's own (`examples/adsb/maintainer.py`). They
 # differ by orders of magnitude because the costs do: `seal` is an indexed
@@ -294,12 +295,40 @@ def _flush_slot(role: str, flush_every: float) -> int:
     return math.floor((time.time() - lag) / flush_every)
 
 
+def retain(
+    streams: Sequence[tuple[Path, str]], logs: dict[str, litelink.WriteHandle]
+) -> None:
+    """One retention pass over each stream that has a window (`_retention`).
+
+    Per stream, and guarded per stream, as `sweep` guards per log. Only a
+    stream whose live log this process opened: that is the handle its live
+    log is truncated through. A held claim is a pass skipped, not an error.
+    """
+    for home, name in streams:
+        try:
+            metadata = _metadata.load(home, name)
+            live = None if metadata is None else logs.get(metadata.live_log.name)
+            if live is not None:
+                _retention.run(home, name, live)
+
+        except RuntimeError as exc:
+            print(f"[retain] {name}: skipped: {exc}", file=sys.stderr, flush=True)
+
+        except Exception as exc:  # noqa: BLE001 — see `sweep`
+            print(
+                f"[retain] {name}: retrying next pass: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
 def sweep(
     logs: Sequence[tuple[str, litelink.WriteHandle]],
     role: str,
     every: float,
     retiring: Sequence[tuple[Path, str]] = (),
     flush_every: float | None = None,
+    streams: Sequence[tuple[Path, str]] = (),
 ) -> None:
     """One role's passes over every log this process maintains, until SIGTERM.
 
@@ -326,6 +355,7 @@ def sweep(
     flushed = {name: _flush_slot(role, flushing) if flushing else 0 for name, _ in logs}
     pending = list(retiring)
     retry_at = time.monotonic()
+    retain_at = time.monotonic()
     span = 0.0 if role == "seal" else every / max(len(logs), 1)
     due = {
         name: time.monotonic() + index * span for index, (name, _) in enumerate(logs)
@@ -334,6 +364,10 @@ def sweep(
         if pending and time.monotonic() >= retry_at:
             retry_at = time.monotonic() + every
             pending = finish_retiring(pending)
+
+        if streams and time.monotonic() >= retain_at:
+            retain_at = time.monotonic() + _retention.EVERY
+            retain(streams, dict(logs))
 
         for name, log in logs:
             if time.monotonic() < due[name]:
@@ -426,6 +460,14 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="a stream's retired log to retire through litelink if it is not",
     )
+    parser.add_argument(
+        "--stream",
+        action="append",
+        nargs=2,
+        metavar=("HOME", "NAME"),
+        default=[],
+        help="a stream whose retention this process applies (clean-published)",
+    )
     parser.add_argument("--role", choices=list(ROLES), required=True)
     parser.add_argument("--every", type=float, required=True)
     parser.add_argument("--flush-every", type=float, default=None)
@@ -469,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.every,
                 [(Path(root), name) for root, name in args.retire],
                 args.flush_every,
+                [(Path(home), name) for home, name in args.stream],
             )
 
         on_exit(opened, args.role, args.flush_every)
@@ -496,11 +539,13 @@ class Supervisor:
     """
 
     __slots__ = (
+        "_env",
         "_names",
         "_plan",
         "_process",
         "_retiring",
         "_role",
+        "_streams",
         "_stopped",
         "_targets",
         "_watch",
@@ -512,9 +557,15 @@ class Supervisor:
         plan: Maintain,
         role: str,
         retiring: Sequence[tuple[Path, str]] = (),
+        streams: Sequence[tuple[Path, str]] = (),
+        env: Mapping[str, str | None] | None = None,
     ) -> None:
         self._targets = list(targets)
+        # The logs' `S3Options`, as the child's environment (`_process`): it
+        # opens the logs itself, by name, and has no other way to get them.
+        self._env = dict(env or {})
         self._retiring = list(retiring)
+        self._streams = list(streams)
         self._names = f"{role}: " + ", ".join(sorted(name for _root, name in targets))
         self._plan = plan
         self._role = role
@@ -541,7 +592,7 @@ class Supervisor:
         # A fresh interpreter rather than a fork. A forked child would inherit
         # this process's event loop and its open SQLite connections, and
         # litelink's handles are not built to be used across a fork.
-        return popen(self._spawn_argv())
+        return popen(self._spawn_argv(), self._env)
 
     def _spawn_argv(self) -> list[str]:
         argv = [sys.executable, "-m", "streamcast", "maintain"]
@@ -550,6 +601,9 @@ class Supervisor:
 
         for root, name in self._retiring:
             argv += ["--retire", str(root), name]
+
+        for home, name in self._streams:
+            argv += ["--stream", str(home), name]
 
         argv += ["--role", self._role, "--every", str(self._plan.every(self._role))]
         if self._plan.flush_every is not None and self._role in FLUSHED:

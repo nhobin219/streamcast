@@ -16,7 +16,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _log, _metadata
+from streamcast import _log, _metadata, _versions
 from streamcast.asgi import asgi
 
 SCHEMA: dict[str, Any] = {
@@ -165,7 +165,7 @@ class TestItNamesTheLiveLog:
 
         metadata = _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
         assert metadata is not None
-        _metadata.save(
+        _versions.commit(
             _metadata.home(tmp_path, "trades"),
             dataclasses.replace(
                 metadata,

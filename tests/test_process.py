@@ -1,4 +1,4 @@
-"""A server's children die with it, SIGKILL included.
+"""A server's children die with it, SIGKILL included, and get its S3 options.
 
 An orderly shutdown stops the maintainer and the sidecar itself; these tests
 cover the case it cannot, a server killed outright. Each runs a real server in
@@ -10,9 +10,11 @@ Linux only: `PR_SET_PDEATHSIG` has no portable equivalent (see `_process`).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ctypes
 import errno
+import json
 import os
 import select
 import signal
@@ -22,7 +24,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import litelink
+import pyarrow as pa
 import pytest
+
+import streamcast
+from streamcast import _process
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux only"
@@ -234,3 +241,203 @@ def test_a_terminals_ctrl_c_reaches_the_server_not_its_children(tmp_path):
     finally:
         server.kill()
         server.wait()
+
+
+# -- a stream's S3Options, in its children --------------------------------------
+
+KEYS = litelink.S3Options(
+    endpoint="http://store:9000", access_key="ak", secret_key="sk", region="r1"
+)
+
+
+def test_the_options_become_the_variables_the_children_read():
+    assert _process.environment(None) == {}
+    assert _process.environment(litelink.S3Options(region="r2")) == {
+        "AWS_REGION": "r2"
+    }, "what is not set is left to what the child inherits"
+    assert _process.environment(KEYS) == {
+        "AWS_ENDPOINT_URL": "http://store:9000",
+        "AWS_ACCESS_KEY_ID": "ak",
+        "AWS_SECRET_ACCESS_KEY": "sk",
+        "AWS_REGION": "r1",
+        "AWS_SESSION_TOKEN": None,
+        "LITESTREAM_ACCESS_KEY_ID": "ak",
+        "LITESTREAM_SECRET_ACCESS_KEY": "sk",
+    }
+
+
+def test_a_child_is_started_with_them(tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "for-other-keys")
+    monkeypatch.setenv("AWS_REGION", "inherited")
+    out = tmp_path / "env.json"
+    child = _process.popen(
+        [
+            sys.executable,
+            "-c",
+            f"import json, os; open({str(out)!r}, 'w').write(json.dumps(dict(os.environ)))",
+        ],
+        _process.environment(KEYS),
+    )
+    assert child.wait(timeout=10) == 0
+    seen = json.loads(out.read_text())
+
+    assert seen["AWS_ACCESS_KEY_ID"] == "ak"
+    assert seen["AWS_REGION"] == "r1", "explicit wins"
+    assert "AWS_SESSION_TOKEN" not in seen, "not paired with keys it is not for"
+    assert seen["PATH"] == os.environ["PATH"], "laid over, not instead of"
+
+
+def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
+    from streamcast._maintain import ROLES, Maintain
+    from streamcast._server import _supervisors
+
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    logs = [litelink.new(tmp_path / name, name, schema=schema) for name in "abc"]
+    try:
+        other = litelink.S3Options(endpoint="http://other:9000", access_key="ok")
+        routes = {
+            "a": streamcast.Stream("a", log=logs[0], s3_options=KEYS),
+            "b": streamcast.Stream("b", log=logs[1], s3_options=KEYS),
+            "c": streamcast.Stream("c", log=logs[2], s3_options=other),
+        }
+        made = _supervisors(routes, Maintain())
+
+        groups = {
+            tuple(sorted(name for _root, name in sup.targets)): sup._env  # noqa: SLF001
+            for sup in made
+        }
+        assert groups == {
+            ("a", "b"): _process.environment(KEYS),
+            ("c",): _process.environment(other),
+        }
+        assert len(made) == 2 * len(ROLES)
+    finally:
+        for log in logs:
+            log.close()
+
+
+@pytest.mark.replication
+async def test_the_maintainer_publishes_with_the_streams_own_options(
+    tmp_path, s3, bucket, monkeypatch
+):
+    """Nothing in the environment: the maintainer, which opens the log itself
+    in a process of its own, has only what the stream was given. Without it,
+    it publishes to real AWS, or nowhere. The publish role alone, over rows
+    already sealed: what `serve` groups is `_supervisors`' to test."""
+    from streamcast._maintain import Maintain, Supervisor
+
+    for name in (
+        "AWS_ENDPOINT_URL",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "LITESTREAM_ACCESS_KEY_ID",
+        "LITESTREAM_SECRET_ACCESS_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    log = litelink.new(
+        tmp_path,
+        "t",
+        schema=pa.schema([pa.field("n", pa.int64(), nullable=False)]),
+        published=bucket,
+        s3_options=s3,
+    )
+    try:
+        log.extend([{"n": n} for n in range(3)])
+        while log.seal(flush=True) is not None:
+            pass
+
+        publisher = Supervisor(
+            [(Path(log.root), log.name)],
+            Maintain(publish_every=0.05, flush_every=0.2),
+            "publish",
+            env=_process.environment(s3),
+        )
+        publisher.start()
+        try:
+            deadline = time.monotonic() + 10
+            while log.published_through() < 3:
+                assert time.monotonic() < deadline, "the maintainer never published"
+                await asyncio.sleep(0.05)
+        finally:
+            publisher.terminate()
+            await publisher.wait_closed()
+    finally:
+        log.close()
+
+
+@pytest.mark.replication
+def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
+    tmp_path, s3, bucket
+):
+    from streamcast._server import _sidecars
+
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    logs = [
+        litelink.new(
+            tmp_path,
+            name,
+            schema=schema,
+            config=litelink.LogConfig(wal_replication=True),
+            published=bucket,
+            s3_options=s3,
+        )
+        for name in "abc"
+    ]
+    other = litelink.S3Options(endpoint=s3.endpoint, access_key="ok", secret_key="os")
+    try:
+        routes = {
+            "a": streamcast.Stream("a", log=logs[0], s3_options=s3),
+            "b": streamcast.Stream("b", log=logs[1], s3_options=s3),
+            "c": streamcast.Stream("c", log=logs[2], s3_options=other),
+        }
+        made = _sidecars(routes, replicate=True)
+
+        assert {
+            tuple(sorted(name for name, _config in sidecar._logs)): sidecar._env  # noqa: SLF001
+            for sidecar in made
+        } == {
+            ("a", "b"): _process.environment(s3),
+            ("c",): _process.environment(other),
+        }
+    finally:
+        for log in logs:
+            log.close()
+
+
+def test_logs_named_alike_in_two_roots_keep_their_own_options(tmp_path):
+    """A log's name is not unique across roots: grouped by it, one stream's
+    options would reach both logs, and the other's maintainer would publish
+    to an endpoint its log is not on — for good."""
+    from streamcast._maintain import Maintain
+    from streamcast._server import _supervisors
+
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    plain = litelink.new(tmp_path / "r1", "x", schema=schema)
+    keyed = litelink.new(tmp_path / "r2", "x", schema=schema)
+    try:
+        routes = {
+            "a": streamcast.Stream("a", log=plain),
+            "b": streamcast.Stream("b", log=keyed, s3_options=KEYS),
+        }
+        made = _supervisors(routes, Maintain())
+
+        envs = {
+            tuple(root.name for root, _name in sup.targets): sup._env  # noqa: SLF001
+            for sup in made
+        }
+        assert envs == {("r1",): {}, ("r2",): _process.environment(KEYS)}
+
+        retained = {
+            tuple(root.name for root, _name in sup.targets): sup._streams  # noqa: SLF001
+            for sup in made
+            if sup.role == "clean-published"
+        }
+        assert retained == {
+            ("r1",): [(tmp_path / "r1", "a")],
+            ("r2",): [(tmp_path / "r2", "b")],
+        }, "each stream's retention runs on its own log"
+    finally:
+        plain.close()
+        keyed.close()

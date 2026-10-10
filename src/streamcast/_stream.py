@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import dataclasses
 import time
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -916,7 +917,7 @@ class Stream:
 
             if not finished and isinstance(log, litelink.WriteHandle):
                 if log.config.wal_replication:
-                    with _replicate.retiring(log):
+                    with _replicate.retiring(log, s3_options=s3_options):  # ty: ignore[invalid-argument-type]
                         log.retire()
                 else:
                     log.retire()
@@ -958,6 +959,75 @@ class Stream:
         )
 
         return retirement
+
+    @classmethod
+    def retain(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        max_age: timedelta | None,
+        s3_options: object | None = None,
+    ) -> None:
+        """Keep a stream's rows for `max_age`, or for good with None, the default.
+
+            streamcast.Stream.retain("trades", root="data", max_age=timedelta(days=30))
+
+        **Off unless set: nothing ever leaves a stream that was not told to
+        let it.** Set, a row whose `streamcast_ts` is older than `max_age`
+        leaves every log of the stream — the live one and every retired one,
+        here or only in its published table — on the maintainer's next pass
+        and those after (`_retention`). Retired logs wholly older go entirely.
+
+        Readers are given a grace (`_retention.GRACE`, an hour): first the
+        stream's metadata says it starts at the new floor, and only after the
+        grace are the files deleted, so a reader that resolved the stream
+        before finishes. A subscriber or catch-up asking below the floor is
+        refused; a snapshot starts there.
+
+        Recorded in the stream's metadata, so it holds wherever the stream is
+        served and needs no restart: an explicit call, as `migrate` and
+        `retire` are, so two servers cannot keep different windows. A build
+        from before this one ignores the setting, and one that rewrites the
+        metadata drops it — set it again after running one.
+        """
+        if max_age is not None and max_age <= timedelta(0):
+            msg = f"max_age={max_age}: a positive window, or None to keep everything"
+            raise ValueError(msg)
+
+        root = _metadata.home(root, name)
+        retention = None if max_age is None else int(max_age.total_seconds() * 1e6)
+        # Over the version read, or not at all: a retention pass committing
+        # meanwhile would otherwise have its floor undone, and this retried
+        # against what it wrote (`_versions.commit`'s `expected`).
+        for attempt in range(5):
+            # From the version's own file, so it matches the name compared.
+            read, metadata, _manifest_read = _versions.load(root, name)
+            if metadata is None:
+                # Not served yet, so no metadata: what serve would write.
+                try:
+                    log = litelink.open(root, name, read_only=True)
+                except FileNotFoundError:
+                    msg = f"there is no stream {name!r} at {root} to set retention on"
+                    raise FileNotFoundError(msg) from None
+
+                with log:
+                    metadata = _metadata.single(name, log)
+
+            try:
+                _versions.commit(
+                    root,
+                    dataclasses.replace(metadata, retention=retention),
+                    published=metadata.live_log.published,
+                    s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+                    expected=read,
+                )
+            except _versions.Conflict:
+                if attempt == 4:
+                    raise
+
+            else:
+                return
 
     @classmethod
     def ingest(
@@ -2430,7 +2500,7 @@ def _seal_and_succeed(
         msg = f"{old.name} must be opened as a writer to retire it"
         raise TypeError(msg)
     elif old.config.wal_replication:
-        with _replicate.retiring(old):
+        with _replicate.retiring(old, s3_options=s3_options):  # ty: ignore[invalid-argument-type]
             old.retire()
     else:
         old.retire()
