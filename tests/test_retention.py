@@ -400,3 +400,63 @@ class TestRaces:
             assert after.pending is None
         finally:
             await stream.aclose()
+
+    async def test_a_pass_reads_the_version_it_compares_not_the_plain_copy(
+        self, tmp_path, monkeypatch
+    ):
+        """The plain copy is written after the hint: between the two — or
+        after a crash there — it is the old version under the new one's name.
+        A pass built on it would put the old window back over the new."""
+        stream = await one_log(tmp_path, monkeypatch)
+        try:
+            plain = home(tmp_path) / "t.metadata.json"
+            before = plain.read_bytes()
+            streamcast.Stream.retain("t", root=tmp_path, max_age=timedelta(days=30))
+            plain.write_bytes(before)  # as if the copy had not been written yet
+
+            assert stream.log is not None
+            _retention.run(home(tmp_path), "t", stream.log, now=NOW)
+
+            _version, current, _manifest = _versions.load(home(tmp_path), "t")
+            assert current is not None
+            assert current.retention == 30 * DAY, "the operator's window stands"
+        finally:
+            await stream.aclose()
+
+
+class TestAFailedSecondHalf:
+    async def test_the_cut_log_stays_readable_when_the_last_commit_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """Between `finish`'s truncate and its commit — a conflict, a crash —
+        the log is short; it must not read as published short meanwhile."""
+        stream = streamcast.Stream.new(
+            "t",
+            root=tmp_path,
+            schema=SCHEMA,
+            config=litelink.LogConfig(target_compact_size=256),
+        )
+        await write(stream, monkeypatch, T0, [0, 1, 2])
+        await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
+        stream.ensure_metadata()
+        await stream.aclose()
+        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        try:
+            await write(migrated, monkeypatch, T0 + 2 * DAY, [6])
+            migrated.ensure_metadata()
+            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            assert migrated.log is not None
+            _retention.run(home(tmp_path), "t", migrated.log, now=NOW)
+
+            def conflicted(*_args, **_kwargs):  # noqa: ANN202
+                msg = "the metadata changed since it was read"
+                raise _versions.Conflict(msg)
+
+            monkeypatch.setattr(_versions, "commit", conflicted)
+            with pytest.raises(_versions.Conflict):
+                _retention.run(home(tmp_path), "t", migrated.log, now=NOW + GRACE)
+
+            monkeypatch.undo()
+            assert await offsets(tmp_path) == [4, 5, 6, 7]
+        finally:
+            await migrated.aclose()

@@ -77,18 +77,23 @@ def run(
 ) -> Metadata | None:
     """One pass: the second half if one is due, else the first if there is
     anything to drop. Returns the metadata it committed, or None."""
-    # The version read, so each half commits only over it: a `Stream.retain`
-    # or a migration that committed meanwhile makes this pass a `Conflict`,
-    # retried on the next, rather than undone by it.
-    read = _versions.version(home, stream)
-    metadata = _metadata.load(home, stream)
+    # The version read, from its own file, so each half commits only over it:
+    # a `Stream.retain` or a migration that committed meanwhile makes this
+    # pass a `Conflict`, retried on the next, rather than undone by it.
+    read, metadata, manifest = _versions.load(home, stream)
     if metadata is None:
         return None
 
     at = now_us() if now is None else now
     if metadata.pending is not None:
         return finish(
-            home, metadata, live, s3_options=s3_options, now=at, expected=read
+            home,
+            metadata,
+            live,
+            manifest=manifest,
+            s3_options=s3_options,
+            now=at,
+            expected=read,
         )
 
     if metadata.retention is None:
@@ -98,6 +103,7 @@ def run(
         home,
         metadata,
         newest=_newest(live, s3_options),
+        manifest=manifest,
         s3_options=s3_options,
         now=at,
         expected=read,
@@ -146,11 +152,15 @@ def begin(
     metadata: Metadata,
     *,
     newest: Callable[[Entry, int], int | None],
+    manifest: pa.Table | None = None,
     s3_options: S3Options | None = None,
     now: int,
     expected: object = _versions.UNCHECKED,
 ) -> Metadata | None:
-    """The first half: publish the stream starting at its floor."""
+    """The first half: publish the stream starting at its floor.
+
+    `manifest` is the one the version `metadata` was read from names.
+    """
     assert metadata.retention is not None  # the caller checked
     moved = floor(metadata, now - metadata.retention, newest)
     if moved is None:
@@ -166,12 +176,23 @@ def begin(
     else:
         live = dataclasses.replace(live, start_offset=max(live.start_offset, at))
 
-    manifest = _manifest.load(home, metadata.stream)
     if manifest is not None:
         for entry in dropped:
             manifest = litelink.manifest.without(
                 manifest, entry.name, key=_manifest.KEY
             )
+
+        if (
+            kept
+            and kept[0].start_offset > metadata.sealed_logs[len(dropped)].start_offset
+        ):
+            # **The log the floor cuts through stops being counted now**, before
+            # its truncate rather than after: a reader checks a retired log's
+            # table against its count to catch one published short, and once
+            # truncated it is short by design. Unknown, the check is skipped;
+            # `finish` counts it again. Otherwise every read of it would fail
+            # between the truncate and the commit that recounts it.
+            manifest = _counted(manifest, kept[0].name, None)
 
     moved_to = dataclasses.replace(
         metadata,
@@ -190,7 +211,7 @@ def begin(
     _versions.commit(
         home,
         moved_to,
-        manifest=manifest if dropped and kept else None,
+        manifest=manifest if kept else None,
         published=live.published,
         s3_options=s3_options,
         expected=expected,
@@ -203,11 +224,15 @@ def finish(
     metadata: Metadata,
     live: WriteHandle,
     *,
+    manifest: pa.Table | None = None,
     s3_options: S3Options | None = None,
     now: int,
     expected: object = _versions.UNCHECKED,
 ) -> Metadata | None:
-    """The second half, once readers have had their grace: delete, truncate."""
+    """The second half, once readers have had their grace: delete, truncate.
+
+    `manifest` is the one the version `metadata` was read from names.
+    """
     pending = metadata.pending
     assert pending is not None  # the caller checked
     if now < pending.at + _us(GRACE):
@@ -223,22 +248,43 @@ def finish(
                 root=home if local.is_dir() else None,
             )
 
-    manifest = None
+    recounted = None
     if metadata.sealed_logs:
         straddled = metadata.sealed_logs[0]
         if straddled.published is not None:
+            if manifest is not None and _count(manifest, straddled.name) is not None:
+                # Counted again since `begin` — a migration while this was
+                # pending sealed the log the floor is in, with its count. Not
+                # counted while it is truncated (see `begin`), so a version
+                # without the count is committed first, and the rest of this
+                # pass builds on that one.
+                manifest = _counted(manifest, straddled.name, None)
+                expected = _versions.commit(
+                    home,
+                    metadata,
+                    manifest=manifest,
+                    published=metadata.live_log.published,
+                    s3_options=s3_options,
+                    expected=expected,
+                )
+
             litelink.truncate(
                 straddled.published,
                 straddled.name,
                 below=pending.floor,
                 s3_options=s3_options,
             )
-            # **Its manifest row counted the rows it had.** A reader checks a
-            # retired log's table against that count, to catch one published
-            # short — and a truncated table is short by design. The row is
-            # corrected to what the table now holds, or every read of the log
-            # would be refused, the rows inside the window too.
-            manifest = _recounted(home, metadata, straddled, s3_options)
+            if manifest is not None and straddled.name in _names(manifest):
+                # Counted again, as what the table holds now.
+                opened = _published.Table.open(
+                    straddled.published, straddled.name, s3_options
+                )
+                try:
+                    count = opened.record_count
+                finally:
+                    opened.close()
+
+                recounted = _counted(manifest, straddled.name, count)
 
     else:
         # The floor is in the live log. A held claim raises: the record stays,
@@ -249,7 +295,7 @@ def finish(
     _versions.commit(
         home,
         done,
-        manifest=manifest,
+        manifest=recounted,
         published=metadata.live_log.published,
         s3_options=s3_options,
         expected=expected,
@@ -257,26 +303,28 @@ def finish(
     return done
 
 
-def _recounted(
-    home: str | Path, metadata: Metadata, entry: Entry, s3_options: S3Options | None
-) -> pa.Table | None:
-    """The stream's manifest with `entry`'s row counting what its table holds."""
-    manifest = _manifest.load(home, metadata.stream)
-    if manifest is None or entry.published is None:
+def _names(manifest: pa.Table) -> list[str]:
+    return manifest.column(_manifest.KEY).to_pylist()
+
+
+def _count(manifest: pa.Table, name: str) -> int | None:
+    """`name`'s row count in `manifest`, or None if it has no row or no count."""
+    names = _names(manifest)
+    if name not in names:
         return None
 
-    names = manifest.column(_manifest.KEY).to_pylist()
-    if entry.name not in names:
-        return None
+    return manifest.column("record_count")[names.index(name)].as_py()
 
-    opened = _published.Table.open(entry.published, entry.name, s3_options)
-    try:
-        count = opened.record_count
-    finally:
-        opened.close()
+
+def _counted(manifest: pa.Table, name: str, count: int | None) -> pa.Table:
+    """`manifest` with `name`'s row counting `count` — None for unknown, which
+    a reader's check for a table published short skips."""
+    names = _names(manifest)
+    if name not in names:
+        return manifest
 
     counts = manifest.column("record_count").to_pylist()
-    counts[names.index(entry.name)] = count
+    counts[names.index(name)] = count
     index = manifest.schema.get_field_index("record_count")
     return manifest.set_column(
         index, manifest.schema.field(index), pa.array(counts, pa.int64())

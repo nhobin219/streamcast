@@ -1001,8 +1001,8 @@ class Stream:
         # meanwhile would otherwise have its floor undone, and this retried
         # against what it wrote (`_versions.commit`'s `expected`).
         for attempt in range(5):
-            read = _versions.version(root, name)
-            metadata = _metadata.load(root, name)
+            # From the version's own file, so it matches the name compared.
+            read, metadata, _manifest_read = _versions.load(root, name)
             if metadata is None:
                 # Not served yet, so no metadata: what serve would write.
                 try:
