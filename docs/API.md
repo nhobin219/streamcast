@@ -1394,6 +1394,9 @@ process runs one pass an hour:
    the retired log the floor cuts through is truncated, and the live log is truncated.
    Readers that resolved the stream before the floor moved get that hour to finish, because
    litelink deletes a retired log's files immediately.
+   If the metadata's published copy on S3 is behind the local one, because a write there
+   failed, it is published again and the hour starts over, since readers elsewhere read
+   that copy.
 
 What still has to be done is recorded in the metadata, so a restart between the two halves
 loses nothing. Logs are truncated in whole files, so a log can keep rows just below the

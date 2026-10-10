@@ -242,6 +242,22 @@ def version(home: str | os.PathLike[str], stream: str) -> str | None:
     return None if found is None else found[1]
 
 
+def behind(
+    home: str | os.PathLike[str],
+    stream: str,
+    published: str | None,
+    s3_options: S3Options | None = None,
+) -> bool:
+    """Whether the copy under a remote `published` names another version than
+    the home does — a commit whose remote write failed after its local one.
+    A version has one name in every store, so a name is enough."""
+    if published is None or not _metadata.remote(published):
+        return False
+
+    remote = current(_Remote(published, stream, s3_options))
+    return (None if remote is None else remote[1]) != version(home, stream)
+
+
 @contextlib.contextmanager
 def _locked(home: Path, stream: str):  # noqa: ANN202
     """Every local commit of a stream's metadata, one at a time on this box.
@@ -438,6 +454,7 @@ __all__ = [
     "KEEP",
     "UNCHECKED",
     "Conflict",
+    "behind",
     "commit",
     "load",
     "current",

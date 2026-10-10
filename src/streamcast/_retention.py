@@ -26,7 +26,9 @@ fails rather than answering wrong, but it fails. So:
    retired log the floor cut through, and truncates the live log — whose own
    deletes wait out litelink's snapshot retention besides — then clears the
    record. Files are whole, so a log may keep rows just below the floor until
-   the file holding them goes; no reader sees them.
+   the file holding them goes; no reader sees them. If the published copy of the
+   metadata is not the version the home has, `finish` publishes it and starts
+   the grace over instead.
 
 One pass does one half: `finish` when a record is due, else `begin`. A held
 claim on the live log raises `RuntimeError`, and the record stays for the next
@@ -237,6 +239,27 @@ def finish(
     assert pending is not None  # the caller checked
     if now < pending.at + _us(GRACE):
         return None
+
+    published = metadata.live_log.published
+    if _versions.behind(home, metadata.stream, published, s3_options):
+        # **The grace is counted from when readers could see the floor, and
+        # a reader elsewhere sees the published copy.** A commit writes the
+        # home first: one whose remote write failed — `begin`'s, say — left
+        # that copy naming the logs this would delete, so its readers have
+        # had no grace at all. Published again, with the grace started over;
+        # nothing is deleted until a later pass finds the copy current.
+        held = dataclasses.replace(
+            metadata, pending=dataclasses.replace(pending, at=now)
+        )
+        _versions.commit(
+            home,
+            held,
+            manifest=manifest,
+            published=published,
+            s3_options=s3_options,
+            expected=expected,
+        )
+        return held
 
     for dropped in pending.dropped:
         local = Path(home) / dropped.name

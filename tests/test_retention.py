@@ -460,3 +460,55 @@ class TestAFailedSecondHalf:
             assert await offsets(tmp_path) == [4, 5, 6, 7]
         finally:
             await migrated.aclose()
+
+
+@pytest.mark.replication
+class TestThePublishedCopy:
+    async def test_nothing_is_deleted_until_readers_elsewhere_saw_the_floor(
+        self, tmp_path, monkeypatch, s3, bucket
+    ):
+        """A reader on another machine resolves the copy under the published
+        prefix. If `begin`'s write there failed, that copy still names the old
+        rows, and its readers' grace has not started: `finish` publishes the
+        floor and waits again, rather than deleting under them."""
+        stream = streamcast.Stream.new(
+            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        )
+        try:
+            await write(stream, monkeypatch, T0, [0, 1, 2])
+            await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
+            stream.ensure_metadata()
+            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
+            assert stream.log is not None
+            published = stream.log.published
+
+            def unreachable(*_args, **_kwargs):  # noqa: ANN202
+                msg = "S3 did not answer"
+                raise OSError(msg)
+
+            with monkeypatch.context() as patched:
+                patched.setattr(_versions._Remote, "write", unreachable)  # noqa: SLF001
+                with pytest.raises(OSError, match="did not answer"):
+                    _retention.run(
+                        home(tmp_path), "t", stream.log, s3_options=s3, now=NOW
+                    )
+
+            assert _versions.behind(home(tmp_path), "t", published, s3)
+
+            held = _retention.run(
+                home(tmp_path), "t", stream.log, s3_options=s3, now=NOW + GRACE
+            )
+            assert held is not None
+            assert held.pending is not None
+            assert held.pending.at == NOW + GRACE, "the grace starts over"
+            assert not _versions.behind(home(tmp_path), "t", published, s3)
+            assert lowest(stream.log) == 1, "nothing deleted yet"
+
+            done = _retention.run(
+                home(tmp_path), "t", stream.log, s3_options=s3, now=NOW + 2 * GRACE
+            )
+            assert done is not None
+            assert done.pending is None
+            assert lowest(stream.log) == 4
+        finally:
+            await stream.aclose()
