@@ -700,7 +700,7 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.12.3"
+version = "0.12.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "duckdb" },
@@ -708,12 +708,12 @@ dependencies = [
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3c/f9/1731a52c6fd6be50f1fb26af1faa516f7129c7900dbd5351950514e8fbd5/litelink-0.12.3.tar.gz", hash = "sha256:6fd58747218736684d11d0a528a8b4de04ca4808fd498690129fce86196409f3", size = 359587, upload-time = "2026-10-10T01:22:27.879Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8b/ff/2b6b8c6a553410d27efae46f5e253ab759b49faa358abfe88da1e6031cad/litelink-0.12.4.tar.gz", hash = "sha256:db9cb5aaa1508c9349608e5e7ad2350a9a0b6f18c41fb77bddcc66f95d61fc46", size = 359931, upload-time = "2026-10-10T05:59:48.426Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/2a/f6bb6e020d278c00ea492e166f2116760cf8c1fa599d726607a81479d320/litelink-0.12.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:221653c0d70a78523aca623006ca2d9f91d274fa9d16c56df92fd4b98079f661", size = 44242404, upload-time = "2026-10-10T01:22:12.265Z" },
-    { url = "https://files.pythonhosted.org/packages/06/be/afead687829c5ad558c4e6c379ec4426dcfd62d74a6272175044bc316d72/litelink-0.12.3-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:024463d26a8ed14fb26ca6086e04d9c63ae8cdd5481fe2a8380f11b77e0aa6f5", size = 46963995, upload-time = "2026-10-10T01:22:15.556Z" },
-    { url = "https://files.pythonhosted.org/packages/65/2b/1e44e9f60f6a551222a9628bf40fe9c79b74d955611edbcc3ed78b0ab040/litelink-0.12.3-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4e1e76da8e7c4faa6a718f49557144ad552c9667da8d2346e41798f818033966", size = 56113006, upload-time = "2026-10-10T01:22:18.892Z" },
-    { url = "https://files.pythonhosted.org/packages/8d/43/44b8ea5cda2a8133ffada7a29dda7a9a981d2a8833fd601f36a4f03f364c/litelink-0.12.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:afd4e7b631c81483ebb11e6fc1ebc791f7a16607413f081a0264272ca4df521d", size = 60011009, upload-time = "2026-10-10T01:22:22.834Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/b8/23f4a8ec60e28480d34b7f2f164921302d63a51d0b215d66a47e89d72372/litelink-0.12.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b932c558ae8e73f2a0015a11d91ebeaba742150c69b0245ff28bc09799f0027c", size = 44242745, upload-time = "2026-10-10T05:59:31.548Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/7d/ac28429c0c3cf10ad51c6fa692e296aaac9f67cbc8adaa90c4d0eb846df8/litelink-0.12.4-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:8de1a19647551180c75c881727cb6982ede651b570ff8ae80c1f3fc12fab4858", size = 46964335, upload-time = "2026-10-10T05:59:35.864Z" },
+    { url = "https://files.pythonhosted.org/packages/82/ae/6925dbe8edd2c9f3337f983b1fc11174942018f3720e7fe2f7d42ec15423/litelink-0.12.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b7dbbbccafab974ebb88f15b1aaf276827b01a319c01ab09b4433cf4482749ef", size = 56113347, upload-time = "2026-10-10T05:59:40.51Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/d2/9fffea61813b8d4ad4ebd181dbda278fdbc44f5c16434b5344437b9713e4/litelink-0.12.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:19ddac3e30c6d9b9ad10bfb5cf316f374e3104597a7f894d69c0d1632858dc54", size = 60011348, upload-time = "2026-10-10T05:59:45.496Z" },
 ]
 
 [[package]]
@@ -1970,7 +1970,7 @@ wheels = [
 
 [[package]]
 name = "streamcast"
-version = "0.18.0"
+version = "0.19.0"
 source = { editable = "." }
 dependencies = [
     { name = "litelink" },
@@ -2003,7 +2003,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litelink", specifier = ">=0.12.3,<0.13" },
+    { name = "litelink", specifier = ">=0.12.4,<0.13" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
     { name = "websockets", specifier = ">=14,<18" },
