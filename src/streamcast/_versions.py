@@ -242,22 +242,6 @@ def version(home: str | os.PathLike[str], stream: str) -> str | None:
     return None if found is None else found[1]
 
 
-def behind(
-    home: str | os.PathLike[str],
-    stream: str,
-    published: str | None,
-    s3_options: S3Options | None = None,
-) -> bool:
-    """Whether the copy under a remote `published` names another version than
-    the home does — a commit whose remote write failed after its local one.
-    A version has one name in every store, so a name is enough."""
-    if published is None or not _metadata.remote(published):
-        return False
-
-    remote = current(_Remote(published, stream, s3_options))
-    return (None if remote is None else remote[1]) != version(home, stream)
-
-
 @contextlib.contextmanager
 def _locked(home: Path, stream: str):  # noqa: ANN202
     """Every local commit of a stream's metadata, one at a time on this box.
@@ -285,6 +269,7 @@ def commit(
     s3_options: S3Options | None = None,
     local: bool = True,
     expected: object = UNCHECKED,
+    published_first: bool = False,
 ) -> str | None:
     """Write `metadata` as the stream's next version: in its home unless
     `local` is false, and under `published` when that is remote.
@@ -298,6 +283,11 @@ def commit(
     version is another by the time the lock is held, `Conflict` is raised and
     nothing is written — the caller's `metadata` was built on a version that
     is no longer current, and writing it would undo whatever replaced it.
+
+    **`published_first` writes the published copy before the home's**, so a
+    version in the home is one readers elsewhere were already shown: the home's
+    write follows only once the remote one has succeeded. Retention needs that,
+    because its grace is counted from the home's version (`_retention`).
     """
     if not local:
         return _commit(home, metadata, manifest, published, s3_options, local=False)
@@ -312,7 +302,15 @@ def commit(
                 )
                 raise Conflict(msg)
 
-        return _commit(home, metadata, manifest, published, s3_options, local=True)
+        return _commit(
+            home,
+            metadata,
+            manifest,
+            published,
+            s3_options,
+            local=True,
+            published_first=published_first,
+        )
 
 
 def _commit(
@@ -323,6 +321,7 @@ def _commit(
     s3_options: S3Options | None,
     *,
     local: bool,
+    published_first: bool = False,
 ) -> str | None:
     stores: list[_Store] = []
     if local:
@@ -338,7 +337,7 @@ def _commit(
     latest = [found[0] for found in map(current, stores) if found is not None]
     tag = f"{max(latest, default=0) + 1:05d}-{uuid.uuid4().hex}"
     raw = None if manifest is None else _parquet(manifest)
-    for store in stores:
+    for store in reversed(stores) if published_first else stores:
         _write(store, metadata, tag, raw)
 
     return f"{tag}.metadata.json"
@@ -454,7 +453,6 @@ __all__ = [
     "KEEP",
     "UNCHECKED",
     "Conflict",
-    "behind",
     "commit",
     "load",
     "current",
