@@ -318,11 +318,14 @@ def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
 
 @pytest.mark.replication
 async def test_the_maintainer_publishes_with_the_streams_own_options(
-    tmp_path, serve, s3, bucket, monkeypatch
+    tmp_path, s3, bucket, monkeypatch
 ):
     """Nothing in the environment: the maintainer, which opens the log itself
     in a process of its own, has only what the stream was given. Without it,
-    it publishes to real AWS, or nowhere."""
+    it publishes to real AWS, or nowhere. The publish role alone, over rows
+    already sealed: what `serve` groups is `_supervisors`' to test."""
+    from streamcast._maintain import Maintain, Supervisor
+
     for name in (
         "AWS_ENDPOINT_URL",
         "AWS_ACCESS_KEY_ID",
@@ -333,32 +336,35 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
     ):
         monkeypatch.delenv(name, raising=False)
 
-    schema = {
-        "type": "object",
-        "properties": {"i": {"type": "integer"}},
-        "required": ["i"],
-    }
-    stream = streamcast.Stream.new(
-        "t", root=tmp_path, schema=schema, published=bucket, s3_options=s3
+    log = litelink.new(
+        tmp_path,
+        "t",
+        schema=pa.schema([pa.field("n", pa.int64(), nullable=False)]),
+        published=bucket,
+        s3_options=s3,
     )
-    fast = streamcast.Maintain(seal_every=0.05, publish_every=0.1, flush_every=0.5)
     try:
-        await stream.send_many([{"i": i} for i in range(3)])
-        async with serve(stream, maintain=fast):
-            hint = stream.metadata_hint
-            assert hint is not None
-            deadline = time.monotonic() + 10
-            while True:
-                async with await streamcast.Stream.snapshot(
-                    hint, s3_options=s3
-                ) as snap:
-                    if snap.end_offset == 4:
-                        break
+        log.extend([{"n": n} for n in range(3)])
+        while log.seal(flush=True) is not None:
+            pass
 
+        publisher = Supervisor(
+            [(Path(log.root), log.name)],
+            Maintain(publish_every=0.05, flush_every=0.2),
+            "publish",
+            env=_process.environment(s3),
+        )
+        publisher.start()
+        try:
+            deadline = time.monotonic() + 10
+            while log.published_through() < 3:
                 assert time.monotonic() < deadline, "the maintainer never published"
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
+        finally:
+            publisher.terminate()
+            await publisher.wait_closed()
     finally:
-        await stream.aclose()
+        log.close()
 
 
 @pytest.mark.replication
