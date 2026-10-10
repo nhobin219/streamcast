@@ -23,10 +23,10 @@ permissions:
 jobs:
   lint:
     name: Lint + format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
       - run: uv sync
@@ -36,10 +36,10 @@ jobs:
 
   typecheck:
     name: Type check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
       - run: uv sync
@@ -47,7 +47,7 @@ jobs:
 
   test:
     name: Tests (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # An S3-compatible endpoint, because without one the replication tier
     # SKIPS — and a skip is not a pass. That tier is where litestream is
@@ -76,8 +76,8 @@ jobs:
         # is the one CI catches that a dev machine does not.
         python-version: ["3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -86,7 +86,7 @@ jobs:
       # API, which Node has had as a global since 22. The oldest line with it,
       # so a client relying on anything newer fails here rather than in a user's
       # browser.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # Any HTTP answer means it is listening. NOT `curl -f`: an
@@ -120,9 +120,9 @@ jobs:
 
   packaging:
     name: The wheel imports and serves
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # **No cache on this job, deliberately.** It is the only one that
       # resolves this package's dependencies from the INDEX rather than from
       # the lockfile, and uv's cache includes index metadata. A restored cache
@@ -134,7 +134,7 @@ jobs:
       # The job installs one wheel into one throwaway venv, so the cache was
       # saving little and hiding the answer to "does a cold box resolve this",
       # which is the question this job exists to ask.
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.0
       - run: uv build --wheel --out-dir dist
 
       # Installed into a clean environment and driven end to end, because
@@ -200,7 +200,7 @@ jobs:
     name: CI success
     if: always()
     needs: [lint, typecheck, test, packaging]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # One required check for branch protection / the merge queue.
       #
