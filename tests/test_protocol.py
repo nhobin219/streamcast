@@ -171,6 +171,19 @@ class TestGreeting:
         with pytest.raises(ProtocolError, match=match):
             parse_greeting(frame)
 
+    def test_a_greeting_from_before_the_hint_is_refused(self):
+        """Version 4's `metadata` named a plain copy that is no longer written;
+        a 4 client would read 5's, the hint, as metadata (#124)."""
+        frame = (
+            '{"streamcast": 4, "stream": "t", "end_offset": 1, "replay": null,'
+            ' "durable": true, "metadata": "s3://b/t/t.metadata.json",'
+            ' "metadata_hint": "s3://b/t/t.metadata/version-hint.text"}'
+        )
+        with pytest.raises(
+            ProtocolError, match="speaks streamcast 4; this build speaks 5"
+        ):
+            parse_greeting(frame)
+
 
 class TestRefusals:
     def test_it_round_trips(self):

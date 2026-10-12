@@ -12,10 +12,12 @@ import json
 import shutil
 from typing import Any
 
+import pyarrow.parquet as pq
 import pytest
 
 import streamcast
-from streamcast import _metadata, _remote, _snapshot, _versions
+from streamcast import _manifest, _metadata, _remote, _snapshot, _versions
+from tests.conftest import current_json
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -44,6 +46,13 @@ async def migrated(root) -> None:
     await streamcast.Stream.migrate("t", root=root, schema=WIDER).aclose()
 
 
+def from_before(home, metadata: _metadata.Metadata, manifest) -> None:
+    """`home` as a build from before the versions left it: plain files only."""
+    (home / "t.metadata.json").write_text(metadata.to_json())
+    pq.write_table(manifest, home / "t.manifest.parquet")
+    shutil.rmtree(home / "t.metadata")
+
+
 def versions(home) -> list[str]:
     return sorted(
         path.name
@@ -53,7 +62,7 @@ def versions(home) -> list[str]:
 
 
 class TestACommit:
-    async def test_serve_writes_the_first_version_and_the_plain_copy(
+    async def test_serve_writes_the_first_version_and_nothing_beside_it(
         self, tmp_path, serve
     ):
         await served(tmp_path, serve)
@@ -62,7 +71,7 @@ class TestACommit:
 
         assert hint.startswith("00001-") and hint.endswith(".metadata.json")
         assert versions(home) == [hint]
-        assert (home / "t.metadata.json").is_file(), "the plain copy (#124)"
+        assert not (home / "t.metadata.json").exists(), "no plain copy (#124)"
 
     async def test_a_migration_is_a_version_naming_its_own_manifest(
         self, tmp_path, serve
@@ -78,8 +87,7 @@ class TestACommit:
             ".metadata.json", ".manifest.parquet"
         )
         assert (home / "t.metadata" / version["manifest"]).is_file()
-        plain = json.loads((home / "t.metadata.json").read_text())
-        assert plain["manifest"] == "t.manifest.parquet", "the copy names the copy"
+        assert not (home / "t.manifest.parquet").exists(), "no plain copy (#124)"
 
     async def test_the_last_versions_are_kept_and_no_more(self, tmp_path, serve):
         await served(tmp_path, serve)
@@ -96,44 +104,83 @@ class TestACommit:
     async def test_a_stream_from_before_gets_its_first_version_at_serve(
         self, tmp_path, serve
     ):
+        """Its plain files are read, carried into its first version — the
+        manifest too — and then deleted: left, they would show a reader that
+        still opened them the stream as it was."""
         await served(tmp_path, serve)
-        shutil.rmtree(tmp_path / "t" / "t.metadata")  # as a build from before left it
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        await migrated(tmp_path)
+        home = tmp_path / "t"
+        before = _metadata.load(home, "t")
+        manifest = _manifest.load(home, "t")
+        assert before is not None
+        assert manifest is not None
+        from_before(home, before, manifest)
+
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER)
         try:
             async with serve(stream, maintain=False):
                 pass
         finally:
             await stream.aclose()
 
-        assert (tmp_path / "t" / "t.metadata" / _versions.HINT).is_file()
+        assert (home / "t.metadata" / _versions.HINT).is_file()
+        assert _metadata.load(home, "t") == before
+        assert _manifest.load(home, "t") == manifest
+        assert not (home / "t.metadata.json").exists()
+        assert not (home / "t.manifest.parquet").exists()
+
+    async def test_a_stream_never_versioned_is_still_read(self, tmp_path, serve):
+        """By a reader that has only its plain files — the stream's, until a
+        build with the versions serves it."""
+        await served(tmp_path, serve)
+        await migrated(tmp_path)
+        home = tmp_path / "t"
+        before = _metadata.load(home, "t")
+        manifest = _manifest.load(home, "t")
+        assert before is not None
+        assert manifest is not None
+        from_before(home, before, manifest)
+
+        plain = (home / "t.metadata.json").resolve().as_uri()
+        async with await streamcast.Stream.snapshot(plain) as snap:
+            assert [entry.name for entry in snap.metadata.logs] == ["t", "t-v2"]
+            assert snap._manifest == manifest, "the plain one, beside it"  # noqa: SLF001
 
 
 class TestTheGreeting:
-    async def test_it_names_the_hint_beside_the_plain_copy(self, tmp_path, serve):
+    async def test_it_names_the_hint(self, tmp_path, serve):
         await served(tmp_path, serve)
         stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
                     info = sub.info
+
+                named = stream.metadata_uri
         finally:
             await stream.aclose()
 
-        home = (tmp_path / "t").resolve()
-        assert info.metadata_hint == (home / "t.metadata" / _versions.HINT).as_uri()
-        assert info.metadata == (home / "t.metadata.json").as_uri()
+        hint = (tmp_path / "t" / "t.metadata" / _versions.HINT).resolve().as_uri()
+        assert info.metadata == hint
+        assert named == hint
 
-    async def test_a_snapshot_opens_either(self, tmp_path, serve):
+    async def test_a_plain_uri_is_read_through_the_hint_beside_it(
+        self, tmp_path, serve
+    ):
+        """`<stream>.metadata.json`, as an older greeting named it or a reader
+        wrote it down: the current version, never a stale file at that path."""
         await served(tmp_path, serve)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
-        hint, plain = stream.metadata_hint, stream.metadata_uri
-        await stream.aclose()
-        assert hint is not None
-        assert plain is not None
+        await migrated(tmp_path)
+        home = tmp_path / "t"
+        stale = _metadata.Metadata.from_json(
+            json.dumps({**current_json(home, "t"), "sealed_logs": []})
+        )
+        (home / "t.metadata.json").write_text(stale.to_json())
 
-        for uri in (hint, plain):
-            async with await streamcast.Stream.snapshot(uri) as snap:
-                assert snap.end_offset == 1, "nothing published yet"
+        plain = (home / "t.metadata.json").resolve().as_uri()
+        async with await streamcast.Stream.snapshot(plain) as snap:
+            assert [entry.name for entry in snap.metadata.logs] == ["t", "t-v2"]
+            assert snap._manifest is not None, "the version's, in its directory"  # noqa: SLF001
 
 
 class Counting:
@@ -192,12 +239,9 @@ class TestTheReadsItSaves:
 
         assert await self._opened(hint, s3, reads) == [_versions.HINT]
 
-        # The plain copy, as an older reader opens it: both files, every time.
+        # A plain URI, as an older greeting named it: through the hint too.
         plain = f"{bucket}/t/t.metadata.json"
-        assert await self._opened(plain, s3, reads) == [
-            "t.manifest.parquet",
-            "t.metadata.json",
-        ]
+        assert await self._opened(plain, s3, reads) == [_versions.HINT]
 
     async def test_a_new_version_is_read_when_the_hint_names_it(
         self, tmp_path, serve, s3, bucket

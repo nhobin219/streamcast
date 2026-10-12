@@ -109,7 +109,7 @@ class Live:
         # Where the history is read, as the broker's latest greeting says.
         # The hint where the broker gives one (#123): a rebase then re-reads
         # only it, and the versions it names once.
-        self._uri = greeting.metadata_hint or greeting.metadata
+        self._uri = greeting.metadata
         self._stream_id = greeting.stream_id
         self._s3 = s3_options
         self._rebase_every = rebase_every
@@ -165,7 +165,7 @@ class Live:
 
         # The latest word on where the history is: a restarted broker may
         # serve a migrated stream, whose metadata the next rebase must read.
-        self._uri = subscription.info.metadata_hint or subscription.info.metadata
+        self._uri = subscription.info.metadata
         self._stream_id = subscription.info.stream_id
         return subscription
 
@@ -525,7 +525,7 @@ async def live(
     async with _client.connect(broker) as probe:
         greeting = probe.info
 
-    uri = _require(broker, greeting.metadata_hint or greeting.metadata)
+    uri = _require(broker, greeting.metadata)
     if where:
         _check_where(broker, where, greeting.schema)
 

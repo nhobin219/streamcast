@@ -7,7 +7,28 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## 0.19.0 — 2026-10-10
+## Unreleased
+
+### Changed
+
+- **Breaking: the greeting's `metadata` names the hint, and the protocol is
+  version 5** (#124). `metadata` is now the URI of
+  `<stream>.metadata/version-hint.text`, which names the stream's current
+  metadata version, and `metadata_hint` is gone. `Stream.metadata_uri` names
+  the hint too, and `Stream.metadata_hint` is gone. A client from before
+  refuses a version-5 greeting, saying which version each side speaks, rather
+  than reading the hint as metadata: upgrade clients with the server.
+- **Breaking: no plain `<stream>.metadata.json` or `<stream>.manifest.parquet`
+  is written**, locally or under the published prefix. Each version names its
+  own manifest beside it. A stream from before 0.18 is read from its plain
+  files until its first version is written, at its next `serve`, and that
+  commit deletes them, so nothing is left to show a reader the stream as it
+  was. Tooling that reads those files reads the hint instead.
+  `Stream.snapshot` and `connect(metadata=)` still take a
+  `<stream>.metadata.json` URI, and read it through the hint beside it.
+- **`serve`'s sync and `Stream.restore` read the published side's current
+  version through its hint**, not a plain copy.
+
 
 ### Added
 

@@ -5,8 +5,6 @@
         00004-9f2c….metadata.json          immutable: written once, never again
         00004-9f2c….manifest.parquet       immutable, named by the version that wrote it
         00003-51ab….metadata.json          the versions before, kept for a reader mid-open
-    <stream>.metadata.json                 a plain copy of the current version (#124)
-    <stream>.manifest.parquet              a plain copy of the current manifest
 
 **Iceberg's own indirection, one level up** (#123). A versioned file's name is
 never reused, so a reader that has read it once never needs to again: the only
@@ -16,13 +14,17 @@ rewritten in place, so it is the one never cached.
 
 **Written in the order a reader needs**: the manifest a version names, then
 the version, then the hint, so a hint never names a file that is not there
-yet. The plain copies come last, for readers from before (#124 removes them).
-The same layout sits in the stream's home and, when it publishes to S3, under
+yet. The same layout sits in the stream's home and, when it publishes to S3, under
 its published prefix, with the same file names in both.
 
 **A version is a commit, and commits are rare**: a migration, a retirement, a
 revival, a restore, or a `serve` that fills in what an older file left out.
 So listing the directory to keep the last `KEEP` versions is cheap.
+
+**A stream from before the versions** has only `<stream>.metadata.json` and
+`<stream>.manifest.parquet` beside its logs. They are read until its first
+version is written, and that commit deletes them (#124): left behind, they
+would answer a reader that still opened them with a stream as it was then.
 """
 
 from __future__ import annotations
@@ -136,7 +138,7 @@ class _Local:
         return [path.name for path in self.dir.iterdir() if path.is_file()]
 
     def delete(self, name: str) -> None:
-        (self.dir / name).unlink(missing_ok=True)
+        self._path(name).unlink(missing_ok=True)
 
 
 class _Remote:
@@ -234,6 +236,73 @@ def load(
         metadata = dataclasses.replace(metadata, manifest=_manifest.name(stream))
 
     return found[1], metadata, manifest
+
+
+def fetch(
+    published: str, stream: str, s3_options: S3Options | None = None
+) -> _metadata.Metadata | None:
+    """The current version under a remote `published` prefix, as `load` reads
+    the home's: through its hint, with `manifest` given back as the plain name.
+    A stream from before the versions is read from its plain copy there.
+
+    Only a MISSING stream is None. Anything else — bad credentials, an
+    unreachable endpoint — raises, because treating it as "one log" would
+    restore the stream's first log as though it were its current one.
+    """
+    store = _Remote(published, stream, s3_options)
+    found = current(store)
+    if found is None:
+        raw = store.read(_metadata.plain_name(stream))
+    else:
+        raw = store.read(found[1])
+        if raw is None:  # pragma: no cover — a hint is written after its version
+            msg = f"the hint under {published} names {found[1]}, which is not there"
+            raise FileNotFoundError(msg)
+
+    if raw is None:
+        # **pyarrow says "not found" for a missing BUCKET too**, in exactly
+        # the words it uses for a missing key — measured against rustfs. A
+        # mistyped bucket would otherwise read as "no copy yet", and a restore
+        # would go on to rebuild the stream's first log as though it were live.
+        filesystem, key = _remote._filesystem(store.dir, s3_options)  # noqa: SLF001
+        bucket = key.split("/", 1)[0]
+        if filesystem.get_file_info(bucket).type == pafs.FileType.NotFound:
+            msg = f"the published location's bucket {bucket!r} does not exist ({published})"
+            raise FileNotFoundError(msg)
+
+        return None
+
+    metadata = _metadata.Metadata.from_json(raw.decode())
+    if metadata.manifest is not None:
+        metadata = dataclasses.replace(metadata, manifest=_manifest.name(stream))
+
+    return metadata
+
+
+def manifest_uri(uri: str, manifest: str) -> str:
+    """Where the manifest a version names is, for metadata opened at `uri`.
+
+    Beside the version, in the metadata directory, when it is a versioned
+    one — which is beside the hint, and not beside a `<stream>.metadata.json`
+    URI read through the hint (`beside`). A plain one, a stream's from before
+    the versions, is beside its plain metadata.
+    """
+    parent = uri.rpartition("/")[0]
+    if _VERSION.match(manifest) and (hint := beside(uri)) is not None:
+        parent = hint.rpartition("/")[0]
+
+    return f"{parent}/{manifest}"
+
+
+def beside(uri: str) -> str | None:
+    """The hint beside a `<stream>.metadata.json` URI — where a stream from
+    before the versions kept its metadata, and where a reader may still point
+    — or None if `uri` is not one."""
+    parent, _, name = uri.rpartition("/")
+    if not name.endswith(".metadata.json") or _VERSION.match(name):
+        return None
+
+    return f"{parent}/{directory(name.removesuffix('.metadata.json'))}/{HINT}"
 
 
 def version(home: str | os.PathLike[str], stream: str) -> str | None:
@@ -359,11 +428,18 @@ def _write(
     )
     # 2. the hint: from here on, readers open this version
     store.write(HINT, versioned.encode())
-    # 3. the plain copies, for readers from before the hint (#124)
-    if manifest is not None:
-        store.write(_manifest.name(metadata.stream), manifest)
+    # 3. the plain files a stream from before the versions had, if this is
+    # its first: nothing reads them once there is a hint, and a reader that
+    # still opened them would get the stream as it was. Best-effort, after
+    # the commit has landed: one left behind is stale, not wrong for anyone
+    # who reads the hint.
+    for plain in (
+        _metadata.plain_name(metadata.stream),
+        _manifest.name(metadata.stream),
+    ):
+        with contextlib.suppress(OSError):
+            store.delete(plain)
 
-    store.write(f"{metadata.stream}.metadata.json", metadata.to_json().encode())
     _prune(store)
 
 
@@ -453,12 +529,15 @@ __all__ = [
     "KEEP",
     "UNCHECKED",
     "Conflict",
+    "beside",
     "commit",
     "load",
     "current",
     "directory",
+    "fetch",
     "hint_uri",
     "immutable",
+    "manifest_uri",
     "missing",
     "version",
 ]

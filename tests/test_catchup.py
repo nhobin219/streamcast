@@ -769,11 +769,11 @@ class TestWhereTheHistoryIsRead:
     async def test_the_greeting_names_the_metadata_and_the_stream(
         self, serve, published_log, s3
     ):
-        """The file and the id that says it is this stream's."""
+        """The hint naming its metadata, and the id that says it is this stream's."""
         stream = streamcast.Stream("trades", log=published_log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
-            assert (
-                sub.info.metadata == f"{published_log.published}/trades.metadata.json"
+            assert sub.info.metadata == (
+                f"{published_log.published}/trades.metadata/version-hint.text"
             )
             found = _snapshot.metadata(sub.info.metadata, s3)
             assert sub.info.stream_id == found.stream_id

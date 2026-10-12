@@ -4,7 +4,7 @@
     table = await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 A stream is a sequence of logs (`Stream.migrate`), each publishing an
-ordinary Iceberg table, and `<stream>.metadata.json` says which, in order,
+ordinary Iceberg table, and the stream's metadata says which, in order,
 where each is published, and the offsets and `streamcast_ts` range each
 holds. A snapshot reads that file and then the tables, on the reader's own
 machine with its own credentials: the broker hands out the file's URI in its
@@ -145,15 +145,25 @@ def _remember(key: tuple[str, tuple[object, ...]], data: bytes) -> None:
 def _resolve(uri: str, s3_options: S3Options | None) -> str:
     """The metadata version a hint names, or `uri` itself if it is not a hint.
 
-    A hint is what the greeting gives a new reader (`metadata_hint`); a
-    `.metadata.json` URI — an older greeting's, or one written down — is read
-    as it is.
+    A hint is what the greeting gives a reader. A `<stream>.metadata.json` URI
+    — an older greeting's, or one written down — is read through the hint
+    beside it (#124): the plain file there is a stream from before the
+    versions, and one its first version has not deleted yet is stale. Read
+    as it is only when there is no hint, for a stream never versioned.
     """
-    if not uri.endswith(f"/{_versions.HINT}"):
+    hint = uri if uri.endswith(f"/{_versions.HINT}") else _versions.beside(uri)
+    if hint is None:
         return uri
 
-    named = _read(uri, s3_options).decode().strip()
-    return f"{uri.rsplit('/', 1)[0]}/{named}"
+    try:
+        named = _read(hint, s3_options).decode().strip()
+    except FileNotFoundError:
+        if hint == uri:
+            raise
+
+        return uri
+
+    return f"{hint.rsplit('/', 1)[0]}/{named}"
 
 
 def metadata(
@@ -856,12 +866,13 @@ def _manifest_for(
     if found.manifest is None:
         return None
 
-    base = metadata_uri.rsplit("/", 1)[0]
     try:
         import pyarrow.parquet as pq  # noqa: PLC0415 — only when there is one
 
         return pq.read_table(
-            pa.BufferReader(_read(f"{base}/{found.manifest}", s3_options))
+            pa.BufferReader(
+                _read(_versions.manifest_uri(metadata_uri, found.manifest), s3_options)
+            )
         )
     except FileNotFoundError:
         # Missing statistics never prune: every sealed log is read.

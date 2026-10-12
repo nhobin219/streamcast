@@ -17,6 +17,7 @@ import pytest
 
 import streamcast
 from streamcast import _metadata, _versions
+from tests.conftest import current_json
 
 SCHEMA = {
     "type": "object",
@@ -59,8 +60,7 @@ class TestRetiring:
         # Version 3, so a build that predates retirement refuses the file
         # rather than taking the retired log for a migration that died.
         assert (
-            '"streamcast_metadata": 3'
-            in _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
+            current_json(_metadata.home(tmp_path, "t"), "t")["streamcast_metadata"] == 3
         )
 
     async def test_it_is_safe_to_run_again(self, tmp_path):
@@ -170,8 +170,7 @@ class TestReviving:
         ]
         # Back to version 2: nothing a build before retirement cannot read.
         assert (
-            '"streamcast_metadata": 2'
-            in _metadata.path(_metadata.home(tmp_path, "t"), "t").read_text()
+            current_json(_metadata.home(tmp_path, "t"), "t")["streamcast_metadata"] == 2
         )
 
         async with serve(revived, maintain=False) as uri:
@@ -215,7 +214,7 @@ class TestOnAnotherBox:
         box_a, box_b = tmp_path / "a", tmp_path / "b"
         await produce(box_a, published=bucket, s3_options=s3)
         streamcast.Stream.retire("t", root=box_a, s3_options=s3)
-        published_copy = _metadata.fetch(f"{bucket}/t", "t", s3)
+        published_copy = _versions.fetch(f"{bucket}/t", "t", s3)
         assert published_copy is not None
         assert published_copy.retirement is not None
         shutil.rmtree(box_a)  # the old box is gone
@@ -231,7 +230,7 @@ class TestOnAnotherBox:
                 got = [(await sub.recv())[0] for _ in range(8)]
 
         assert got == list(range(1, 9))
-        fetched = _metadata.fetch(f"{bucket}/t", "t", s3)
+        fetched = _versions.fetch(f"{bucket}/t", "t", s3)
         assert fetched is not None
         assert fetched.retirement is None, "flipped in the published copy too"
 

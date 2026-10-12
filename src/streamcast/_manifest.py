@@ -4,7 +4,7 @@ A migrated stream is a sequence of logs, each its own Iceberg table. Iceberg's
 own manifests prune FILES within a table; nothing in Iceberg says which
 TABLES can be skipped. This is that summary, one level up:
 
-    <stream>.manifest.parquet
+    <stream>.metadata/00004-9f2c….manifest.parquet
     log     start_offset  end_offset  record_count  price                      side
     trades  1             1001        1000          {min, max, null_count,…}   {min, max, …}
 
@@ -21,9 +21,9 @@ an entry with no statistics and an open end, which offsets alone can skip.
 
 **Parquet, rewritten whole at each migration.** PyArrow and DuckDB read it
 natively; migrations are rare, so the write is proportional to the log count
-a few times a year and a reader makes one GET. `metadata.json`'s `manifest`
-names it relative to itself, so the same pointer works for the local copy and
-the published one.
+a few times a year and a reader makes one GET. Each version of the metadata
+names its own, beside it in the metadata directory (`_versions`), so the same
+pointer works in the home and under the published prefix.
 """
 
 from __future__ import annotations
@@ -35,13 +35,11 @@ from typing import TYPE_CHECKING, Final
 import pyarrow.parquet as pq
 from litelink import manifest as _litelink
 
-from streamcast import _remote
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import pyarrow as pa
-    from litelink import S3Options, TierStatistics
+    from litelink import TierStatistics
 
 KEY: Final = "log"
 """The unit column: a stream's manifest has one row per log."""
@@ -76,32 +74,13 @@ def prune(
 
 
 def name(stream: str) -> str:
-    """The manifest's file name, which is also `metadata.json`'s pointer to it.
+    """The name a `Metadata` in hand gives its manifest, whichever it is.
 
-    Relative to the metadata file, so one pointer serves the local copy and the
-    published one alike.
+    `_versions.load` hands a version's manifest back under it, and a commit
+    writes the manifest under the version's own name instead. Also the file a
+    stream from before the versions kept beside its metadata (`plain`).
     """
     return f"{stream}.manifest.parquet"
-
-
-def save(root: str | os.PathLike[str], stream: str, manifest: pa.Table) -> Path:
-    """Write it beside the metadata file, atomically, and return where."""
-    target = Path(root) / name(stream)
-    staging = target.with_suffix(".parquet.tmp")
-    pq.write_table(manifest, staging)
-    staging.replace(target)
-
-    return target
-
-
-def publish(
-    published: str, stream: str, manifest: pa.Table, s3_options: S3Options | None
-) -> None:
-    """Copy it beside the logs' published tables and the metadata file."""
-    uri = f"{published.rstrip('/')}/{name(stream)}"
-    filesystem, key = _remote._filesystem(uri, s3_options)  # noqa: SLF001
-    with filesystem.open_output_stream(key) as sink:
-        pq.write_table(manifest, sink)
 
 
 def load(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
@@ -113,7 +92,7 @@ def load(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
 
 
 def plain(root: str | os.PathLike[str], stream: str) -> pa.Table | None:
-    """The plain `<stream>.manifest.parquet`: a stream with no version yet."""
+    """The plain `<stream>.manifest.parquet` of a stream with no version yet."""
     target = Path(root) / name(stream)
     if not target.exists():
         return None
@@ -130,6 +109,4 @@ __all__ = [
     "name",
     "plain",
     "prune",
-    "publish",
-    "save",
 ]

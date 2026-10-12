@@ -86,9 +86,8 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 `[offset, ts, msg]` per message:
 
 ```
-{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata.json",
- "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+{"streamcast":5,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"5f0c…","durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
@@ -176,8 +175,9 @@ the server accepted the subscribe. The alternative surfaces a refused offset as
 a failure of whatever `recv` the application happened to reach first, which on a
 quiet stream is minutes later and somewhere else.
 
-**It names where the history is read.** `metadata` is the URI of the stream's
-metadata file (§5) and `stream_id` the id that file records; both are null on a
+**It names where the history is read.** `metadata` is the URI of the hint
+naming the stream's current metadata (§5) and `stream_id` the id that metadata
+records; both are null on a
 stream with no log. They are all a reader on another machine needs, with its
 own credentials, to read every log the stream has had — which is what
 `catch_up` and `Stream.snapshot` start from. The id is checked against the
@@ -796,10 +796,10 @@ stopped:
    one for the call, under the same `flock` the server's takes.
 2. **The next log is created**, `trades-v2` and so on, starting at exactly the
    old log's `end_offset`.
-3. **The metadata records both**, the new one live, at
-   `root/<stream>/<stream>.metadata.json` and, when the logs publish to S3,
-   `<published>/<stream>/<stream>.metadata.json` (`root/<stream>.metadata.json` and
-   `<published>/<stream>.metadata.json` for a stream created before 0.18).
+3. **The metadata records both**, the new one live, in a new version under
+   `root/<stream>/<stream>.metadata/` and, when the logs publish to S3,
+   `<published>/<stream>/<stream>.metadata/` (`root/<stream>.metadata/` and
+   `<published>/<stream>.metadata/` for a stream created before 0.18).
 
 **Offline, so dense.** A live rotation would have to create the next log
 (100–300 ms, measured) while `send` kept writing the old one, and so could not
@@ -827,7 +827,7 @@ opened read-only on the rerun, and the migration carries on from there.
  "live_log": {"name": "trades-v2", "published": "s3://market-data/prod",
               "start_offset": 1001, "start_ts": 1790042411000000,
               "schema": {…}, "system_schema": {…}},
- "manifest": "trades.manifest.parquet"}
+ "manifest": "00004-9f2c….manifest.parquet"}
 ```
 
 **Every durable stream has one, written by `serve`.** Before it listens,
@@ -839,6 +839,15 @@ that is better found out at deploy than at the first remote read. It is
 `serve`'s job rather than `Stream.new`'s so that a `Stream(log=…)` gets one
 too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
 `serve` and nothing about the log changes.
+
+**It is written as versions, behind a hint**, as an Iceberg table's metadata
+is. Each change is an immutable `<stream>.metadata/<n>-<id>.metadata.json`,
+with the manifest it names beside it, and `version-hint.text` in the same
+directory names the current one; the greeting's `metadata` names the hint. The
+same files sit in the stream's home and under its published prefix. A stream
+from before 0.18 has only a plain `<stream>.metadata.json` and
+`<stream>.manifest.parquet` beside its logs, read until its first version is
+written, which deletes them.
 
 - **`sealed_logs` and `live_log` are separate keys.** Only sealed logs have
   statistics (#27), so only they can be pruned, and the structure says so.
@@ -921,7 +930,8 @@ offset is reused.
 
 Iceberg's manifests hold per-file bounds and prune files within one table.
 Nothing in Iceberg says which *tables* a query can skip, and a migrated stream
-is several. `<stream>.manifest.parquet` is that summary, one level up: one row
+is several. The stream's manifest, a Parquet file beside each version of its
+metadata, is that summary, one level up: one row
 per **sealed** log, with a struct per column (`min`, `max`, `null_count`,
 `value_count`, and `nan_count` for floats), rolled up from the log's own
 Iceberg statistics (litelink#85). The live log has no row and is never pruned.
