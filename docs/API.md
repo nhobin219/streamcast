@@ -352,9 +352,10 @@ its first version is written. `Stream.snapshot` and `connect(metadata=)` take a
 `<stream>.metadata.json` URI too, and read it through the hint beside it.
 
 **A client reads a greeting at protocol 4 or 5, and a server sends 4**, so clients and
-servers upgrade one at a time in any order: a 0.19 client and a 0.20.1 server, or a 0.20.1
-client and a 0.19 or 0.20.0 server, work together. `info.metadata` is always the best URI
-the server gave: the hint when it names one.
+servers upgrade one at a time: a 0.20.1 client works with a 0.19, 0.20.0 or 0.20.1 server,
+and a 0.20.1 server with a 0.19 or 0.20.1 client. A 0.20.0 client reads only 5 and refuses
+a 0.20.1 server, so upgrade clients first. `info.metadata` is always the best URI the server
+gave: the hint when it names one.
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from

@@ -23,9 +23,11 @@ there was nothing to have changed from. Everything above it is ordinary.
     and `<stream>.manifest.parquet` copies again. `serve` puts back any copy
     0.20.0 deleted.
 
-  Every pair from 0.19 to 0.20.1 works together. Upgrade through 0.20.1:
-  clients first or servers first, one process at a time. A later release
-  moves servers to protocol 5 once clients read it.
+  A 0.20.1 client works with a 0.19, 0.20.0 or 0.20.1 server, and a 0.20.1
+  server with a 0.19 or 0.20.1 client. A 0.20.0 client reads only protocol 5,
+  so it still refuses a 0.20.1 server, as it does a 0.19 one. **Upgrade
+  clients to 0.20.1 first, then servers**, one process at a time. A later
+  release moves servers to protocol 5 once clients read it.
 
 ## 0.20.0 — 2026-10-12
 
