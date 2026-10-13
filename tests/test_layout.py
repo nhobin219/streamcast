@@ -93,7 +93,9 @@ class TestANewStream:
         assert sorted(p.name for p in (tmp_path / "t").iterdir()) == [
             "t",
             "t-v2",
+            "t.manifest.parquet",
             "t.metadata",
+            "t.metadata.json",
         ]
 
 
@@ -112,7 +114,9 @@ class TestAStreamFromBefore:
         assert sorted(p.name for p in tmp_path.iterdir()) == [
             "t",
             "t-v2",
+            "t.manifest.parquet",
             "t.metadata",
+            "t.metadata.json",
         ]
 
     async def test_a_log_without_its_metadata_is_found_too(self, tmp_path):

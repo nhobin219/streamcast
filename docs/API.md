@@ -302,6 +302,8 @@ data/                                s3://bucket/prefix/
       version-hint.text                    version-hint.text
       00004-9f2c….metadata.json            00004-9f2c….metadata.json
       00004-9f2c….manifest.parquet         00004-9f2c….manifest.parquet
+    trades.metadata.json                 trades.metadata.json      a plain copy
+    trades.manifest.parquet              trades.manifest.parquet
     trades/          the first log       trades/       its published table
     trades-v2/       after a migrate     trades-v2/
   quotes/                              quotes/
@@ -338,17 +340,22 @@ at deploy. The ASGI app does the same when its lifespan starts.
 migration, retirement, revival or restore writes an immutable
 `<stream>.metadata/<n>-<id>.metadata.json`, plus a new manifest beside it when there is
 one, and then rewrites `<stream>.metadata/version-hint.text` to name it. The last ten
-versions are kept. A reader opens the hint, which the greeting gives as `metadata`. The
+versions are kept. A reader opens the hint, which the greeting gives as `metadata_hint`. The
 version and manifest it names are never rewritten, so a reader that opens the stream again,
 such as a `Live` view every few seconds, reads only the hint, a few bytes. A reader
 caches each file per process, per set of credentials, up to 16 MiB in all.
 
-**There is no plain `<stream>.metadata.json` beside the versions.** A stream from before
-0.18 has only that file and `<stream>.manifest.parquet`. They're read until its first
-version is written at the next `serve`, and that commit deletes them, so nothing is left
-to show a reader the stream as it was. `Stream.snapshot` and `connect(metadata=)` still
-take a `<stream>.metadata.json` URI, an older greeting's or one written down, and read it
-through the hint beside it.
+**A plain copy of the current version** is written beside the versions after each commit,
+`<stream>.metadata.json` and `<stream>.manifest.parquet`, for clients from before the hint,
+which open the greeting's `metadata`. A stream from before 0.18 has only those, read until
+its first version is written. `Stream.snapshot` and `connect(metadata=)` take a
+`<stream>.metadata.json` URI too, and read it through the hint beside it.
+
+**A client reads a greeting at protocol 4 or 5, and a server sends 4**, so clients and
+servers upgrade one at a time: a 0.20.1 client works with a 0.19, 0.20.0 or 0.20.1 server,
+and a 0.20.1 server with a 0.19 or 0.20.1 client. A 0.20.0 client reads only 5 and refuses
+a 0.20.1 server, so upgrade clients first. `info.metadata` is always the best URI the server
+gave: the hint when it names one.
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
@@ -1284,7 +1291,7 @@ streamcast.from_arrow(schema)   -> dict           # what the greeting publishes
 without this repo:
 
 ```json
-{"streamcast":5,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":null,"durable":true,
  "schema":{"type":"object","properties":{"event_ts":{"type":"integer","format":"int64"}}}}
 ```
 
@@ -1731,8 +1738,9 @@ message: the offset, the time the server took the row, then the row. Reading a r
 spelled out step by step in [SPEC §2](SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":5,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json",
+ "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"5f0c…","schema":{...},"durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```

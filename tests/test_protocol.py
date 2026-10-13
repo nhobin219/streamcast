@@ -171,18 +171,36 @@ class TestGreeting:
         with pytest.raises(ProtocolError, match=match):
             parse_greeting(frame)
 
-    def test_a_greeting_from_before_the_hint_is_refused(self):
-        """Version 4's `metadata` named a plain copy that is no longer written;
-        a 4 client would read 5's, the hint, as metadata (#124)."""
+    @pytest.mark.parametrize(
+        ("fields", "hint"),
+        [
+            # 4: a plain `metadata`, for clients from before the versions, and
+            # the hint beside it.
+            (
+                '"streamcast": 4, "metadata": "s3://b/t/t.metadata.json",'
+                ' "metadata_hint": "s3://b/t/t.metadata/version-hint.text"',
+                "s3://b/t/t.metadata/version-hint.text",
+            ),
+            # 5, as 0.20.0 sent it: `metadata` is the hint.
+            (
+                '"streamcast": 5, "metadata": "s3://b/t/t.metadata/version-hint.text"',
+                "s3://b/t/t.metadata/version-hint.text",
+            ),
+            # 4 from before the versions: a plain `metadata` and no hint.
+            (
+                '"streamcast": 4, "metadata": "s3://b/t/t.metadata.json"',
+                "s3://b/t/t.metadata.json",
+            ),
+        ],
+    )
+    def test_either_protocol_is_read_and_the_hint_preferred(self, fields, hint):
+        """A client reads 4 and 5, so clients and servers upgrade one at a
+        time, in any order (#135)."""
         frame = (
-            '{"streamcast": 4, "stream": "t", "end_offset": 1, "replay": null,'
-            ' "durable": true, "metadata": "s3://b/t/t.metadata.json",'
-            ' "metadata_hint": "s3://b/t/t.metadata/version-hint.text"}'
+            f'{{{fields}, "stream": "t", "end_offset": 1, "replay": null,'
+            ' "durable": true}'
         )
-        with pytest.raises(
-            ProtocolError, match="speaks streamcast 4; this build speaks 5"
-        ):
-            parse_greeting(frame)
+        assert parse_greeting(frame).metadata == hint
 
 
 class TestRefusals:

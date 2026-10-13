@@ -164,8 +164,9 @@ A client in any language needs a JSON parser, plus, for binary columns, the deco
 in [SPEC §2](docs/SPEC.md#reading-a-row-in-another-language).
 
 ```
-{"streamcast":5,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json",
+ "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"6f1c…","durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
@@ -174,8 +175,9 @@ The offset and the stamp are positional, so `const [offset, ts, msg] = JSON.pars
 another language and `wscat ws://localhost:8765/trades?offset=0` is a working subscriber
 with none at all.
 
-`metadata` names the stream's metadata — every log it has been through, where each
-is published, and what each holds — through the hint naming its current version, so a
+`metadata_hint` names the stream's metadata — every log it has been through, where each
+is published, and what each holds — through the hint naming its current version, and
+`metadata` is a plain copy of it for clients from before the hint, so a
 subscriber holding the greeting can read the
 history itself rather than through the socket: `Stream.snapshot(info.metadata)`, or any
 Iceberg engine pointed at a log's published table. `stream_id` says which stream the

@@ -21,10 +21,11 @@ its published prefix, with the same file names in both.
 revival, a restore, or a `serve` that fills in what an older file left out.
 So listing the directory to keep the last `KEEP` versions is cheap.
 
-**A stream from before the versions** has only `<stream>.metadata.json` and
-`<stream>.manifest.parquet` beside its logs. They are read until its first
-version is written, and that commit deletes them (#124): left behind, they
-would answer a reader that still opened them with a stream as it was then.
+**The plain copies** — `<stream>.metadata.json` and `<stream>.manifest.parquet`
+beside the logs — are written last, after the hint, for clients from before
+the versions (#135); nothing here reads them while there is a hint. A stream
+from before the versions has only those, and they are read until its first
+version is written.
 """
 
 from __future__ import annotations
@@ -73,6 +74,17 @@ def hint_uri(
         return f"{published.rstrip('/')}/{directory(stream)}/{HINT}"
 
     return (Path(home) / directory(stream) / HINT).resolve().as_uri()
+
+
+def plain_uri(
+    home: str | os.PathLike[str] | str, stream: str, published: str | None
+) -> str:
+    """Where a client from before the versions finds the plain copy: beside
+    the published tables when they are remote, else in the stream's home."""
+    if published is not None and _metadata.remote(published):
+        return f"{published.rstrip('/')}/{_metadata.plain_name(stream)}"
+
+    return _metadata.path(home, stream).resolve().as_uri()
 
 
 def immutable(uri: str) -> bool:
@@ -305,6 +317,25 @@ def beside(uri: str) -> str | None:
     return f"{parent}/{directory(name.removesuffix('.metadata.json'))}/{HINT}"
 
 
+def plainless(
+    home: str | os.PathLike[str],
+    stream: str,
+    *,
+    published: str | None = None,
+    s3_options: S3Options | None = None,
+) -> tuple[bool, bool]:
+    """Whether the plain copy is missing: `(locally, published)` — deleted by
+    0.20.0, which wrote none (#135)."""
+    local = _Local(Path(home), stream).read(_metadata.plain_name(stream)) is None
+    remote = (
+        published is not None
+        and _metadata.remote(published)
+        and _Remote(published, stream, s3_options).read(_metadata.plain_name(stream))
+        is None
+    )
+    return local, remote
+
+
 def version(home: str | os.PathLike[str], stream: str) -> str | None:
     """The name of the stream's current version in its home, or None."""
     found = current(_Local(Path(home), stream))
@@ -428,18 +459,17 @@ def _write(
     )
     # 2. the hint: from here on, readers open this version
     store.write(HINT, versioned.encode())
-    # 3. the plain files a stream from before the versions had, if this is
-    # its first: nothing reads them once there is a hint, and a reader that
-    # still opened them would get the stream as it was. Best-effort, after
-    # the commit has landed: one left behind is stale, not wrong for anyone
-    # who reads the hint.
-    for plain in (
-        _metadata.plain_name(metadata.stream),
-        _manifest.name(metadata.stream),
-    ):
-        with contextlib.suppress(OSError):
-            store.delete(plain)
+    # 3. the plain copies, for clients from before the hint, which open the
+    # greeting's `metadata` (#135). The manifest too when the version carries
+    # one over rather than bringing it, so a copy 0.20.0 deleted comes back.
+    plain = manifest
+    if plain is None and named is not None:
+        plain = store.read(named)
 
+    if plain is not None:
+        store.write(_manifest.name(metadata.stream), plain)
+
+    store.write(_metadata.plain_name(metadata.stream), metadata.to_json().encode())
     _prune(store)
 
 
@@ -539,5 +569,7 @@ __all__ = [
     "immutable",
     "manifest_uri",
     "missing",
+    "plain_uri",
+    "plainless",
     "version",
 ]

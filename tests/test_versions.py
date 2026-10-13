@@ -62,7 +62,7 @@ def versions(home) -> list[str]:
 
 
 class TestACommit:
-    async def test_serve_writes_the_first_version_and_nothing_beside_it(
+    async def test_serve_writes_the_first_version_and_the_plain_copy(
         self, tmp_path, serve
     ):
         await served(tmp_path, serve)
@@ -71,7 +71,9 @@ class TestACommit:
 
         assert hint.startswith("00001-") and hint.endswith(".metadata.json")
         assert versions(home) == [hint]
-        assert not (home / "t.metadata.json").exists(), "no plain copy (#124)"
+        assert _metadata.plain(home, "t") == _metadata.load(home, "t"), (
+            "the plain copy, for clients from before the hint (#135)"
+        )
 
     async def test_a_migration_is_a_version_naming_its_own_manifest(
         self, tmp_path, serve
@@ -87,7 +89,7 @@ class TestACommit:
             ".metadata.json", ".manifest.parquet"
         )
         assert (home / "t.metadata" / version["manifest"]).is_file()
-        assert not (home / "t.manifest.parquet").exists(), "no plain copy (#124)"
+        assert _manifest.plain(home, "t") == _manifest.load(home, "t"), "and its copy"
 
     async def test_the_last_versions_are_kept_and_no_more(self, tmp_path, serve):
         await served(tmp_path, serve)
@@ -105,8 +107,7 @@ class TestACommit:
         self, tmp_path, serve
     ):
         """Its plain files are read, carried into its first version — the
-        manifest too — and then deleted: left, they would show a reader that
-        still opened them the stream as it was."""
+        manifest too — and then rewritten as copies of that version."""
         await served(tmp_path, serve)
         await migrated(tmp_path)
         home = tmp_path / "t"
@@ -126,8 +127,29 @@ class TestACommit:
         assert (home / "t.metadata" / _versions.HINT).is_file()
         assert _metadata.load(home, "t") == before
         assert _manifest.load(home, "t") == manifest
-        assert not (home / "t.metadata.json").exists()
-        assert not (home / "t.manifest.parquet").exists()
+        assert _metadata.plain(home, "t") == before
+        assert _manifest.plain(home, "t") == manifest
+
+    async def test_a_plain_copy_0_20_0_deleted_comes_back_at_serve(
+        self, tmp_path, serve
+    ):
+        """0.20.0 wrote none and deleted the ones it found; a client from
+        before the hint still opens them (#135)."""
+        await served(tmp_path, serve)
+        await migrated(tmp_path)
+        home = tmp_path / "t"
+        (home / "t.metadata.json").unlink()
+        (home / "t.manifest.parquet").unlink()
+
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER)
+        try:
+            async with serve(stream, maintain=False):
+                pass
+        finally:
+            await stream.aclose()
+
+        assert _metadata.plain(home, "t") == _metadata.load(home, "t")
+        assert _manifest.plain(home, "t") == _manifest.load(home, "t")
 
     async def test_a_stream_never_versioned_is_still_read(self, tmp_path, serve):
         """By a reader that has only its plain files — the stream's, until a
@@ -242,6 +264,29 @@ class TestTheReadsItSaves:
         # A plain URI, as an older greeting named it: through the hint too.
         plain = f"{bucket}/t/t.metadata.json"
         assert await self._opened(plain, s3, reads) == [_versions.HINT]
+
+    async def test_a_published_plain_copy_0_20_0_deleted_comes_back(
+        self, tmp_path, serve, s3, bucket
+    ):
+        await served(tmp_path, serve, published=bucket, s3_options=s3)
+        await migrated(tmp_path)
+        store = _versions._Remote(f"{bucket}/t", "t", s3)  # noqa: SLF001
+        for name in ("t.metadata.json", "t.manifest.parquet"):
+            store.delete(name)
+
+        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER, s3_options=s3)
+        try:
+            async with serve(stream, maintain=False):
+                pass
+        finally:
+            await stream.aclose()
+
+        plain = store.read("t.metadata.json")
+        assert plain is not None
+        assert _metadata.Metadata.from_json(plain.decode()) == _metadata.load(
+            tmp_path / "t", "t"
+        )
+        assert store.read("t.manifest.parquet") is not None
 
     async def test_a_new_version_is_read_when_the_hint_names_it(
         self, tmp_path, serve, s3, bucket
