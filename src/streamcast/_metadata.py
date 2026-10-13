@@ -576,8 +576,8 @@ def within(published: str, stream: str) -> str:
 
 
 def plain_name(stream: str) -> str:
-    """The file a stream from before the versions kept its metadata in, beside
-    its logs: read until its first version is written, which deletes it."""
+    """The plain copy of the current version beside the logs, for clients
+    from before the versions (#135); all a stream from before them has."""
     return f"{stream}.metadata.json"
 
 
