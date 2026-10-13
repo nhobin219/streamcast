@@ -86,8 +86,9 @@ through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
 `[offset, ts, msg]` per message:
 
 ```
-{"streamcast":5,"stream":"trades","end_offset":1861,"replay":[1200,1861],
- "metadata":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
+{"streamcast":4,"stream":"trades","end_offset":1861,"replay":[1200,1861],
+ "metadata":"s3://market-data/prod/trades/trades.metadata.json",
+ "metadata_hint":"s3://market-data/prod/trades/trades.metadata/version-hint.text",
  "stream_id":"5f0c…","durable":true}
 [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0,"amount":0.015,"side":0}]
 ```
@@ -175,8 +176,9 @@ the server accepted the subscribe. The alternative surfaces a refused offset as
 a failure of whatever `recv` the application happened to reach first, which on a
 quiet stream is minutes later and somewhere else.
 
-**It names where the history is read.** `metadata` is the URI of the hint
-naming the stream's current metadata (§5) and `stream_id` the id that metadata
+**It names where the history is read.** `metadata_hint` is the URI of the
+hint naming the stream's current metadata (§5), `metadata` a plain copy of it
+for clients from before the hint, and `stream_id` the id that metadata
 records; both are null on a
 stream with no log. They are all a reader on another machine needs, with its
 own credentials, to read every log the stream has had — which is what
@@ -843,11 +845,12 @@ too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
 **It is written as versions, behind a hint**, as an Iceberg table's metadata
 is. Each change is an immutable `<stream>.metadata/<n>-<id>.metadata.json`,
 with the manifest it names beside it, and `version-hint.text` in the same
-directory names the current one; the greeting's `metadata` names the hint. The
-same files sit in the stream's home and under its published prefix. A stream
-from before 0.18 has only a plain `<stream>.metadata.json` and
-`<stream>.manifest.parquet` beside its logs, read until its first version is
-written, which deletes them.
+directory names the current one; the greeting's `metadata_hint` names the hint.
+The same files sit in the stream's home and under its published prefix, and
+after each commit a plain `<stream>.metadata.json` and
+`<stream>.manifest.parquet` beside the logs copy the current version, for
+clients from before the hint. A stream from before 0.18 has only those, read
+until its first version is written.
 
 - **`sealed_logs` and `live_log` are separate keys.** Only sealed logs have
   statistics (#27), so only they can be pruned, and the structure says so.

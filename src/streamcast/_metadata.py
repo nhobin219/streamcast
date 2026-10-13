@@ -658,6 +658,11 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     unversioned, unpublished = _versions.missing(
         root, stream, published=log.published, s3_options=s3_options
     )
+    # And one whose plain copy 0.20.0 deleted gets it back, for the clients
+    # from before the versions that open it (#135).
+    plainless, unplain = _versions.plainless(
+        root, stream, published=log.published, s3_options=s3_options
+    )
     changed = found is None
     if found is None:
         found = single(stream, log)
@@ -679,10 +684,10 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
         )
         raise ValueError(msg)
 
-    if changed or unversioned:
+    if changed or unversioned or plainless:
         _versions.commit(root, found)
 
-    if remote(log.published) and (unpublished or published != found):
+    if remote(log.published) and (unpublished or unplain or published != found):
         _versions.commit(
             root, found, published=log.published, s3_options=s3_options, local=False
         )

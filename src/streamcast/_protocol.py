@@ -5,7 +5,7 @@ message after it is a three-element array — the offset, the time the server
 took the row, then the row itself. How another language reads a row, binary
 columns included, is `docs/SPEC.md` §2, "Reading a row in another language":
 
-    {"streamcast":5,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
+    {"streamcast":4,"stream":"trades","end_offset":1861,"metadata":"s3://…",...}
     [1861,1790038800124001,{"event_ts":1790038800123456,"price":85565.0}]
 
 **The server's fields are POSITIONAL, and the row is untouched.** The offset
@@ -73,14 +73,21 @@ _DECODER: Final = msgspec.json.Decoder()
 #
 # There is no key name here on purpose. That is the point.
 
-VERSION: Final = 5
-"""The protocol this build speaks. A greeting naming any other is refused.
+VERSION: Final = 4
+"""The protocol this build's server speaks.
 
 One number for the whole protocol rather than a feature list, because there is
 nothing yet to negotiate: a server and a subscriber that disagree about the
-frame layout disagree about all of it. 5 is 4 with `metadata` naming the
-hint rather than a plain copy of the current version (#124): a 4 client would
-read the hint as metadata, so it is refused instead.
+frame layout disagree about all of it.
+"""
+
+ACCEPTED: Final = (4, 5)
+"""The protocols this build's clients read; a greeting naming any other is refused.
+
+5 is 4 with `metadata` naming the hint and no `metadata_hint` (#124). Read
+here so a client upgrades before the servers it talks to, and a server after
+its clients, one process at a time in any order (#135): a server speaking 5
+comes in a later release, once clients read it.
 """
 
 EARLIEST: Final = 0
@@ -262,6 +269,10 @@ class Greeting:
     `file://` path on the server's machine, readable there and nowhere else.
     Credentials are the reader's own; a server that sent them would be
     handing every subscriber its keys.
+
+    From a protocol-4 server, its `metadata_hint`; from one from before the
+    versions, which names no hint, its plain `metadata`, which a reader takes
+    as well (`Stream.snapshot` reads either).
     """
 
     stream_id: str | None
@@ -325,11 +336,15 @@ def greeting(
     metadata: str | None = None,
     stream_id: str | None = None,
     where: dict[str, object] | None = None,
+    metadata_hint: str | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
     `metadata` and `stream_id` say where the stream's history can be read
-    from, and which stream it is; both None for a stream with no log.
+    from, and which stream it is; both None for a stream with no log. At
+    protocol 4 `metadata` is the plain `<stream>.metadata.json`, for clients
+    from before the versions, and `metadata_hint` the hint every later client
+    opens instead.
 
     `where` is the filter the server is applying, echoed back. It is what lets
     a subscriber confirm the server understood the predicate rather than
@@ -346,6 +361,7 @@ def greeting(
             "group_commit": group_commit,
             "schema": schema,
             "metadata": metadata,
+            "metadata_hint": metadata_hint,
             "stream_id": stream_id,
             "where": where,
         }
@@ -376,14 +392,20 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         raise ProtocolError(msg)
 
     version = fields["streamcast"]
-    if version != VERSION:
-        msg = f"server speaks streamcast {version}; this build speaks {VERSION}"
+    if version not in ACCEPTED:
+        msg = (
+            f"server speaks streamcast {version}; this build speaks "
+            f"{' or '.join(map(str, ACCEPTED))}"
+        )
         raise ProtocolError(msg)
 
     replay = fields.get("replay")
     schema = fields.get("schema")
 
-    metadata = fields.get("metadata")
+    # The hint wherever the server names one: `metadata_hint` at 4, beside a
+    # plain `metadata`; `metadata` itself at 5.
+    hint = fields.get("metadata_hint")
+    metadata = hint if isinstance(hint, str) else fields.get("metadata")
     stream_id = fields.get("stream_id")
 
     return Greeting(

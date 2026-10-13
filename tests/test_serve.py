@@ -185,9 +185,10 @@ class TestWebsocketsCompatibility:
             assert info["streamcast"] == streamcast._protocol.VERSION
             assert info["stream"] == "trades"
             # Enough to read the stream's history without this server: the
-            # hint naming its metadata, and the id that says it is this stream's.
-            assert info["metadata"].endswith("/trades.metadata/version-hint.text")
-            assert "metadata_hint" not in info, "folded into metadata (#124)"
+            # hint naming its metadata, a plain copy for clients from before
+            # the hint (#135), and the id that says it is this stream's.
+            assert info["metadata_hint"].endswith("/trades.metadata/version-hint.text")
+            assert info["metadata"].endswith("/trades.metadata.json")
             assert isinstance(info["stream_id"], str)
 
             # And every frame after it is a readable JSON row. No header to

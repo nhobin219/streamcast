@@ -1489,6 +1489,15 @@ class Stream:
         return _versions.hint_uri(self._log.root, self._name, self._log.published)
 
     @property
+    def _plain_uri(self) -> str | None:
+        """The plain copy, which a protocol-4 greeting's `metadata` names for
+        clients from before the versions (#135)."""
+        if self._log is None:
+            return None
+
+        return _versions.plain_uri(self._log.root, self._name, self._log.published)
+
+    @property
     def name(self) -> str:
         """What this stream is served at. `""` is served at `/`."""
         return self._name
@@ -1968,7 +1977,8 @@ class Stream:
                 durable=self._log is not None,
                 group_commit=self._group_commit,
                 schema=self._shape,
-                metadata=self.metadata_uri,
+                metadata=self._plain_uri,
+                metadata_hint=self.metadata_uri,
                 stream_id=self._stream_id,
             )
         )
@@ -2121,7 +2131,8 @@ class Stream:
                     # Where the history is read, and whose: a subscriber
                     # checks the id against the file, so a file at the same
                     # path that belongs to another stream is refused.
-                    metadata=self.metadata_uri,
+                    metadata=self._plain_uri,
+                    metadata_hint=self.metadata_uri,
                     stream_id=self._stream_id,
                     where=dict(where) if where is not None else None,
                 )

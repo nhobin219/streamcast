@@ -7,6 +7,26 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.20.1 — 2026-10-13
+
+### Fixed
+
+- **Clients and servers upgrade one at a time again** (#135). 0.20.0 moved
+  the greeting to protocol 5, so a 0.19 client and a 0.20.0 server, or the
+  other way round, refused each other at connect, publishers included, and a
+  deployment had to upgrade every process at once. Now:
+  - **A client reads protocol 4 or 5**, and `info.metadata` is the best URI
+    the server gave: the hint, `metadata_hint` from a 4 server or `metadata`
+    from a 5.
+  - **A server sends protocol 4 again**, with a plain `metadata` and the
+    hint as `metadata_hint`, and writes the plain `<stream>.metadata.json`
+    and `<stream>.manifest.parquet` copies again. `serve` puts back any copy
+    0.20.0 deleted.
+
+  Every pair from 0.19 to 0.20.1 works together. Upgrade through 0.20.1:
+  clients first or servers first, one process at a time. A later release
+  moves servers to protocol 5 once clients read it.
+
 ## 0.20.0 — 2026-10-12
 
 ### Changed
