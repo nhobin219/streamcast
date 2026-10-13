@@ -49,12 +49,33 @@ the state where X breaks*, and map each to an invariant in `docs/SPEC.md` §7:
 - **Bounds** — "Find something that grows per message or per connection and is not
   counted by `max_backlog`."
 
+## Widen the bar to the change's own failure
+
+I1-I6 are the bar, but a change can fail in a way they don't name. Then say in the brief
+what counts as critical for this change, so the reviewer doesn't grade it as operability.
+Ones that have been used:
+
+- **Retention:** deleting rows a reader can still resolve, or starting a grace that a
+  reader never had.
+- **Metadata:** a reader silently given a stale view, such as a missing log or an ignored
+  floor. A stream that no longer opens, serves or restores after an upgrade.
+- **Subprocesses:** two litestreams on one database, or a log left with no working
+  maintainer.
+- **Protocol:** a client/server pair the PR claims works that doesn't.
+
 ## Tell it what is already verified
 
 The rubric says **"Do not re-derive what you were told is verified."** List, as bullets,
 what you already have — with numbers where there are numbers, so it can tell whether its
 own run agrees. The falsifications especially: say which tests you broke the code against
 and confirmed failing.
+
+## Keep a round short
+
+Scope each round to finish in about five minutes: two or three questions, the commits to
+read named (`git show <sha>`), and what is verified listed. A fresh reviewer per round is
+fine when the brief says what earlier rounds found and what changed since. Run the full
+suite beside it, not after it.
 
 ## The loop
 
