@@ -548,16 +548,16 @@ def home(root: str | os.PathLike[str], stream: str) -> Path:
         return root
 
     own = root / stream
-    if path(own, stream).exists() or _is_log(own / stream):
+    if path(own, stream).exists() or is_log(own / stream):
         return own
 
-    if path(root, stream).exists() or _is_log(own):
+    if path(root, stream).exists() or is_log(own):
         return root
 
     return own
 
 
-def _is_log(directory: Path) -> bool:
+def is_log(directory: Path) -> bool:
     """Whether `directory` is a litelink log: its buffer is always there."""
     return (directory / "buffer.db").exists()
 
@@ -738,6 +738,7 @@ __all__ = [
     "check_types",
     "describe",
     "ensure",
+    "is_log",
     "load",
     "path",
     "plain",

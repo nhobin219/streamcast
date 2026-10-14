@@ -14,18 +14,23 @@ just check              # lint + format-check + typecheck + tests, exactly what 
 
 You need [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just).
 
-Most of the suite needs nothing else: every test binds port 0 on loopback, every log is a
-temp directory, and a change that makes the ordinary tests need the network is a change to
-reject. The **replication and catch-up tiers** are the exception and are marked
-`@pytest.mark.replication` — they run litestream against a real object store and read a
-real published table back, which cannot be faked without testing the fake. They SKIP without an
-endpoint, and a skip is not a pass:
+**When a change needs a litelink that is not released yet**, point `[tool.uv.sources]` at
+its git commit until the release exists. uv builds it from source, and a source build of
+litelink is its pure wheel, without the litestream binary its released wheels carry, so
+the replication tier cannot find litestream and fails where it is required. Add, beside
+the source, `[tool.uv.extra-build-variables]` with
+`litelink = { LITELINK_WHEEL_PLATFORM = "linux-x86_64" }` (or `linux-arm64`,
+`macos-x86_64`, `macos-arm64`), so litelink's build hook makes the platform wheel instead.
+uv keeps the wheel it built for a commit and reuses it whatever the variable says, so after
+changing it:
 
 ```bash
-just rustfs             # a local S3 endpoint in a container
-just check-all          # every gate, with those tiers REQUIRED — what CI runs
-just rustfs-stop
+uv cache clean litelink
+uv sync --reinstall-package litelink
 ```
+
+A release refuses a tree that still has `[tool.uv.sources]`: remove both tables and raise
+the floor once the litelink release is on PyPI.
 
 ## Commits
 

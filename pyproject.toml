@@ -59,12 +59,14 @@ dependencies = [
     # truncating and deleting a retired log from its published table, which
     # retention needs, and metadata read from object storage once; 0.12.4
     # for a failed claim commit that raises its real error and orphans no
-    # claim, which a maintainer's stop signal relied on.
+    # claim, which a maintainer's stop signal relied on; 0.12.5 for
+    # `litelink.replication` and `litelink.column_ddl`, the public replication
+    # primitives and column DDL `Store` is built on.
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.12.4,<0.13",
+    "litelink>=0.12.5,<0.13",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

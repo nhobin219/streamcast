@@ -11,6 +11,30 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`streamcast.Store`, a consumer's state committed with its offset.**
+  Exactly-once processing for a consumer of a stream: in one
+  `transaction()` it applies a message to its own tables and advances its
+  offset in that stream (`tx.advance(stream, offset)`), so a write and its
+  offset survive `kill -9` together or not at all. After any crash it
+  resumes from `store.offset(stream)`, skipping no message, and `advance`
+  only moves forward, so none is applied twice. A position is keyed by the
+  stream's name, read from a URI as `connect` reads one, so a broker that
+  moves host or port keeps it; the stream's `stream_id` is recorded beside
+  it, and another stream under the same name is refused with
+  `StreamMismatch` rather than resumed, with `tx.forget` as the way out.
+  The state is a local SQLite database of tables declared in JSON Schema,
+  as a stream's schema is (`StoreTable`), the source of truth, with a
+  litelink log's column type checks. `Store.new` is create-or-open, as
+  `Stream.new` is, and a store that exists must be declared exactly as it
+  was created: every difference is refused and named, additive ones
+  included. Changing a declaration will be `Store.migrate` (#147). So that
+  it also survives losing the machine, it replicates the way a log does and never runs litestream itself: `write_replication_config()`
+  writes the config a `Sidecar` runs, `flush(socket=sidecar.socket)` ships
+  through that sidecar and raises when none answers, and `Store.restore`
+  brings the database back onto a machine that has none. Ported from
+  litelink's `Store` design, which moved here: a position in a stream is a
+  consumer's concept, and litelink keeps only the primitives it is built on
+  (`litelink.replication`, `litelink.column_ddl`). See SPEC §8c.
 - **`streamcast.Sidecar` and `streamcast.SidecarUnavailable` are public.**
   A process with litelink databases to replicate and no `serve` runs the
   same supervised litestream `serve` does: one process for every database,
@@ -35,8 +59,25 @@ there was nothing to have changed from. Everything above it is ordinary.
   beside its replacement, both replicating every database it had. It is
   now killed and reaped first.
 
+### Packaging
+
+- **litelink 0.12.5.** `Store` is built on `litelink.replication` and
+  `litelink.column_ddl`, the public replication primitives and column DDL
+  that release added.
+
 ### Changed
 
+- **The store's constructors are `Store.new` and `Store.restore`, and
+  opening a store no longer changes its declaration.** The store has never
+  been released, in streamcast or in litelink (its design reached neither's
+  PyPI), so no published version behaves otherwise. This is recorded for
+  anyone who built on this change's earlier heads, where `Store.open(root,
+  name, ...)` created or opened a store and applied a new table or a new
+  nullable column on the way. `Store.new(name, root=..., ...)` takes its
+  place: the same create-or-open, the name first, as `Stream.new`, with no
+  automatic migration. Any difference from the recorded declaration is
+  refused and named. `Store.restore` and `Store.replication_config_for`
+  take the name first too.
 - **A server's litestream listens on a control socket** in its temporary
   working directory. Before, the merged config dropped every socket.
   Nothing else about `serve(replicate=True)` changes.
