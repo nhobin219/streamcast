@@ -701,7 +701,7 @@ wheels = [
 [[package]]
 name = "litelink"
 version = "0.12.4"
-source = { git = "https://github.com/nhobin219/litelink?rev=f44e871e4a006c3ae8f250a2e45e978b9a735ae3#f44e871e4a006c3ae8f250a2e45e978b9a735ae3" }
+source = { git = "https://github.com/nhobin219/litelink?rev=d8b926521d2e126cb4589d39f9f544bdebd4d341#d8b926521d2e126cb4589d39f9f544bdebd4d341" }
 dependencies = [
     { name = "duckdb" },
     { name = "pyarrow" },
@@ -1996,7 +1996,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litelink", git = "https://github.com/nhobin219/litelink?rev=f44e871e4a006c3ae8f250a2e45e978b9a735ae3" },
+    { name = "litelink", git = "https://github.com/nhobin219/litelink?rev=d8b926521d2e126cb4589d39f9f544bdebd4d341" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
     { name = "websockets", specifier = ">=14,<18" },

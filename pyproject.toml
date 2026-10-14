@@ -105,7 +105,7 @@ build-backend = "uv_build"
 # same one PyPI has. It names linux-x86_64, which is what CI and the
 # development boxes run; on another platform, override it as CONTRIBUTING says.
 [tool.uv.sources]
-litelink = { git = "https://github.com/nhobin219/litelink", rev = "f44e871e4a006c3ae8f250a2e45e978b9a735ae3" }
+litelink = { git = "https://github.com/nhobin219/litelink", rev = "d8b926521d2e126cb4589d39f9f544bdebd4d341" }
 
 [tool.uv.extra-build-variables]
 litelink = { LITELINK_WHEEL_PLATFORM = "linux-x86_64" }
