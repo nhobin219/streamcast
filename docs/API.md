@@ -1196,7 +1196,10 @@ spelling ([The schema is yours](#the-schema-is-yours)): `properties` in column o
 the type, and `contentEncoding` for a binary column. A schema a stream would refuse is
 refused when the `StoreTable` is built. `key` names the primary key's columns, which must be
 required and non-null; `single_row` makes the one-row checkpoint. `store.tables` hands the
-declaration back as a stream publishes its schema (`from_arrow`), every width explicit. `open` creates it or opens it, and applies additive
+declaration back as a stream publishes its schema (`from_arrow`), every width explicit.
+What is enforced is each column's type and nullability, as for a stream: validation keywords
+such as `minimum`, `enum` or `pattern` become no constraint. A NaN written to a nullable
+number column is stored by SQLite as NULL, where a stream's append refuses it. `open` creates it or opens it, and applies additive
 declaration changes (a new table, a new nullable column); anything else is refused with the
 differences named. Column types are enforced by the same DDL as a litelink log's buffer
 (`litelink.column_ddl`), so `tx.execute` cannot store a value of the wrong type. Nested

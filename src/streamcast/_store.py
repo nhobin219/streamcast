@@ -121,6 +121,11 @@ class StoreTable:
 
     The schema is converted here, so one `to_arrow` refuses would raise at
     construction, as a stream's does at `Stream.new`.
+
+    What is enforced is the column's type and nullability, as for a stream.
+    Validation keywords (`minimum`, `enum`, `maxLength`, `pattern`) are read
+    by neither and become no CHECK, so raw SQL can store a value they would
+    reject. Equality compares the spelling given, not the columns.
     """
 
     schema: Mapping[str, object]
@@ -337,6 +342,12 @@ def schema_changes(
         if old.key != table.key or old.single_row != table.single_row:
             problems.append(f"table {name!r} changes its key")
 
+        # Type and nullability, not field metadata: a binary column's
+        # `contentEncoding` is how its value is spelled on the JSON wire, and
+        # the store holds the bytes, which a change of spelling leaves as they
+        # were. A reordered `properties` is not a change either: SQLite's
+        # column order is fixed at CREATE, and only the recorded spelling
+        # follows the new declaration.
         before, after = _arrow(old), _arrow(table)
         for f in before:
             if f.name not in after.names:
