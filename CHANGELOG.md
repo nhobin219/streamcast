@@ -21,11 +21,14 @@ there was nothing to have changed from. Everything above it is ordinary.
   stream's name, read from a URI as `connect` reads one, so a broker that
   moves host or port keeps it; the stream's `stream_id` is recorded beside
   it, and another stream under the same name is refused with
-  `StreamMismatch` rather than resumed, with `tx.forget` as the way out. The state is a
-  local SQLite database of tables declared in JSON Schema, as a stream's
-  schema is (`StoreTable`), the source of truth, with additive-only schema
-  changes and a litelink log's column type checks. So that it also survives losing the machine, it replicates the way
-  a log does and never runs litestream itself: `write_replication_config()`
+  `StreamMismatch` rather than resumed, with `tx.forget` as the way out.
+  The state is a local SQLite database of tables declared in JSON Schema,
+  as a stream's schema is (`StoreTable`), the source of truth, with a
+  litelink log's column type checks. `Store.new` is create-or-open, as
+  `Stream.new` is, and a store that exists must be declared exactly as it
+  was created: every difference is refused and named, additive ones
+  included. Changing a declaration will be `Store.migrate` (#147). So that
+  it also survives losing the machine, it replicates the way a log does and never runs litestream itself: `write_replication_config()`
   writes the config a `Sidecar` runs, `flush(socket=sidecar.socket)` ships
   through that sidecar and raises when none answers, and `Store.restore`
   brings the database back onto a machine that has none. Ported from
@@ -67,6 +70,17 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed
 
+- **The store's constructors are `Store.new` and `Store.restore`, and
+  opening a store no longer changes its declaration.** The store has never
+  been released, in streamcast or in litelink (its design reached neither's
+  PyPI), so no published version behaves otherwise. This is recorded for
+  anyone who built on this change's earlier heads, where `Store.open(root,
+  name, ...)` created or opened a store and applied a new table or a new
+  nullable column on the way. `Store.new(name, root=..., ...)` takes its
+  place: the same create-or-open, the name first, as `Stream.new`, with no
+  automatic migration. Any difference from the recorded declaration is
+  refused and named. `Store.restore` and `Store.replication_config_for`
+  take the name first too.
 - **A server's litestream listens on a control socket** in its temporary
   working directory. Before, the merged config dropped every socket.
   Nothing else about `serve(replicate=True)` changes.

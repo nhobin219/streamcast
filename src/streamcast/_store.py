@@ -321,72 +321,56 @@ def _decode_table(value: Mapping[str, object]) -> StoreTable:
     )
 
 
-def schema_changes(
+def declaration_differences(
     recorded: Mapping[str, StoreTable], declared: Mapping[str, StoreTable]
 ) -> list[str]:
-    """The DDL taking `recorded` to `declared`, or ValueError naming what isn't
-    additive.
+    """Every way `declared` differs from the `recorded` declaration, named.
 
-    Additive means a new table, or a new NULLABLE column on an existing one.
-    Everything else would change what an existing row means — a dropped or
-    retyped column, a tightened nullability, a new key — and is refused. A new
-    non-nullable column is refused too: the rows already there have no value
-    for it, and a default invented here would be a value nobody wrote.
+    Additive changes count, a new table or a new nullable column among them:
+    `new` applies no change of any kind to an existing store, as `Stream.new`
+    applies none to an existing log, so that a declaration that drifted from
+    the store is refused rather than quietly made true. The columns are
+    compared as `Stream.new` compares a log's: by name, type and
+    nullability, in order, and not by field metadata (a binary column's
+    `contentEncoding` is how its value is spelled on the JSON wire, and the
+    store holds the bytes).
     """
-    statements: list[str] = []
-    problems: list[str] = []
+    differences: list[str] = []
     for name in sorted(set(recorded) - set(declared)):
-        problems.append(f"table {name!r} is recorded but not declared (dropped)")
+        differences.append(f"table {name!r} is in the store and not declared")
 
-    for name, table in declared.items():
-        _check_table(name, table)
-        old = recorded.get(name)
-        if old is None:
-            statements.append(_create_ddl(name, table))
-            continue
+    for name in sorted(set(declared) - set(recorded)):
+        differences.append(f"table {name!r} is declared and not in the store")
 
+    for name in sorted(set(recorded) & set(declared)):
+        old, table = recorded[name], declared[name]
         if old.key != table.key or old.single_row != table.single_row:
-            problems.append(f"table {name!r} changes its key")
+            differences.append(f"table {name!r} changes its key")
 
-        # Type and nullability, not field metadata: a binary column's
-        # `contentEncoding` is how its value is spelled on the JSON wire, and
-        # the store holds the bytes, which a change of spelling leaves as they
-        # were. A reordered `properties` is not a change either: SQLite's
-        # column order is fixed at CREATE, and only the recorded spelling
-        # follows the new declaration.
         before, after = _arrow(old), _arrow(table)
         for f in before:
             if f.name not in after.names:
-                problems.append(f"column {name}.{f.name} is dropped or renamed")
+                differences.append(f"column {name}.{f.name} is not declared")
                 continue
 
             new = after.field(f.name)
             if not new.type.equals(f.type):
-                problems.append(
+                differences.append(
                     f"column {name}.{f.name} changes type {f.type} -> {new.type}"
                 )
 
             if new.nullable != f.nullable:
-                problems.append(f"column {name}.{f.name} changes nullability")
+                differences.append(f"column {name}.{f.name} changes nullability")
 
         for f in after:
-            if f.name in before.names:
-                continue
+            if f.name not in before.names:
+                differences.append(f"column {name}.{f.name} is new")
 
-            if not f.nullable:
-                problems.append(
-                    f"new column {name}.{f.name} must be nullable: existing rows "
-                    f"have no value for it"
-                )
-                continue
+        common = [n for n in before.names if n in after.names]
+        if common != [n for n in after.names if n in before.names]:
+            differences.append(f"table {name!r} declares its columns in another order")
 
-            statements.append(f'ALTER TABLE "{name}" ADD COLUMN {column_ddl(f)}')
-
-    if problems:
-        msg = "a store's schema changes are additive only: " + "; ".join(problems)
-        raise ValueError(msg)
-
-    return statements
+    return differences
 
 
 # -- the transaction ----------------------------------------------------------
@@ -613,7 +597,8 @@ def _decode_retention(meta: Mapping[str, str]) -> timedelta | None:
 
 
 class Store:
-    """One open table store. Build it with `Store.open` or `Store.restore`.
+    """One open table store. Build it with `Store.new`, or `Store.restore` on a
+    machine that has none.
 
     Threads within a process share one handle: every call takes one lock, and
     a transaction holds it from `BEGIN` to `COMMIT`. A second process opening
@@ -632,26 +617,33 @@ class Store:
     # -- construction ------------------------------------------------------
 
     @classmethod
-    def open(
+    def new(
         cls,
-        root: PathLike[str] | str,
         name: str,
         *,
+        root: PathLike[str] | str,
         tables: Mapping[str, StoreTable],
         published: str | None = None,
         s3_options: S3Options | None = None,
         retention: timedelta | None = None,
     ) -> Self:
-        """Open the store at `<root>/<name>`, creating it if it does not exist.
+        """The store at `<root>/<name>`, created if it is not there yet.
 
-        A local database always wins, and `open` never restores one: a
-        replica is pulled only by `restore`, on a machine that has none.
+            store = streamcast.Store.new("totals", root="data", tables=TABLES)
 
-        `tables` is the whole declaration. Changes against the recorded one
-        are applied here, in the opening transaction, if they are additive;
-        anything else is refused with every difference named. `published` and
-        `retention` are recorded on first use, and an open naming a different
-        `published` is refused: it is where this store's replica already is.
+        Named and shaped as `Stream.new`, and the same contract: the name,
+        then everything else by keyword; create-or-open; and an existing
+        store checked against what is declared. `tables` is the whole
+        declaration. A store that exists must have been created with exactly
+        these tables, and any difference is refused with every difference
+        named, a new table or a new nullable column included: nothing is
+        changed in a store by opening it. A local database always wins, and
+        this never restores one; `restore` pulls a replica onto a machine
+        that has none.
+
+        `published` and `retention` are recorded when not recorded yet, and
+        a `published` that differs from the recorded one is refused: it is
+        where this store's replica already is.
         """
         layout = StoreLayout(Path(root), name)
         if published is not None:
@@ -695,14 +687,29 @@ class Store:
                 )
                 raise ValueError(msg)
 
-            for statement in schema_changes(_decode_tables(meta), tables):
-                con.execute(statement)
+            pairs: dict[str, str] = {}
+            if "tables" not in meta:
+                # A store being created: the declaration is made true, once.
+                for name, table in tables.items():
+                    _check_table(name, table)
+                    con.execute(_create_ddl(name, table))
 
-            pairs = {
-                "tables": json.dumps(
+                pairs["tables"] = json.dumps(
                     {n: _encode_table(t) for n, t in sorted(tables.items())}
-                ),
-            }
+                )
+
+            else:
+                differences = declaration_differences(_decode_tables(meta), tables)
+                if differences:
+                    msg = (
+                        f"this store was created with another declaration: "
+                        f"{'; '.join(differences)}. A store's declaration is fixed "
+                        f"when it is created, as a stream's schema is; declare the "
+                        f"tables it has, or start a new store and replay the stream "
+                        f"into it"
+                    )
+                    raise ValueError(msg)
+
             if published is not None:
                 pairs["published"] = published
 
@@ -720,9 +727,9 @@ class Store:
     @classmethod
     def restore(
         cls,
-        root: PathLike[str] | str,
         name: str,
         *,
+        root: PathLike[str] | str,
         published: str,
         tables: Mapping[str, StoreTable],
         s3_options: S3Options | None = None,
@@ -782,9 +789,9 @@ class Store:
             )
             raise FileNotFoundError(msg)
 
-        store = cls.open(
-            root,
+        store = cls.new(
             name,
+            root=root,
             tables=tables,
             published=published,
             s3_options=options,
@@ -831,8 +838,9 @@ class Store:
 
     @staticmethod
     def replication_config_for(
-        root: PathLike[str] | str,
         name: str,
+        *,
+        root: PathLike[str] | str,
         published: str,
         s3_options: S3Options | None = None,
         retention: timedelta | None = None,

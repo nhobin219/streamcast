@@ -1535,12 +1535,29 @@ text is something no CHECK can see into, and a transaction hands the consumer ra
 `column_ddl` accepts one, checked as text, because a log's own encoder checks the JSON; a
 store has no encoder. Names beginning `_streamcast` are reserved.
 
-**Schema changes are additive.** A store is one SQLite database, so a new table or a new
-nullable column is one transaction at `open`, and no file anywhere predates it. Everything
-else (a dropped or renamed column or table, a type change, a tightened nullability, a key
-change, a new non-nullable column) changes what an existing row means, and is refused with
-every difference named. The declaration is recorded in the store's `_streamcast_meta`
-table, which is the one copy of what the tables are.
+**`new` is create-or-open, as `Stream.new` is, and changes nothing in a store that
+exists.** The declaration is recorded in the store's `_streamcast_meta` table when the store
+is created, and that record is the one copy of what the tables are. A later `new` must
+declare exactly those tables, compared as `Stream.new` compares a log's columns: by name,
+type and nullability, in order, plus each table's key. Any difference is refused with every
+difference named, **additive ones included**: a new table, a new nullable column. Applying
+those automatically would make every `new` a possible migration, and taking that away later
+would break whoever relied on it.
+
+Changing a declaration is a migration, made explicitly, as `Stream.migrate` is. A store is
+current state, not history, so dropping a column or a table is a legitimate one there,
+where a log's would not be. `Store.migrate` is not built yet (#147). Until it is, a store
+that needs another declaration is a new store, replayed from the stream.
+
+The declaration is made under SQLite's write lock and re-read after taking it. Two `new`s on
+one store therefore make one store. A `store.db` with no declaration recorded (a `new`
+killed before its first commit) is a store still being created, and the next `new` creates
+it.
+
+**On a fresh machine, `new` creates an empty store even when its `published` prefix already
+holds a replica**, exactly as `Stream.new` creates an empty log. Restoring is `restore`'s
+job, and is the caller's to choose. #146 covers both: started under a replicating sidecar,
+the empty one is shipped over the good replica.
 
 ### The offset
 

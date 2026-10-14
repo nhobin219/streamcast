@@ -1161,10 +1161,11 @@ recovery hint, and refusing to start because a save was torn turns a crash into 
 ## A consumer's state: `Store`
 
 ```python
-Store.open(root, name, *, tables, published=None, s3_options=None, retention=None) -> Store
-Store.restore(root, name, *, published, tables, s3_options=None, retention=None,
+Store.new(name, *, root, tables, published=None, s3_options=None, retention=None) -> Store
+Store.restore(name, *, root, published, tables, s3_options=None, retention=None,
               binary=None) -> Store
-Store.replication_config_for(root, name, published, s3_options=None, retention=None) -> str
+Store.replication_config_for(name, *, root, published, s3_options=None,
+                             retention=None) -> str
 
 store.transaction() -> ContextManager[StoreTransaction]
     tx.execute(sql, parameters=()) -> sqlite3.Cursor
@@ -1221,9 +1222,23 @@ required and non-null; `single_row` makes the one-row checkpoint. `store.tables`
 declaration back as a stream publishes its schema (`from_arrow`), every width explicit.
 What is enforced is each column's type and nullability, as for a stream: validation keywords
 such as `minimum`, `enum` or `pattern` become no constraint. A NaN written to a nullable
-number column is stored by SQLite as NULL, where a stream's append refuses it. `open` creates it or opens it, and applies additive
-declaration changes (a new table, a new nullable column); anything else is refused with the
-differences named. Column types are enforced by the same DDL as a litelink log's buffer
+number column is stored by SQLite as NULL, where a stream's append refuses it.
+
+**`new` and `restore`, shaped as a stream's** (`Stream.new("trades", root=..., ...)`,
+`Stream.restore("trades", root=..., published=...)`): the name, then everything else by
+keyword. `new` is create-or-open, as `Stream.new` is. It creates the store if it is not
+there, and otherwise opens it and checks it against what is declared. A store that exists
+must be declared exactly as it was created: any difference is refused with every difference
+named, a new table or a new nullable column included. Nothing changes a store by opening it,
+as nothing changes a log. Changing a declaration is a migration, made explicitly, as
+`Stream.migrate` is; `Store.migrate` is not built yet (#147), and until then a store that
+needs another declaration is a new store, replayed from the stream. `restore` pulls the store
+from its replica onto a machine that has none.
+
+**On a fresh machine `new` creates an empty store**, whether or not the replica prefix holds
+one, as `Stream.new` creates an empty log. A machine that lost its store calls `restore`. If
+it calls `new` instead and a sidecar replicates the result, the empty store is shipped over
+the good replica; #146 tracks refusing that for both. Column types are enforced by the same DDL as a litelink log's buffer
 (`litelink.column_ddl`), so `tx.execute` cannot store a value of the wrong type. Nested
 columns are refused: their JSON is text no constraint can check. Names beginning
 `_streamcast` are reserved.
@@ -1231,7 +1246,7 @@ columns are refused: their JSON is text no constraint can check. Names beginning
 **Committing work with its offset** is what the store exists for:
 
 ```python
-store = streamcast.Store.open("data", "state", tables={
+store = streamcast.Store.new("state", root="data", tables={
     "seen": streamcast.StoreTable({
         "type": "object",
         "properties": {"id": {"type": "string"},
@@ -1273,8 +1288,8 @@ machine. The store never runs litestream itself: `write_replication_config()` wr
 [`Sidecar`](#sidecar-the-same-process-for-databases-you-serve-yourself) runs it:
 
 ```python
-store = streamcast.Store.open("data", "state", tables=TABLES,
-                              published="s3://bucket/state", s3_options=s3)
+store = streamcast.Store.new("state", root="data", tables=TABLES,
+                             published="s3://bucket/state", s3_options=s3)
 sidecar = streamcast.Sidecar.of([store.write_replication_config()], s3_options=s3)
 sidecar.start()
 ...

@@ -770,7 +770,7 @@ its offset in the stream commit in one transaction. After any crash it resumes f
 exactly-once processing, with no server keeping track for it.
 
 ```python
-store = streamcast.Store.open("data", "totals", tables={
+store = streamcast.Store.new("totals", root="data", tables={
     "totals": streamcast.StoreTable({
         "type": "object",
         "properties": {"account": {"type": "string"},
@@ -806,7 +806,9 @@ name starts its offsets again, so resuming it from the old position would skip m
 that is refused with `StreamMismatch`, and `tx.forget(uri)` starts it afresh.
 
 A table is declared in JSON Schema, exactly as a stream's schema is
-([Server](#server)), and its changes are additive.
+([Server](#server)). `Store.new` is create-or-open, as `Stream.new` is, and a store that
+exists must be declared as it was created: a difference is refused, an additive one
+included. On a machine that lost its store, `Store.restore` brings it back from its replica.
 
 So that this state also survives losing the machine, the store replicates exactly as a
 log does: it writes a litestream config, a `Sidecar` runs litestream on it,

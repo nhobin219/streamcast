@@ -60,9 +60,9 @@ TABLES = {"items": ITEMS, "checkpoint": CHECKPOINT}
 NOWHERE = "s3://bucket/stores"
 
 
-def opened(root: Path, **overrides: object) -> Store:
+def created(root: Path, **overrides: object) -> Store:
     arguments: dict[str, object] = {"tables": TABLES} | overrides
-    return Store.open(root, "state", **arguments)  # ty: ignore[invalid-argument-type]
+    return Store.new("state", root=root, **arguments)  # ty: ignore[invalid-argument-type]
 
 
 def work(store: Store, upto: int, start: int = 1) -> None:
@@ -125,7 +125,9 @@ def test_the_store_config_is_the_logs_for_the_same_inputs(tmp_path: Path) -> Non
     s3 = S3Options(endpoint="http://127.0.0.1:9000", region="us-east-1")
     retention = timedelta(hours=6)
     log = WriteHandle.replication_config_for(tmp_path, "state", NOWHERE, s3, retention)
-    for_store = Store.replication_config_for(tmp_path, "state", NOWHERE, s3, retention)
+    for_store = Store.replication_config_for(
+        "state", root=tmp_path, published=NOWHERE, s3_options=s3, retention=retention
+    )
 
     log_header, log_blocks = _blocks(log)
     store_header, store_blocks = _blocks(for_store)
@@ -141,7 +143,7 @@ def test_the_store_config_is_the_logs_for_the_same_inputs(tmp_path: Path) -> Non
 
     # An open store emits the same file, from what it recorded, beside its
     # database.
-    with opened(tmp_path, published=NOWHERE, s3_options=s3, retention=retention) as s:
+    with created(tmp_path, published=NOWHERE, s3_options=s3, retention=retention) as s:
         assert s.replication_config() == for_store
         written = s.write_replication_config()
         assert written == s.path.parent / "litestream.yml"
@@ -152,17 +154,17 @@ def test_replication_needs_an_object_store(tmp_path: Path) -> None:
     """A replica on this machine is no replica; a store that names none has
     nothing to emit or flush."""
     with pytest.raises(ValueError, match="s3://"):
-        opened(tmp_path, published=f"file://{tmp_path}/elsewhere")
+        created(tmp_path, published=f"file://{tmp_path}/elsewhere")
 
     # Refused when it is recorded, not at the first config written from it:
     # `published` is split positionally, so a malformed one names another
     # bucket.
     with pytest.raises(ValueError, match="bucket"):
-        opened(tmp_path, published="s3://a:b/stores")
+        created(tmp_path, published="s3://a:b/stores")
 
     assert not (tmp_path / "state" / "store.db").exists()
 
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         assert store.published is None
         with pytest.raises(ValueError, match="no published location"):
             store.replication_config()
@@ -172,12 +174,12 @@ def test_replication_needs_an_object_store(tmp_path: Path) -> None:
 
 
 def test_the_published_location_is_fixed_once_recorded(tmp_path: Path) -> None:
-    opened(tmp_path, published=NOWHERE).close()
+    created(tmp_path, published=NOWHERE).close()
     with pytest.raises(ValueError, match="replicates to"):
-        opened(tmp_path, published="s3://bucket/other")
+        created(tmp_path, published="s3://bucket/other")
 
     # Reopening without it keeps the recorded one.
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         assert store.published == NOWHERE
 
 
@@ -187,7 +189,7 @@ def test_a_store_refuses_a_logs_directory(tmp_path: Path) -> None:
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "buffer.db").touch()
     with pytest.raises(FileExistsError, match="holds a log"):
-        opened(tmp_path)
+        created(tmp_path)
 
 
 def test_a_store_inside_a_logs_directory_is_refused(tmp_path: Path) -> None:
@@ -200,11 +202,11 @@ def test_a_store_inside_a_logs_directory_is_refused(tmp_path: Path) -> None:
     (tmp_path / "log").mkdir()
     (tmp_path / "log" / "buffer.db").touch()
     with pytest.raises(FileExistsError, match="is inside it"):
-        Store.open(tmp_path / "log", "state", tables=TABLES)
+        Store.new("state", root=tmp_path / "log", tables=TABLES)
 
     with pytest.raises(FileExistsError, match="is inside it"):
         Store.restore(
-            tmp_path / "log" / "deeper", "state", published=NOWHERE, tables=TABLES
+            "state", root=tmp_path / "log" / "deeper", published=NOWHERE, tables=TABLES
         )
 
     assert not (tmp_path / "log" / "state").exists()
@@ -225,7 +227,7 @@ def test_a_failed_restore_leaves_no_config(
 
     monkeypatch.setattr(store_module, "restore_database", unreachable)
     with pytest.raises(RuntimeError, match="did not answer"):
-        Store.restore(tmp_path, "state", published=NOWHERE, tables=TABLES)
+        Store.restore("state", root=tmp_path, published=NOWHERE, tables=TABLES)
 
     assert not (tmp_path / "state" / "litestream.yml").exists()
     assert not (tmp_path / "state" / "store.db").exists()
@@ -234,7 +236,7 @@ def test_a_failed_restore_leaves_no_config(
 def test_a_returning_cursor_left_half_read_commits_nothing(tmp_path: Path) -> None:
     """SQLite will not commit with a statement in progress; the transaction
     rolls back whole rather than committing part of it (S1)."""
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         with pytest.raises(sqlite3.OperationalError), store.transaction() as tx:
             # Held, as a consumer holding the cursor would: one collected at
             # once is reset, and the commit then succeeds.
@@ -262,7 +264,7 @@ def test_a_store_restore_leaves_a_logs_directory_untouched(tmp_path: Path) -> No
         before = config.read_text()
 
     with pytest.raises(FileExistsError, match="holds a log"):
-        Store.restore(tmp_path, "state", published=NOWHERE, tables=TABLES)
+        Store.restore("state", root=tmp_path, published=NOWHERE, tables=TABLES)
 
     assert config.read_text() == before
     assert not (tmp_path / "state" / "store.db").exists()
@@ -293,7 +295,7 @@ def test_flush_without_a_sidecar_raises_and_starts_nothing(
         return popen(command, *args, **kwargs)  # noqa: S603  # ty: ignore[no-matching-overload]
 
     monkeypatch.setattr(subprocess, "Popen", recorded)
-    with opened(tmp_path, published=NOWHERE) as store:
+    with created(tmp_path, published=NOWHERE) as store:
         work(store, 3)
         with pytest.raises(RuntimeError, match="control socket"):
             store.flush(binary, timeout=2)
@@ -325,7 +327,7 @@ def test_flush_asks_the_socket_it_is_given_and_names_it(
 
     monkeypatch.setattr(subprocess, "Popen", recorded)
     given = tmp_path / "merged.sock"
-    with opened(tmp_path, published=NOWHERE) as store:
+    with created(tmp_path, published=NOWHERE) as store:
         derived = control_socket(store._layout)  # noqa: SLF001
         assert given != derived
         work(store, 1)
@@ -342,7 +344,7 @@ def test_flush_asks_the_socket_it_is_given_and_names_it(
 
 def test_flush_inside_a_transaction_is_refused(tmp_path: Path) -> None:
     """It ships what is committed, which would not include the transaction."""
-    with opened(tmp_path, published=NOWHERE) as store, store.transaction():
+    with created(tmp_path, published=NOWHERE) as store, store.transaction():
         with pytest.raises(RuntimeError, match="inside a store transaction"):
             store.flush()
 
@@ -365,7 +367,7 @@ def test_flush_then_restore_brings_back_the_tables_and_the_offset(
     binary = sidecar_binary()
     published = f"{bucket}/stores"
     primary = tmp_path / "primary"
-    store = opened(primary, published=published, s3_options=s3)
+    store = created(primary, published=published, s3_options=s3)
     config = store.write_replication_config()
     config.write_text(
         config.read_text().replace(
@@ -395,8 +397,8 @@ def test_flush_then_restore_brings_back_the_tables_and_the_offset(
 
         replacement = tmp_path / "replacement"
         with Store.restore(
-            replacement,
             "state",
+            root=replacement,
             published=published,
             tables=TABLES,
             s3_options=s3,
@@ -432,7 +434,7 @@ async def test_flush_through_a_sidecar_on_its_own_socket(
     """
     binary = sidecar_binary()
     published = f"{bucket}/stores"
-    store = opened(tmp_path / "primary", published=published, s3_options=s3)
+    store = created(tmp_path / "primary", published=published, s3_options=s3)
     derived = control_socket(store._layout)  # noqa: SLF001
     config = store.write_replication_config()
     config.write_text(
@@ -461,8 +463,8 @@ async def test_flush_through_a_sidecar_on_its_own_socket(
         store.close()
 
         with Store.restore(
-            tmp_path / "replacement",
             "state",
+            root=tmp_path / "replacement",
             published=published,
             tables=TABLES,
             s3_options=s3,
@@ -482,8 +484,8 @@ def test_restore_without_a_replica_names_where_it_looked(
     sidecar_binary()
     with pytest.raises(FileNotFoundError, match=f"{bucket}/stores/state/_wal"):
         Store.restore(
-            tmp_path,
             "state",
+            root=tmp_path,
             published=f"{bucket}/stores",
             tables=TABLES,
             s3_options=s3,
@@ -503,13 +505,13 @@ def test_restore_never_overwrites_a_local_store(tmp_path: Path) -> None:
     own existence check from `restore`, leaving litelink's: the config is
     rewritten before litelink refuses.
     """
-    with opened(tmp_path, published=NOWHERE) as store:
+    with created(tmp_path, published=NOWHERE) as store:
         config = store.write_replication_config()
 
     config.write_text(config.read_text() + "# the deployment's\n")
     before = config.read_text()
     with pytest.raises(FileExistsError, match="never restored over"):
-        Store.restore(tmp_path, "state", published=NOWHERE, tables=TABLES)
+        Store.restore("state", root=tmp_path, published=NOWHERE, tables=TABLES)
 
     assert config.read_text() == before
 
@@ -517,7 +519,7 @@ def test_restore_never_overwrites_a_local_store(tmp_path: Path) -> None:
     (other / "state").mkdir(parents=True)
     (other / "state" / "store.db-wal").touch()
     with pytest.raises(FileExistsError, match="store.db-wal"):
-        Store.restore(other, "state", published=NOWHERE, tables=TABLES)
+        Store.restore("state", root=other, published=NOWHERE, tables=TABLES)
 
 
 # -- the write and its offset -------------------------------------------------
@@ -529,7 +531,7 @@ _CHILD = textwrap.dedent(
     from streamcast import Store
     from tests.test_store import TABLES, work
 
-    store = Store.open(sys.argv[1], "state", tables=TABLES)
+    store = Store.new("state", root=sys.argv[1], tables=TABLES)
     work(store, 50)
     with store.transaction() as tx:
         tx.execute("INSERT INTO items (id, state) VALUES (51, 's51')")
@@ -565,14 +567,14 @@ def test_a_write_and_its_offset_survive_kill_9_together(tmp_path: Path) -> None:
         child.wait(timeout=10)
 
     assert child.returncode == -signal.SIGKILL
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         assert store.offset("trades") == 50
         assert store.query("SELECT count(*), max(id) FROM items") == [(50, 50)]
         assert store.query("SELECT seen FROM checkpoint") == [(50,)]
 
 
 def test_a_raising_transaction_keeps_neither(tmp_path: Path) -> None:
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         with pytest.raises(KeyError), store.transaction() as tx:
             tx.execute("INSERT INTO items (id, state) VALUES (1, 'a')")
             tx.advance("trades", 1)
@@ -591,7 +593,7 @@ def test_a_transaction_sqlite_rolled_back_commits_nothing_after(
     Falsify by dropping the in-transaction check from `_live`: the offset
     lands on its own, without the row it describes.
     """
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         work(store, 1)
         with pytest.raises(RuntimeError, match="rolled this transaction back"):  # noqa: SIM117
             with store.transaction() as tx:
@@ -622,7 +624,7 @@ def test_a_transaction_sqlite_rolled_back_commits_nothing_after(
     ],
 )
 def test_consumer_sql_cannot_break_the_transaction(tmp_path: Path, sql: str) -> None:
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         work(store, 1)
         with store.transaction() as tx:
             with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
@@ -635,7 +637,7 @@ def test_consumer_sql_cannot_break_the_transaction(tmp_path: Path, sql: str) -> 
 
 def test_offsets_only_advance(tmp_path: Path) -> None:
     """A replayed message is refused, not applied twice."""
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         work(store, 3)
         for stale in (3, 2):
             with (
@@ -659,7 +661,7 @@ def test_offsets_only_advance(tmp_path: Path) -> None:
 
 
 def test_nothing_ends_a_transaction_from_inside_it(tmp_path: Path) -> None:
-    with opened(tmp_path) as store, store.transaction() as tx:
+    with created(tmp_path) as store, store.transaction() as tx:
         with pytest.raises(RuntimeError, match="inside a store transaction"):  # noqa: SIM117
             with store.transaction():
                 pass
@@ -676,7 +678,7 @@ def test_nothing_ends_a_transaction_from_inside_it(tmp_path: Path) -> None:
 
 
 def test_a_finished_transaction_is_unusable(tmp_path: Path) -> None:
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         with store.transaction() as tx:
             tx.advance("trades", 1)
 
@@ -689,7 +691,7 @@ def test_a_finished_transaction_is_unusable(tmp_path: Path) -> None:
 
 def test_declared_types_hold_through_raw_sql(tmp_path: Path) -> None:
     """The log's I17 DDL: a wrong type is refused, not converted."""
-    with opened(tmp_path) as store, store.transaction() as tx:
+    with created(tmp_path) as store, store.transaction() as tx:
         for sql in (
             "INSERT INTO items (id, state) VALUES ('7', 'a')",
             "INSERT INTO items (id, state) VALUES (1, 12345)",
@@ -701,7 +703,7 @@ def test_declared_types_hold_through_raw_sql(tmp_path: Path) -> None:
 
 
 def test_query_is_read_only(tmp_path: Path) -> None:
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             store.query("DELETE FROM items")
 
@@ -722,45 +724,101 @@ def _with(
     )
 
 
-def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
-    """A new table or a new nullable column is applied at open; anything that
-    changes what an existing row means is refused, naming the difference."""
-    with opened(tmp_path) as store:
+def test_an_existing_store_must_be_declared_as_it_was_created(
+    tmp_path: Path,
+) -> None:
+    """`new` is create-or-open, as `Stream.new` is, and changes nothing in a
+    store that exists: every difference from the recorded declaration is
+    refused and named, the additive ones included, and the store is left as
+    it was. The same declaration reopens it.
+
+    Falsify by applying an additive change instead of refusing it (a new
+    table created at open): the store gains the table, and the refusal is
+    missing.
+    """
+    with created(tmp_path) as store:
         work(store, 2)
 
-    wider = {
-        "items": _with(ITEMS, "note", {"type": ["string", "null"]}),
-        "checkpoint": CHECKPOINT,
-        "extra": StoreTable(_object({"x": {"type": ["integer", "null"]}}, [])),
-    }
-    with Store.open(tmp_path, "state", tables=wider) as store:
-        assert store.query("SELECT id, note FROM items ORDER BY id") == [
-            (1, None),
-            (2, None),
-        ]
-        assert set(store.tables) == {"items", "checkpoint", "extra"}
+    with created(tmp_path) as store:
         assert store.offset("trades") == 2
+        assert store.query("SELECT count(*) FROM items") == [(2,)]
 
     refused = {
-        "dropped table": {"items": wider["items"], "checkpoint": CHECKPOINT},
-        "dropped column": TABLES | {"extra": wider["extra"]},
-        "retyped": wider
-        | {
-            "extra": StoreTable(_object({"x": {"type": ["string", "null"]}}, [])),
-        },
-        "tightened": wider
-        | {
-            "extra": StoreTable(_object({"x": {"type": "integer"}}, ["x"])),
-        },
-        "rekeyed": wider
-        | {"items": StoreTable(schema=wider["items"].schema, key=("id", "state"))},
-        "non-nullable addition": wider
-        | {"extra": _with(wider["extra"], "y", {"type": "integer"}, required=True)},
+        "a new table": (
+            TABLES
+            | {"extra": StoreTable(_object({"x": {"type": ["integer", "null"]}}, []))},
+            "table 'extra' is declared and not in the store",
+        ),
+        "a new nullable column": (
+            TABLES | {"items": _with(ITEMS, "note", {"type": ["string", "null"]})},
+            "column items.note is new",
+        ),
+        "a table left out": (
+            {"items": ITEMS},
+            "table 'checkpoint' is in the store and not declared",
+        ),
+        "a column left out": (
+            TABLES
+            | {
+                "checkpoint": StoreTable(
+                    _object({"other": {"type": "integer"}}, ["other"]), single_row=True
+                )
+            },
+            "column checkpoint.seen is not declared",
+        ),
+        "a type changed": (
+            TABLES
+            | {
+                "checkpoint": StoreTable(
+                    _object({"seen": {"type": "string"}}, ["seen"]), single_row=True
+                )
+            },
+            "column checkpoint.seen changes type int64 -> string",
+        ),
+        "nullability changed": (
+            TABLES
+            | {
+                "checkpoint": StoreTable(
+                    _object({"seen": {"type": ["integer", "null"]}}, []),
+                    single_row=True,
+                )
+            },
+            "column checkpoint.seen changes nullability",
+        ),
+        "a key changed": (
+            TABLES | {"items": StoreTable(ITEMS.schema, key=("id", "state"))},
+            "table 'items' changes its key",
+        ),
+        "columns reordered": (
+            TABLES
+            | {
+                "items": StoreTable(
+                    _object(
+                        {
+                            "state": {"type": "string"},
+                            "id": {"type": "integer"},
+                            "score": {"type": ["number", "null"]},
+                        },
+                        ["id", "state", "score"],
+                    ),
+                    key=("id",),
+                )
+            },
+            "table 'items' declares its columns in another order",
+        ),
     }
-    for case, tables in refused.items():
-        with pytest.raises(ValueError, match="additive only"):
-            Store.open(tmp_path, "state", tables=tables)
-            pytest.fail(case)
+    for case, (tables, named) in refused.items():
+        with pytest.raises(
+            ValueError, match="created with another declaration"
+        ) as raised:
+            Store.new("state", root=tmp_path, tables=tables)
+
+        assert named in str(raised.value), case
+
+    with created(tmp_path) as store:
+        assert set(store.tables) == set(TABLES)
+        assert store.offset("trades") == 2
+        assert store.query("SELECT name FROM sqlite_master WHERE name = 'extra'") == []
 
 
 def test_a_table_is_declared_in_json_schema_as_a_stream_is(tmp_path: Path) -> None:
@@ -783,7 +841,7 @@ def test_a_table_is_declared_in_json_schema_as_a_stream_is(tmp_path: Path) -> No
             "required": ["n", "wide", "raw"],
         }
     )
-    with Store.open(tmp_path, "state", tables={"narrow": narrow}) as store:
+    with Store.new("state", root=tmp_path, tables={"narrow": narrow}) as store:
         recorded = store.tables["narrow"].schema
         assert recorded == from_arrow(to_arrow(narrow.schema))
         properties = recorded["properties"]
@@ -797,7 +855,7 @@ def test_a_table_is_declared_in_json_schema_as_a_stream_is(tmp_path: Path) -> No
         assert store.query("SELECT n, raw FROM narrow") == [(2**31 - 1, b"\x00\x01")]
 
     # Reopened with the declaration it handed back: nothing to change.
-    with Store.open(tmp_path, "state", tables={"narrow": StoreTable(recorded)}):
+    with Store.new("state", root=tmp_path, tables={"narrow": StoreTable(recorded)}):
         pass
 
 
@@ -881,7 +939,7 @@ def test_declarations_refused(
     tmp_path: Path, tables: dict[str, StoreTable], error: str
 ) -> None:
     with pytest.raises((ValueError, TypeError), match=error):
-        Store.open(tmp_path, "state", tables=tables)
+        Store.new("state", root=tmp_path, tables=tables)
 
 
 def test_a_release_floor_carries_the_api_the_store_imports() -> None:
@@ -927,7 +985,7 @@ def test_a_position_is_keyed_by_the_streams_name_not_where_it_is_served(
         "wss://10.0.0.7:443/trades",
         "WSS://Broker.Example/trades",
     )
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         for i, spelling in enumerate(spellings, start=1):
             with store.transaction() as tx:
                 assert tx.offset(spelling) == (None if i == 1 else i - 1)
@@ -953,7 +1011,7 @@ def test_another_stream_under_the_same_name_is_refused_not_resumed(
     advance lands on the first stream's position.
     """
     first, second = str(uuid.uuid4()), str(uuid.uuid4())
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         with store.transaction() as tx:
             tx.advance("trades", 400, stream_id=first)
 
@@ -990,7 +1048,7 @@ def test_a_position_recorded_without_an_identity_takes_the_first_given(
 ) -> None:
     """Nothing recorded is nothing to mismatch: the first identity given is
     recorded, and the guard holds from then on."""
-    with opened(tmp_path) as store:
+    with created(tmp_path) as store:
         work(store, 2)
         known = str(uuid.uuid4())
         assert store.offset("trades", stream_id=known) == 2
@@ -1012,7 +1070,7 @@ async def test_the_greeting_identifies_the_stream_a_position_belongs_to(
     position check passes and would resume at the old stream's offset.
     """
     schema = from_arrow(SCHEMA)
-    with opened(tmp_path / "consumer") as store:
+    with created(tmp_path / "consumer") as store:
         stream = Stream.new("trades", root=tmp_path / "a", schema=schema)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(3)])
@@ -1043,3 +1101,54 @@ async def test_the_greeting_identifies_the_stream_a_position_belongs_to(
                 store.offset(elsewhere, stream_id=sub.info.stream_id)
 
         await other.aclose()
+
+
+def test_a_new_interrupted_before_its_first_commit_is_finished_by_the_next(
+    tmp_path: Path,
+) -> None:
+    """A `store.db` with no declaration in it (a `new` killed before its
+    first commit) is a store being created, and the next `new` creates it.
+
+    Falsify by treating a database with no recorded declaration as one to
+    compare against: the next `new` is refused for "differences" from an
+    empty declaration.
+    """
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "store.db").touch()
+    with created(tmp_path) as store:
+        work(store, 1)
+        assert set(store.tables) == set(TABLES)
+
+
+def test_two_news_on_one_store_make_one_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declaration is made under SQLite's write lock and re-read after
+    taking it, so a second `new` arriving while the first is creating the
+    store opens what the first made rather than declaring it twice. Forced
+    from a hook at the point the first has connected and not yet declared,
+    not timed.
+
+    Falsify by creating the tables whatever is recorded: the first `new`,
+    resuming, fails on tables the second already made.
+    """
+    real = store_module._connect
+    seen: list[object] = []
+
+    def connect_then_new(path: Path) -> sqlite3.Connection:
+        con = real(path)
+        if not seen:
+            seen.append(None)
+            with created(tmp_path) as other:
+                seen[0] = set(other.tables)
+
+        return con
+
+    monkeypatch.setattr(store_module, "_connect", connect_then_new)
+    with created(tmp_path) as store:
+        work(store, 1)
+
+    monkeypatch.undo()
+    assert seen == [set(TABLES)]
+    with created(tmp_path) as store:
+        assert store.offset("trades") == 1
