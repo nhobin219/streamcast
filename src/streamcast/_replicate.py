@@ -83,6 +83,12 @@ _POLL: Final = 0.5
 _CLAIM_EVERY: Final = 5.0
 
 _STOP_GRACE: Final = 10.0
+
+# The merged process's control socket, in its workdir, and the longest path a
+# Unix socket binds: `sun_path` is 108 bytes on Linux and 104 on macOS, less
+# the terminator, so 100 leaves room on both.
+_SOCKET: Final = "control.sock"
+_SOCKET_MAX: Final = 100
 _BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
 
 
@@ -126,7 +132,7 @@ class Sidecar:
         workdir: Path,
         env: Mapping[str, str | None] | None = None,
     ) -> None:
-        """Takes built values and does no I/O. Construct through `new`.
+        """Takes built values and does no I/O. Construct through `of` or `new`.
 
         litelink's own rule, and this class had been breaking it: writing a
         config file and probing PATH from an initialiser means a `Sidecar`
@@ -136,8 +142,10 @@ class Sidecar:
         self._binary = binary
         self._workdir = workdir
         self._config = workdir / "litestream.yml"
-        self._locks: dict[str, object] = {}
-        self._owned: set[str] = set()
+        # Keyed by config path, not by name: a name is not unique across
+        # roots, and two logs called alike would share one entry.
+        self._locks: dict[Path, object] = {}
+        self._owned: set[Path] = set()
         self._process: subprocess.Popen[bytes] | None = None
         self._stopping = False
         self._watch: asyncio.Task[None] | None = None
@@ -146,13 +154,86 @@ class Sidecar:
         self._env = dict(env or {})
 
     @classmethod
+    def of(
+        cls,
+        configs: Sequence[Path | str],
+        *,
+        binary: str | None = None,
+        s3_options: S3Options | None = None,
+    ) -> Sidecar:
+        """A sidecar for the databases these litelink-written configs name.
+
+        Each config is a `write_replication_config()` file, read when the
+        process starts rather than now, and named after its directory in
+        messages and `owned`. The lock is that directory's `litestream.lock`,
+        so two configs in one directory would share one lock: the second
+        would never be claimed, and its database never replicated. Refused
+        here, naming both, as is a config given twice.
+
+        A missing binary raises HERE, before anything serves, for the reason
+        `new` gives. So does a control socket path too long to bind: a Unix
+        socket path is limited to about 104 bytes, and a litestream that
+        cannot listen exits at once and is restarted for ever.
+        """
+        resolved_configs = [Path(config).resolve() for config in configs]
+        seen: dict[Path, Path] = {}
+        for config in resolved_configs:
+            other = seen.get(config.parent)
+            if other == config:
+                msg = f"{config} is given twice; one litestream per database"
+                raise ValueError(msg)
+
+            if other is not None:
+                msg = (
+                    f"{other} and {config} are in one directory, so they would "
+                    f"share its litestream.lock and the second would never be "
+                    f"replicated; each config needs a directory of its own"
+                )
+                raise ValueError(msg)
+
+            seen[config.parent] = config
+
+        written = [(config.parent.name, config) for config in resolved_configs]
+        resolved = litestream_binary(binary)
+
+        if not Path(resolved).is_absolute() or not Path(resolved).exists():
+            # `litestream_binary` falls through to the bare name for a
+            # PATH install, so resolve it the way `Popen` would.
+            if shutil.which(resolved) is None:
+                names = ", ".join(repr(name) for name, _ in written)
+                msg = (
+                    f"{names} have wal_replication on, but litestream was not "
+                    f"found (tried {resolved!r}). Install it, or pass "
+                    f"replicate=False and run your own."
+                )
+                raise SidecarUnavailable(msg)
+
+        workdir = Path(tempfile.mkdtemp(prefix="streamcast-litestream-"))
+        socket = workdir / _SOCKET
+        if len(bytes(socket)) > _SOCKET_MAX:
+            shutil.rmtree(workdir, ignore_errors=True)
+            msg = (
+                f"litestream's control socket would be {socket}, longer than "
+                f"{_SOCKET_MAX} bytes, which a Unix socket cannot bind; point "
+                f"TMPDIR at a shorter directory"
+            )
+            raise SidecarUnavailable(msg)
+
+        return cls(
+            logs=written,
+            binary=resolved,
+            workdir=workdir,
+            env=environment(s3_options),
+        )
+
+    @classmethod
     def new(
         cls,
         logs: Sequence[WriteHandle],
         binary: str | None = None,
         s3_options: S3Options | None = None,
     ) -> Sidecar:
-        """Write each log's config, resolve litestream, and build the sidecar.
+        """Write each log's config, then build the sidecar from them (`of`).
 
         **Both ordering guarantees the initialiser used to carry are kept
         here, and they are the reason this is a factory rather than a
@@ -170,32 +251,27 @@ class Sidecar:
         servers dividing the logs under one root would otherwise write it to
         the same path.
         """
-        written = [(log.name, Path(log.write_replication_config())) for log in logs]
-        resolved = litestream_binary(binary)
-
-        if not Path(resolved).is_absolute() or not Path(resolved).exists():
-            # `litestream_binary` falls through to the bare name for a
-            # PATH install, so resolve it the way `Popen` would.
-            if shutil.which(resolved) is None:
-                names = ", ".join(repr(name) for name, _ in written)
-                msg = (
-                    f"{names} have wal_replication on, but litestream was not "
-                    f"found (tried {resolved!r}). Install it, or pass "
-                    f"replicate=False and run your own."
-                )
-                raise SidecarUnavailable(msg)
-
-        return cls(
-            logs=written,
-            binary=resolved,
-            workdir=Path(tempfile.mkdtemp(prefix="streamcast-litestream-")),
-            env=environment(s3_options),
+        return cls.of(
+            [log.write_replication_config() for log in logs],
+            binary=binary,
+            s3_options=s3_options,
         )
 
     @property
     def config(self) -> Path:
         """The merged config this process runs, once it has claimed anything."""
         return self._config
+
+    @property
+    def socket(self) -> Path:
+        """The control socket the merged process listens on.
+
+        One for the whole process, in its own workdir: `litestream sync -wait
+        -socket <this> <database>` flushes any database it replicates. Each
+        log's own socket, the one litelink derives for `retire()`, is not
+        opened by this process.
+        """
+        return self._workdir / _SOCKET
 
     @property
     def owner(self) -> bool:
@@ -205,7 +281,7 @@ class Sidecar:
     @property
     def owned(self) -> set[str]:
         """The logs whose locks this process holds, and so is replicating."""
-        return set(self._owned)
+        return {name for name, config in self._logs if config in self._owned}
 
     def _lock_path(self, config: Path) -> Path:
         # Beside the log, which is the config's directory — NOT `log.root`,
@@ -223,21 +299,21 @@ class Sidecar:
         database while nobody is.
         """
         gained = False
-        for name, config in self._logs:
-            if name in self._owned:
+        for _name, config in self._logs:
+            if config in self._owned:
                 continue
 
-            handle = self._locks.get(name)
+            handle = self._locks.get(config)
             if handle is None:
                 handle = self._lock_path(config).open("w")
-                self._locks[name] = handle
+                self._locks[config] = handle
 
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # ty: ignore[invalid-argument-type]
             except OSError:
                 continue
 
-            self._owned.add(name)
+            self._owned.add(config)
             gained = True
 
         return gained
@@ -252,15 +328,23 @@ class Sidecar:
         instead of handing litestream a config that silently replicates less
         than it should.
 
-        **Each log's `socket:` block is left out.** litelink gives every log
-        its own control socket, for `retire()` to flush the replica through,
-        and one litestream can listen on one. A server never retires a log —
-        `Stream.migrate` does, offline, through `retiring` below — so the
-        process a server runs needs none.
+        **Each log's `socket:` block is replaced by one of the process's
+        own** (`socket`). litelink gives every log its own control socket,
+        for `retire()` to flush the replica through, and one litestream
+        listens on one. A server never retires a log — `Stream.migrate`
+        does, offline, through `retiring` below, on the log's own config —
+        but a caller holding a merged process still needs to flush through
+        it, so it listens on a path this process chose rather than on any
+        one log's.
         """
-        lines = ["dbs:"]
-        for name, config in self._logs:
-            if name not in self._owned:
+        lines = [
+            "socket:",
+            "  enabled: true",
+            f"  path: {self.socket}",
+            "dbs:",
+        ]
+        for _name, config in self._logs:
+            if config not in self._owned:
                 continue
 
             body = config.read_text().splitlines()
@@ -299,6 +383,10 @@ class Sidecar:
                 continue
 
             self._write_config()
+            # A socket file left by a litestream that died does not unbind
+            # itself, and the next one fails to listen on it. The workdir is
+            # this process's alone, so whatever is there is stale.
+            self.socket.unlink(missing_ok=True)
             process = self._spawn()
             self._process = process
 
@@ -314,7 +402,7 @@ class Sidecar:
                 # for the life of the server.
                 print(
                     f"[streamcast] litestream restarting to add "
-                    f"{', '.join(sorted(self._owned))}",
+                    f"{', '.join(sorted(self.owned))}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -323,7 +411,7 @@ class Sidecar:
             code = process.returncode
             delay = next(backoff)
             print(
-                f"[streamcast] litestream for {', '.join(sorted(self._owned))} "
+                f"[streamcast] litestream for {', '.join(sorted(self.owned))} "
                 f"exited ({code}); restarting in {delay:g}s",
                 file=sys.stderr,
                 flush=True,
@@ -351,10 +439,16 @@ class Sidecar:
             next_claim = _CLAIM_EVERY
             if self._claim():
                 process.terminate()
-                with contextlib.suppress(TimeoutError):
+                try:
                     await asyncio.wait_for(
                         asyncio.to_thread(process.wait), timeout=_STOP_GRACE
                     )
+                except TimeoutError:
+                    # Killed and reaped, never left running: the caller spawns
+                    # the wider litestream next, and beside one that outlived
+                    # its grace that is two on every database the old one had.
+                    process.kill()
+                    await asyncio.to_thread(process.wait)
 
                 return True
 
