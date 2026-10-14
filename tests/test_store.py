@@ -28,19 +28,26 @@ from litelink.replication import control_socket, litestream_binary
 
 from streamcast import Sidecar, Store, StoreTable
 from streamcast import _store as store_module
+from streamcast._schema import from_arrow, to_arrow
 
 ITEMS = StoreTable(
-    schema=pa.schema(
-        [
-            pa.field("id", pa.int64(), nullable=False),
-            pa.field("state", pa.string(), nullable=False),
-            pa.field("score", pa.float64()),
-        ]
-    ),
+    {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "state": {"type": "string"},
+            "score": {"type": ["number", "null"]},
+        },
+        "required": ["id", "state", "score"],
+    },
     key=("id",),
 )
 CHECKPOINT = StoreTable(
-    schema=pa.schema([pa.field("seen", pa.int64(), nullable=False)]),
+    {
+        "type": "object",
+        "properties": {"seen": {"type": "integer"}},
+        "required": ["seen"],
+    },
     single_row=True,
 )
 TABLES = {"items": ITEMS, "checkpoint": CHECKPOINT}
@@ -695,12 +702,20 @@ def test_query_is_read_only(tmp_path: Path) -> None:
             store.query("DELETE FROM items")
 
 
-def _with(table: StoreTable, *fields: pa.Field) -> StoreTable:
-    schema = table.schema
-    for field in fields:
-        schema = schema.append(field)
+def _object(properties: dict[str, object], required: list[str]) -> dict[str, object]:
+    return {"type": "object", "properties": properties, "required": required}
 
-    return StoreTable(schema=schema, key=table.key, single_row=table.single_row)
+
+def _with(
+    table: StoreTable, name: str, spec: dict[str, object], *, required: bool = False
+) -> StoreTable:
+    """`table` with one more column, appended as a JSON Schema property."""
+    properties = dict(table.schema["properties"])  # ty: ignore[no-matching-overload]
+    properties[name] = spec
+    listed = [*table.schema.get("required", []), *([name] if required else [])]  # ty: ignore[not-iterable]
+    return StoreTable(
+        _object(properties, listed), key=table.key, single_row=table.single_row
+    )
 
 
 def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
@@ -710,9 +725,9 @@ def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
         work(store, 2)
 
     wider = {
-        "items": _with(ITEMS, pa.field("note", pa.string())),
+        "items": _with(ITEMS, "note", {"type": ["string", "null"]}),
         "checkpoint": CHECKPOINT,
-        "extra": StoreTable(schema=pa.schema([pa.field("x", pa.int64())])),
+        "extra": StoreTable(_object({"x": {"type": ["integer", "null"]}}, [])),
     }
     with Store.open(tmp_path, "state", tables=wider) as store:
         assert store.query("SELECT id, note FROM items ORDER BY id") == [
@@ -727,23 +742,87 @@ def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
         "dropped column": TABLES | {"extra": wider["extra"]},
         "retyped": wider
         | {
-            "extra": StoreTable(schema=pa.schema([pa.field("x", pa.string())])),
+            "extra": StoreTable(_object({"x": {"type": ["string", "null"]}}, [])),
         },
         "tightened": wider
         | {
-            "extra": StoreTable(
-                schema=pa.schema([pa.field("x", pa.int64(), nullable=False)])
-            ),
+            "extra": StoreTable(_object({"x": {"type": "integer"}}, ["x"])),
         },
         "rekeyed": wider
         | {"items": StoreTable(schema=wider["items"].schema, key=("id", "state"))},
         "non-nullable addition": wider
-        | {"extra": _with(wider["extra"], pa.field("y", pa.int64(), nullable=False))},
+        | {"extra": _with(wider["extra"], "y", {"type": "integer"}, required=True)},
     }
     for case, tables in refused.items():
         with pytest.raises(ValueError, match="additive only"):
             Store.open(tmp_path, "state", tables=tables)
             pytest.fail(case)
+
+
+def test_a_table_is_declared_in_json_schema_as_a_stream_is(tmp_path: Path) -> None:
+    """The JSON Schema form `Stream.new` takes, in its spelling: `format` sets
+    the width, and the declaration a store records and hands back is the one
+    a stream publishes (`from_arrow`), every width explicit.
+
+    Falsify by mapping `format` away (declaring every integer int64): the
+    int32 column takes 2**40. Or by recording the schema as given: `wide`
+    comes back without its width.
+    """
+    narrow = StoreTable(
+        {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "format": "int32"},
+                "wide": {"type": "integer"},
+                "raw": {"type": ["string", "null"], "contentEncoding": "base64"},
+            },
+            "required": ["n", "wide", "raw"],
+        }
+    )
+    with Store.open(tmp_path, "state", tables={"narrow": narrow}) as store:
+        recorded = store.tables["narrow"].schema
+        assert recorded == from_arrow(to_arrow(narrow.schema))
+        properties = recorded["properties"]
+        assert properties["n"] == {"type": "integer", "format": "int32"}  # ty: ignore[not-subscriptable]
+        assert properties["wide"] == {"type": "integer", "format": "int64"}  # ty: ignore[not-subscriptable]
+        with store.transaction() as tx:
+            tx.execute("INSERT INTO narrow VALUES (?, 1, ?)", (2**31 - 1, b"\x00\x01"))
+            with pytest.raises(sqlite3.IntegrityError):
+                tx.execute("INSERT INTO narrow VALUES (?, 1, NULL)", (2**40,))
+
+        assert store.query("SELECT n, raw FROM narrow") == [(2**31 - 1, b"\x00\x01")]
+
+    # Reopened with the declaration it handed back: nothing to change.
+    with Store.open(tmp_path, "state", tables={"narrow": StoreTable(recorded)}):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("schema", "error"),
+    [
+        ({"type": "array"}, "JSON object schema"),
+        ({"type": "object", "properties": {}}, "non-empty 'properties'"),
+        (
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            "required",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string", "format": "date-time"}},
+                "required": ["a"],
+            },
+            "date-time",
+        ),
+    ],
+)
+def test_a_schema_a_stream_would_refuse_is_refused_at_construction(
+    schema: dict[str, object], error: str
+) -> None:
+    """The stream's own rules, refused where the table is built and named as
+    a store table's: the optional non-null property included."""
+    with pytest.raises(TypeError, match=f"a store table's schema: .*{error}"):
+        StoreTable(schema)
 
 
 @pytest.mark.parametrize(
@@ -753,33 +832,37 @@ def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
         (
             {
                 "t": StoreTable(
-                    schema=pa.schema([pa.field("_Streamcast_row", pa.int64())])
+                    _object(
+                        {"_Streamcast_row": {"type": "integer"}}, ["_Streamcast_row"]
+                    )
                 )
             },
             "reserved",
         ),
         (
-            {"t": StoreTable(schema=pa.schema([pa.field("a", pa.decimal128(5, 2))]))},
-            "column t.a: unsupported column type",
-        ),
-        (
             {
                 "t": StoreTable(
-                    schema=pa.schema(
-                        [pa.field("a", pa.int64()), pa.field("A", pa.int64())]
+                    _object(
+                        {"a": {"type": "integer"}, "A": {"type": "integer"}}, ["a", "A"]
                     )
                 )
             },
             "twice",
         ),
         (
-            {"t": StoreTable(schema=pa.schema([pa.field("a", pa.list_(pa.int64()))]))},
+            {
+                "t": StoreTable(
+                    _object(
+                        {"a": {"type": "array", "items": {"type": "integer"}}}, ["a"]
+                    )
+                )
+            },
             "scalar",
         ),
         (
             {
                 "t": StoreTable(
-                    schema=pa.schema([pa.field("a", pa.int64())]), key=("a",)
+                    _object({"a": {"type": ["integer", "null"]}}, ["a"]), key=("a",)
                 )
             },
             "non-nullable",

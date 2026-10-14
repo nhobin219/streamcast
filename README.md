@@ -771,10 +771,12 @@ exactly-once processing, with no server keeping track for it.
 
 ```python
 store = streamcast.Store.open("data", "totals", tables={
-    "totals": streamcast.StoreTable(
-        pa.schema([pa.field("account", pa.string(), nullable=False),
-                   pa.field("amount", pa.int64(), nullable=False)]),
-        key=("account",)),
+    "totals": streamcast.StoreTable({
+        "type": "object",
+        "properties": {"account": {"type": "string"},
+                       "amount": {"type": "integer"}},
+        "required": ["account", "amount"],
+    }, key=("account",)),
 })
 
 done = store.offset("orders")                     # None on first start
@@ -792,7 +794,8 @@ async with streamcast.connect(uri, offset=start, catch_up=True) as sub:
 A crash leaves both the effect and the offset, or neither. `advance` only moves forward, so
 a replayed message is refused rather than applied twice. The guarantee covers what the
 transaction writes; an effect outside the store, such as a request to another service, is
-not part of it. Schema changes are additive.
+not part of it. A table is declared in JSON Schema, exactly as a stream's schema is
+([Server](#server)), and its changes are additive.
 
 So that this state also survives losing the machine, the store replicates exactly as a
 log does: it writes a litestream config, a `Sidecar` runs litestream on it,

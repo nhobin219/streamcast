@@ -1188,7 +1188,15 @@ a message and never applying one twice. A `subscription` is the consumer's own n
 position in one stream; a store keeps one offset per subscription.
 
 The store is a local SQLite database of declared tables. It is the source of truth; reads and
-writes never touch the network. `open` creates it or opens it, and applies additive
+writes never touch the network.
+
+**A table is declared in JSON Schema, the form `Stream.new(schema=)` takes** and in the same
+spelling ([The schema is yours](#the-schema-is-yours)): `properties` in column order,
+`format` for a width (`int32`, `float`), nullability through `required` and a `"null"` in
+the type, and `contentEncoding` for a binary column. A schema a stream would refuse is
+refused when the `StoreTable` is built. `key` names the primary key's columns, which must be
+required and non-null; `single_row` makes the one-row checkpoint. `store.tables` hands the
+declaration back as a stream publishes its schema (`from_arrow`), every width explicit. `open` creates it or opens it, and applies additive
 declaration changes (a new table, a new nullable column); anything else is refused with the
 differences named. Column types are enforced by the same DDL as a litelink log's buffer
 (`litelink.column_ddl`), so `tx.execute` cannot store a value of the wrong type. Nested
@@ -1199,10 +1207,12 @@ columns are refused: their JSON is text no constraint can check. Names beginning
 
 ```python
 store = streamcast.Store.open("data", "state", tables={
-    "seen": streamcast.StoreTable(
-        pa.schema([pa.field("id", pa.string(), nullable=False),
-                   pa.field("count", pa.int64(), nullable=False)]),
-        key=("id",)),
+    "seen": streamcast.StoreTable({
+        "type": "object",
+        "properties": {"id": {"type": "string"},
+                       "count": {"type": "integer"}},
+        "required": ["id", "count"],
+    }, key=("id",)),
 })
 done = store.offset("events")                      # None on first start
 start = streamcast.EARLIEST if done is None else done + 1

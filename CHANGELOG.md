@@ -18,9 +18,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   and its offset survive `kill -9` together or not at all. After any crash
   it resumes from `store.offset(subscription)`, skipping no message, and
   `advance` only moves forward, so none is applied twice. The state is a
-  local SQLite database of declared tables (`StoreTable`), the source of
-  truth, with additive-only schema changes and a litelink log's column type
-  checks. So that it also survives losing the machine, it replicates the way
+  local SQLite database of tables declared in JSON Schema, as a stream's
+  schema is (`StoreTable`), the source of truth, with additive-only schema
+  changes and a litelink log's column type checks. So that it also survives losing the machine, it replicates the way
   a log does and never runs litestream itself: `write_replication_config()`
   writes the config a `Sidecar` runs, `flush(socket=sidecar.socket)` ships
   through that sidecar and raises when none answers, and `Store.restore`

@@ -26,7 +26,6 @@ here that runs it, under a lock beside each database.
 
 from __future__ import annotations
 
-import base64
 import json
 import sqlite3
 import threading
@@ -46,6 +45,7 @@ from litelink.replication import (
 )
 
 from streamcast._metadata import is_log
+from streamcast._schema import from_arrow, to_arrow
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -105,17 +105,40 @@ _WRITES = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
 class StoreTable:
     """One declared table: its columns, and how rows are identified.
 
+    `schema` is a JSON Schema object, the form `Stream.new(schema=)` takes and
+    in the same spelling (`_schema`): `properties` in column order, `format`
+    for a width, nullability through `required` and a `"null"` in the type.
+
+        StoreTable({"type": "object",
+                    "properties": {"id": {"type": "integer"},
+                                   "note": {"type": ["string", "null"]}},
+                    "required": ["id"]},
+                   key=("id",))
+
     `key` declares a primary key. `single_row` is the one-row checkpoint: the
     table holds at most one row, so `INSERT ... ON CONFLICT ("_streamcast_row")
     DO UPDATE` replaces it. A table with neither is a plain heap.
+
+    The schema is converted here, so one `to_arrow` refuses would raise at
+    construction, as a stream's does at `Stream.new`.
     """
 
-    schema: pa.Schema
+    schema: Mapping[str, object]
     key: tuple[str, ...] = ()
     single_row: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "key", tuple(self.key))
+        _arrow(self)
+
+
+def _arrow(table: StoreTable) -> pa.Schema:
+    """The table's columns as Arrow, which `column_ddl` and the checks read."""
+    try:
+        return to_arrow(table.schema)
+    except TypeError as exc:
+        msg = f"a store table's schema: {exc}"
+        raise TypeError(msg) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,8 +235,9 @@ def _identifier(name: str, what: str) -> None:
 
 def _check_table(name: str, table: StoreTable) -> None:
     _identifier(name, "table")
+    columns = _arrow(table)
     seen: set[str] = set()
-    for f in table.schema:
+    for f in columns:
         _identifier(f.name, f"column {name}.")
         # SQLite identifiers are case-insensitive, so `Id` and `id` collide in
         # the DDL even though Arrow keeps them apart.
@@ -234,22 +258,16 @@ def _check_table(name: str, table: StoreTable) -> None:
             )
             raise TypeError(msg)
 
-        try:
-            column_ddl(f)
-        except TypeError as exc:
-            msg = f"column {name}.{f.name}: {exc}"
-            raise TypeError(msg) from None
-
     if table.key and table.single_row:
         msg = f"table {name!r}: a single-row table has no key of its own"
         raise ValueError(msg)
 
     for column in table.key:
-        if column not in table.schema.names:
+        if column not in columns.names:
             msg = f"table {name!r}: key column {column!r} is not declared"
             raise ValueError(msg)
 
-        if table.schema.field(column).nullable:
+        if columns.field(column).nullable:
             msg = f"table {name!r}: key column {column!r} must be non-nullable"
             raise ValueError(msg)
 
@@ -258,7 +276,7 @@ def _create_ddl(name: str, table: StoreTable) -> str:
     # The log's own column DDL (litelink's I17): every column `ANY` with a `typeof` and
     # range CHECK, so the consumer's raw SQL cannot store a value of the wrong
     # type any more than an append can.
-    columns = [column_ddl(f) for f in table.schema]
+    columns = [column_ddl(f) for f in _arrow(table)]
     if table.single_row:
         columns.insert(
             0,
@@ -272,16 +290,20 @@ def _create_ddl(name: str, table: StoreTable) -> str:
 
 
 def _encode_table(table: StoreTable) -> dict[str, object]:
+    # Recorded as `from_arrow` spells it, as a stream publishes its schema:
+    # every width explicit and nullability in the type, so what `tables` hands
+    # back converts to exactly the columns the database holds.
     return {
-        "schema": base64.b64encode(table.schema.serialize().to_pybytes()).decode(),
+        "schema": from_arrow(_arrow(table)),
         "key": list(table.key),
         "single_row": table.single_row,
     }
 
 
 def _decode_table(value: Mapping[str, object]) -> StoreTable:
-    schema = pa.ipc.read_schema(pa.py_buffer(base64.b64decode(str(value["schema"]))))
+    schema = value["schema"]
     key = value["key"]
+    assert isinstance(schema, dict)
     assert isinstance(key, list)
     return StoreTable(
         schema=schema, key=tuple(key), single_row=bool(value["single_row"])
@@ -315,12 +337,13 @@ def schema_changes(
         if old.key != table.key or old.single_row != table.single_row:
             problems.append(f"table {name!r} changes its key")
 
-        for f in old.schema:
-            if f.name not in table.schema.names:
+        before, after = _arrow(old), _arrow(table)
+        for f in before:
+            if f.name not in after.names:
                 problems.append(f"column {name}.{f.name} is dropped or renamed")
                 continue
 
-            new = table.schema.field(f.name)
+            new = after.field(f.name)
             if not new.type.equals(f.type):
                 problems.append(
                     f"column {name}.{f.name} changes type {f.type} -> {new.type}"
@@ -329,8 +352,8 @@ def schema_changes(
             if new.nullable != f.nullable:
                 problems.append(f"column {name}.{f.name} changes nullability")
 
-        for f in table.schema:
-            if f.name in old.schema.names:
+        for f in after:
+            if f.name in before.names:
                 continue
 
             if not f.nullable:

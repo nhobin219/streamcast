@@ -1523,8 +1523,12 @@ replicating. It refuses a directory inside a log's as well, because litelink rem
 retired log's directory whole. The converse is not refused: litelink knows nothing of stores, so a log created
 later in a store's directory is the caller's error to avoid.
 
-Tables are declared with an Arrow schema, an optional primary key, or `single_row` (a rowid
-alias pinned to 0, so a second row is refused by SQLite). Every column carries a litelink
+Tables are declared in JSON Schema, the form and spelling a stream's schema takes (§5,
+`_schema`), with an optional primary key, or `single_row` (a rowid alias pinned to 0, so a
+second row is refused by SQLite). streamcast is a JSON framework, so a consumer declares its
+tables in the vocabulary it already declares its streams in; `to_arrow` converts them, which
+is what lets the store reuse `litelink.column_ddl`, and the declaration is recorded in
+`from_arrow`'s spelling, every width explicit. Every column carries a litelink
 log's I17 DDL (`ANY` with a `typeof` and range CHECK inside a STRICT table), so the
 consumer's own SQL cannot store a value of the wrong type. Nested types are refused: JSON
 text is something no CHECK can see into, and a transaction hands the consumer raw SQL.
