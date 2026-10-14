@@ -1193,7 +1193,7 @@ served at, read as `connect` reads one: the path with its leading slash removed,
 host, port, scheme or query. `ws://127.0.0.1:8765/trades`, `wss://broker.example/trades` and
 `trades` are one position, so a broker that moves host or port, or a consumer that switches
 from a local URI to a remote one, resumes rather than replaying from nothing. Only a `ws://`
-or `wss://` string is read as a URI; anything else is the name as given. Behind an ASGI mount
+or `wss://` string (in any case) is read as a URI; anything else is the name as given. Behind an ASGI mount
 at a path prefix the URI's path carries the prefix too, so key by the greeting's name
 (`sub.info.stream`) there.
 

@@ -655,12 +655,14 @@ def stream_name(stream: str) -> str:
     host, the port, the scheme and the query. A string that is not a `ws://`
     or `wss://` URI is taken to be the name already. Not "anything with a
     scheme": `urlsplit` reads `a:b` as scheme `a`, and a name may hold a colon.
+    The scheme is compared case-insensitively, as `websockets` reads it, so
+    `WS://host/trades` is `trades` too.
 
     A server mounted under a path prefix (`asgi` in an app at `/streams`)
     serves `trades` at `/streams/trades`, which this reads as
     `streams/trades`: the greeting's `stream` is the server's own name for it.
     """
-    if not stream.startswith(("ws://", "wss://")):
+    if not stream.lower().startswith(("ws://", "wss://")):
         return stream
 
     return urlsplit(stream).path.lstrip("/")

@@ -925,6 +925,7 @@ def test_a_position_is_keyed_by_the_streams_name_not_where_it_is_served(
         "ws://localhost:9001/trades?offset=7",
         "wss://broker.example.com/trades",
         "wss://10.0.0.7:443/trades",
+        "WSS://Broker.Example/trades",
     )
     with opened(tmp_path) as store:
         for i, spelling in enumerate(spellings, start=1):
