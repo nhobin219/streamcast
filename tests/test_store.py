@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import tomllib
 from datetime import timedelta
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from litelink import S3Options, WriteHandle
 from litelink.replication import control_socket, litestream_binary
 
 from streamcast import Sidecar, Store, StoreTable
+from streamcast import _store as store_module
 
 ITEMS = StoreTable(
     schema=pa.schema(
@@ -70,6 +73,12 @@ def work(store: Store, upto: int, start: int = 1) -> None:
 def sidecar_binary() -> str:
     binary = litestream_binary()
     if shutil.which(binary) is None and not os.access(binary, os.X_OK):
+        # Fails where the replication tier is required, as `conftest.s3` does:
+        # a litelink built from source without its platform hook has no
+        # binary, and these tests would otherwise pass by skipping.
+        if os.environ.get("STREAMCAST_REQUIRE_S3"):
+            pytest.fail("STREAMCAST_REQUIRE_S3 is set but litestream is not there")
+
         pytest.skip("litestream is not provisioned; litelink's wheel carries it")
 
     return binary
@@ -168,6 +177,64 @@ def test_a_store_refuses_a_logs_directory(tmp_path: Path) -> None:
     (tmp_path / "state" / "buffer.db").touch()
     with pytest.raises(FileExistsError, match="holds a log"):
         opened(tmp_path)
+
+
+def test_a_store_inside_a_logs_directory_is_refused(tmp_path: Path) -> None:
+    """litelink removes a retired log's directory whole, so a store rooted in
+    one would be deleted with it.
+
+    Falsify by checking only the store's own directory in `refuse_a_log`: the
+    store is created inside the log's.
+    """
+    (tmp_path / "log").mkdir()
+    (tmp_path / "log" / "buffer.db").touch()
+    with pytest.raises(FileExistsError, match="is inside it"):
+        Store.open(tmp_path / "log", "state", tables=TABLES)
+
+    with pytest.raises(FileExistsError, match="is inside it"):
+        Store.restore(
+            tmp_path / "log" / "deeper", "state", published=NOWHERE, tables=TABLES
+        )
+
+    assert not (tmp_path / "log" / "state").exists()
+
+
+def test_a_failed_restore_leaves_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restore that raises brings no store back, so it leaves no config
+    either: a config beside an empty directory reads as a store to run.
+
+    Falsify by dropping the `except` around `restore_database`: the config
+    stays.
+    """
+
+    def unreachable(*_: object, **__: object) -> bool:
+        raise RuntimeError("the endpoint did not answer")
+
+    monkeypatch.setattr(store_module, "restore_database", unreachable)
+    with pytest.raises(RuntimeError, match="did not answer"):
+        Store.restore(tmp_path, "state", published=NOWHERE, tables=TABLES)
+
+    assert not (tmp_path / "state" / "litestream.yml").exists()
+    assert not (tmp_path / "state" / "store.db").exists()
+
+
+def test_a_returning_cursor_left_half_read_commits_nothing(tmp_path: Path) -> None:
+    """SQLite will not commit with a statement in progress; the transaction
+    rolls back whole rather than committing part of it (S1)."""
+    with opened(tmp_path) as store:
+        with pytest.raises(sqlite3.OperationalError), store.transaction() as tx:
+            # Held, as a consumer holding the cursor would: one collected at
+            # once is reset, and the commit then succeeds.
+            cursor = tx.execute(
+                "INSERT INTO items (id, state) VALUES (1, 'a'), (2, 'b') RETURNING id"
+            )
+            assert cursor.fetchone() is not None
+            tx.advance("sub", 1)
+
+        assert store.offset("sub") is None
+        assert store.query("SELECT count(*) FROM items") == [(0,)]
 
 
 def test_a_store_restore_leaves_a_logs_directory_untouched(tmp_path: Path) -> None:
@@ -728,3 +795,26 @@ def test_declarations_refused(
 ) -> None:
     with pytest.raises((ValueError, TypeError), match=error):
         Store.open(tmp_path, "state", tables=tables)
+
+
+def test_a_release_floor_carries_the_api_the_store_imports() -> None:
+    """`Store` imports `litelink.replication` and `litelink.column_ddl`, which
+    litelink 0.12.5 is the first to ship. While `[tool.uv.sources]` names a
+    litelink commit the floor may trail; a tree without it is what a release
+    builds, and a floor below 0.12.5 there would let a resolver pick a litelink
+    `import streamcast` fails on.
+
+    Falsify by deleting `[tool.uv.sources]` with the floor left at 0.12.4.
+    """
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    )
+    if "litelink" in pyproject.get("tool", {}).get("uv", {}).get("sources", {}):
+        return
+
+    (requirement,) = [
+        r for r in pyproject["project"]["dependencies"] if r.startswith("litelink")
+    ]
+    floor = re.search(r">=\s*([0-9.]+)", requirement)
+    assert floor is not None, requirement
+    assert tuple(int(p) for p in floor.group(1).split(".")) >= (0, 12, 5), requirement

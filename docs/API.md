@@ -1255,7 +1255,8 @@ store is never restored over. With no replica it raises `FileNotFoundError` nami
 looked. `published` must be `s3://`, is recorded on first use, and cannot change.
 
 **Give a store a directory of its own.** The replication config and the control socket are
-both derived from the directory. A store refuses a litelink log's directory; litelink knows
+both derived from the directory. A store refuses a litelink log's directory, and one inside
+it, which goes when the log is retired; litelink knows
 nothing of stores, so nothing refuses a log created later in a store's.
 
 ## Refusals

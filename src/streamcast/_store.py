@@ -173,6 +173,17 @@ class StoreLayout:
             )
             raise FileExistsError(msg)
 
+        # Inside a log's directory is refused too: litelink removes a retired
+        # log's directory whole, and a store under it would go with it.
+        for parent in self.directory.parents:
+            if is_log(parent):
+                msg = (
+                    f"{parent} holds a log, and {self.directory} is inside it; "
+                    f"a retired log's directory is removed whole, so a store "
+                    f"needs a directory outside every log's"
+                )
+                raise FileExistsError(msg)
+
 
 # -- declarations -------------------------------------------------------------
 
@@ -378,6 +389,11 @@ class StoreTransaction:
         changing the schema, PRAGMAs, ATTACH and any write to a store's own
         `_streamcast_` tables are refused by an authorizer, because each of them
         would break the commit this transaction is.
+
+        Read a returned cursor to the end before the block exits: SQLite
+        will not commit while a statement is in progress, which an
+        `INSERT ... RETURNING` left half-read is, and the transaction then
+        rolls back whole.
         """
         con = self._live()
         con.set_authorizer(_authorize)
@@ -645,9 +661,19 @@ class Store:
         # `restore_database` refuses an existing database and a stray `-wal`
         # as well, but only after the config above was written: checked here
         # first so that a refused restore writes nothing at all.
-        if not restore_database(
-            config, layout.database, s3_options=options, binary=binary
-        ):
+        try:
+            restored = restore_database(
+                config, layout.database, s3_options=options, binary=binary
+            )
+        except BaseException:
+            # No store came back, so no config is left either: one beside an
+            # empty directory reads as a store a sidecar should run.
+            if not layout.database.exists():
+                config.unlink(missing_ok=True)
+
+            raise
+
+        if not restored:
             config.unlink(missing_ok=True)
             msg = (
                 f"no replica of store {name!r} at "

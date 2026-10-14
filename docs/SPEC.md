@@ -1519,7 +1519,8 @@ A store is `<root>/<name>/store.db`, with its litestream config beside it in
 refuses a log's directory** (one holding `buffer.db`) in `open` and `restore`, before
 anything is written, because the config and the sidecar's control socket are both derived
 from the directory, so whichever wrote its config second would silently stop the other
-replicating. The converse is not refused: litelink knows nothing of stores, so a log created
+replicating. It refuses a directory inside a log's as well, because litelink removes a
+retired log's directory whole. The converse is not refused: litelink knows nothing of stores, so a log created
 later in a store's directory is the caller's error to avoid.
 
 Tables are declared with an Arrow schema, an optional primary key, or `single_row` (a rowid
