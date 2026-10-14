@@ -1,5 +1,8 @@
 """A server's children die with it, SIGKILL included, and get its S3 options.
 
+`streamcast.popen` and `streamcast.environment` are how it starts them, and
+are public: the tests of those two alone go through the package's names.
+
 An orderly shutdown stops the maintainer and the sidecar itself; these tests
 cover the case it cannot, a server killed outright. Each runs a real server in
 its own process — the thing being tested is what the kernel does when that
@@ -243,6 +246,81 @@ def test_a_terminals_ctrl_c_reaches_the_server_not_its_children(tmp_path):
         server.wait()
 
 
+# -- popen, on its own -------------------------------------------------------
+
+# A parent that starts one child with `streamcast.popen`, prints its pid and
+# waits: what the kernel does when it vanishes is the thing under test.
+PARENT = """
+import sys, time, streamcast
+child = streamcast.popen([sys.executable, "-c", "import time; time.sleep(60)"])
+print(child.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def test_the_package_exports_them():
+    assert streamcast.popen is _process.popen
+    assert streamcast.environment is _process.environment
+    assert {"popen", "environment"} <= set(streamcast.__all__)
+
+
+def test_a_popen_child_dies_with_a_killed_parent():
+    parent = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", PARENT], stdout=subprocess.PIPE, text=True
+    )
+    fd = None
+    try:
+        assert parent.stdout is not None
+        pid = int(parent.stdout.readline())
+        child = identify(pid)
+        assert child is not None, "the child exited on its own"
+        fd = pidfd(child)
+        assert fd is not None
+        parent.send_signal(signal.SIGKILL)
+        parent.wait()
+
+        died = select.poll()
+        died.register(fd, select.POLLIN)
+        assert died.poll(10_000), "the child outlived its parent"
+    finally:
+        if fd is not None:
+            kill(fd)
+            os.close(fd)
+
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait()
+
+
+def test_a_popen_child_is_in_a_session_of_its_own():
+    child = streamcast.popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert os.getsid(child.pid) == child.pid
+        assert os.getpgid(child.pid) != os.getpgid(0)
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize("env", [None, {}])
+def test_without_variables_a_child_inherits_the_environment(tmp_path, monkeypatch, env):
+    monkeypatch.setenv("STREAMCAST_TEST_INHERITED", "yes")
+    out = tmp_path / "env.json"
+    child = streamcast.popen(
+        [
+            sys.executable,
+            "-c",
+            f"import json, os; open({str(out)!r}, 'w').write(json.dumps(dict(os.environ)))",
+        ],
+        env,
+    )
+    assert child.wait(timeout=10) == 0
+    seen = json.loads(out.read_text())
+
+    assert seen["STREAMCAST_TEST_INHERITED"] == "yes"
+    assert seen["PATH"] == os.environ["PATH"]
+
+
 # -- a stream's S3Options, in its children --------------------------------------
 
 KEYS = litelink.S3Options(
@@ -251,11 +329,11 @@ KEYS = litelink.S3Options(
 
 
 def test_the_options_become_the_variables_the_children_read():
-    assert _process.environment(None) == {}
-    assert _process.environment(litelink.S3Options(region="r2")) == {
+    assert streamcast.environment(None) == {}
+    assert streamcast.environment(litelink.S3Options(region="r2")) == {
         "AWS_REGION": "r2"
     }, "what is not set is left to what the child inherits"
-    assert _process.environment(KEYS) == {
+    assert streamcast.environment(KEYS) == {
         "AWS_ENDPOINT_URL": "http://store:9000",
         "AWS_ACCESS_KEY_ID": "ak",
         "AWS_SECRET_ACCESS_KEY": "sk",
@@ -266,17 +344,24 @@ def test_the_options_become_the_variables_the_children_read():
     }
 
 
+def test_environment_returns_a_fresh_mapping():
+    first = streamcast.environment(KEYS)
+    first["AWS_REGION"] = "changed"
+
+    assert streamcast.environment(KEYS)["AWS_REGION"] == "r1"
+
+
 def test_a_child_is_started_with_them(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_SESSION_TOKEN", "for-other-keys")
     monkeypatch.setenv("AWS_REGION", "inherited")
     out = tmp_path / "env.json"
-    child = _process.popen(
+    child = streamcast.popen(
         [
             sys.executable,
             "-c",
             f"import json, os; open({str(out)!r}, 'w').write(json.dumps(dict(os.environ)))",
         ],
-        _process.environment(KEYS),
+        streamcast.environment(KEYS),
     )
     assert child.wait(timeout=10) == 0
     seen = json.loads(out.read_text())
@@ -307,8 +392,8 @@ def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
             for sup in made
         }
         assert groups == {
-            ("a", "b"): _process.environment(KEYS),
-            ("c",): _process.environment(other),
+            ("a", "b"): streamcast.environment(KEYS),
+            ("c",): streamcast.environment(other),
         }
         assert len(made) == 2 * len(ROLES)
     finally:
@@ -352,7 +437,7 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
             [(Path(log.root), log.name)],
             Maintain(publish_every=0.05, flush_every=0.2),
             "publish",
-            env=_process.environment(s3),
+            env=streamcast.environment(s3),
         )
         publisher.start()
         try:
@@ -398,8 +483,8 @@ def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
             tuple(sorted(name for name, _config in sidecar._logs)): sidecar._env  # noqa: SLF001
             for sidecar in made
         } == {
-            ("a", "b"): _process.environment(s3),
-            ("c",): _process.environment(other),
+            ("a", "b"): streamcast.environment(s3),
+            ("c",): streamcast.environment(other),
         }
     finally:
         for log in logs:
@@ -427,7 +512,7 @@ def test_logs_named_alike_in_two_roots_keep_their_own_options(tmp_path):
             tuple(root.name for root, _name in sup.targets): sup._env  # noqa: SLF001
             for sup in made
         }
-        assert envs == {("r1",): {}, ("r2",): _process.environment(KEYS)}
+        assert envs == {("r1",): {}, ("r2",): streamcast.environment(KEYS)}
 
         retained = {
             tuple(root.name for root, _name in sup.targets): sup._streams  # noqa: SLF001

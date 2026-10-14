@@ -7,6 +7,18 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`streamcast.popen` and `streamcast.environment` are public.** They are
+  how `serve` starts the maintainer and litestream: a child in a session of
+  its own, killed by the kernel when the thread that started it dies (Linux,
+  `PR_SET_PDEATHSIG`), with a stream's `S3Options` in its environment rather
+  than its argv. A process that runs a sidecar of its own can now start it on
+  the same terms instead of copying a private module. No behaviour changes;
+  `docs/API.md` documents both under `serve`.
+
 ## 0.20.1 — 2026-10-13
 
 ### Fixed

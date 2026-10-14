@@ -80,6 +80,11 @@ maintainer as five role subprocesses and, with `replicate=True`, litestream as
 an flock-guarded sidecar. Both are keyword-controlled (`maintain=`,
 `replicate=`) for when you run your own.
 
+**`popen` and `environment` are how `serve` starts its children**: in a
+session of their own, killed by the kernel when the server dies, with a
+stream's `S3Options` in their environment rather than their argv. They are
+public for a process that runs a sidecar of its own on the same terms.
+
 **The object model is two classes and two functions.** `Stream` is the
 broadcast — offsets, subscribers, replay — and holds no socket. `serve` puts
 it behind a port; `connect` reads it. `Subscription` is what a consumer holds,
@@ -122,6 +127,7 @@ from streamcast._errors import (
 from streamcast._limits import MAX_BACKLOG
 from streamcast._live import Live
 from streamcast._maintain import Maintain
+from streamcast._process import environment, popen
 from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
@@ -165,7 +171,9 @@ __all__ = [
     "TooSlow",
     "__version__",
     "connect",
+    "environment",
     "from_arrow",
+    "popen",
     "serve",
     "to_arrow",
 ]

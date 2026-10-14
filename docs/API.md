@@ -533,6 +533,38 @@ litestream reads its own pair rather than the AWS ones, which is why the config 
 generates carries no secret and is safe to commit. On AWS with an instance role, none of
 this needs setting.
 
+### Starting a child of your own: `popen` and `environment`
+
+`serve` starts every child through two functions, and both are public for a process
+that runs a sidecar of its own — its own litestream, or any helper that must live and die
+with it — and wants the same guarantees rather than a copy of them.
+
+```python
+env = streamcast.environment(s3_options)       # {"AWS_REGION": "r1", ...}
+child = streamcast.popen(["litestream", "replicate", "-config", path], env)
+...
+child.terminate()                              # stopping it stays the caller's job
+```
+
+**`popen(argv, env=None)`** starts `argv` and returns its `subprocess.Popen[bytes]`:
+
+- **On Linux, the kernel kills the child when the process that started it dies**
+  (`PR_SET_PDEATHSIG`), `SIGKILL` included, which no signal handler can cover. The parent
+  is the *thread* that called `popen`, not the process, so call it from a thread that
+  lives as long as the child should — the event loop's, not a pool worker's. Elsewhere
+  only an orderly shutdown stops the child.
+- **The child runs in a session of its own**, so a terminal's Ctrl-C reaches the parent
+  and not the child, and the parent stops it on its own terms.
+- **`env` is laid over this process's environment**: a value replaces the variable, and
+  `None` removes it. Without `env`, or with an empty one, the child inherits the
+  environment unchanged.
+
+**`environment(s3_options)`** is the `env` that gives a child a set of `S3Options`, as
+described under Credentials above: each field that is set, as the `AWS_*` variable
+litelink's `S3Options.resolved()` reads, and the keys again as `LITESTREAM_*`. Explicit
+keys remove an inherited `AWS_SESSION_TOKEN` (`None`). `environment(None)` is `{}`. It
+returns a fresh `dict[str, str | None]` each call, to pass to `popen` as it is.
+
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 
