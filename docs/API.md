@@ -508,6 +508,46 @@ missed push: a server that came up and replicated nothing would leave you believ
 had protection you did not have. The wheel bundles one, so this is only reachable on a
 platform litelink ships no binary for.
 
+#### `Sidecar`: the same process, for databases you serve yourself
+
+```python
+Sidecar.of(configs, *, binary=None, s3_options=None) -> Sidecar
+Sidecar.new(logs, binary=None, s3_options=None) -> Sidecar   # of() on each log's config
+
+sidecar.start()                 # in a running event loop
+sidecar.socket   -> Path        # the control socket the process listens on
+sidecar.owned    -> set[str]    # the configs' directory names it holds the locks of
+sidecar.terminate(); await sidecar.wait_closed()
+```
+
+`serve` builds one of these per set of `S3Options`. It is exported for a process that has
+litelink databases to replicate and no `serve` to do it: `of` takes the paths litelink's
+`write_replication_config()` wrote, of logs or of anything else litelink replicates, and
+runs one litestream for all of them, with the same per-database lock, the same standby,
+the same restart with backoff and the same death with its parent.
+
+`of` refuses, before anything starts:
+
+- a config given twice, or two configs in one directory (`ValueError`, naming both). The
+  lock is the directory's `litestream.lock`, so the second would never be claimed and its
+  database never replicated;
+- a litestream binary that cannot be found (`SidecarUnavailable`);
+- a control socket path over 100 bytes, which a Unix socket cannot bind
+  (`SidecarUnavailable`): point `TMPDIR` somewhere shorter.
+
+**The merged process listens on one control socket of its own**, `sidecar.socket`, in
+its working directory. One litestream listens on one socket, so each config's own
+`socket:` block is replaced rather than kept. Flush any database it replicates through
+it, and the call returns once the replica has caught up:
+
+```
+litestream sync -wait -socket <sidecar.socket> <database>
+```
+
+Against a database this process is standing by for, litestream answers with an error,
+which is the right answer: another process replicates it. A socket file left by a
+litestream that died is removed before the next one starts.
+
 ### Credentials
 
 **Both subprocesses get the stream's `S3Options`, through their environment.** litelink

@@ -7,6 +7,34 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- **`streamcast.Sidecar` and `streamcast.SidecarUnavailable` are public.**
+  A process with litelink databases to replicate and no `serve` runs the
+  same supervised litestream `serve` does: one process for every database,
+  a lock per database, standby, restart with backoff, and death with its
+  parent.
+- **`Sidecar.of(configs, *, binary=None, s3_options=None)`** builds one from
+  config files litelink wrote, a log's or anything else's. `Sidecar.new` is
+  `of` on each log's config. `of` refuses a config given twice and two
+  configs in one directory, which would share one lock so the second would
+  never replicate (`ValueError`); and a missing binary or a control socket
+  path over 100 bytes (`SidecarUnavailable`), before anything starts.
+- **`Sidecar.socket`: one control socket for the merged process**, at
+  `control.sock` in its working directory. `litestream sync -wait -socket
+  <it> <database>` flushes any database it replicates. A stale socket file
+  is removed before each start.
+
+### Changed
+
+- **A server's litestream listens on a control socket** in its temporary
+  working directory. Before, the merged config dropped every socket.
+  Nothing else about `serve(replicate=True)` changes.
+- **A sidecar's locks are keyed by config path, not by log name**, so two
+  logs named alike under two roots in one sidecar are both claimed.
+
 ## 0.20.1 — 2026-10-13
 
 ### Fixed

@@ -1460,6 +1460,11 @@ it, the server reads history from the published table.
 last frames, then restore. Only unplanned failover loses rows, and it loses
 the ones the old box never managed to replicate.
 
+The sidecar's control socket is how to know it has. One litestream listens on
+one socket, and each log's config names its own, so the merged process drops
+them and listens on one in its working directory (`Sidecar.socket`);
+`litestream sync -wait` through it returns once the replica has caught up.
+
 ### ⚠️ Two writers on one log corrupts it
 
 The fence stops offsets being REUSED. Nothing stops the machine you are

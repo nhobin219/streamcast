@@ -10,6 +10,8 @@ sets it.
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
 from pathlib import Path
 
 import litelink
@@ -162,11 +164,70 @@ class TestItActuallyReplicates:
             sidecar._write_config()  # noqa: SLF001
             text = sidecar.config.read_text()
 
-            assert text.startswith("dbs:")
+            assert text.startswith(
+                f"socket:\n  enabled: true\n  path: {sidecar.socket}\ndbs:"
+            )
             assert text.count("- path:") == 6, text
             for name in ("trades", "quotes"):
                 assert f"/{name}/buffer.db" in text
                 assert f"/{name}/catalog.db" in text
+
+        finally:
+            sidecar.terminate()
+            await sidecar.wait_closed()
+
+    async def test_every_log_flushes_through_the_one_socket(self, two_shipped):
+        """**What `Sidecar.socket` is for.** A caller holding the merged
+        process flushes any of its databases through it and gets back a
+        replica that has caught up.
+
+        Called through `litestream sync` directly rather than litelink's
+        `flush`, which takes no socket at the litelink floor this pins.
+        Falsify by dropping the socket block from `_write_config`.
+        """
+        sidecar = Sidecar.of([log.write_replication_config() for log in two_shipped])
+        for log in two_shipped:
+            log.extend([{"event_ts": i, "price": 1.0 * i} for i in range(10)])
+
+        sidecar.start()
+        try:
+            for _ in range(300):
+                if sidecar.socket.exists():
+                    break
+
+                await asyncio.sleep(0.1)
+
+            assert sidecar.socket.exists(), "litestream never opened its socket"
+
+            def sync(database: Path) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(  # noqa: S603
+                    [
+                        sidecar._binary,  # noqa: SLF001
+                        "sync",
+                        "-wait",
+                        "-json",
+                        "-timeout",
+                        "30",
+                        "-socket",
+                        str(sidecar.socket),
+                        str(database),
+                    ],
+                    capture_output=True,
+                    timeout=45,
+                    check=False,
+                )
+
+            for log in two_shipped:
+                database = Path(log.write_replication_config()).parent / "buffer.db"
+                done = await asyncio.to_thread(sync, database)
+                assert done.returncode == 0, done.stderr.decode()
+                report = json.loads(done.stdout)
+                assert report["replica_txid"] == report["txid"] > 0, report
+
+            # One it does not replicate is an error, never a silent success.
+            stranger = Path(two_shipped[0].root) / "elsewhere" / "buffer.db"
+            done = await asyncio.to_thread(sync, stranger)
+            assert done.returncode != 0, done.stdout.decode()
 
         finally:
             sidecar.terminate()

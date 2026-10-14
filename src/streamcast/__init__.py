@@ -124,6 +124,7 @@ from streamcast._live import Live
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
 from streamcast._publish import Publication, publish
+from streamcast._replicate import Sidecar, SidecarUnavailable
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
@@ -156,6 +157,8 @@ __all__ = [
     "publish",
     "Rejected",
     "Publication",
+    "Sidecar",
+    "SidecarUnavailable",
     "Stats",
     "Stream",
     "StreamNotFound",
