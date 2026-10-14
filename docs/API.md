@@ -1168,9 +1168,10 @@ Store.replication_config_for(root, name, published, s3_options=None, retention=N
 
 store.transaction() -> ContextManager[StoreTransaction]
     tx.execute(sql, parameters=()) -> sqlite3.Cursor
-    tx.advance(subscription, offset)
-    tx.offset(subscription) -> int | None
-store.offset(subscription) -> int | None
+    tx.advance(stream, offset, *, stream_id=None)
+    tx.offset(stream, *, stream_id=None) -> int | None
+    tx.forget(stream)
+store.offset(stream, *, stream_id=None) -> int | None
 store.query(sql, parameters=()) -> list[tuple]      # read-only
 store.replication_config() -> str
 store.write_replication_config() -> Path
@@ -1179,13 +1180,34 @@ store.root · name · path · tables · published · retention · databases
 store.close() · context manager
 
 StoreTable(schema, key=(), single_row=False)
+StreamMismatch(stream, recorded, given)            # a StreamcastError
 ```
 
 The state of a consumer of a stream, for exactly-once processing (SPEC §8c). A consumer
 applies each message to tables of its own and advances its offset in that stream in one
-transaction, so after any crash it resumes from `store.offset(subscription)`, never skipping
-a message and never applying one twice. A `subscription` is the consumer's own name for its
-position in one stream; a store keeps one offset per subscription.
+transaction, so after any crash it resumes from `store.offset(stream)`, never skipping a
+message and never applying one twice. A store keeps one position per stream.
+
+**A position is keyed by the stream's name.** `stream` is the name, or a URI the stream is
+served at, read as `connect` reads one: the path with its leading slash removed, whatever the
+host, port, scheme or query. `ws://127.0.0.1:8765/trades`, `wss://broker.example/trades` and
+`trades` are one position, so a broker that moves host or port, or a consumer that switches
+from a local URI to a remote one, resumes rather than replaying from nothing. Only a `ws://`
+or `wss://` string is read as a URI; anything else is the name as given. Behind an ASGI mount
+at a path prefix the URI's path carries the prefix too, so key by the greeting's name
+(`sub.info.stream`) there.
+
+**Beside the offset the store records the stream's identity**, its `stream_id`: minted once
+when a durable stream's metadata is first written, kept by `migrate`, `retire` and `restore`,
+and sent in every greeting (`sub.info.stream_id`). A stream deleted and created again under
+the same name, or a same-named stream on another broker or in another bucket, has another
+one, and its offsets start again: a position of 400 recorded for the old stream would skip
+the new one's first 400 messages. Given `stream_id=`, `offset` and `advance` compare it with
+the recorded one and raise `StreamMismatch` on a difference, rather than guess. A position
+recorded without one takes the first identity given. `tx.forget(stream)` drops a position,
+for when the recorded stream is gone for good: the only way a position moves other than
+forward. The identity is not the key, so nothing that might mint a new one silently drops a
+consumer's position; it is refused, loudly, instead.
 
 The store is a local SQLite database of declared tables. It is the source of truth; reads and
 writes never touch the network.
@@ -1217,14 +1239,15 @@ store = streamcast.Store.open("data", "state", tables={
         "required": ["id", "count"],
     }, key=("id",)),
 })
-done = store.offset("events")                      # None on first start
+done = store.offset(uri)                           # None on first start
 start = streamcast.EARLIEST if done is None else done + 1
 async with streamcast.connect(uri, offset=start, catch_up=True) as sub:
+    store.offset(uri, stream_id=sub.info.stream_id) # another stream of this name? refused
     async for offset, ts, row in sub:
         with store.transaction() as tx:            # durable when the block returns
             tx.execute("INSERT INTO seen VALUES (?, 1) "
                        "ON CONFLICT (id) DO UPDATE SET count = count + 1", (row["key"],))
-            tx.advance("events", offset)
+            tx.advance(uri, offset, stream_id=sub.info.stream_id)
 ```
 
 A crash at any point leaves both the row's effect and its offset, or neither, so the loop

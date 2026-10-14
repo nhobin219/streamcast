@@ -46,7 +46,6 @@ import collections
 import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 from litelink import S3Options
 from websockets.asyncio.client import connect as _ws_connect
@@ -62,6 +61,7 @@ from streamcast._protocol import (
     parse_greeting,
     parse_publish_reply,
     publish_path,
+    stream_name,
 )
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
@@ -402,7 +402,7 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     ) -> None:
         self._uri = uri
         self._max_in_flight = max_in_flight
-        self._stream = urlsplit(uri).path.lstrip("/")
+        self._stream = stream_name(uri)
         self._kwargs: dict[str, Any] = {"compression": compression, **kwargs}
         self._publication: Publication | None = None
         self._cursor = Cursor(cursor) if cursor is not None else None

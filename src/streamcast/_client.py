@@ -63,7 +63,7 @@ from streamcast._errors import (
     StreamRetired,
     TooSlow,
 )
-from streamcast._protocol import decode, parse_greeting, parse_refusal
+from streamcast._protocol import decode, parse_greeting, parse_refusal, stream_name
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
 if TYPE_CHECKING:
@@ -809,7 +809,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         self._catch_up_retries = catch_up_retries
         self._metadata = metadata
         self._s3 = s3_options
-        self._stream = urlsplit(uri).path.lstrip("/")
+        self._stream = stream_name(uri)
         self._cursor = Cursor(cursor) if cursor is not None else None
 
         self._remote: RemoteCursor | None = None

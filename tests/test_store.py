@@ -18,17 +18,21 @@ import sys
 import textwrap
 import time
 import tomllib
+import uuid
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
 from litelink import S3Options, WriteHandle
 from litelink.replication import control_socket, litestream_binary
 
-from streamcast import Sidecar, Store, StoreTable
+import streamcast
+from streamcast import Sidecar, Store, StoreTable, Stream, StreamMismatch
 from streamcast import _store as store_module
 from streamcast._schema import from_arrow, to_arrow
+from tests.conftest import SCHEMA, trade
 
 ITEMS = StoreTable(
     {
@@ -74,7 +78,7 @@ def work(store: Store, upto: int, start: int = 1) -> None:
                 'ON CONFLICT ("_streamcast_row") DO UPDATE SET seen = excluded.seen',
                 (i,),
             )
-            tx.advance("sub", i)
+            tx.advance("trades", i)
 
 
 def sidecar_binary() -> str:
@@ -238,9 +242,9 @@ def test_a_returning_cursor_left_half_read_commits_nothing(tmp_path: Path) -> No
                 "INSERT INTO items (id, state) VALUES (1, 'a'), (2, 'b') RETURNING id"
             )
             assert cursor.fetchone() is not None
-            tx.advance("sub", 1)
+            tx.advance("trades", 1)
 
-        assert store.offset("sub") is None
+        assert store.offset("trades") is None
         assert store.query("SELECT count(*) FROM items") == [(0,)]
 
 
@@ -398,14 +402,14 @@ def test_flush_then_restore_brings_back_the_tables_and_the_offset(
             s3_options=s3,
             binary=binary,
         ) as restored:
-            assert restored.offset("sub") == 200
+            assert restored.offset("trades") == 200
             assert restored.query("SELECT count(*), max(id) FROM items") == [(200, 200)]
             assert restored.query("SELECT seen FROM checkpoint") == [(200,)]
             assert restored.published == published
             assert (replacement / "state" / "litestream.yml").exists()
             # It carries on where it stopped.
             work(restored, 201, start=201)
-            assert restored.offset("sub") == 201
+            assert restored.offset("trades") == 201
     finally:
         sidecar.terminate()
         sidecar.wait(timeout=10)
@@ -464,7 +468,7 @@ async def test_flush_through_a_sidecar_on_its_own_socket(
             s3_options=s3,
             binary=binary,
         ) as restored:
-            assert restored.offset("sub") == 50
+            assert restored.offset("trades") == 50
             assert restored.query("SELECT count(*), max(id) FROM items") == [(50, 50)]
     finally:
         sidecar.terminate()
@@ -529,7 +533,7 @@ _CHILD = textwrap.dedent(
     work(store, 50)
     with store.transaction() as tx:
         tx.execute("INSERT INTO items (id, state) VALUES (51, 's51')")
-        tx.advance("sub", 51)
+        tx.advance("trades", 51)
         print("inside", flush=True)
         sys.stdin.read()
     """
@@ -562,7 +566,7 @@ def test_a_write_and_its_offset_survive_kill_9_together(tmp_path: Path) -> None:
 
     assert child.returncode == -signal.SIGKILL
     with opened(tmp_path) as store:
-        assert store.offset("sub") == 50
+        assert store.offset("trades") == 50
         assert store.query("SELECT count(*), max(id) FROM items") == [(50, 50)]
         assert store.query("SELECT seen FROM checkpoint") == [(50,)]
 
@@ -571,10 +575,10 @@ def test_a_raising_transaction_keeps_neither(tmp_path: Path) -> None:
     with opened(tmp_path) as store:
         with pytest.raises(KeyError), store.transaction() as tx:
             tx.execute("INSERT INTO items (id, state) VALUES (1, 'a')")
-            tx.advance("sub", 1)
+            tx.advance("trades", 1)
             raise KeyError
 
-        assert store.offset("sub") is None
+        assert store.offset("trades") is None
         assert store.query("SELECT count(*) FROM items") == [(0,)]
 
 
@@ -597,9 +601,9 @@ def test_a_transaction_sqlite_rolled_back_commits_nothing_after(
                         "INSERT OR ROLLBACK INTO items (id, state) VALUES (1, 'x')"
                     )
 
-                tx.advance("sub", 2)
+                tx.advance("trades", 2)
 
-        assert store.offset("sub") == 1
+        assert store.offset("trades") == 1
         assert store.query("SELECT count(*) FROM items") == [(1,)]
 
 
@@ -624,9 +628,9 @@ def test_consumer_sql_cannot_break_the_transaction(tmp_path: Path, sql: str) -> 
             with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
                 tx.execute(sql)
 
-            tx.advance("sub", 2)
+            tx.advance("trades", 2)
 
-        assert store.offset("sub") == 2
+        assert store.offset("trades") == 2
 
 
 def test_offsets_only_advance(tmp_path: Path) -> None:
@@ -638,20 +642,20 @@ def test_offsets_only_advance(tmp_path: Path) -> None:
                 pytest.raises(ValueError, match="already at 3"),
                 store.transaction() as tx,
             ):
-                tx.advance("sub", stale)
+                tx.advance("trades", stale)
 
         with (
             pytest.raises(ValueError, match="non-negative int"),
             store.transaction() as tx,
         ):
-            tx.advance("sub", -1)
+            tx.advance("trades", -1)
 
         # Subscriptions are independent.
         with store.transaction() as tx:
             tx.advance("other", 1)
             assert tx.offset("other") == 1
 
-        assert store.offset("sub") == 3
+        assert store.offset("trades") == 3
 
 
 def test_nothing_ends_a_transaction_from_inside_it(tmp_path: Path) -> None:
@@ -661,23 +665,23 @@ def test_nothing_ends_a_transaction_from_inside_it(tmp_path: Path) -> None:
                 pass
 
         with pytest.raises(RuntimeError, match="inside a store transaction"):
-            store.offset("sub")
+            store.offset("trades")
 
         # `close` too: the lock is held for the transaction, so it would wait
         # for itself.
         with pytest.raises(RuntimeError, match="inside a store transaction"):
             store.close()
 
-        tx.advance("sub", 1)
+        tx.advance("trades", 1)
 
 
 def test_a_finished_transaction_is_unusable(tmp_path: Path) -> None:
     with opened(tmp_path) as store:
         with store.transaction() as tx:
-            tx.advance("sub", 1)
+            tx.advance("trades", 1)
 
         with pytest.raises(RuntimeError, match="has ended"):
-            tx.advance("sub", 2)
+            tx.advance("trades", 2)
 
 
 # -- declared tables ----------------------------------------------------------
@@ -735,7 +739,7 @@ def test_schema_changes_are_additive_only(tmp_path: Path) -> None:
             (2, None),
         ]
         assert set(store.tables) == {"items", "checkpoint", "extra"}
-        assert store.offset("sub") == 2
+        assert store.offset("trades") == 2
 
     refused = {
         "dropped table": {"items": wider["items"], "checkpoint": CHECKPOINT},
@@ -901,3 +905,140 @@ def test_a_release_floor_carries_the_api_the_store_imports() -> None:
     floor = re.search(r">=\s*([0-9.]+)", requirement)
     assert floor is not None, requirement
     assert tuple(int(p) for p in floor.group(1).split(".")) >= (0, 12, 5), requirement
+
+
+# -- the position is the stream's ----------------------------------------------
+
+
+def test_a_position_is_keyed_by_the_streams_name_not_where_it_is_served(
+    tmp_path: Path,
+) -> None:
+    """The name `connect` reads from a URI, whatever the host, port, scheme
+    or query: a broker that moves, or a switch from a local URI to a remote
+    one, keeps the consumer's position rather than replaying from nothing.
+
+    Falsify by keying on the URI as given: each spelling is its own row.
+    """
+    spellings = (
+        "trades",
+        "ws://127.0.0.1:8765/trades",
+        "ws://localhost:9001/trades?offset=7",
+        "wss://broker.example.com/trades",
+        "wss://10.0.0.7:443/trades",
+    )
+    with opened(tmp_path) as store:
+        for i, spelling in enumerate(spellings, start=1):
+            with store.transaction() as tx:
+                assert tx.offset(spelling) == (None if i == 1 else i - 1)
+                tx.advance(spelling, i)
+
+        assert {store.offset(spelling) for spelling in spellings} == {len(spellings)}
+        assert store.query("SELECT stream FROM _streamcast_offsets") == [("trades",)]
+        # A name is taken as given, colon and all: not read as a URI scheme.
+        with store.transaction() as tx:
+            tx.advance("venue:trades", 1)
+
+        assert store.offset("venue:trades") == 1
+        assert store.offset("trades") == len(spellings)
+
+
+def test_another_stream_under_the_same_name_is_refused_not_resumed(
+    tmp_path: Path,
+) -> None:
+    """A stream recreated under the same name starts its offsets again; a
+    position recorded for the old one would skip that many of its messages.
+
+    Falsify by not comparing the recorded identity: the second stream's
+    advance lands on the first stream's position.
+    """
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    with opened(tmp_path) as store:
+        with store.transaction() as tx:
+            tx.advance("trades", 400, stream_id=first)
+
+        assert store.offset("trades", stream_id=first) == 400
+        with pytest.raises(StreamMismatch, match="forget") as raised:
+            store.offset("ws://elsewhere:1/trades", stream_id=second)
+
+        assert (raised.value.recorded, raised.value.given) == (first, second)
+        # In a transaction: the message's effect goes with the refusal (S1).
+        with pytest.raises(StreamMismatch), store.transaction() as tx:
+            tx.execute("INSERT INTO items (id, state) VALUES (1, 'new')")
+            tx.advance("trades", 1, stream_id=second)
+
+        assert store.query("SELECT count(*) FROM items") == [(0,)]
+        assert store.offset("trades") == 400
+        # Without an identity there is nothing to compare, and the recorded
+        # one is kept rather than erased.
+        with store.transaction() as tx:
+            tx.advance("trades", 401)
+
+        with pytest.raises(StreamMismatch):
+            store.offset("trades", stream_id=second)
+
+        # The way out, said in the refusal: forget, then start the new one.
+        with store.transaction() as tx:
+            tx.forget("trades")
+            tx.advance("trades", 1, stream_id=second)
+
+        assert store.offset("trades", stream_id=second) == 1
+
+
+def test_a_position_recorded_without_an_identity_takes_the_first_given(
+    tmp_path: Path,
+) -> None:
+    """Nothing recorded is nothing to mismatch: the first identity given is
+    recorded, and the guard holds from then on."""
+    with opened(tmp_path) as store:
+        work(store, 2)
+        known = str(uuid.uuid4())
+        assert store.offset("trades", stream_id=known) == 2
+        with store.transaction() as tx:
+            tx.advance("trades", 3, stream_id=known)
+
+        with pytest.raises(StreamMismatch):
+            store.offset("trades", stream_id=str(uuid.uuid4()))
+
+
+async def test_the_greeting_identifies_the_stream_a_position_belongs_to(
+    tmp_path: Path, serve: Any
+) -> None:
+    """End to end, with the identity a server sends: the same stream served
+    on another port resumes its position; one created again under the same
+    name is refused.
+
+    Falsify by recording no `stream_id` in `advance`: the recreated stream's
+    position check passes and would resume at the old stream's offset.
+    """
+    schema = from_arrow(SCHEMA)
+    with opened(tmp_path / "consumer") as store:
+        stream = Stream.new("trades", root=tmp_path / "a", schema=schema)
+        async with serve(stream) as uri:
+            await stream.send_many([trade(i) for i in range(3)])
+            async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
+                identity = sub.info.stream_id
+                assert identity is not None
+                for _ in range(3):
+                    offset, _, _ = await sub.recv()
+                    assert offset is not None
+                    with store.transaction() as tx:
+                        tx.advance(uri, offset, stream_id=identity)
+
+        await stream.aclose()
+        # The same stream, from its own root, on another port.
+        again = Stream.new("trades", root=tmp_path / "a", schema=schema)
+        async with serve(again) as moved:
+            assert moved != uri
+            async with streamcast.connect(moved) as sub:
+                assert sub.info.stream_id == identity
+                assert store.offset(moved, stream_id=sub.info.stream_id) == 3
+
+        await again.aclose()
+        # Another stream, created under the same name elsewhere.
+        other = Stream.new("trades", root=tmp_path / "b", schema=schema)
+        async with serve(other) as elsewhere, streamcast.connect(elsewhere) as sub:
+            assert sub.info.stream_id != identity
+            with pytest.raises(StreamMismatch):
+                store.offset(elsewhere, stream_id=sub.info.stream_id)
+
+        await other.aclose()

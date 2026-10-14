@@ -44,7 +44,9 @@ from litelink.replication import (
     restore_database,
 )
 
+from streamcast._errors import StreamcastError
 from streamcast._metadata import is_log
+from streamcast._protocol import stream_name
 from streamcast._schema import from_arrow, to_arrow
 
 if TYPE_CHECKING:
@@ -62,8 +64,12 @@ _SINGLE = "_streamcast_row"
 _SYSTEM = (
     "CREATE TABLE IF NOT EXISTS _streamcast_meta "
     "(k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT",
+    # Keyed by the stream's NAME, which survives a broker moving host or
+    # port; `stream_id` is the identity checked beside it, and is not the key,
+    # so nothing that could mint a new one drops a position quietly.
     "CREATE TABLE IF NOT EXISTS _streamcast_offsets ("
-    "subscription TEXT PRIMARY KEY, litelink_offset INTEGER NOT NULL) STRICT",
+    "stream TEXT PRIMARY KEY, stream_id TEXT, litelink_offset INTEGER NOT NULL)"
+    " STRICT",
 )
 
 # Statements a consumer's SQL may not run. A transaction statement would end
@@ -436,8 +442,18 @@ class StoreTransaction:
         finally:
             con.set_authorizer(None)
 
-    def advance(self, subscription: str, offset: int) -> None:
-        """Record that everything through `offset` of `subscription` is done.
+    def advance(
+        self, stream: str, offset: int, *, stream_id: str | None = None
+    ) -> None:
+        """Record that everything through `offset` of `stream` is done.
+
+        `stream` is the stream's name, or a URI it is served at, read as
+        `connect` reads one (`stream_name`): a broker that moves host or port
+        keeps the position. `stream_id` is the stream's identity, from the
+        greeting (`sub.info.stream_id`); given, it is recorded beside the
+        offset and checked against the one recorded before, and a mismatch
+        raises `StreamMismatch` rather than advancing another stream's
+        position. A position recorded without one takes the first given.
 
         In this transaction, so it commits with the work it describes (S1).
         Strictly forward: an offset at or below the recorded one is refused, so
@@ -448,23 +464,65 @@ class StoreTransaction:
             msg = f"offset must be a non-negative int, not {offset!r}"
             raise ValueError(msg)
 
-        current = _offset(con, subscription)
+        name = stream_name(stream)
+        current = _position(con, name, stream_id)
         if current is not None and offset <= current:
             msg = (
-                f"subscription {subscription!r} is already at {current}; "
-                f"{offset} does not advance it"
+                f"stream {name!r} is already at {current}; {offset} does not advance it"
             )
             raise ValueError(msg)
 
+        # COALESCE: a call that names no identity keeps the one recorded.
         con.execute(
-            f"INSERT INTO _streamcast_offsets (subscription, {OFFSET}) VALUES (?, ?) "
-            f"ON CONFLICT (subscription) DO UPDATE SET {OFFSET} = excluded.{OFFSET}",
-            (subscription, offset),
+            f"INSERT INTO _streamcast_offsets (stream, stream_id, {OFFSET}) "
+            f"VALUES (?, ?, ?) ON CONFLICT (stream) DO UPDATE SET "
+            f"{OFFSET} = excluded.{OFFSET}, "
+            f"stream_id = COALESCE(excluded.stream_id, stream_id)",
+            (name, stream_id, offset),
         )
 
-    def offset(self, subscription: str) -> int | None:
-        """Where `subscription` stands, including this transaction's advance."""
-        return _offset(self._live(), subscription)
+    def offset(self, stream: str, *, stream_id: str | None = None) -> int | None:
+        """Where `stream` stands, including this transaction's advance.
+
+        Raises `StreamMismatch` when `stream_id` is given and differs from
+        the identity recorded with the position.
+        """
+        return _position(self._live(), stream_name(stream), stream_id)
+
+    def forget(self, stream: str) -> None:
+        """Drop `stream`'s position, so the next `advance` starts it afresh.
+
+        The way out of a `StreamMismatch` when the recorded stream is gone for
+        good, and the only way a position moves other than forward. Its own
+        call, so that `advance` stays forward-only: nothing reaches this by
+        passing a smaller number.
+        """
+        self._live().execute(
+            "DELETE FROM _streamcast_offsets WHERE stream = ?", (stream_name(stream),)
+        )
+
+
+class StreamMismatch(StreamcastError):
+    """A position was recorded for another stream of the same name.
+
+    A stream deleted and created again, or a same-named stream on another
+    broker or in another bucket, starts its offsets again; resuming it from a
+    position recorded for the old one would skip that many of its messages.
+    So it is refused, not guessed at. `forget` drops the old position when
+    the old stream is gone for good.
+    """
+
+    def __init__(self, stream: str, recorded: str, given: str) -> None:
+        self.stream = stream
+        self.recorded = recorded
+        self.given = given
+        super().__init__(
+            f"the position for stream {stream!r} was recorded for stream id "
+            f"{recorded}, and this is {given}: another stream under the same "
+            f"name, whose offsets started again. Resuming would skip its "
+            f"messages. If {recorded} is gone for good, forget the position "
+            f"(tx.forget({stream!r})) and start from the beginning"
+        )
 
 
 def _authorize(action: int, arg1: str | None, *_: object) -> int:
@@ -484,12 +542,21 @@ def _read_only(action: int, *_: object) -> int:
     return sqlite3.SQLITE_OK
 
 
-def _offset(con: sqlite3.Connection, subscription: str) -> int | None:
+def _position(
+    con: sqlite3.Connection, stream: str, stream_id: str | None
+) -> int | None:
     row = con.execute(
-        f"SELECT {OFFSET} FROM _streamcast_offsets WHERE subscription = ?",
-        (subscription,),
+        f"SELECT {OFFSET}, stream_id FROM _streamcast_offsets WHERE stream = ?",
+        (stream,),
     ).fetchone()
-    return None if row is None else int(row[0])
+    if row is None:
+        return None
+
+    offset, recorded = row
+    if stream_id is not None and recorded is not None and recorded != stream_id:
+        raise StreamMismatch(stream, recorded, stream_id)
+
+    return int(offset)
 
 
 def _meta(con: sqlite3.Connection) -> dict[str, str]:
@@ -839,10 +906,12 @@ class Store:
 
     # -- reads -------------------------------------------------------------
 
-    def offset(self, subscription: str) -> int | None:
-        """Where `subscription` stands, as last committed."""
+    def offset(self, stream: str, *, stream_id: str | None = None) -> int | None:
+        """Where `stream` stands, as last committed: its name, or a URI it is
+        served at. Raises `StreamMismatch` when `stream_id` is given and is
+        not the identity recorded with the position (see `advance`)."""
         with self._locked() as con:
-            return _offset(con, subscription)
+            return _position(con, stream_name(stream), stream_id)
 
     def query(
         self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] = ()

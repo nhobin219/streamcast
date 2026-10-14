@@ -136,7 +136,7 @@ from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
-from streamcast._store import Store, StoreTable, StoreTransaction
+from streamcast._store import Store, StoreTable, StoreTransaction, StreamMismatch
 from streamcast._stream import MAX_REPLAY, Stream
 
 try:
@@ -172,6 +172,7 @@ __all__ = [
     "StoreTable",
     "StoreTransaction",
     "Stream",
+    "StreamMismatch",
     "StreamNotFound",
     "StreamRetired",
     "StreamcastError",

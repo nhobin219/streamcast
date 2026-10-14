@@ -766,7 +766,7 @@ together: the message's effect, and the record that the message is done. A curso
 give it that, because a cursor is a second file saved on its own clock. `streamcast.Store`
 is that state: a local SQLite database of declared tables in which a consumer's writes and
 its offset in the stream commit in one transaction. After any crash it resumes from
-`store.offset(subscription)`, so no message is skipped and none is applied twice:
+`store.offset(stream)`, so no message is skipped and none is applied twice:
 exactly-once processing, with no server keeping track for it.
 
 ```python
@@ -779,22 +779,33 @@ store = streamcast.Store.open("data", "totals", tables={
     }, key=("account",)),
 })
 
-done = store.offset("orders")                     # None on first start
+done = store.offset(uri)                          # None on first start
 start = streamcast.EARLIEST if done is None else done + 1
 async with streamcast.connect(uri, offset=start, catch_up=True) as sub:
+    stream_id = sub.info.stream_id                # which stream this is
+    store.offset(uri, stream_id=stream_id)        # refuses another one of that name
     async for offset, ts, row in sub:
         with store.transaction() as tx:           # one transaction, durable on return
             tx.execute(
                 "INSERT INTO totals VALUES (?, ?) ON CONFLICT (account) "
                 "DO UPDATE SET amount = amount + excluded.amount",
                 (row["account"], row["amount"]))
-            tx.advance("orders", offset)
+            tx.advance(uri, offset, stream_id=stream_id)
 ```
 
 A crash leaves both the effect and the offset, or neither. `advance` only moves forward, so
 a replayed message is refused rather than applied twice. The guarantee covers what the
 transaction writes; an effect outside the store, such as a request to another service, is
-not part of it. A table is declared in JSON Schema, exactly as a stream's schema is
+not part of it.
+
+The position is the **stream's**, keyed by its name: `uri` above is read as `connect` reads
+it, so `ws://old-host:8765/orders` and `wss://new-host/orders` are the one position, and a
+broker that moves resumes rather than replays. Beside it the store records the stream's
+identity (`stream_id`, from the greeting). A stream deleted and created again under the same
+name starts its offsets again, so resuming it from the old position would skip messages:
+that is refused with `StreamMismatch`, and `tx.forget(uri)` starts it afresh.
+
+A table is declared in JSON Schema, exactly as a stream's schema is
 ([Server](#server)), and its changes are additive.
 
 So that this state also survives losing the machine, the store replicates exactly as a

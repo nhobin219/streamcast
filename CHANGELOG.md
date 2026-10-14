@@ -14,10 +14,14 @@ there was nothing to have changed from. Everything above it is ordinary.
 - **`streamcast.Store`, a consumer's state committed with its offset.**
   Exactly-once processing for a consumer of a stream: in one
   `transaction()` it applies a message to its own tables and advances its
-  offset in that stream (`tx.advance(subscription, offset)`), so a write
-  and its offset survive `kill -9` together or not at all. After any crash
-  it resumes from `store.offset(subscription)`, skipping no message, and
-  `advance` only moves forward, so none is applied twice. The state is a
+  offset in that stream (`tx.advance(stream, offset)`), so a write and its
+  offset survive `kill -9` together or not at all. After any crash it
+  resumes from `store.offset(stream)`, skipping no message, and `advance`
+  only moves forward, so none is applied twice. A position is keyed by the
+  stream's name, read from a URI as `connect` reads one, so a broker that
+  moves host or port keeps it; the stream's `stream_id` is recorded beside
+  it, and another stream under the same name is refused with
+  `StreamMismatch` rather than resumed, with `tx.forget` as the way out. The state is a
   local SQLite database of tables declared in JSON Schema, as a stream's
   schema is (`StoreTable`), the source of truth, with additive-only schema
   changes and a litelink log's column type checks. So that it also survives losing the machine, it replicates the way

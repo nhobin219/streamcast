@@ -1497,7 +1497,7 @@ A consumer of a stream applies each message to tables of its own and must know, 
 crash, which messages it has applied. `Store` is that state: an embedded SQLite database of
 declared tables in which the consumer's writes and its offset in the stream commit in one
 transaction (S1). A crash leaves a message's effect and its offset together or neither, so
-the consumer resumes from `offset(subscription)` and processes every message exactly once:
+the consumer resumes from `offset(stream)` and processes every message exactly once:
 none skipped, none applied twice (S2), with no server holding its position.
 
 The database is the source of truth, every read and write is local, and the network is
@@ -1546,14 +1546,31 @@ table, which is the one copy of what the tables are.
 
 A consumer commits its work and its position in what it consumes in one transaction.
 `transaction()` is `BEGIN IMMEDIATE` … `COMMIT` at `synchronous=FULL`, so it is durable when
-the `with` returns, and `tx.advance(subscription, offset)` writes the offset in
-`_streamcast_offsets`, one row per subscription, inside it. The offset is the frame's, a
+the `with` returns, and `tx.advance(stream, offset)` writes the offset in
+`_streamcast_offsets`, one row per stream, inside it. The offset is the frame's, a
 log's `litelink_offset`. It is not a column of the consumer's tables: a per-table column
 would lose its position when the rows carrying it are deleted.
 
 That is the whole pattern. Nothing here knows what is being consumed; a consume loop reads a
 row, applies it through `tx.execute`, advances to its offset, and on restart resumes after
-`store.offset(subscription)`.
+`store.offset(stream)`.
+
+**The key is the stream's name**, read from a URI as the server reads a subscribe path
+(`_protocol.stream_name`, which `connect` and `publish` use too): independent of the host,
+port and scheme, so a broker that moves keeps every consumer's position. A key with the
+host in it would reset a position on a move, and the consumer would replay from its
+`offset=` fallback without anything saying so.
+
+**Beside it, the stream's identity.** `stream_id` is minted once, when a durable stream's
+metadata is first written (`_metadata.single`), and kept by everything that rewrites that
+file (`advance` for `migrate`, `retire`, `revive`; `restore` reads it back), and every
+greeting carries it. A stream deleted and recreated, or a same-named one elsewhere, has a
+new one and starts its offsets again. Given `stream_id`, `offset` and `advance` compare it
+with the recorded one and raise `StreamMismatch` on a difference: resuming would skip the
+new stream's first messages, a hole I4 forbids at the subscriber. It is checked, not keyed:
+a key that changed under an operation would drop every consumer's position silently, where
+a check refuses loudly. A position recorded without an identity takes the first one given.
+`forget` removes a position, and is the only way one moves other than forward (S2).
 
 A restore fence (§8b) moves offsets forward by 2**20, and `advance` accepts any forward
 move, so a store resuming across one is served as any consumer is.
@@ -1591,14 +1608,17 @@ collide with a log's `buffer.db`, `catalog.db` or `published.db` under the same 
 | | Invariant | Why |
 |---|---|---|
 | **S1** | A consumer's writes and its offset advance commit together or not at all. | It is exactly-once processing with no server state. Enforced by one SQLite transaction; an authorizer refuses the consumer statements that could end it (transaction control, savepoints, DDL, PRAGMA, ATTACH, writes to `_streamcast_` tables), and a transaction SQLite ended by itself (a caught `OR ROLLBACK`) refuses every later call and commits nothing. |
-| **S2** | An offset only moves forward. | A replayed message is refused rather than applied twice. |
+| **S2** | An offset only moves forward; `forget` is the one other move, and removes it. | A replayed message is refused rather than applied twice. |
+| **S5** | A position is never resumed for another stream of the same name. | Its offsets started again, so resuming would skip its first messages. Checked against the recorded `stream_id` when one is given; never the key, so no operation drops a position silently. |
 | **S3** | The store never starts a replicator. | Two litestream processes on one database corrupt its replica. `flush` is a client of the running sidecar. |
 | **S4** | A local database is never restored over. | It is the source of truth; a restore over it would discard commits the replica never received. |
 
 `tests/test_store.py` checks each: S1 by killing a process with SIGKILL inside a
 transaction that has written a row and advanced its offset, which comes back with neither;
 S2 by advancing to a stale offset; S3 by recording every process a flush with no sidecar
-starts; S4 by restoring over a store and over a stray `-wal`. The replication tier runs a
+starts; S4 by restoring over a store and over a stray `-wal`; S5 by serving one stream on
+two ports, where the position resumes, and another created under the same name, where it is
+refused. The replication tier runs a
 `Sidecar` on a store's config at an hour's sync interval, flushes through `sidecar.socket`,
 and restores the tables and the offset onto a root with no database.
 

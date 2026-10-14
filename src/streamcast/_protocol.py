@@ -646,6 +646,26 @@ def publish_path(uri: str) -> str:
     return urlunsplit(split._replace(query=query))
 
 
+def stream_name(stream: str) -> str:
+    """The name a stream is served under, from its URI or from the name itself.
+
+    `ws://host:8765/trades?offset=7` and `wss://broker.example/trades` are
+    both `trades`: the name is the URI's path with its leading slash removed,
+    as `parse_subscribe` reads it on the server, and is independent of the
+    host, the port, the scheme and the query. A string that is not a `ws://`
+    or `wss://` URI is taken to be the name already. Not "anything with a
+    scheme": `urlsplit` reads `a:b` as scheme `a`, and a name may hold a colon.
+
+    A server mounted under a path prefix (`asgi` in an app at `/streams`)
+    serves `trades` at `/streams/trades`, which this reads as
+    `streams/trades`: the greeting's `stream` is the server's own name for it.
+    """
+    if not stream.startswith(("ws://", "wss://")):
+        return stream
+
+    return urlsplit(stream).path.lstrip("/")
+
+
 def subscribe_path(name: str, offset: int | None) -> str:
     """The inverse, for the client. Kept beside the parser so they cannot drift."""
     path = "/" + quote(name)
@@ -676,5 +696,6 @@ __all__ = [
     "parse_refusal",
     "parse_subscribe",
     "refusal",
+    "stream_name",
     "subscribe_path",
 ]
