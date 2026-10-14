@@ -14,22 +14,23 @@ just check              # lint + format-check + typecheck + tests, exactly what 
 
 You need [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just).
 
-**When `pyproject.toml` has a `[tool.uv.sources]` table**, litelink comes from a git
-commit rather than the index, because a change here needs a litelink not yet released.
-uv builds it from source, and a source build of litelink is its pure wheel, without the
-litestream binary its released wheels carry. `[tool.uv.extra-build-variables]` sets
-`LITELINK_WHEEL_PLATFORM` for that build, so litelink's build hook makes the platform
-wheel instead. It names `linux-x86_64`; on another platform, change it locally to
-`linux-arm64`, `macos-x86_64` or `macos-arm64` and do not commit that. uv keeps the wheel
-it built for a commit and reuses it whatever the variable says, so after changing it:
+**When a change needs a litelink that is not released yet**, point `[tool.uv.sources]` at
+its git commit until the release exists. uv builds it from source, and a source build of
+litelink is its pure wheel, without the litestream binary its released wheels carry, so
+the replication tier cannot find litestream and fails where it is required. Add, beside
+the source, `[tool.uv.extra-build-variables]` with
+`litelink = { LITELINK_WHEEL_PLATFORM = "linux-x86_64" }` (or `linux-arm64`,
+`macos-x86_64`, `macos-arm64`), so litelink's build hook makes the platform wheel instead.
+uv keeps the wheel it built for a commit and reuses it whatever the variable says, so after
+changing it:
 
 ```bash
 uv cache clean litelink
 uv sync --reinstall-package litelink
 ```
 
-Without the binary the replication tier cannot find litestream, and fails where it is
-required. A release refuses a tree that still has the table.
+A release refuses a tree that still has `[tool.uv.sources]`: remove both tables and raise
+the floor once the litelink release is on PyPI.
 
 ## Commits
 

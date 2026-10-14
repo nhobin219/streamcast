@@ -59,12 +59,14 @@ dependencies = [
     # truncating and deleting a retired log from its published table, which
     # retention needs, and metadata read from object storage once; 0.12.4
     # for a failed claim commit that raises its real error and orphans no
-    # claim, which a maintainer's stop signal relied on.
+    # claim, which a maintainer's stop signal relied on; 0.12.5 for
+    # `litelink.replication` and `litelink.column_ddl`, the public replication
+    # primitives and column DDL `Store` is built on.
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.12.4,<0.13",
+    "litelink>=0.12.5,<0.13",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a
@@ -90,25 +92,6 @@ Specification = "https://github.com/nhobin219/streamcast/blob/main/docs/SPEC.md"
 # ships no binaries. A pure wheel needs no hook.
 requires = ["uv_build>=0.9.0,<0.12"]
 build-backend = "uv_build"
-
-# **Until litelink 0.12.5 is on PyPI, litelink comes from its pull request.**
-# `Store` is built on `litelink.replication` and `litelink.column_ddl`, which
-# land in 0.12.5 (nhobin219/litelink#193); the commit below is that pull
-# request's head. uv leaves this table out of the built metadata, and the
-# release workflow refuses a tree that still carries it. Once 0.12.5 is
-# released: delete both tables below, raise the floor to `>=0.12.5`, and
-# `uv lock --refresh-package litelink`.
-#
-# A git build of litelink is its pure wheel, without the litestream binary its
-# PyPI wheels carry, and the replication tier needs that binary. The build
-# variable makes litelink's build hook produce the platform wheel instead, the
-# same one PyPI has. It names linux-x86_64, which is what CI and the
-# development boxes run; on another platform, override it as CONTRIBUTING says.
-[tool.uv.sources]
-litelink = { git = "https://github.com/nhobin219/litelink", rev = "d8b926521d2e126cb4589d39f9f544bdebd4d341" }
-
-[tool.uv.extra-build-variables]
-litelink = { LITELINK_WHEEL_PLATFORM = "linux-x86_64" }
 
 [tool.uv.build-backend]
 module-root = "src"

@@ -61,12 +61,9 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Packaging
 
-- **litelink comes from a git commit until 0.12.5 is released.** `Store`
-  needs `litelink.replication` and `litelink.column_ddl`, which ship in
-  litelink 0.12.5. `[tool.uv.sources]` names that pull request's head, and
-  CI builds it as litelink's platform wheel so litestream is there. This
-  must not be released as it stands: the release workflow refuses the
-  table, and the floor rises to `litelink>=0.12.5` once that release exists.
+- **litelink 0.12.5.** `Store` is built on `litelink.replication` and
+  `litelink.column_ddl`, the public replication primitives and column DDL
+  that release added.
 
 ### Changed
 

@@ -700,13 +700,20 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.12.4"
-source = { git = "https://github.com/nhobin219/litelink?rev=d8b926521d2e126cb4589d39f9f544bdebd4d341#d8b926521d2e126cb4589d39f9f544bdebd4d341" }
+version = "0.12.5"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "duckdb" },
     { name = "pyarrow" },
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/a5/71fb5bd7236cd993424926210e388d6e62d987f2a55eb690676497a5838d/litelink-0.12.5.tar.gz", hash = "sha256:df69dd987abe428a67cd72dbc6493f8ab45c52762a2bb90ae7dbdebd56ce1a99", size = 362153, upload-time = "2026-10-14T21:13:24.42Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4b/c1/bc5e193a59fb0e16d317f58e61238ad08b497216bf0da6105366849a9726/litelink-0.12.5-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5cc41f6b94bc4a84698893c0de8dbeb39beab061323010fb3cc91c02cfd3e322", size = 44244943, upload-time = "2026-10-14T21:13:03.379Z" },
+    { url = "https://files.pythonhosted.org/packages/32/3d/8352ee2396280c2fa41319f9b293dfe68566f419d183c34ff166164617a1/litelink-0.12.5-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:bf7f47468ee66e5432ff6cefc68f2b0857b6da4fcb1b387106129e0fb31a1ce0", size = 46966535, upload-time = "2026-10-14T21:13:08.685Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/c2/2b98f9d42b511588a2092b86fb59ba1eca5d508c97ba7234370f72d7060c/litelink-0.12.5-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3376087bd5713c4c5a8dc14974f690da18dda0a4157946e9c143ab8fa5a9d03e", size = 56115541, upload-time = "2026-10-14T21:13:15.297Z" },
+    { url = "https://files.pythonhosted.org/packages/39/7d/25a5738565e8a1017d215c726aa2283e583efc508e6ddd1a0d9de5db2e8e/litelink-0.12.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:40c1b9f3457524fe6b5e3b8a416b239afd1752855bc353b4a38f7374e1313535", size = 60013540, upload-time = "2026-10-14T21:13:20.716Z" },
 ]
 
 [[package]]
@@ -1996,7 +2003,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litelink", git = "https://github.com/nhobin219/litelink?rev=d8b926521d2e126cb4589d39f9f544bdebd4d341" },
+    { name = "litelink", specifier = ">=0.12.5,<0.13" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
     { name = "websockets", specifier = ">=14,<18" },
