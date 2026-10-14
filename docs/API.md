@@ -516,7 +516,7 @@ Sidecar.new(logs, binary=None, s3_options=None) -> Sidecar   # of() on each log'
 
 sidecar.start()                 # in a running event loop
 sidecar.socket   -> Path        # the control socket the process listens on
-sidecar.owned    -> set[str]    # the configs' directory names it holds the locks of
+sidecar.owned    -> set[str]    # the directory names of the configs it holds the locks of
 sidecar.terminate(); await sidecar.wait_closed()
 ```
 
@@ -525,6 +525,10 @@ litelink databases to replicate and no `serve` to do it: `of` takes the paths li
 `write_replication_config()` wrote, of logs or of anything else litelink replicates, and
 runs one litestream for all of them, with the same per-database lock, the same standby,
 the same restart with backoff and the same death with its parent.
+
+`owned` is for messages: it names each config by its directory, so two configs in
+directories named alike read as one name. The locks and the merged config are kept per
+config path, and both are claimed and replicated.
 
 `of` refuses, before anything starts:
 

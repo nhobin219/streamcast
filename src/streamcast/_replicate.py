@@ -439,10 +439,16 @@ class Sidecar:
             next_claim = _CLAIM_EVERY
             if self._claim():
                 process.terminate()
-                with contextlib.suppress(TimeoutError):
+                try:
                     await asyncio.wait_for(
                         asyncio.to_thread(process.wait), timeout=_STOP_GRACE
                     )
+                except TimeoutError:
+                    # Killed and reaped, never left running: the caller spawns
+                    # the wider litestream next, and beside one that outlived
+                    # its grace that is two on every database the old one had.
+                    process.kill()
+                    await asyncio.to_thread(process.wait)
 
                 return True
 

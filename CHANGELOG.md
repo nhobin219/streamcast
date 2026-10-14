@@ -27,6 +27,14 @@ there was nothing to have changed from. Everything above it is ordinary.
   <it> <database>` flushes any database it replicates. A stale socket file
   is removed before each start.
 
+### Fixed
+
+- **A widening restart no longer runs two litestreams on one database.**
+  When a freed log is picked up, the running litestream is stopped and a
+  wider one started. One that outlived the 10 s grace was left running
+  beside its replacement, both replicating every database it had. It is
+  now killed and reaped first.
+
 ### Changed
 
 - **A server's litestream listens on a control socket** in its temporary

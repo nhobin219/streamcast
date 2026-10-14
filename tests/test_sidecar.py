@@ -8,13 +8,14 @@ merged process's socket is in `test_replicate.py`.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 
 import streamcast
-from streamcast import _replicate
+from streamcast import _process, _replicate
 from streamcast._replicate import Sidecar, SidecarUnavailable
 
 
@@ -216,3 +217,53 @@ class TestTheSocket:
             await closed(sidecar)
 
         assert present[:2] == [False, False]
+
+
+class TestNeverTwo:
+    async def test_a_widen_never_overlaps_a_litestream_that_will_not_stop(
+        self, tmp_path, monkeypatch
+    ):
+        """Widening restarts litestream, and the old one may outlive the
+        grace — finishing a last sync against slow storage. Spawning the new
+        one beside it is two litestreams on every database the old one had.
+        """
+        first, second = config(tmp_path / "a"), config(tmp_path / "b")
+        holder = Sidecar.of([second])
+        assert holder._claim() is True  # noqa: SLF001
+
+        sidecar = Sidecar.of([first, second])
+        children: list[subprocess.Popen[bytes]] = []
+        alive_at_spawn: list[bool] = []
+
+        def spawn():
+            alive_at_spawn.append(any(c.poll() is None for c in children))
+            # Ignores SIGTERM, as a litestream mid-sync can for longer than
+            # the grace.
+            child = _process.popen(
+                ["sh", "-c", "trap '' TERM; while :; do sleep 0.05; done"]
+            )
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(_replicate, "_STOP_GRACE", 0.2)
+        monkeypatch.setattr(_replicate, "_CLAIM_EVERY", 0.1)
+        monkeypatch.setattr(_replicate, "_POLL", 0.05)
+        monkeypatch.setattr(Sidecar, "_spawn", lambda _self: spawn())
+        sidecar.start()
+        try:
+
+            async def spawned(count: int) -> None:
+                while len(children) < count:
+                    await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(spawned(1), timeout=10)
+            await closed(holder)
+            await asyncio.wait_for(spawned(2), timeout=10)
+
+            assert alive_at_spawn == [False, False], "two litestreams at once"
+
+        finally:
+            await closed(sidecar)
+            for child in children:
+                child.kill()
+                child.wait()
