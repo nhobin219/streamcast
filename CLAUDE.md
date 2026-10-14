@@ -169,6 +169,7 @@ src/streamcast/
     _catchup.py     reading the gap from the published tables when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box
+    _store.py       Store — a consumer's tables and its offset, in one transaction
     _publish.py     publish, Publication — the producer end, over a socket
     _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
     _codec.py       what JSON needs done to binary and map values, in and out

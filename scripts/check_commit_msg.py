@@ -38,6 +38,7 @@ SCOPES = {
     "catchup",  # reading the gap from the published tables
     "maintain",  # the maintainer's role subprocesses
     "replicate",  # the litestream sidecar
+    "store",  # §8c a consumer's state: its tables and offset, one transaction
     "errors",  # the refusal vocabulary and close codes
     "spec",  # docs/SPEC.md itself
     "ci",  # workflows, hooks, Justfile

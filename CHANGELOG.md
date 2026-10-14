@@ -11,6 +11,23 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`streamcast.Store`, a consumer's state committed with its offset.**
+  Exactly-once processing for a consumer of a stream: in one
+  `transaction()` it applies a message to its own tables and advances its
+  offset in that stream (`tx.advance(subscription, offset)`), so a write
+  and its offset survive `kill -9` together or not at all. After any crash
+  it resumes from `store.offset(subscription)`, skipping no message, and
+  `advance` only moves forward, so none is applied twice. The state is a
+  local SQLite database of declared tables (`StoreTable`), the source of
+  truth, with additive-only schema changes and a litelink log's column type
+  checks. So that it also survives losing the machine, it replicates the way
+  a log does and never runs litestream itself: `write_replication_config()`
+  writes the config a `Sidecar` runs, `flush(socket=sidecar.socket)` ships
+  through that sidecar and raises when none answers, and `Store.restore`
+  brings the database back onto a machine that has none. Ported from
+  litelink's `Store` design, which moved here: a position in a stream is a
+  consumer's concept, and litelink keeps only the primitives it is built on
+  (`litelink.replication`, `litelink.column_ddl`). See SPEC §8c.
 - **`streamcast.Sidecar` and `streamcast.SidecarUnavailable` are public.**
   A process with litelink databases to replicate and no `serve` runs the
   same supervised litestream `serve` does: one process for every database,
@@ -34,6 +51,15 @@ there was nothing to have changed from. Everything above it is ordinary.
   wider one started. One that outlived the 10 s grace was left running
   beside its replacement, both replicating every database it had. It is
   now killed and reaped first.
+
+### Packaging
+
+- **litelink comes from a git commit until 0.12.5 is released.** `Store`
+  needs `litelink.replication` and `litelink.column_ddl`, which ship in
+  litelink 0.12.5. `[tool.uv.sources]` names that pull request's head, and
+  CI builds it as litelink's platform wheel so litestream is there. This
+  must not be released as it stands: the release workflow refuses the
+  table, and the floor rises to `litelink>=0.12.5` once that release exists.
 
 ### Changed
 

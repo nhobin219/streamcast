@@ -759,6 +759,46 @@ The band the WAL would add is the one the server is about to send anyway.
 Neither is automatic. Both are keywords on `connect`, because a consumer that would rather
 fail loudly than resume from a copy that lags should be able to say so.
 
+### A consumer's state: `Store`
+
+A consumer that applies each message to tables of its own needs two things to land
+together: the message's effect, and the record that the message is done. A cursor cannot
+give it that, because a cursor is a second file saved on its own clock. `streamcast.Store`
+is that state: a local SQLite database of declared tables in which a consumer's writes and
+its offset in the stream commit in one transaction. After any crash it resumes from
+`store.offset(subscription)`, so no message is skipped and none is applied twice:
+exactly-once processing, with no server keeping track for it.
+
+```python
+store = streamcast.Store.open("data", "totals", tables={
+    "totals": streamcast.StoreTable(
+        pa.schema([pa.field("account", pa.string(), nullable=False),
+                   pa.field("amount", pa.int64(), nullable=False)]),
+        key=("account",)),
+})
+
+done = store.offset("orders")                     # None on first start
+start = streamcast.EARLIEST if done is None else done + 1
+async with streamcast.connect(uri, offset=start, catch_up=True) as sub:
+    async for offset, ts, row in sub:
+        with store.transaction() as tx:           # one transaction, durable on return
+            tx.execute(
+                "INSERT INTO totals VALUES (?, ?) ON CONFLICT (account) "
+                "DO UPDATE SET amount = amount + excluded.amount",
+                (row["account"], row["amount"]))
+            tx.advance("orders", offset)
+```
+
+A crash leaves both the effect and the offset, or neither. `advance` only moves forward, so
+a replayed message is refused rather than applied twice. The guarantee covers what the
+transaction writes; an effect outside the store, such as a request to another service, is
+not part of it. Schema changes are additive.
+
+So that this state also survives losing the machine, the store replicates exactly as a
+log does: it writes a litestream config, a `Sidecar` runs litestream on it,
+`flush(socket=sidecar.socket)` ships before you continue, and `Store.restore` brings the
+database back on another machine. See [`docs/API.md`](docs/API.md#a-consumers-state-store).
+
 ## Reading a stream
 
 A subscription delivers rows one at a time. To ask a question of a stream — an aggregate,

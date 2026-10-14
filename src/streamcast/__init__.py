@@ -86,6 +86,13 @@ it behind a port; `connect` reads it. `Subscription` is what a consumer holds,
 and it is read-only: it has no `send`, rather than a `send` that raises, for
 the reason litelink's read handles have no `append`.
 
+**A consumer that must apply every message exactly once keeps a `Store`.**
+Its own SQLite tables and its offset in the log, committed in one
+transaction: a message's effect and the record that it is done land together
+or not at all, so after any crash it resumes from `store.offset(...)`. The
+store is local; replicating it, so it also survives losing the machine, is a
+`Sidecar` on its config.
+
 **Recovery is three keywords on `connect`.** `cursor=` keeps the last handled
 offset on disk; `cursor_uri=` ships it to object storage so a consumer can
 resume on another box; `catch_up=True` reads the gap from the stream's
@@ -129,6 +136,7 @@ from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
+from streamcast._store import Store, StoreTable, StoreTransaction
 from streamcast._stream import MAX_REPLAY, Stream
 
 try:
@@ -160,6 +168,9 @@ __all__ = [
     "Sidecar",
     "SidecarUnavailable",
     "Stats",
+    "Store",
+    "StoreTable",
+    "StoreTransaction",
     "Stream",
     "StreamNotFound",
     "StreamRetired",

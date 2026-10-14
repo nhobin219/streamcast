@@ -1151,10 +1151,112 @@ failure this whole feature exists to prevent.
 POSIX and Windows both. SQLite was considered and is the wrong tool for one integer: the
 case it would genuinely earn is a cursor committed in the *same transaction* as the
 consumer's work, and that only works in the consumer's own database, which is not a file
-this library can own. `commit()` is the hand-back for that.
+this library can own. `commit()` is the hand-back for that, and a
+[`Store`](#a-consumers-state-store) is that database when the consumer's work is tables of
+its own.
 
 An unreadable or empty file is treated as absent rather than as an error — a cursor is a
 recovery hint, and refusing to start because a save was torn turns a crash into an outage.
+
+## A consumer's state: `Store`
+
+```python
+Store.open(root, name, *, tables, published=None, s3_options=None, retention=None) -> Store
+Store.restore(root, name, *, published, tables, s3_options=None, retention=None,
+              binary=None) -> Store
+Store.replication_config_for(root, name, published, s3_options=None, retention=None) -> str
+
+store.transaction() -> ContextManager[StoreTransaction]
+    tx.execute(sql, parameters=()) -> sqlite3.Cursor
+    tx.advance(subscription, offset)
+    tx.offset(subscription) -> int | None
+store.offset(subscription) -> int | None
+store.query(sql, parameters=()) -> list[tuple]      # read-only
+store.replication_config() -> str
+store.write_replication_config() -> Path
+store.flush(binary=None, timeout=60, socket=None)
+store.root · name · path · tables · published · retention · databases
+store.close() · context manager
+
+StoreTable(schema, key=(), single_row=False)
+```
+
+The state of a consumer of a stream, for exactly-once processing (SPEC §8c). A consumer
+applies each message to tables of its own and advances its offset in that stream in one
+transaction, so after any crash it resumes from `store.offset(subscription)`, never skipping
+a message and never applying one twice. A `subscription` is the consumer's own name for its
+position in one stream; a store keeps one offset per subscription.
+
+The store is a local SQLite database of declared tables. It is the source of truth; reads and
+writes never touch the network. `open` creates it or opens it, and applies additive
+declaration changes (a new table, a new nullable column); anything else is refused with the
+differences named. Column types are enforced by the same DDL as a litelink log's buffer
+(`litelink.column_ddl`), so `tx.execute` cannot store a value of the wrong type. Nested
+columns are refused: their JSON is text no constraint can check. Names beginning
+`_streamcast` are reserved.
+
+**Committing work with its offset** is what the store exists for:
+
+```python
+store = streamcast.Store.open("data", "state", tables={
+    "seen": streamcast.StoreTable(
+        pa.schema([pa.field("id", pa.string(), nullable=False),
+                   pa.field("count", pa.int64(), nullable=False)]),
+        key=("id",)),
+})
+done = store.offset("events")                      # None on first start
+start = streamcast.EARLIEST if done is None else done + 1
+async with streamcast.connect(uri, offset=start, catch_up=True) as sub:
+    async for offset, ts, row in sub:
+        with store.transaction() as tx:            # durable when the block returns
+            tx.execute("INSERT INTO seen VALUES (?, 1) "
+                       "ON CONFLICT (id) DO UPDATE SET count = count + 1", (row["key"],))
+            tx.advance("events", offset)
+```
+
+A crash at any point leaves both the row's effect and its offset, or neither, so the loop
+resumes exactly after the last message it applied. `advance` only moves forward and refuses a
+replay. The guarantee covers what the transaction writes: an effect outside the store, such as
+a request to another service, can still happen twice. Inside the transaction, statements that
+could end it (`COMMIT`, savepoints, DDL, `PRAGMA`, `ATTACH`) and writes to the store's own
+`_streamcast_` tables are refused.
+
+**The store is the position, so do not give `connect` a `cursor=` as well.** A cursor saves
+on its own clock, and two records of one position disagree after a crash. Pass `offset=`.
+
+**A transaction blocks.** It is synchronous SQLite at `synchronous=FULL`, one fsync per
+commit: 0.9 ms measured on a cloud VM's disk, against 0.2 ms for a cursor file's save. One
+transaction per message therefore holds a consumer to roughly a thousand messages a second,
+on the event loop. A faster consumer applies a batch from `recv_many` in one transaction and
+advances to its last offset, or runs the transaction in `asyncio.to_thread`. Threads share
+one handle under one lock.
+
+**Replication is the log's**, and it is what lets the consumer's state survive losing the
+machine. The store never runs litestream itself: `write_replication_config()` writes
+`<root>/<name>/litestream.yml`, the database ships to `<published>/<name>/_wal`, and a
+[`Sidecar`](#sidecar-the-same-process-for-databases-you-serve-yourself) runs it:
+
+```python
+store = streamcast.Store.open("data", "state", tables=TABLES,
+                              published="s3://bucket/state", s3_options=s3)
+sidecar = streamcast.Sidecar.of([store.write_replication_config()], s3_options=s3)
+sidecar.start()
+...
+store.flush(socket=sidecar.socket)    # in the replica before continuing
+```
+
+`retention` writes the snapshot window that prunes the replica; the sidecar's credentials need
+delete permission under the prefix for it to work. `flush()` asks the running sidecar to ship
+now and returns once the replica has it; with no sidecar answering it raises and starts
+nothing. It asks the socket the store's config names; a `Sidecar`, which merges configs into
+one process, listens on its own, so pass `sidecar.socket`. `restore()` pulls the database
+onto a machine that has none, before any sidecar starts, and refuses one that does: a local
+store is never restored over. With no replica it raises `FileNotFoundError` naming where it
+looked. `published` must be `s3://`, is recorded on first use, and cannot change.
+
+**Give a store a directory of its own.** The replication config and the control socket are
+both derived from the directory. A store refuses a litelink log's directory; litelink knows
+nothing of stores, so nothing refuses a log created later in a store's.
 
 ## Refusals
 
