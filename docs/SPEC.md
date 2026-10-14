@@ -1535,14 +1535,16 @@ text is something no CHECK can see into, and a transaction hands the consumer ra
 `column_ddl` accepts one, checked as text, because a log's own encoder checks the JSON; a
 store has no encoder. Names beginning `_streamcast` are reserved.
 
-**`new` is create-or-open, as `Stream.new` is, and changes nothing in a store that
+**`new` is create-or-open, as `Stream.new` is, and changes no table in a store that
 exists.** The declaration is recorded in the store's `_streamcast_meta` table when the store
 is created, and that record is the one copy of what the tables are. A later `new` must
 declare exactly those tables, compared as `Stream.new` compares a log's columns: by name,
 type and nullability, in order, plus each table's key. Any difference is refused with every
 difference named, **additive ones included**: a new table, a new nullable column. Applying
 those automatically would make every `new` a possible migration, and taking that away later
-would break whoever relied on it.
+would break whoever relied on it. What `new` does record on an existing store is
+replication settings, not tables: a `published` not recorded yet (a different one is
+refused), and a given `retention`, which replaces the recorded one.
 
 Changing a declaration is a migration, made explicitly, as `Stream.migrate` is. A store is
 current state, not history, so dropping a column or a table is a legitimate one there,

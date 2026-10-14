@@ -1152,3 +1152,23 @@ def test_two_news_on_one_store_make_one_store(
     assert seen == [set(TABLES)]
     with created(tmp_path) as store:
         assert store.offset("trades") == 1
+
+
+def test_new_on_an_existing_store_records_only_replication_settings(
+    tmp_path: Path,
+) -> None:
+    """Opening changes no table. A given `retention` replaces the recorded
+    one, and a call without one keeps it; the config written next carries
+    the recorded window.
+
+    Falsify by recording `retention` only when none is recorded: the second
+    window is ignored.
+    """
+    created(tmp_path, published=NOWHERE, retention=timedelta(hours=1)).close()
+    with created(tmp_path, retention=timedelta(hours=2)) as store:
+        assert store.retention == timedelta(hours=2)
+
+    with created(tmp_path) as store:
+        assert store.retention == timedelta(hours=2)
+        assert store.published == NOWHERE
+        assert "retention: 7200s" in store.replication_config()

@@ -641,9 +641,11 @@ class Store:
         this never restores one; `restore` pulls a replica onto a machine
         that has none.
 
-        `published` and `retention` are recorded when not recorded yet, and
-        a `published` that differs from the recorded one is refused: it is
-        where this store's replica already is.
+        `published` is recorded when not recorded yet, and one that differs
+        from the recorded one is refused: it is where this store's replica
+        already is. `retention`, when given, is recorded, replacing any
+        recorded before: it is the replica's snapshot window, which the next
+        written config carries, and not part of the declaration.
         """
         layout = StoreLayout(Path(root), name)
         if published is not None:

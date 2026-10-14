@@ -1229,8 +1229,10 @@ number column is stored by SQLite as NULL, where a stream's append refuses it.
 keyword. `new` is create-or-open, as `Stream.new` is. It creates the store if it is not
 there, and otherwise opens it and checks it against what is declared. A store that exists
 must be declared exactly as it was created: any difference is refused with every difference
-named, a new table or a new nullable column included. Nothing changes a store by opening it,
-as nothing changes a log. Changing a declaration is a migration, made explicitly, as
+named, a new table or a new nullable column included. Opening a store changes none of its
+tables, as opening a stream changes none of its log's columns. It records only replication
+settings: a `published` not recorded yet (a different one is refused), and a given
+`retention`, which replaces the recorded one. Changing a declaration is a migration, made explicitly, as
 `Stream.migrate` is; `Store.migrate` is not built yet (#147), and until then a store that
 needs another declaration is a new store, replayed from the stream. `restore` pulls the store
 from its replica onto a machine that has none.
