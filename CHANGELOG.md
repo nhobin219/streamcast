@@ -7,6 +7,27 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Removed
+
+- **Breaking: `streamcast.Store`, `StoreTable`, `StoreTransaction` and
+  `StreamMismatch` are gone** (#142). The consumer store added in 0.20.2 has
+  no user: the deployment it was built for keeps its state in a central
+  transactional database instead. A consumer that needs its offset committed
+  with its work keeps it in its own database, through `connect(cursor=)`'s
+  `commit()` hand-back, as before 0.20.2. `connect(cursor=)`, `Cursor` and
+  `cursor_uri=` are unchanged.
+- **Breaking: `streamcast.Sidecar` and `streamcast.SidecarUnavailable` are
+  private again** (#142). They were exported in 0.20.2 for a process that
+  replicates databases without `serve`, which no longer exists. `serve`
+  runs the same sidecar as in 0.20.2, including that a widening restart
+  never leaves two litestreams on one database, and a missing litestream
+  still fails `serve` before it binds.
+- **Nothing imports `litelink.replication` or `litelink.column_ddl`**,
+  which only the store used, so a litelink release can make them private
+  without breaking this one. The litelink floor stays at 0.12.5.
+
 ## 0.20.2 — 2026-10-14
 
 ### Added

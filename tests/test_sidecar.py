@@ -44,16 +44,16 @@ async def closed(sidecar: Sidecar) -> None:
     await sidecar.wait_closed()
 
 
-def test_the_package_exports_it():
-    assert streamcast.Sidecar is Sidecar
-    assert streamcast.SidecarUnavailable is SidecarUnavailable
-    assert {"Sidecar", "SidecarUnavailable"} <= set(streamcast.__all__)
+def test_the_package_does_not_export_it():
+    """`serve` runs it; nothing outside the package builds one."""
+    for name in ("Sidecar", "SidecarUnavailable"):
+        assert not hasattr(streamcast, name)
+        assert name not in streamcast.__all__
 
 
 class TestOf:
     async def test_it_takes_a_bare_config_path_as_a_string(self, tmp_path):
-        """Any litelink-written config, not only a log this process opened —
-        a store, or a log another process writes to."""
+        """Any litelink-written config, not only a log this process opened."""
         path = config(tmp_path / "data" / "trades")
         sidecar = Sidecar.of([str(path)])
         try:
