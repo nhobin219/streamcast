@@ -14,6 +14,19 @@ just check              # lint + format-check + typecheck + tests, exactly what 
 
 You need [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just).
 
+Most of the suite needs nothing else: every test binds port 0 on loopback, every log is a
+temp directory, and a change that makes the ordinary tests need the network is a change to
+reject. The **replication and catch-up tiers** are the exception and are marked
+`@pytest.mark.replication` — they run litestream against a real object store and read a
+real published table back, which cannot be faked without testing the fake. They SKIP without an
+endpoint, and a skip is not a pass:
+
+```bash
+just rustfs             # a local S3 endpoint in a container
+just check-all          # every gate, with those tiers REQUIRED — what CI runs
+just rustfs-stop
+```
+
 **When a change needs a litelink that is not released yet**, point `[tool.uv.sources]` at
 its git commit until the release exists. uv builds it from source, and a source build of
 litelink is its pure wheel, without the litestream binary its released wheels carry, so

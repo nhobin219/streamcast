@@ -1460,11 +1460,6 @@ it, the server reads history from the published table.
 last frames, then restore. Only unplanned failover loses rows, and it loses
 the ones the old box never managed to replicate.
 
-The sidecar's control socket is how to know it has. One litestream listens on
-one socket, and each log's config names its own, so the merged process drops
-them and listens on one in its working directory (`Sidecar.socket`);
-`litestream sync -wait` through it returns once the replica has caught up.
-
 ### ⚠️ Two writers on one log corrupts it
 
 The fence stops offsets being REUSED. Nothing stops the machine you are
@@ -1488,158 +1483,6 @@ the stream on its next log at exactly that end, on any box: nothing after it
 was ever issued, so nothing is skipped, and nothing was left unpublished, so
 nothing is lost. Until revived, a retired stream is served read-only, from its
 published table.
-
----
-
-## 8c. A consumer's state: `Store`
-
-A consumer of a stream applies each message to tables of its own and must know, after any
-crash, which messages it has applied. `Store` is that state: an embedded SQLite database of
-declared tables in which the consumer's writes and its offset in the stream commit in one
-transaction (S1). A crash leaves a message's effect and its offset together or neither, so
-the consumer resumes from `offset(stream)` and processes every message exactly once:
-none skipped, none applied twice (S2), with no server holding its position.
-
-The database is the source of truth, every read and write is local, and the network is
-reached only by the sidecar that replicates it and by an explicit `flush` or `restore`.
-Replication is secondary to the pattern: it is how the same state survives losing the
-machine, and it is a litelink log's own (litelink's SPEC §3a), through
-`litelink.replication`.
-
-**It is streamcast's, not litelink's.** litelink is an embedded engine for append-only logs
-and knows nothing of who reads one. A position in a stream is a consumer's concept, and
-streamcast is where consumers live. litelink exports the pieces the store is built from, so
-none of them is copied here: the replication config, the control socket, `flush`, the
-restore (`litelink.replication`), and a log's column DDL (`litelink.column_ddl`).
-
-### Layout and declaration
-
-A store is `<root>/<name>/store.db`, with its litestream config beside it in
-`<root>/<name>/litestream.yml`. `StoreLayout` derives both and does no I/O. **A store
-refuses a log's directory** (one holding `buffer.db`) in `open` and `restore`, before
-anything is written, because the config and the sidecar's control socket are both derived
-from the directory, so whichever wrote its config second would silently stop the other
-replicating. It refuses a directory inside a log's as well, because litelink removes a
-retired log's directory whole. The converse is not refused: litelink knows nothing of stores, so a log created
-later in a store's directory is the caller's error to avoid.
-
-Tables are declared in JSON Schema, the form and spelling a stream's schema takes (§5,
-`_schema`), with an optional primary key, or `single_row` (a rowid alias pinned to 0, so a
-second row is refused by SQLite). streamcast is a JSON framework, so a consumer declares its
-tables in the vocabulary it already declares its streams in; `to_arrow` converts them, which
-is what lets the store reuse `litelink.column_ddl`, and the declaration is recorded in
-`from_arrow`'s spelling, every width explicit. Every column carries a litelink
-log's I17 DDL (`ANY` with a `typeof` and range CHECK inside a STRICT table), so the
-consumer's own SQL cannot store a value of the wrong type. Nested types are refused: JSON
-text is something no CHECK can see into, and a transaction hands the consumer raw SQL.
-`column_ddl` accepts one, checked as text, because a log's own encoder checks the JSON; a
-store has no encoder. Names beginning `_streamcast` are reserved.
-
-**`new` is create-or-open, as `Stream.new` is, and changes no table in a store that
-exists.** The declaration is recorded in the store's `_streamcast_meta` table when the store
-is created, and that record is the one copy of what the tables are. A later `new` must
-declare exactly those tables, compared as `Stream.new` compares a log's columns: by name,
-type and nullability, in order, plus each table's key. Any difference is refused with every
-difference named, **additive ones included**: a new table, a new nullable column. Applying
-those automatically would make every `new` a possible migration, and taking that away later
-would break whoever relied on it. What `new` does record on an existing store is
-replication settings, not tables: a `published` not recorded yet (a different one is
-refused), and a given `retention`, which replaces the recorded one.
-
-Changing a declaration is a migration, made explicitly, as `Stream.migrate` is. A store is
-current state, not history, so dropping a column or a table is a legitimate one there,
-where a log's would not be. `Store.migrate` is not built yet (#147). Until it is, a store
-that needs another declaration is a new store, replayed from the stream.
-
-The declaration is made under SQLite's write lock and re-read after taking it. Two `new`s on
-one store therefore make one store. A `store.db` with no declaration recorded (a `new`
-killed before its first commit) is a store still being created, and the next `new` creates
-it.
-
-**On a fresh machine, `new` creates an empty store even when its `published` prefix already
-holds a replica**, exactly as `Stream.new` creates an empty log. Restoring is `restore`'s
-job, and is the caller's to choose. #146 covers both: started under a replicating sidecar,
-the empty one is shipped over the good replica.
-
-### The offset
-
-A consumer commits its work and its position in what it consumes in one transaction.
-`transaction()` is `BEGIN IMMEDIATE` … `COMMIT` at `synchronous=FULL`, so it is durable when
-the `with` returns, and `tx.advance(stream, offset)` writes the offset in
-`_streamcast_offsets`, one row per stream, inside it. The offset is the frame's, a
-log's `litelink_offset`. It is not a column of the consumer's tables: a per-table column
-would lose its position when the rows carrying it are deleted.
-
-That is the whole pattern. Nothing here knows what is being consumed; a consume loop reads a
-row, applies it through `tx.execute`, advances to its offset, and on restart resumes after
-`store.offset(stream)`.
-
-**The key is the stream's name**, read from a URI as the server reads a subscribe path
-(`_protocol.stream_name`, which `connect` and `publish` use too): independent of the host,
-port and scheme, so a broker that moves keeps every consumer's position. A key with the
-host in it would reset a position on a move, and the consumer would replay from its
-`offset=` fallback without anything saying so.
-
-**Beside it, the stream's identity.** `stream_id` is minted once, when a durable stream's
-metadata is first written (`_metadata.single`), and kept by everything that rewrites that
-file (`advance` for `migrate`, `retire`, `revive`; `restore` reads it back), and every
-greeting carries it. A stream deleted and recreated, or a same-named one elsewhere, has a
-new one and starts its offsets again. Given `stream_id`, `offset` and `advance` compare it
-with the recorded one and raise `StreamMismatch` on a difference: resuming would skip the
-new stream's first messages, a hole I4 forbids at the subscriber. It is checked, not keyed:
-a key that changed under an operation would drop every consumer's position silently, where
-a check refuses loudly. A position recorded without an identity takes the first one given.
-`forget` removes a position, and is the only way one moves other than forward (S2).
-
-A restore fence (§8b) moves offsets forward by 2**20, and `advance` accepts any forward
-move, so a store resuming across one is served as any consumer is.
-
-### Replication
-
-The store adds nothing to a log's replication. `replication_config`,
-`write_replication_config`, `replication_config_for`, `flush` and `restore` are litelink's,
-through its `Replicated` protocol (a name, a directory, the databases): the same socket, the
-same destination `<published>/<name>/_wal`, the same per-database snapshot window that prunes
-the replica. The store's replica key is `<prefix>/<name>/_wal/store.db`, so it does not
-collide with a log's `buffer.db`, `catalog.db` or `published.db` under the same name.
-
-- **The store never runs litestream.** `Sidecar.of([store.write_replication_config()])`
-  does, or the deployment's own. A store that supervised its sidecar could become a second
-  replicator of one database.
-- **`flush()`** is `litestream sync -wait` through the running sidecar's control socket. It
-  returns once the replica's transaction is at the database's, and raises, starting nothing,
-  when no sidecar answers. It is what makes a long sync interval safe for a store that
-  changes slowly. It is refused inside a transaction on the same thread, since it ships what
-  is committed. It asks the socket the store's config names, derived from its directory; a
-  `Sidecar` merges configs into one process listening on its own socket, which no one
-  directory derives, so `flush(socket=sidecar.socket)` takes that path instead.
-- **`restore()`** writes `replication_config_for`'s config and calls
-  `litelink.replication.restore_database` into the database's own path, then opens the
-  store with the caller's declaration. It refuses a machine where the database or a stray
-  `-wal` exists, before writing anything, and with no replica it raises naming where it
-  looked rather than creating an empty store.
-- **Retention needs delete permission.** The snapshot window prunes the replica only if the
-  sidecar's credentials may delete under the prefix (`s3:DeleteObject`). Without it retention
-  fails and old LTX files accumulate.
-
-### Invariants
-
-| | Invariant | Why |
-|---|---|---|
-| **S1** | A consumer's writes and its offset advance commit together or not at all. | It is exactly-once processing with no server state. Enforced by one SQLite transaction; an authorizer refuses the consumer statements that could end it (transaction control, savepoints, DDL, PRAGMA, ATTACH, writes to `_streamcast_` tables), and a transaction SQLite ended by itself (a caught `OR ROLLBACK`) refuses every later call and commits nothing. |
-| **S2** | An offset only moves forward; `forget` is the one other move, and removes it. | A replayed message is refused rather than applied twice. |
-| **S5** | A position is never resumed for another stream of the same name. | Its offsets started again, so resuming would skip its first messages. Checked against the recorded `stream_id` when one is given; never the key, so no operation drops a position silently. |
-| **S3** | The store never starts a replicator. | Two litestream processes on one database corrupt its replica. `flush` is a client of the running sidecar. |
-| **S4** | A local database is never restored over. | It is the source of truth; a restore over it would discard commits the replica never received. |
-
-`tests/test_store.py` checks each: S1 by killing a process with SIGKILL inside a
-transaction that has written a row and advanced its offset, which comes back with neither;
-S2 by advancing to a stale offset; S3 by recording every process a flush with no sidecar
-starts; S4 by restoring over a store and over a stray `-wal`; S5 by serving one stream on
-two ports, where the position resumes, and another created under the same name, where it is
-refused. The replication tier runs a
-`Sidecar` on a store's config at an hour's sync interval, flushes through `sidecar.socket`,
-and restores the tables and the offset onto a root with no database.
 
 ---
 
@@ -1684,8 +1527,7 @@ box, and two consumers sharing a key overwrite each other. That is documented
 rather than solved: the fix is a compare-and-set, which S3 gained only
 recently and which litelink does not use either — and the failure it prevents
 is re-delivery, which is the safe direction. A consumer that needs more wants
-its cursor committed in the same transaction as its work, in its own database:
-a `Store` (§8c).
+its cursor committed in the same transaction as its work, in its own database.
 
 **A batching consumer's cursor.** The automatic save advances as the consumer
 reads, which for a batch is ahead of what it has flushed — so such a consumer

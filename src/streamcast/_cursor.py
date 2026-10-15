@@ -13,8 +13,7 @@ transaction as its work. That only works if the cursor lives in the
 consumer's OWN database, which is not a file this library can own. So the
 cheap case is handled cheaply, and the expensive case is handed back with
 `commit()` rather than half-served by a database that holds one integer and
-brings a WAL, a shared-memory file and a lock protocol to do it. When the
-consumer's work is tables of its own, `Store` (`_store`) is that database.
+brings a WAL, a shared-memory file and a lock protocol to do it.
 
 **The cursor may lag the consumer. It must never lead it.** Everything here is
 arranged around that asymmetry: a cursor behind the work re-delivers messages,
