@@ -35,6 +35,29 @@ jobs:
           fi
           echo "both say $packaged"
 
+      # A pushed tag cannot be corrected without re-running this workflow, so
+      # its message is checked here too: annotated, reading "streamcast X.Y.Z"
+      # like every tag since 0.19.0. Asked of the API, because checkout does
+      # not keep the annotated tag object (actions/checkout#290).
+      - name: Tag is annotated "streamcast <version>"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          want="streamcast ${GITHUB_REF_NAME#v}"
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq .object)
+          if [ "$(jq -r .type <<<"$object")" != tag ]; then
+            echo "$GITHUB_REF_NAME is a lightweight tag; cut it with" >&2
+            echo "  git tag -a $GITHUB_REF_NAME -m \"$want\" <sha>" >&2
+            exit 1
+          fi
+          got=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .sha <<<"$object")" --jq .message | head -1)
+          if [ "$got" != "$want" ]; then
+            echo "tag message reads \"$got\", expected \"$want\"; cut it with" >&2
+            echo "  git tag -a $GITHUB_REF_NAME -m \"$want\" <sha>" >&2
+            exit 1
+          fi
+          echo "tag reads \"$want\""
+
       # **A path source must never reach PyPI.** While litelink and streamcast
       # change together, `[tool.uv.sources]` points at a checkout next door.
       # `uv` leaves it out of the built metadata, so a wheel would install and
