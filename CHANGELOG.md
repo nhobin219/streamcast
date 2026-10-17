@@ -7,7 +7,48 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.21.1 — 2026-10-17
+
+### Upgrading
+
+**Nothing on the wire changed from 0.20.1, and no box has to step through
+0.20.1.** A 0.19.0 or 0.20.1 process can go straight to 0.21.1, one process at
+a time, clients and servers in either order. Every 0.19.0 to 0.21.x server
+sends the same greeting: protocol 4, with `metadata` naming the plain
+`<stream>.metadata.json` and `metadata_hint` naming the hint. Frames,
+publish replies and refusals are unchanged. Measured against the releases
+from PyPI by `tests/test_interop.py` (publish, subscribe from `EARLIEST`, and
+`Stream.snapshot` of the greeting's metadata, alone and through the broker):
+
+- **0.21.1 client → 0.19.0 server: works.** The client reads protocol 4 or
+  5 (`_protocol.ACCEPTED`) and opens the server's `metadata_hint`.
+- **0.19.0 client → 0.21.1 server: works.** 0.19.0 accepts only protocol 4,
+  which this server still sends, and it opens the plain
+  `<stream>.metadata.json`, which this server still writes beside each
+  version.
+- **0.21.1 client → 0.20.1 server: works**, through the hint.
+- **0.20.1 client → 0.21.1 server: works**, through the hint.
+- **A 0.21.1 server takes over a stream a 0.19.0 or 0.20.1 server wrote**, in
+  place, and that release's clients keep reading it: offsets carry on and
+  every row reads back.
+
+The one pair that does not work is unchanged: a **0.20.0** client reads only
+protocol 5 and refuses this server (`server speaks streamcast 4; this build
+speaks 5`), as it refuses 0.19 and 0.20.1. 0.20.0 is yanked; move any such
+process to 0.21.1 first.
+
+The litelink requirement does move: an application that pins litelink
+itself below 0.13 must raise that pin with this upgrade (see Packaging).
+Boxes on litelink 0.12 and 0.13 read each other's logs: the pairs above run
+the older release on its own litelink 0.12.6. They serve a `file://` stream;
+none of them publishes to S3.
+
+### Added
+
+- **`tests/test_interop.py`**, the `interop` tier: this build against 0.19.0
+  and 0.20.1 from PyPI, each in its own virtualenv. It skips when uv's cache
+  lacks them; `STREAMCAST_REQUIRE_INTEROP=1`, set by `just check-all` and CI,
+  fetches them and fails if it cannot.
 
 ### Packaging
 
