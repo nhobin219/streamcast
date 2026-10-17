@@ -112,11 +112,13 @@ jobs:
       # failure. Without it, a dead endpoint would look exactly like an
       # absent one and eight tests would vanish green.
       #
-      # STREAMCAST_REQUIRE_NODE does the same for the JavaScript client test.
+      # STREAMCAST_REQUIRE_NODE does the same for the JavaScript client test,
+      # and STREAMCAST_REQUIRE_INTEROP for the pairs with released versions.
       - run: uv run pytest -q
         env:
           STREAMCAST_REQUIRE_S3: "1"
           STREAMCAST_REQUIRE_NODE: "1"
+          STREAMCAST_REQUIRE_INTEROP: "1"
 
   packaging:
     name: The wheel imports and serves

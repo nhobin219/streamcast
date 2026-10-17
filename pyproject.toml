@@ -187,5 +187,6 @@ asyncio_default_fixture_loop_scope = "function"
 timeout = 60
 markers = [
     "replication: ships a WAL to object storage through litestream — `just rustfs` starts an endpoint, or set AWS_ENDPOINT_URL. Skipped when none answers, unless STREAMCAST_REQUIRE_S3 is set.",
+    "interop: runs this build against released streamcast versions from PyPI, each in a virtualenv of its own. Skipped when uv cannot install them from its cache, unless STREAMCAST_REQUIRE_INTEROP is set, which lets it fetch them and fails if it cannot.",
     "slow: drives real fsync volume or a real backlog overflow — wall-clock bound rather than CPU bound. Deselect with -m 'not slow'.",
 ]
