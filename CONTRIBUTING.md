@@ -87,6 +87,14 @@ fails, then restore it. A test that passes against broken code is worse than no 
 because it reports coverage that is not there. Every test in this suite was falsified
 when it was added, and two of them caught real defects that way.
 
+The **interop tier**, `tests/test_interop.py` (`@pytest.mark.interop`), pairs this build
+with the releases a rolling upgrade can meet it beside, each installed from PyPI into a
+virtualenv of its own: this client against their servers and their clients against this
+server, publishing, subscribing and reading a snapshot. It installs from uv's cache and
+SKIPS when the cache lacks them; `STREAMCAST_REQUIRE_INTEROP=1`, which `just check-all`
+and CI set, lets it fetch them and fails if it cannot. When a release changes anything
+another version reads, add the release it must still talk to to its `RELEASES`.
+
 The slow tier is `tests/test_backpressure.py`. It is the only place a real queue overflow
 is forced against a real socket, and it is where the isolation guarantee either holds or
 does not — so CI runs it. `test-fast` skips it for an inner loop, not for a PR.

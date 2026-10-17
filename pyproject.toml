@@ -1,6 +1,6 @@
 [project]
 name = "streamcast"
-version = "0.21.0"
+version = "0.21.1"
 description = "A JSON WebSocket pubsub framework for structured data. Every message lands in an Iceberg table: no ETL, no second copy."
 readme = "README.md"
 authors = [
@@ -59,13 +59,16 @@ dependencies = [
     # truncating and deleting a retired log from its published table, which
     # retention needs, and metadata read from object storage once; 0.12.4
     # for a failed claim commit that raises its real error and orphans no
-    # claim, which a maintainer's stop signal relied on. 0.12.5 is the
-    # release this one is tested against; nothing here imports what it added.
+    # claim, which a maintainer's stop signal relied on. 0.12.5's public
+    # `replication` and `column_ddl` are not used here, so 0.13.0 making them
+    # private again breaks nothing; 0.13.1 for a table's metadata JSON
+    # fsynced before the catalog names it, so a power loss cannot leave a
+    # log that will not open (litelink#198).
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.12.5,<0.13",
+    "litelink>=0.13.1,<0.14",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a
@@ -187,5 +190,6 @@ asyncio_default_fixture_loop_scope = "function"
 timeout = 60
 markers = [
     "replication: ships a WAL to object storage through litestream — `just rustfs` starts an endpoint, or set AWS_ENDPOINT_URL. Skipped when none answers, unless STREAMCAST_REQUIRE_S3 is set.",
+    "interop: runs this build against released streamcast versions from PyPI, each in a virtualenv of its own. Skipped when uv cannot install them from its cache, unless STREAMCAST_REQUIRE_INTEROP is set, which lets it fetch them and fails if it cannot.",
     "slow: drives real fsync volume or a real backlog overflow — wall-clock bound rather than CPU bound. Deselect with -m 'not slow'.",
 ]
