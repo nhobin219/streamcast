@@ -7,6 +7,17 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Packaging
+
+- **litelink 0.13.1** (`>=0.13.1,<0.14`). A table's metadata JSON is fsynced
+  before the catalog names it, so a power loss can no longer leave a log that
+  will not open (litelink#198). 0.13.0 made `litelink.replication` and
+  `litelink.column_ddl` private again; nothing here imports either, since
+  0.21.0. An application that pins litelink itself below 0.13 must move that
+  pin to install this release.
+
 ## 0.21.0 — 2026-10-15
 
 ### Removed
