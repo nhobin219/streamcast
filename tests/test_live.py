@@ -13,6 +13,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import duckdb
 import litelink
 import pytest
 
@@ -107,6 +108,27 @@ class TestItIsCurrent:
         async with served(live_only) as (_server, broker):
             with pytest.raises(ValueError, match="no log"):
                 await streamcast.Stream.live(broker)
+
+
+class TestItsDatabase:
+    async def test_a_memory_limit_holds_for_the_base_and_every_rebase(self, stream):
+        """`memory_limit` is a setting of the database a view reads through,
+        and a rebase opens a new snapshot: it must open it the same way."""
+        reference = duckdb.connect()
+        reference.execute("SET memory_limit = '64MB'")
+        want = reference.execute("SELECT current_setting('memory_limit')").fetchall()[
+            0
+        ][0]
+        reference.close()
+        query = "SELECT current_setting('memory_limit') AS m FROM log LIMIT 1"
+        async with served(stream) as (_server, broker):
+            async with await streamcast.Stream.live(
+                broker, rebase_every=3600, memory_limit="64MB"
+            ) as live:
+                await live.wait_for(5)
+                assert (await live.sql(query).read_all())["m"].to_pylist() == [want]
+                await live.rebase()
+                assert (await live.sql(query).read_all())["m"].to_pylist() == [want]
 
 
 class TestMemory:

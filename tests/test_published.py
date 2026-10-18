@@ -7,6 +7,7 @@ of its but the extensions it provisions.
 
 from __future__ import annotations
 
+import duckdb
 import litelink
 import pyarrow as pa
 import pytest
@@ -191,6 +192,38 @@ class TestTheReadCache:
             cached.execute("DROP TABLE cache_probe")
             for connected in (cached, uncached, disk):
                 connected.close()
+
+    def test_a_memory_limit_is_the_databases_own(self):
+        """DuckDB has one `memory_limit` per database, so a reader asking for
+        one gets a database of its own rather than capping everyone else's."""
+        default = _published.connection(None, remote=False)
+        limited = _published.connection(
+            None, remote=False, cache=_published.ReadCache(memory_limit="64MB")
+        )
+        reference = duckdb.connect()
+        setting = "SELECT current_setting('memory_limit')"
+        try:
+            reference.execute("SET memory_limit = '64MB'")
+            assert (
+                limited.execute(setting).fetchone()
+                == reference.execute(setting).fetchone()
+            )
+            assert (
+                default.execute(setting).fetchone()
+                != limited.execute(setting).fetchone()
+            )
+        finally:
+            for connected in (default, limited, reference):
+                connected.close()
+
+    def test_a_limit_duckdb_cannot_read_is_refused_every_time(self):
+        """Raised where the database is made, and not kept: a second reader
+        asking for the same limit is refused too, not handed a database that
+        never took it."""
+        bad = _published.ReadCache(memory_limit="plenty")
+        for _ in range(2):
+            with pytest.raises(duckdb.Error, match="Memory"):
+                _published.connection(None, remote=False, cache=bad)
 
     def test_a_disk_cached_reader_sees_every_publish(self, tmp_path, s3, bucket):
         """The hint is the one object that changes, and `cache_httpfs` would

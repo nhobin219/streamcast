@@ -7,6 +7,35 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- **A catch-up holds one page of its gap, not the gap** (#160). `Snapshot.rows`,
+  which `connect(catch_up=True)` reads the gap through, ran one `ORDER BY`
+  query over the whole range and handed its rows back in batches of a million,
+  so the first `recv` waited for DuckDB to read and sort the whole gap and
+  then held up to a million rows as Python dicts. It now reads
+  `_snapshot.PAGE` (65,536) offsets to a query, and steps over a run of
+  offsets a table does not hold (a restore fence) with one query instead of
+  walking it. Measured on one machine, same session, a 200,000-row gap of
+  0.5 KB rows from a 300-file local table, in a 1200 MB scope: first `recv`
+  4.60 s and 220 → 671 MiB before, 0.91 s and 221 → 370 MiB after; peak over
+  the whole gap 671 MiB before, 410 MiB after; the whole gap 5.90 s before,
+  4.08 s after. A 50-row gap is unchanged (0.10 s, +4 MiB). The connect-time
+  extent query (`min`/`max`/`count(*)` over the table's offsets) is
+  unchanged.
+
+### Added
+
+- **`memory_limit=` on `Stream.snapshot`, `scan`, `sql` and `live`**: DuckDB's
+  `memory_limit` for the database the reader reads through, in DuckDB's
+  notation (`"1GB"`). DuckDB's default is 80% of the machine's RAM and does
+  not see a cgroup's cap. Like the cache settings, readers asking for
+  different limits read through different databases, and a `Live` view's
+  rebases keep its limit. A limit DuckDB cannot parse raises where the
+  snapshot opens.
+
 ## 0.21.1 — 2026-10-17
 
 ### Upgrading

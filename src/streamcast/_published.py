@@ -65,8 +65,9 @@ def path(uri: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ReadCache:
-    """How a reader caches what it reads: `litelink.duckdb_connection`'s four
-    settings, with its defaults. Hashable, because it is part of the key a
+    """How a reader's database caches what it reads, and how much memory it
+    may use: `litelink.duckdb_connection`'s four settings with its defaults,
+    and DuckDB's `memory_limit`. Hashable, because it is part of the key a
     database is shared under."""
 
     memory_cache: bool = True
@@ -79,6 +80,11 @@ class ReadCache:
     it knows what deserves a cache of its own, a stream id for one."""
     disk_cache_volume_limit: float = 0.8
     """How full the disk cache's VOLUME may get, everything on it counted."""
+    memory_limit: str | None = None
+    """DuckDB's `memory_limit` for the database, in its own notation (`"1GB"`),
+    or None for DuckDB's default: 80% of the machine's RAM, which does not see
+    a cgroup's cap. A query that needs more spills to DuckDB's temporary
+    directory, or fails, rather than growing the process."""
 
     @classmethod
     def of(
@@ -88,13 +94,15 @@ class ReadCache:
         disk_cache: bool,
         cache_key: str | PathLike[str] | None,
         disk_cache_volume_limit: float,
+        memory_limit: str | None,
     ) -> ReadCache:
-        """From the keywords the public calls take, which are litelink's."""
+        """From the keywords the public calls take: litelink's, and DuckDB's."""
         return cls(
             memory_cache,
             disk_cache,
             None if cache_key is None else os.fspath(cache_key),
             disk_cache_volume_limit,
+            memory_limit,
         )
 
 
@@ -171,11 +179,14 @@ def connection(
     **And one per `cache`**, because a cache belongs to the database too: two
     readers asking for different caching, or different directories, cannot
     share one. A local database caches only in memory — the disk cache is
-    for `s3://` reads — so its disk settings do not split it.
+    for `s3://` reads — so its disk settings do not split it. Its
+    `memory_limit` does: DuckDB has one per database.
     """
     credentials = (s3_options or S3Options()).resolved() if remote else None
     if credentials is None:
-        cache = ReadCache(memory_cache=cache.memory_cache)
+        cache = ReadCache(
+            memory_cache=cache.memory_cache, memory_limit=cache.memory_limit
+        )
 
     key = (credentials, cache)
     with _LOCK:
@@ -192,6 +203,15 @@ def connection(
                 if credentials is not None
                 else duckdb_connection(memory_cache=cache.memory_cache)
             )
+            if cache.memory_limit is not None:
+                # Before the database is shared: a limit DuckDB cannot parse
+                # raises here, and leaves nothing behind under its key.
+                try:
+                    database.execute("SET memory_limit = ?", [cache.memory_limit])
+                except BaseException:
+                    database.close()
+                    raise
+
             _DATABASES[key] = database
 
         connected = database.cursor()
@@ -337,6 +357,20 @@ class Table:
             raise
 
         return Owning(reader, cursor)
+
+    def next_offset(self, start: int, stop: int) -> int | None:
+        """The lowest offset the pinned snapshot holds in `[start, stop)`, or None."""
+        query = (
+            f'SELECT min("{COLUMN}") FROM {self.relation()} '
+            f'WHERE "{COLUMN}" >= {int(start)} AND "{COLUMN}" < {int(stop)}'
+        )
+        cursor = self._cursor()
+        try:
+            row = cursor.execute(query).fetchone()
+        finally:
+            cursor.close()
+
+        return None if row is None or row[0] is None else int(row[0])
 
     def _cursor(self) -> duckdb.DuckDBPyConnection:
         if self._guard is None:

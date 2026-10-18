@@ -38,6 +38,7 @@ import asyncio
 import collections
 import math
 import threading
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -63,6 +64,24 @@ LATEST: Final = -1
 
 class SnapshotUnavailable(StreamcastError):
     """A snapshot that cannot be served as asked: what is missing, and why."""
+
+
+PAGE: Final = 65_536
+"""Offsets `Snapshot.rows` asks one query for, at most.
+
+**What bounds a catch-up's memory.** A read is `ORDER BY` the offset, so
+DuckDB holds every row of a query before handing back the first, and the
+rows come back as one batch of Python dicts. One query over the whole range
+held the whole gap: measured, a 200,000-row gap of 0.5 KB rows took the
+reader from 220 to 679 MiB before its first row, and a 5.34M-row table took
+a process to 3.1 GB. Offsets are unique, so a page of offsets holds at most
+this many rows, whatever the table's size.
+
+Each page is a query of its own, planned against every data file the table
+has, so a smaller page costs more queries for the same rows. A run of
+offsets the table does not hold (a restore fence) costs one empty page and
+one `min` query to step over.
+"""
 
 
 CACHE_BYTES: Final = 16 * 1024 * 1024
@@ -217,6 +236,34 @@ def _from(start: int | None, piece: _Piece) -> int:
         if start is None
         else max(start, piece.entry.start_offset)
     )
+
+
+async def _paged(
+    table: _published.Table, start: int, stop: int
+) -> AsyncGenerator[tuple[int, int | None, dict[str, object]], None]:
+    """`table`'s rows in `[start, stop)`, oldest first, `PAGE` offsets to a query.
+
+    Pages of the one pinned table, so the rows are those of a single read of
+    it: nothing published between two pages appears in the second.
+    """
+    if table.extent is None:
+        return
+
+    low: int | None = max(start, table.extent[0])
+    stop = min(stop, table.extent[1])
+    while low is not None and low < stop:
+        top = min(low + PAGE, stop)
+        held = False
+        async with aclosing(_log.rows(table, low, top)) as rows:
+            async for item in rows:
+                held = True
+                yield item
+
+        # **An empty page is a fence, not the end.** Rows may lie above it,
+        # so the next one is found with one query rather than walked to: a
+        # restore fences 2**40 offsets without a WAL replica, which is 2**24
+        # empty pages.
+        low = top if held else await asyncio.to_thread(table.next_offset, top, stop)
 
 
 def _stamped(entry: Entry) -> bool:
@@ -707,7 +754,9 @@ class Snapshot:
 
         Built by `_log.rows`, the function a server replays with, so a row
         read here is the row a subscriber would have been sent (I6). For a
-        range too large to hold as one table, which is what catch-up reads.
+        range too large to hold as one table, which is what catch-up reads:
+        each log is read `PAGE` offsets to a query, so what is held at once
+        is one page, not the range.
         """
         self._check()
         frozen = self._frozen()
@@ -717,13 +766,13 @@ class Snapshot:
             for piece in self._relevant(start, high, end=frozen.end):
                 self._check()
                 table = await asyncio.to_thread(self._open, piece)
-                async for offset, ts, row in _log.rows(
-                    table, _from(start, piece), high
-                ):
-                    # Each row, not each log: one closed mid-log raises at the
-                    # next row rather than reading the rest of the log first.
-                    self._check()
-                    yield offset, ts, row
+                async with aclosing(_paged(table, _from(start, piece), high)) as rows:
+                    async for offset, ts, row in rows:
+                        # Each row, not each log: one closed mid-log raises at
+                        # the next row rather than reading the rest of the log
+                        # first.
+                        self._check()
+                        yield offset, ts, row
 
             if frozen.tail is not None:
                 for record in frozen.tail.to_pylist():
