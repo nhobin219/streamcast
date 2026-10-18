@@ -1277,6 +1277,7 @@ class Stream:
         disk_cache: bool = False,
         cache_key: str | PathLike[str] | None = None,
         disk_cache_volume_limit: float = 0.8,
+        memory_limit: str | None = None,
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
@@ -1303,6 +1304,13 @@ class Stream:
         databases; see `litelink.duckdb_connection`. The same keywords are on
         `scan`, `sql` and `live`. Not on `connect`: a catch-up reads its gap
         once, which no cache helps.
+
+        **`memory_limit` caps the reader's DuckDB database** (`"1GB"`, in
+        DuckDB's notation). DuckDB's default is 80% of the machine's RAM, and
+        does not see a cgroup's cap, so a large `ORDER BY` or aggregation in
+        a capped process is killed instead of spilling. A limit is a setting
+        of the database, so readers asking for different limits read through
+        different databases, as with the caches.
         """
         return await _snapshot.snapshot(
             metadata_uri,
@@ -1316,6 +1324,7 @@ class Stream:
                 disk_cache=disk_cache,
                 cache_key=cache_key,
                 disk_cache_volume_limit=disk_cache_volume_limit,
+                memory_limit=memory_limit,
             ),
         )
 
@@ -1332,6 +1341,7 @@ class Stream:
         disk_cache: bool = False,
         cache_key: str | PathLike[str] | None = None,
         disk_cache_volume_limit: float = 0.8,
+        memory_limit: str | None = None,
         columns: Sequence[str] | None = None,
         where: str | None = None,
         filters: Sequence[_manifest.Term] = (),
@@ -1360,6 +1370,7 @@ class Stream:
                 disk_cache=disk_cache,
                 cache_key=cache_key,
                 disk_cache_volume_limit=disk_cache_volume_limit,
+                memory_limit=memory_limit,
             )
             return snap.scan(
                 columns=columns,
@@ -1386,6 +1397,7 @@ class Stream:
         disk_cache: bool = False,
         cache_key: str | PathLike[str] | None = None,
         disk_cache_volume_limit: float = 0.8,
+        memory_limit: str | None = None,
         filters: Sequence[_manifest.Term] = (),
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -1413,6 +1425,7 @@ class Stream:
                 disk_cache=disk_cache,
                 cache_key=cache_key,
                 disk_cache_volume_limit=disk_cache_volume_limit,
+                memory_limit=memory_limit,
             )
             return snap.sql(
                 query,
@@ -1437,6 +1450,7 @@ class Stream:
         disk_cache: bool = False,
         cache_key: str | PathLike[str] | None = None,
         disk_cache_volume_limit: float = 0.8,
+        memory_limit: str | None = None,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -1469,6 +1483,7 @@ class Stream:
                 disk_cache=disk_cache,
                 cache_key=cache_key,
                 disk_cache_volume_limit=disk_cache_volume_limit,
+                memory_limit=memory_limit,
             ),
         )
 

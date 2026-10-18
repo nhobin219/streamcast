@@ -26,6 +26,16 @@ there was nothing to have changed from. Everything above it is ordinary.
   extent query (`min`/`max`/`count(*)` over the table's offsets) is
   unchanged.
 
+### Added
+
+- **`memory_limit=` on `Stream.snapshot`, `scan`, `sql` and `live`**: DuckDB's
+  `memory_limit` for the database the reader reads through, in DuckDB's
+  notation (`"1GB"`). DuckDB's default is 80% of the machine's RAM and does
+  not see a cgroup's cap. Like the cache settings, readers asking for
+  different limits read through different databases, and a `Live` view's
+  rebases keep its limit. A limit DuckDB cannot parse raises where the
+  snapshot opens.
+
 ## 0.21.1 — 2026-10-17
 
 ### Upgrading

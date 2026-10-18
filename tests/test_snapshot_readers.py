@@ -13,6 +13,7 @@ import asyncio
 import time
 from typing import Any
 
+import duckdb
 import litelink
 import pytest
 
@@ -235,3 +236,20 @@ class TestTheOneShotForms:
         reader = streamcast.Stream.sql(uri, "SELECT 1")
         await reader.aclose()
         assert opened == []
+
+    async def test_memory_limit_reaches_the_database_it_reads_through(self, tmp_path):
+        reference = duckdb.connect()
+        reference.execute("SET memory_limit = '64MB'")
+        want = reference.execute("SELECT current_setting('memory_limit')").fetchall()[
+            0
+        ][0]
+        reference.close()
+        uri = await published(tmp_path)
+        query = "SELECT current_setting('memory_limit') AS m FROM log LIMIT 1"
+
+        table = await streamcast.Stream.sql(uri, query, memory_limit="64MB").read_all()
+        assert table["m"].to_pylist() == [want]
+        async with await streamcast.Stream.snapshot(uri, memory_limit="64MB") as snap:
+            table = await snap.sql(query).read_all()
+
+        assert table["m"].to_pylist() == [want]
