@@ -23,6 +23,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
+from litelink import LogConfig
+
 if TYPE_CHECKING:
     from streamcast._stream import Stream
 
@@ -70,6 +72,46 @@ than the reader running out of memory waiting on a publisher that has
 stalled. Counted in rows read, not offset distance, which a restore fence
 stretches by 2**20, or 2**40 with no WAL replica.
 """
+
+PAGE_BYTES: Final = LogConfig().target_row_group_size
+"""Arrow bytes a catch-up reads from a published table in one query, at most.
+
+What `page_bytes=` bounds, on `connect(catch_up=True)`, `Stream.live` and
+`Snapshot.rows`: a page is one `ORDER BY` query over a range of offsets,
+which DuckDB sorts and hands back whole before its first row, so a page is
+what a catch-up holds at once. The rows it is turned into weigh a multiple of
+it as Python objects, which is the caller's to allow for.
+
+litelink's default row group (`LogConfig.target_row_group_size`, 64 MiB of
+Arrow), and taken from litelink rather than chosen here. It is the unit a
+published file is sorted and written in, so an offset range of this size
+reads one or two row groups rather than a sliver of many. It is also what a
+log's own compaction holds at a time (about 2.5x it at the peak, by
+litelink's measurement), so a process already sized for writing a stream is
+sized for reading one back. litelink's default rather than the table's own
+setting, because the reader is not the writer and does not know it.
+"""
+
+PAGE_ROWS: Final = None
+"""Rows in one catch-up query, at most, besides `PAGE_BYTES`: none by default.
+
+What `page_rows=` adds: a page ends at whichever budget it reaches first. A
+row count alone cannot bound memory, because rows have no bounded width (a
+million 10 KB rows is 10 GB), so bytes are the budget and this is a ceiling
+for a caller whose cost is per row rather than per byte. With both None a
+page is the whole range, one query, and nothing bounds it.
+"""
+
+
+def pages(page_bytes: int | None, page_rows: int | None) -> None:
+    """Refuse a page budget that is not a positive int or None, at the call."""
+    for keyword, value in (("page_bytes", page_bytes), ("page_rows", page_rows)):
+        if value is None:
+            continue
+
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            msg = f"{keyword}={value!r}: a budget is an int of at least 1, or None"
+            raise ValueError(msg)
 
 
 def per_stream(
@@ -131,4 +173,13 @@ def _bound(
         )
 
 
-__all__ = ["MAX_BACKLOG", "MAX_INBOUND", "MAX_IN_FLIGHT", "MAX_TAIL", "per_stream"]
+__all__ = [
+    "MAX_BACKLOG",
+    "MAX_INBOUND",
+    "MAX_IN_FLIGHT",
+    "MAX_TAIL",
+    "PAGE_BYTES",
+    "PAGE_ROWS",
+    "pages",
+    "per_stream",
+]

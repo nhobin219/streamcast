@@ -26,26 +26,53 @@ is new API.
   which `connect(catch_up=True)` reads the gap through, ran one `ORDER BY`
   query over the whole range and handed its rows back in batches of a million,
   so the first `recv` waited for DuckDB to read and sort the whole gap and
-  then held up to a million rows as Python dicts. It now reads
-  `_snapshot.PAGE` (65,536) offsets to a query, and steps over a run of
-  offsets a table does not hold (a restore fence) with one query instead of
-  walking it. Measured on one machine, same session, a 200,000-row gap of
-  0.5 KB rows from a 300-file local table, in a 1200 MB scope: first `recv`
-  4.60 s and 220 → 671 MiB before, 0.91 s and 221 → 370 MiB after; peak over
-  the whole gap 671 MiB before, 410 MiB after; the whole gap 5.90 s before,
-  4.08 s after. A 50-row gap is unchanged (0.10 s, +4 MiB). The connect-time
-  extent query (`min`/`max`/`count(*)` over the table's offsets) is
-  unchanged.
+  then held up to a million rows as Python dicts. It now reads a page to a
+  query, each at most `page_bytes` of Arrow (see Added), and steps over a run
+  of offsets a table does not hold (a restore fence) with one query instead
+  of walking it. Measured on one machine in a 1200 MB scope, a gap read from
+  a local table by a catch-up from offset 1:
+  - 199,899 rows of 0.5 KB from a 300-file table: 0.21.1 peaked at 671 MiB,
+    with its first row after 4.60 s; this release peaks at 487 MiB, its first
+    row after 0.09 s. Pages of a fixed 65,536 offsets, measured in the same
+    session as this release, peaked at 416 MiB: for rows this narrow the
+    default byte budget is a larger page (121,354 rows), and `page_bytes=`
+    or `page_rows=` makes it smaller.
+  - 1,900 rows of 100 KB, the reader in a process of its own: 948 and
+    977 MiB in two runs with every row of the gap in one query, which is what
+    fixed 65,536-offset pages do with rows this few; 540 and 504 MiB here.
+
+  A 50-row gap is unchanged (0.08 s, +4 MiB). The connect-time extent query
+  (`min`/`max`/`count(*)` over the table's offsets) is unchanged.
 
 ### Added
 
+- **`page_bytes=` and `page_rows=` on `connect`, `Stream.live` and
+  `Snapshot.rows`**: how much of a gap a catch-up reads in one query.
+  `page_bytes` defaults to `streamcast.PAGE_BYTES`, litelink's default row
+  group (`LogConfig.target_row_group_size`, 64 MiB of Arrow): the unit a
+  published file is sorted and written in, and what a log's compaction holds
+  at a time. `page_rows` defaults to None, no row ceiling; a page ends at
+  whichever budget it reaches first, and with both None a log is read in one
+  query. A budget below 1 raises at the call. Each page is sized from the
+  Arrow bytes per row of the page before it, and the first is one offset, so
+  a page stays within `page_bytes` while rows keep their width and a row
+  wider than the budget is read alone. Where rows widen, the page that meets
+  them, and the one after it if it was a mix of widths, exceed the budget by
+  the ratio of the widths, up to `page_rows`: a gap that goes from 40-byte
+  rows to 10,000-byte ones can put 1.68M of them, 15.6 GiB, in one page,
+  where fixed 65,536-offset pages held 625 MiB. A stream whose row width
+  can grow by orders of magnitude sets `page_rows=` to cap that. Pages are
+  within the budget again once the width stops growing. `Stream.snapshot`,
+  `scan` and `sql` do not page and do not take them.
 - **`memory_limit=` on `Stream.snapshot`, `scan`, `sql` and `live`**: DuckDB's
   `memory_limit` for the database the reader reads through, in DuckDB's
-  notation (`"1GB"`). DuckDB's default is 80% of the machine's RAM and does
-  not see a cgroup's cap. Like the cache settings, readers asking for
-  different limits read through different databases, and a `Live` view's
-  rebases keep its limit. A limit DuckDB cannot parse raises where the
-  snapshot opens.
+  notation (`"1GB"`). DuckDB's default is 80% of what the process may use:
+  its cgroup's cap under one (960 MiB under `MemoryMax=1200M`, measured with
+  DuckDB 1.5.5). A query past the limit spills where it can and raises
+  `OutOfMemoryException` where it cannot. Like the cache settings, readers
+  asking for different limits read through different databases, and a
+  `Live` view's rebases keep its limit. A limit DuckDB cannot parse raises
+  where the snapshot opens.
 
 ## 0.21.1 — 2026-10-17
 

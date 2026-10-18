@@ -68,7 +68,14 @@ from streamcast._errors import (
     ProtocolError,
     StreamRetired,
 )
-from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_TAIL
+from streamcast._limits import (
+    MAX_BACKLOG,
+    MAX_IN_FLIGHT,
+    MAX_INBOUND,
+    MAX_TAIL,
+    PAGE_BYTES,
+    PAGE_ROWS,
+)
 from streamcast._protocol import (
     EARLIEST,
     decode,
@@ -1306,10 +1313,11 @@ class Stream:
         once, which no cache helps.
 
         **`memory_limit` caps the reader's DuckDB database** (`"1GB"`, in
-        DuckDB's notation). DuckDB's default is 80% of the machine's RAM, and
-        does not see a cgroup's cap, so a large `ORDER BY` or aggregation in
-        a capped process is killed instead of spilling. A limit is a setting
-        of the database, so readers asking for different limits read through
+        DuckDB's notation), for a reader that must leave room for more than
+        DuckDB: the default is 80% of what the process may use, its cgroup's
+        cap under one. A query past the limit spills where it can and raises
+        `OutOfMemoryException` where it cannot. A limit is a setting of the
+        database, so readers asking for different limits read through
         different databases, as with the caches.
         """
         return await _snapshot.snapshot(
@@ -1451,6 +1459,8 @@ class Stream:
         cache_key: str | PathLike[str] | None = None,
         disk_cache_volume_limit: float = 0.8,
         memory_limit: str | None = None,
+        page_bytes: int | None = PAGE_BYTES,
+        page_rows: int | None = PAGE_ROWS,
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
@@ -1470,6 +1480,10 @@ class Stream:
         the published tables alike, so every query sees only matching rows.
         `start_offset=` is the lowest offset any query sees; `LATEST` is the
         broker's frontier at open, a view of what happens from now.
+
+        `page_bytes=` and `page_rows=` are `connect`'s, for the catch-up a
+        reconnect reads: at most that much of the gap per query. See
+        `_limits.PAGE_BYTES`.
         """
         return await _live.live(
             broker,
@@ -1485,6 +1499,8 @@ class Stream:
                 disk_cache_volume_limit=disk_cache_volume_limit,
                 memory_limit=memory_limit,
             ),
+            page_bytes=page_bytes,
+            page_rows=page_rows,
         )
 
     @property
