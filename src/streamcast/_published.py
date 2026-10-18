@@ -338,6 +338,20 @@ class Table:
 
         return Owning(reader, cursor)
 
+    def next_offset(self, start: int, stop: int) -> int | None:
+        """The lowest offset the pinned snapshot holds in `[start, stop)`, or None."""
+        query = (
+            f'SELECT min("{COLUMN}") FROM {self.relation()} '
+            f'WHERE "{COLUMN}" >= {int(start)} AND "{COLUMN}" < {int(stop)}'
+        )
+        cursor = self._cursor()
+        try:
+            row = cursor.execute(query).fetchone()
+        finally:
+            cursor.close()
+
+        return None if row is None or row[0] is None else int(row[0])
+
     def _cursor(self) -> duckdb.DuckDBPyConnection:
         if self._guard is None:
             return self._connection.cursor()

@@ -28,8 +28,9 @@ been published since, so the whole thing is a LOOP — read, connect, and if
 the server still says too old, read again from where this round stopped.
 `catch_up_retries` bounds it.
 
-**Memory is one batch.** `Snapshot.rows` streams through the same batch
-reader a server replays with, and every blocking call crosses into a thread.
+**Memory is one page.** `Snapshot.rows` reads `_snapshot.PAGE` offsets to
+a query, through the same batch reader a server replays with, and every
+blocking call crosses into a thread.
 
 **What it cannot fix.** If the published tables end below the server's
 window, a range exists that neither holds. That is reported with both
