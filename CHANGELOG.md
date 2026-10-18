@@ -13,12 +13,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 **Nothing on the wire or on disk changed from 0.21.1.** This release changes
 how a reader reads the published tables (`Snapshot.rows`, which a catch-up
-reads through) and adds a keyword; the greeting, the frames, the refusals and
+reads through) and adds keywords (`memory_limit=`, `page_bytes=`, `page_rows=`); the greeting, the frames, the refusals and
 the files beside the logs are as 0.21.1 writes them. Every pair 0.21.1
 supports is unchanged: a 0.22.0 process goes in one at a time, clients and
 servers in either order, and `tests/test_interop.py` still passes against
-0.19.0 and 0.20.1 from PyPI. It is a minor release because `memory_limit=`
-is new API.
+0.19.0 and 0.20.1 from PyPI. It is a minor release because those keywords
+are new API.
 
 ### Fixed
 
