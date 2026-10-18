@@ -28,9 +28,10 @@ been published since, so the whole thing is a LOOP — read, connect, and if
 the server still says too old, read again from where this round stopped.
 `catch_up_retries` bounds it.
 
-**Memory is one page.** `Snapshot.rows` reads `_snapshot.PAGE` offsets to
-a query, through the same batch reader a server replays with, and every
-blocking call crosses into a thread.
+**Memory is one page.** `Snapshot.rows` reads a page to a query, at most
+`page_bytes` of Arrow (`_limits.PAGE_BYTES`) and `page_rows` rows, through
+the same batch reader a server replays with, and every blocking call crosses
+into a thread.
 
 **What it cannot fix.** If the published tables end below the server's
 window, a range exists that neither holds. That is reported with both
@@ -45,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from streamcast import _filter, _metadata, _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
+from streamcast._limits import PAGE_BYTES, PAGE_ROWS
 from streamcast._protocol import EARLIEST
 
 if TYPE_CHECKING:
@@ -142,6 +144,8 @@ class Catcher:
         "_first",
         "_handshake",
         "_name",
+        "_page_bytes",
+        "_page_rows",
         "_retries",
         "_s3",
         "_stream_id",
@@ -162,8 +166,14 @@ class Catcher:
         retries: int,
         handshake: Callable[[int], Awaitable[tuple[Any, Any]]],
         where: Where | None = None,
+        *,
+        page_bytes: int | None = PAGE_BYTES,
+        page_rows: int | None = PAGE_ROWS,
     ) -> None:
         self._uri = uri
+        # How much of the gap one query reads: see `_limits.PAGE_BYTES`.
+        self._page_bytes = page_bytes
+        self._page_rows = page_rows
         self._stream_id = stream_id
         self._name = name
         self._s3 = s3_options
@@ -268,7 +278,8 @@ class Catcher:
             self._first = None
             matches = _predicate(self._where, snap)
             try:
-                async for offset, ts, row in _rows(snap, self.start):
+                rows = _rows(snap, self.start, self._page_bytes, self._page_rows)
+                async for offset, ts, row in rows:
                     if not checked:
                         checked = True
                         if offset > requested:
@@ -367,11 +378,15 @@ async def _refusing(read: Awaitable[Any]) -> Any:
 
 
 async def _rows(
-    snap: _snapshot.Snapshot, start: int
+    snap: _snapshot.Snapshot,
+    start: int,
+    page_bytes: int | None,
+    page_rows: int | None,
 ) -> AsyncGenerator[tuple[int, int | None, dict], None]:
     """`snap.rows(start)`, refusing as `_refusing` does."""
+    paged = snap.rows(start, page_bytes=page_bytes, page_rows=page_rows)
     try:
-        async with aclosing(snap.rows(start)) as rows:
+        async with aclosing(paged) as rows:
             async for item in rows:
                 yield item
 

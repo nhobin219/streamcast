@@ -50,7 +50,7 @@ from websockets.exceptions import ConnectionClosed
 
 from streamcast import _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
-from streamcast._limits import MAX_TAIL
+from streamcast._limits import MAX_TAIL, PAGE_BYTES, PAGE_ROWS, pages
 from streamcast._published import BATCH, DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
@@ -90,6 +90,8 @@ class Live:
         start: int | None = None,
         max_tail: int = MAX_TAIL,
         cache: ReadCache = DEFAULT_CACHE,
+        page_bytes: int | None = PAGE_BYTES,
+        page_rows: int | None = PAGE_ROWS,
     ) -> None:
         self._broker = broker
         # How the base and every rebase read the published tables, as
@@ -100,6 +102,9 @@ class Live:
         # stops: a publisher that has stalled must not run this process out
         # of memory. See `_limits.MAX_TAIL`.
         self._max_tail = max_tail
+        # How much of a gap a reconnect's catch-up reads per query.
+        self._page_bytes = page_bytes
+        self._page_rows = page_rows
         # The subscription's filter, and the same terms for the published
         # base — one narrowing, applied on both sides of the join.
         self._where = where
@@ -150,6 +155,8 @@ class Live:
             catch_up=True,
             s3_options=self._s3,
             where=self._where,
+            page_bytes=self._page_bytes,
+            page_rows=self._page_rows,
         )
         try:
             subscription = await connecting
@@ -515,8 +522,11 @@ async def live(
     start_offset: int | None = None,
     max_tail: int = MAX_TAIL,
     cache: ReadCache = DEFAULT_CACHE,
+    page_bytes: int | None = PAGE_BYTES,
+    page_rows: int | None = PAGE_ROWS,
 ) -> Live:
     """See `Stream.live`."""
+    pages(page_bytes, page_rows)
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
 
     # One connection for the greeting, closed before the tables are read:
@@ -552,6 +562,8 @@ async def live(
         start=start,
         max_tail=max_tail,
         cache=cache,
+        page_bytes=page_bytes,
+        page_rows=page_rows,
     )
     try:
         await view._start()  # noqa: SLF001

@@ -45,9 +45,17 @@ from typing import TYPE_CHECKING, Any, Final
 import pyarrow as pa
 from litelink import S3Options
 
-from streamcast import _log, _manifest, _published, _remote, _schema, _versions
+from streamcast import (
+    _limits,
+    _log,
+    _manifest,
+    _published,
+    _remote,
+    _schema,
+    _versions,
+)
 from streamcast._errors import NotReplayable, StreamcastError
-from streamcast._limits import MAX_TAIL
+from streamcast._limits import MAX_TAIL, PAGE_BYTES, PAGE_ROWS
 from streamcast._metadata import Metadata
 from streamcast._published import DEFAULT_CACHE, ReadCache
 
@@ -64,24 +72,6 @@ LATEST: Final = -1
 
 class SnapshotUnavailable(StreamcastError):
     """A snapshot that cannot be served as asked: what is missing, and why."""
-
-
-PAGE: Final = 65_536
-"""Offsets `Snapshot.rows` asks one query for, at most.
-
-**What bounds a catch-up's memory.** A read is `ORDER BY` the offset, so
-DuckDB holds every row of a query before handing back the first, and the
-rows come back as one batch of Python dicts. One query over the whole range
-held the whole gap: measured, a 200,000-row gap of 0.5 KB rows took the
-reader from 220 to 679 MiB before its first row, and a 5.34M-row table took
-a process to 3.1 GB. Offsets are unique, so a page of offsets holds at most
-this many rows, whatever the table's size.
-
-Each page is a query of its own, planned against every data file the table
-has, so a smaller page costs more queries for the same rows. A run of
-offsets the table does not hold (a restore fence) costs one empty page and
-one `min` query to step over.
-"""
 
 
 CACHE_BYTES: Final = 16 * 1024 * 1024
@@ -238,32 +228,118 @@ def _from(start: int | None, piece: _Piece) -> int:
     )
 
 
+class _Measured:
+    """`table` as `_log.rows` reads it, counting the Arrow it hands back.
+
+    What sizes the next page: the one just read, measured as it streamed,
+    rather than anything the table says about itself. A data file's size in
+    the manifest is compressed Parquet, which can be a hundredth of the
+    Arrow it decodes to, and a page sized from it would overshoot by that.
+    """
+
+    __slots__ = ("_reader", "_table", "nbytes", "rows")
+
+    def __init__(self, table: _published.Table) -> None:
+        self._table = table
+        self._reader: _published.Owning | None = None
+        self.nbytes = 0
+        self.rows = 0
+
+    @property
+    def schema(self) -> pa.Schema:
+        return self._table.schema
+
+    def scan(self, **kwargs: Any) -> _Measured:
+        self._reader = self._table.scan(**kwargs)
+        return self
+
+    def read_next_batch(self) -> pa.RecordBatch:
+        assert self._reader is not None
+        batch = self._reader.read_next_batch()
+        self.nbytes += batch.nbytes
+        self.rows += batch.num_rows
+        return batch
+
+    def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
+
+
+def _span(
+    width: float | None, page_bytes: int | None, page_rows: int | None
+) -> int | None:
+    """Offsets the next page asks for, or None for the rest of the range.
+
+    `width` is Arrow bytes per row on the last page that held rows, or None
+    before one has. Rows are counted, not offsets, because offsets are unique
+    and a fence makes them sparser than rows: a page of N offsets holds at
+    most N rows, so N = budget / width keeps it within the budget however
+    many of them a fence leaves empty. At least one, whatever the width, so a
+    row wider than the budget is read alone rather than never.
+    """
+    spans = []
+    if page_bytes is not None:
+        # **The first page is one offset**, because nothing is known yet that
+        # bounds a row's width: one row is the only page that cannot be over
+        # budget by more than the row itself.
+        spans.append(1 if width is None else max(1, int(page_bytes // max(width, 1))))
+
+    if page_rows is not None:
+        spans.append(page_rows)
+
+    return min(spans) if spans else None
+
+
 async def _paged(
-    table: _published.Table, start: int, stop: int
+    table: _published.Table,
+    start: int,
+    stop: int,
+    *,
+    page_bytes: int | None,
+    page_rows: int | None,
 ) -> AsyncGenerator[tuple[int, int | None, dict[str, object]], None]:
-    """`table`'s rows in `[start, stop)`, oldest first, `PAGE` offsets to a query.
+    """`table`'s rows in `[start, stop)`, oldest first, a page to a query.
 
     Pages of the one pinned table, so the rows are those of a single read of
     it: nothing published between two pages appears in the second.
+
+    **Each page is sized from the last.** Its Arrow bytes per row, measured as
+    it was read, divide `page_bytes` into the next page's offsets. That holds
+    a page to the budget while the rows keep their width, and a row wider
+    than the budget is read alone. Where the rows widen, the page that meets
+    them was sized for narrower ones and exceeds the budget by the ratio of
+    the widths, at most `page_rows` rows of them: from 40-byte rows to
+    10,000-byte ones, a 64 MiB budget's page is 1.68M offsets of those,
+    15.6 GiB, where `page_rows=65_536` would hold 625 MiB. Nothing read before a page bounds
+    the width of its rows, so only `page_rows` caps that. The next page is
+    sized by that page's AVERAGE, which a mix of the two widths understates,
+    so it can exceed the budget too, by less. Pages are within the budget
+    again once the width stops growing; while it grows, each exceeds it by
+    that page's growth.
     """
     if table.extent is None:
         return
 
     low: int | None = max(start, table.extent[0])
     stop = min(stop, table.extent[1])
+    width: float | None = None
     while low is not None and low < stop:
-        top = min(low + PAGE, stop)
-        held = False
-        async with aclosing(_log.rows(table, low, top)) as rows:
+        span = _span(width, page_bytes, page_rows)
+        top = stop if span is None else min(low + span, stop)
+        page = _Measured(table)
+        async with aclosing(_log.rows(page, low, top)) as rows:
             async for item in rows:
-                held = True
                 yield item
+
+        if page.rows:
+            width = page.nbytes / page.rows
+            low = top
+            continue
 
         # **An empty page is a fence, not the end.** Rows may lie above it,
         # so the next one is found with one query rather than walked to: a
-        # restore fences 2**40 offsets without a WAL replica, which is 2**24
-        # empty pages.
-        low = top if held else await asyncio.to_thread(table.next_offset, top, stop)
+        # restore fences 2**40 offsets without a WAL replica.
+        low = await asyncio.to_thread(table.next_offset, top, stop)
 
 
 def _stamped(entry: Entry) -> bool:
@@ -748,16 +824,24 @@ class Snapshot:
         return Reader(self, plan)
 
     async def rows(
-        self, start: int, stop: int | None = None
+        self,
+        start: int,
+        stop: int | None = None,
+        *,
+        page_bytes: int | None = PAGE_BYTES,
+        page_rows: int | None = PAGE_ROWS,
     ) -> AsyncGenerator[tuple[int, int | None, dict[str, object]], None]:
         """`(offset, ts, row)` for `[start, stop)`, oldest first, a batch at a time.
 
         Built by `_log.rows`, the function a server replays with, so a row
         read here is the row a subscriber would have been sent (I6). For a
         range too large to hold as one table, which is what catch-up reads:
-        each log is read `PAGE` offsets to a query, so what is held at once
-        is one page, not the range.
+        each log is read a page to a query, so what is held at once is one
+        page, not the range. A page is at most `page_bytes` of Arrow and, if
+        it is set, `page_rows` rows; see `_limits.PAGE_BYTES` and `_paged`.
+        Both None reads each log in one query.
         """
+        _limits.pages(page_bytes, page_rows)
         self._check()
         frozen = self._frozen()
         high = min(stop or frozen.end, frozen.end)
@@ -766,7 +850,14 @@ class Snapshot:
             for piece in self._relevant(start, high, end=frozen.end):
                 self._check()
                 table = await asyncio.to_thread(self._open, piece)
-                async with aclosing(_paged(table, _from(start, piece), high)) as rows:
+                paged = _paged(
+                    table,
+                    _from(start, piece),
+                    high,
+                    page_bytes=page_bytes,
+                    page_rows=page_rows,
+                )
+                async with aclosing(paged) as rows:
                     async for offset, ts, row in rows:
                         # Each row, not each log: one closed mid-log raises at
                         # the next row rather than reading the rest of the log

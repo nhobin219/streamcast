@@ -63,6 +63,7 @@ from streamcast._errors import (
     StreamRetired,
     TooSlow,
 )
+from streamcast._limits import PAGE_BYTES, PAGE_ROWS, pages
 from streamcast._protocol import decode, parse_greeting, parse_refusal, stream_name
 from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
@@ -389,8 +390,9 @@ class Subscription:
         that keeps up gets small batches at `recv`'s latency, and one that
         falls behind gets everything that queued, which costs it less per row
         and lets it catch up. Group commit's rule, on the other end of the
-        stream. Rows from the published tables during a catch-up are already
-        in memory, so those batches start full.
+        stream. Rows from the published tables during a catch-up arrive a page
+        at a time, so those batches are full except where one page ends and
+        the next is being read: the first page is a single row (`page_bytes`).
 
         The same rows in the same order as `recv`, with the same check that
         offsets increase. The cursor counts a batch as handled when the next
@@ -758,7 +760,9 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     Nothing is connected while the tables are read, because a subscriber that
     holds a socket through a long catch-up is dropped for falling behind. It
     loops, bounded by `catch_up_retries` (3), for a server that moves on while
-    the gap is being read. `metadata=` overrides which metadata file to read —
+    the gap is being read. It reads the gap a page to a query, each page at
+    most `page_bytes` of Arrow (`PAGE_BYTES`, litelink's row group) and, if
+    set, `page_rows` rows; both None reads it in one query. `metadata=` overrides which metadata file to read —
     otherwise it is the greeting's — and `s3_options=` the credentials. A stream that
     cannot be read raises `CatchUpUnavailable` HERE, at `connect`, with a
     message naming what was tried and what to change. See `_catchup`.
@@ -770,6 +774,8 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     __slots__ = (
         "_catch_up",
         "_catch_up_retries",
+        "_page_bytes",
+        "_page_rows",
         "_cursor",
         "_kwargs",
         "_metadata",
@@ -795,6 +801,8 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         where: Where | None = None,
         catch_up: bool = False,
         catch_up_retries: int = CATCH_UP_RETRIES,
+        page_bytes: int | None = PAGE_BYTES,
+        page_rows: int | None = PAGE_ROWS,
         metadata: str | None = None,
         compression: str | None = None,
         **kwargs: Any,
@@ -807,6 +815,9 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
         self._where = where
         self._catch_up = catch_up
         self._catch_up_retries = catch_up_retries
+        pages(page_bytes, page_rows)
+        self._page_bytes = page_bytes
+        self._page_rows = page_rows
         self._metadata = metadata
         self._s3 = s3_options
         self._stream = stream_name(uri)
@@ -902,6 +913,8 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
             self._catch_up_retries,
             self._handshake,
             self._where,
+            page_bytes=self._page_bytes,
+            page_rows=self._page_rows,
         )
         # BEFORE handing anything back, so an unreadable table raises here
         # rather than from whatever line first calls `recv`. Entering the
