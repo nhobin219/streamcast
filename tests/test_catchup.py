@@ -292,8 +292,11 @@ class TestItClosesTheGap:
         assert published_log.published_through() == TOTAL  # inclusive
 
         async with serve(stream, maintain=False) as uri:
+            # One query for the gap, so the only place a batch can end short
+            # is the join: a page boundary ends one too, while the next page
+            # is read, and the first page is a single row.
             async with streamcast.connect(
-                uri, offset=1, catch_up=True, s3_options=s3
+                uri, offset=1, catch_up=True, s3_options=s3, page_bytes=None
             ) as sub:
                 got: list[list[int | None]] = []
                 async for batch in sub.batches(limit=1500):

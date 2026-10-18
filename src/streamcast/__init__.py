@@ -119,7 +119,7 @@ from streamcast._errors import (
     StreamRetired,
     TooSlow,
 )
-from streamcast._limits import MAX_BACKLOG
+from streamcast._limits import MAX_BACKLOG, PAGE_BYTES, PAGE_ROWS
 from streamcast._live import Live
 from streamcast._maintain import Maintain
 from streamcast._protocol import EARLIEST, Greeting
@@ -140,6 +140,8 @@ __all__ = [
     "LATEST",
     "MAX_BACKLOG",
     "MAX_REPLAY",
+    "PAGE_BYTES",
+    "PAGE_ROWS",
     "CatchUpUnavailable",
     "Live",
     "Reader",

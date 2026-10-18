@@ -82,9 +82,11 @@ class ReadCache:
     """How full the disk cache's VOLUME may get, everything on it counted."""
     memory_limit: str | None = None
     """DuckDB's `memory_limit` for the database, in its own notation (`"1GB"`),
-    or None for DuckDB's default: 80% of the machine's RAM, which does not see
-    a cgroup's cap. A query that needs more spills to DuckDB's temporary
-    directory, or fails, rather than growing the process."""
+    or None for DuckDB's default: 80% of the memory the process may use (its
+    cgroup's cap, under one; measured with DuckDB 1.5.5, 960 MiB under
+    `MemoryMax=1200M`). A query that needs more spills to DuckDB's temporary
+    directory where the operator can, and otherwise raises DuckDB's
+    `OutOfMemoryException`, rather than growing the process."""
 
     @classmethod
     def of(
