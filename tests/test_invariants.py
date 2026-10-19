@@ -59,7 +59,9 @@ def awaits(node: ast.AST) -> list[int]:
     return lines
 
 
-@pytest.mark.parametrize("name", ["_submit", "_commit", "_deliver", "_fan_out"])
+@pytest.mark.parametrize(
+    "name", ["_submit", "_submit_claimed", "_check", "_commit", "_deliver", "_fan_out"]
+)
 def test_publishing_never_awaits(name):
     """The ordering guarantee.
 
@@ -255,7 +257,7 @@ def test_no_initialiser_builds_its_own_collaborators():
     )
 
 
-@pytest.mark.parametrize("name", ["send", "send_many", "serve_publisher"])
+@pytest.mark.parametrize("name", ["send", "send_many", "_serve_publisher"])
 def test_room_is_taken_by_the_next_statement(name):
     """`max_inbound`'s bound holds only if nothing runs between the check and
     the queueing: `await self._room(n)` must be followed directly by the
@@ -281,3 +283,31 @@ def test_room_is_taken_by_the_next_statement(name):
                 ), f"Stream.{name}: the statement after `_room` must queue"
 
     assert found == 1, f"Stream.{name} takes room {found} times"
+
+
+def test_a_claim_is_checked_by_the_statement_before_it_is_used():
+    """Fencing an exactly-once publisher holds only if nothing runs between
+    checking the connection still holds its publisher id and queueing its
+    rows: `if not self._holds(...)` must be followed directly by the
+    statement that calls `self._submit_claimed`. An `await` in between lets
+    a newer connection claim the id, ask the writer for the mark it greets
+    with, and then have this connection queue rows behind that answer --
+    rows the newer one's sender would resend as if they had never landed.
+    """
+    found = 0
+    for node in ast.walk(function(_stream, "Stream", "_serve_publisher")):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+
+        for index, statement in enumerate(body):
+            if isinstance(statement, ast.If) and "self._holds(" in ast.unparse(
+                statement.test
+            ):
+                found += 1
+                following = body[index + 1] if index + 1 < len(body) else None
+                assert following is not None and "self._submit_claimed(" in (
+                    ast.unparse(following)
+                ), "the statement after the claim check must queue"
+
+    assert found == 1, f"the claim is checked {found} times"

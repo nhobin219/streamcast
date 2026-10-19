@@ -37,8 +37,8 @@ from streamcast import _protocol
 
 PEER = Path(__file__).resolve().parent / "interop_peer.py"
 
-RELEASES = ("0.19.0", "0.20.1")
-"""Every release a 0.21 process may meet during an upgrade (CHANGELOG, 0.20.1).
+RELEASES = ("0.19.0", "0.20.1", "0.21.1", "0.22.0")
+"""Every release a 0.23 process may meet during an upgrade (CHANGELOG, 0.20.1).
 
 0.20.0 is not here: it reads only protocol 5, so it refuses this build's
 server as it refuses a 0.19 one, and it was yanked for that (#135).
@@ -188,3 +188,85 @@ class TestThisServer:
         report = pair(sys.executable, python, root)
 
         assert_works(report, client=version, before=SEALED_ROWS + SENT_ROWS)
+
+
+class TestTheMarks:
+    def test_an_older_server_serves_a_log_with_marks_and_leaves_them(
+        self, release, tmp_path
+    ):
+        """A box rolled back after this build deduped a publisher: the older
+        server opens, seals, publishes and serves the log with the table of
+        marks in its buffer, and leaves the table alone, so moving forward
+        again resumes the dedupe where it was."""
+        import asyncio
+
+        import streamcast
+
+        from . import interop_peer
+
+        version, python = release
+        root = tmp_path / "data"
+        indices = (-100, -99)
+        ours = [interop_peer.row(i) for i in indices]
+
+        async def dedupe() -> None:
+            stream = streamcast.Stream.new(
+                "trades", root=root, schema=interop_peer.SCHEMA, exactly_once=True
+            )
+            async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as s:
+                uri = f"ws://127.0.0.1:{s.sockets[0].getsockname()[1]}/trades"
+                async with streamcast.publish(uri, publisher="a") as out:
+                    assert await out.send_many(ours, seq=1) == [1, 2]
+
+            await stream.aclose()
+
+        async def reopened() -> tuple[int, int | None]:
+            stream = streamcast.Stream.new(
+                "trades", root=root, schema=interop_peer.SCHEMA, exactly_once=True
+            )
+            try:
+                writer = stream._writer  # noqa: SLF001
+                assert writer is not None
+                return await writer.probe("a")
+            finally:
+                await stream.aclose()
+
+        asyncio.run(dedupe())
+        report = pair(python, python, root)
+        assert_works(
+            report, client=version, before=[1_790_038_800_000_000 + i for i in indices]
+        )
+        assert asyncio.run(reopened()) == (2, 2)
+
+    def test_an_older_server_refuses_an_exactly_once_publisher(self, release, tmp_path):
+        """Real releases, not a fixture of their refusal: every one before
+        0.23 refuses the unknown `publisher` parameter at the open, before
+        anything is appended, and this client says the broker is too old
+        rather than falling back to at least once."""
+        import asyncio
+
+        import streamcast
+
+        _version, python = release
+        process = subprocess.Popen(
+            [python, "-I", str(PEER), "server", str(tmp_path / "data")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert process.stdout is not None
+            uri = process.stdout.readline().strip()
+
+            async def attempt() -> None:
+                await streamcast.publish(uri, publisher="a")
+
+            with pytest.raises(streamcast.ExactlyOnceUnavailable) as refused:
+                asyncio.run(attempt())
+
+            assert refused.value.why == "broker"
+        finally:
+            process.communicate(timeout=60)
+
+        assert process.returncode == 0

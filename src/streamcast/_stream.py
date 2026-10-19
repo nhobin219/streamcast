@@ -49,6 +49,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
 from streamcast import (
+    _dedupe,
     _filter,
     _ingest,
     _live,
@@ -66,12 +67,15 @@ from streamcast._errors import (
     IngestFailed,
     NotReplayable,
     ProtocolError,
+    SequenceGap,
     StreamRetired,
 )
 from streamcast._limits import (
+    DEDUPE_WINDOW,
     MAX_BACKLOG,
     MAX_IN_FLIGHT,
     MAX_INBOUND,
+    MAX_PUBLISHERS,
     MAX_TAIL,
     PAGE_BYTES,
     PAGE_ROWS,
@@ -80,6 +84,7 @@ from streamcast._protocol import (
     EARLIEST,
     decode,
     decode_publish,
+    decode_publish_seq,
     encode,
     greeting,
     publish_ack,
@@ -199,6 +204,9 @@ class Stream:
         "_queued",
         "_waiting",
         "_check_stored",
+        "_claims",
+        "_closing",
+        "_exactly_once",
     )
 
     def __init__(
@@ -215,6 +223,8 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         retirement: _metadata.Retirement | None = None,
+        exactly_once: bool = False,
+        max_publishers: int = MAX_PUBLISHERS,
     ) -> None:
         """Takes an already-open log and builds nothing. See `Stream.new`.
 
@@ -247,7 +257,19 @@ class Stream:
         it to — see `send`. A stream with a log carries its own shape, so
         passing both is refused: two declarations, one of which would be
         silently ignored.
+
+        `exactly_once` lets publishers that name themselves
+        (`publish(uri, publisher=...)`) have their rows deduped by seq; see
+        `Stream.new`. `max_publishers` bounds the marks cached for them
+        (`MAX_PUBLISHERS`); the table in the log's buffer holds all of them.
         """
+        if exactly_once and log is None:
+            msg = (
+                "exactly_once needs a log: the publishers' marks are committed "
+                "with the rows, in the log's buffer"
+            )
+            raise ValueError(msg)
+
         if log is not None and schema is not None:
             msg = (
                 "a stream with a log takes its schema from the log; pass log= "
@@ -310,11 +332,28 @@ class Stream:
         # A retired stream is read-only: its log is opened for reading, and
         # `_submit` refuses before anything could reach a writer.
         self._retirement = retirement
+        self._exactly_once = exactly_once
         self._writer = (
             None
             if log is None or retirement is not None
-            else Writer(log, self._deliver, self._fail, group=group_commit)  # ty: ignore[invalid-argument-type]
+            else Writer(
+                log,  # ty: ignore[invalid-argument-type]
+                self._deliver,
+                self._fail,
+                group=group_commit,
+                publishers=_dedupe.Publishers(
+                    window=DEDUPE_WINDOW, capacity=max_publishers
+                )
+                if exactly_once
+                else None,
+            )
         )
+        # Which connection holds each exactly-once publisher id: one at a
+        # time, and the newest claim wins (`serve_publisher`).
+        self._claims: dict[str, tuple[object, Peer]] = {}
+        # Superseded connections being closed, held so the tasks are not
+        # collected mid-close.
+        self._closing: set[asyncio.Task[None]] = set()
         # The shape a subscriber is told at subscribe, built once. None for a
         # stream with no log: there are no declared columns to publish. Without
         # `streamcast_ts`, which no frame carries — see `_log.declared`.
@@ -396,6 +435,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
+        exactly_once: bool = False,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -442,6 +482,18 @@ class Stream:
         arithmetic does not bite. The other cost is thread-shaped — each
         replay holds a worker from the `to_thread` pool for its whole scan,
         and that pool is `min(32, cpu + 4)`.
+
+        **`exactly_once=True` lets a publisher that names itself have its
+        rows deduped** (`publish(uri, publisher=...)`, `_dedupe`). Each such
+        publisher numbers its rows 1, 2, 3, … with no holes; a row at or below
+        the last seq the broker appended is answered with its original offset
+        and not appended again, and a seq past the next is refused as a gap.
+        The mark is committed with the rows, in the log's buffer, so it
+        survives a restart. It does NOT survive losing the buffer: a restore
+        from the published table alone forgets every mark (best effort;
+        `docs/SPEC.md` §6b). Like `group_commit` it is passed at each open,
+        not stored, and turning it off and on again leaves the marks valid:
+        plain publishers never touch them.
         """
         # Its own directory for a new stream, or the layout it already has;
         # the published side follows (`_metadata.home`).
@@ -483,6 +535,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            exactly_once=exactly_once,
         )
 
     @classmethod
@@ -498,6 +551,7 @@ class Stream:
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
+        exactly_once: bool = False,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -550,6 +604,13 @@ class Stream:
         starts; `catch_up=True` reads below it through `Stream.snapshot`,
         which reads every log. A consumer that was caught up when the server
         stopped resumes exactly at the seam and loses nothing.
+
+        **Exactly-once publishers' marks are carried across the seam.** Read
+        from the old log before it is retired, kept in a file beside the
+        metadata (`_dedupe.carried`) so a migration that dies after the
+        retire still has them, and written into the new log before the
+        metadata names it current. A publisher's next seq is the same on
+        either side.
         """
         root = _metadata.home(root, name)
         opened = _open_retired(root, name, schema=schema)
@@ -619,9 +680,18 @@ class Stream:
                     s3_options=s3_options,  # ty: ignore[invalid-argument-type]
                     replay_published=replay_published,
                     group_commit=group_commit,
+                    exactly_once=exactly_once,
                 )
 
             retired_schema = old.schema
+            carried = _dedupe.carried(root, name)
+            if not retired and isinstance(old, litelink.WriteHandle):
+                # The marks, read while the log can still be read through a
+                # transaction, and kept on disk before it is retired. Written
+                # even when empty, so a file left by an earlier migration can
+                # never be taken for this log's.
+                _dedupe.stash(carried, old.name, _dedupe.read_all(old))
+
             new_log, sealed = _seal_and_succeed(
                 old,
                 root,
@@ -635,6 +705,17 @@ class Stream:
         finally:
             if old is not None:
                 old.close()
+
+        try:
+            # Before the metadata names the new log current, so no server ever
+            # serves it without them; idempotent, so a re-run writes them again.
+            marks = _dedupe.unstash(carried, current)
+            if marks:
+                _dedupe.write_all(new_log, marks)
+
+        except BaseException:
+            new_log.close()
+            raise
 
         start = new_log.end_offset()
         metadata = metadata.advance(
@@ -677,6 +758,8 @@ class Stream:
             new_log.close()
             raise
 
+        # The new log holds the marks and is current: the copy has done its job.
+        carried.unlink(missing_ok=True)
         return cls(
             name,
             log=new_log,
@@ -687,6 +770,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            exactly_once=exactly_once,
         )
 
     @classmethod
@@ -700,6 +784,7 @@ class Stream:
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
+        exactly_once: bool = False,
         max_replay: int | None = MAX_REPLAY,
         schema: Mapping[str, object] | None = None,
         sort_by: Sequence[str] | None = None,
@@ -754,6 +839,15 @@ class Stream:
         it on its next log at exactly the retired end — no fence, since
         retiring fixed the end — with the retired log's columns and sort and
         `config`. See `Stream.retire`.
+
+        **Exactly-once publishers' marks are best effort here** (`_dedupe`).
+        They live in the log's buffer, so a restore from a WAL replica brings
+        them back consistent with the rows it restored, and the replication
+        lag loses both together. A restore from the published table alone,
+        and a revive, start with none: a publisher's next row is judged
+        against seq 0, and its sender is told so by the greeting's
+        `last_seq`. Real HA is a log on Postgres (#165). `exactly_once` is
+        otherwise as `new` takes it.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
         being reused; nothing stops the machine you are failing over FROM if
@@ -813,6 +907,7 @@ class Stream:
                 max_replay=max_replay,
                 replay_published=replay_published,
                 group_commit=group_commit,
+                exactly_once=exactly_once,
             )
 
         # The shape, exactly as the stream recorded it, unless the caller
@@ -861,6 +956,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            exactly_once=exactly_once,
         )
 
     @classmethod
@@ -1183,6 +1279,7 @@ class Stream:
         max_replay: int | None,
         replay_published: bool,
         group_commit: bool,
+        exactly_once: bool,
     ) -> Stream:
         """A retired stream continued on a new log, where the retired one ended.
 
@@ -1258,6 +1355,7 @@ class Stream:
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             replay_published=replay_published,
             group_commit=group_commit,
+            exactly_once=exactly_once,
         )
 
     def __repr__(self) -> str:
@@ -1753,6 +1851,37 @@ class Stream:
         transaction and its rows commit together, so per-row values would
         imply a precision the commit does not have.
         """
+        now = self._check(batch)
+        if self._writer is not None:
+            return self._commit(batch, now).done
+
+        # Live-only: nothing to commit, so the delivery is this one step.
+        codec = self._codec
+        self._stamp(now)
+        ts = self._wire_ts(now)
+        for row in batch:
+            wire = row if codec.outbound is None else codec.outbound(row)
+            self._fan_out(row, encode(None, ts, wire, self._columns))
+
+        done: asyncio.Future[list[int | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        done.set_result([None] * len(batch))
+        return done
+
+    def _submit_claimed(self, batch: list[Row], publisher: str, seq: int) -> Job:
+        """`_submit` for an exactly-once publisher's frame: rows `seq`, `seq + 1`, …
+
+        NO AWAIT, for the same reason as `_submit`, and its caller checks its
+        claim directly before it. Returns the job, whose `done` resolves to
+        the offsets -- the original ones for rows already in the log, `skip`
+        of them -- or raises `SequenceGap`. The writer decides which, in the
+        commit (`_writer`).
+        """
+        return self._commit(batch, self._check(batch), publisher=publisher, seq=seq)
+
+    def _check(self, batch: list[Row]) -> int:
+        """Refuse `batch` with nothing queued, or return its stamp. No await."""
         if self._retirement is not None:
             raise StreamRetired(
                 self._name, self._retirement.at, self._retirement.end_offset
@@ -1773,27 +1902,15 @@ class Stream:
             for row in batch:
                 self._validate(row)
 
-        if self._writer is not None:
-            return self._commit(batch, now)  # ty: ignore[invalid-return-type]
+        return now
 
-        # Live-only: nothing to commit, so the delivery is this one step.
-        self._stamp(now)
-        ts = self._wire_ts(now)
-        for row in batch:
-            wire = row if codec.outbound is None else codec.outbound(row)
-            self._fan_out(row, encode(None, ts, wire, self._columns))
-
-        done: asyncio.Future[list[int | None]] = (
-            asyncio.get_running_loop().create_future()
-        )
-        done.set_result([None] * len(batch))
-        return done
-
-    def _commit(self, rows: list[Row], now: int) -> asyncio.Future[list[int]]:
-        """Check `rows`, queue them for the writer, and return what resolves
-        to their offsets once they are committed AND delivered. No await:
-        validating and queueing are one step, so two senders queue in the
-        order they called."""
+    def _commit(
+        self, rows: list[Row], now: int, *, publisher: str | None = None, seq: int = 0
+    ) -> Job:
+        """Check `rows`, queue them for the writer, and return the job, whose
+        `done` resolves to their offsets once they are committed AND
+        delivered. No await: validating and queueing are one step, so two
+        senders queue in the order they called."""
         writer = self._writer
         check = self._check_stored
         assert writer is not None  # only called with a log
@@ -1802,36 +1919,55 @@ class Stream:
         for row in stored:
             check(row)
 
-        done: asyncio.Future[list[int]] = asyncio.get_running_loop().create_future()
-        writer.submit(Job(rows=rows, stored=stored, now=now, done=done))
+        done: asyncio.Future[list[int | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        job = Job(
+            rows=rows, stored=stored, now=now, done=done, publisher=publisher, seq=seq
+        )
+        writer.submit(job)
         self._queued += len(rows)
-        return done
+        return job
 
     def _deliver(self, jobs: list[Job], offsets: list[int]) -> None:
         """Commits, back from the writer in commit order: advance the frontier
         and fan out. NO AWAIT — see the module docstring.
 
         One call per commit, which may be several `send`s grouped into one
-        transaction; each job's rows are adjacent in `offsets`, in queue order.
+        transaction; each job's appended rows are adjacent in `offsets`, in
+        queue order. An exactly-once job may have appended fewer than it
+        carried, or none: its leading `skip` rows were already in the log
+        and are answered with their original offsets, unbroadcast, and a
+        job the writer found a gap in fails with it.
         """
         codec = self._codec
         start = 0
+        drained = 0
         for job in jobs:
-            mine = offsets[start : start + len(job.rows)]
-            start += len(job.rows)
-            self._end_offset = mine[-1] + 1
-            self._stamp(job.now)
-            ts = self._wire_ts(job.now)
-            for offset, row in zip(mine, job.rows, strict=True):
-                wire = row if codec.outbound is None else codec.outbound(row)
-                self._fan_out(row, encode(offset, ts, wire, self._columns))
+            drained += len(job.rows)
+            if job.gap is not None:
+                if not job.done.done():
+                    job.done.set_exception(job.gap)
+
+                continue
+
+            fresh = job.rows[job.skip :] if job.skip else job.rows
+            mine = offsets[start : start + len(fresh)]
+            start += len(fresh)
+            if mine:
+                self._end_offset = mine[-1] + 1
+                self._stamp(job.now)
+                ts = self._wire_ts(job.now)
+                for offset, row in zip(mine, fresh, strict=True):
+                    wire = row if codec.outbound is None else codec.outbound(row)
+                    self._fan_out(row, encode(offset, ts, wire, self._columns))
 
             # A sender that gave up waiting has still had its rows committed
             # and delivered; there is just no one to tell.
             if not job.done.done():
-                job.done.set_result(mine)
+                job.done.set_result([*job.prior, *mine] if job.skip else list(mine))
 
-        self._drained(start)
+        self._drained(drained)
 
     def _fail(self, jobs: list[Job], exc: BaseException) -> None:
         """A commit that raised: nothing landed, so nothing is delivered."""
@@ -1952,7 +2088,9 @@ class Stream:
 
     # -- subscribe ---------------------------------------------------------
 
-    async def serve_publisher(self, connection: Peer) -> None:
+    async def serve_publisher(
+        self, connection: Peer, publisher: str | None = None
+    ) -> None:
         """Take rows from a remote publisher and commit them as this process.
 
         **The whole point is that this adds no authority.** A publisher hands
@@ -1988,6 +2126,20 @@ class Stream:
         **A retired stream refuses publishers**, with 4410 (`Close.RETIRED`):
         its log is open read-only and takes nothing. The stream decides, from
         what it is; subscribers still read its history.
+
+        **`publisher` makes the connection exactly-once** (`?publisher=`),
+        on a stream served with `exactly_once=True`; any other stream refuses
+        it with 4412 rather than taking its rows at least once. Its frames
+        carry a seq (`[seq, row]`, `[seq, [rows]]`), and the stream's writer
+        judges each against the publisher's mark in the commit (`_dedupe`).
+
+        **One live connection per publisher id.** A new claim takes the id at
+        once, so the older connection queues nothing after it -- its handler
+        checks the claim directly before `_submit_claimed`, with no await
+        between -- and the older connection is closed with 4409. The mark the
+        greeting reports is asked of the writer after the claim moved, so it
+        includes every row the older connection queued: a sender that deletes
+        its rows at or below `last_seq` never resends one that landed.
         """
         if self._retirement is not None:
             await connection.close(
@@ -2000,6 +2152,64 @@ class Stream:
             )
             return
 
+        token: object | None = None
+        mark: dict[str, object] | None = None
+        if publisher is not None:
+            if not self._exactly_once or self._writer is None:
+                await connection.close(
+                    Close.EXACTLY_ONCE_UNAVAILABLE,
+                    refusal("exactly_once_unavailable", why="stream"),
+                )
+                return
+
+            token = object()
+            previous = self._claims.get(publisher)
+            self._claims[publisher] = (token, connection)
+            # No await since the claim moved: the probe queues behind every
+            # job the older connection could still queue, which is none.
+            try:
+                probe = self._writer.probe(publisher)
+            except BaseException:
+                self._release(publisher, token)
+                raise
+
+            if previous is not None:
+                closing = asyncio.create_task(
+                    previous[1].close(Close.SUPERSEDED, refusal("superseded"))
+                )
+                self._closing.add(closing)
+                closing.add_done_callback(self._closing.discard)
+
+            try:
+                last_seq, last_offset = await probe
+            except BaseException:
+                self._release(publisher, token)
+                raise
+
+            mark = {"id": publisher, "last_seq": last_seq, "last_offset": last_offset}
+
+        try:
+            await self._serve_publisher(connection, publisher, token, mark)
+        finally:
+            if publisher is not None and token is not None:
+                self._release(publisher, token)
+
+    def _holds(self, publisher: str, token: object) -> bool:
+        """Whether `token`'s connection still holds `publisher`. No await."""
+        claim = self._claims.get(publisher)
+        return claim is not None and claim[0] is token
+
+    def _release(self, publisher: str, token: object) -> None:
+        if self._holds(publisher, token):
+            del self._claims[publisher]
+
+    async def _serve_publisher(
+        self,
+        connection: Peer,
+        publisher: str | None,
+        token: object | None,
+        mark: dict[str, object] | None,
+    ) -> None:
         await connection.send(
             greeting(
                 stream=self._name,
@@ -2011,6 +2221,7 @@ class Stream:
                 metadata=self._plain_uri,
                 metadata_hint=self.metadata_uri,
                 stream_id=self._stream_id,
+                publisher=mark,
             )
         )
 
@@ -2022,14 +2233,18 @@ class Stream:
         # each. The writer commits in queue order, so replies leave in the
         # order frames arrived, and a refusal takes its place in that line.
         # Bounded: a client that ignores its own window is held at the socket.
-        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None] = (
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | Job | str | None] = (
             asyncio.Queue(maxsize=self._max_in_flight)
         )
         replying = asyncio.create_task(self._reply(connection, replies))
         try:
             async for frame in connection:
+                seq = 0
                 try:
-                    rows = decode_publish(frame)
+                    if publisher is None:
+                        rows = decode_publish(frame)
+                    else:
+                        seq, rows = decode_publish_seq(frame)
                 except ProtocolError as exc:
                     await replies.put(publish_error("bad_frame", detail=str(exc)))
                     continue
@@ -2051,7 +2266,15 @@ class Stream:
                     # Room first: at `max_inbound` this stops reading the
                     # socket, and TCP holds the publisher back.
                     await self._room(len(batch))
-                    queued = self._submit(batch) if batch else None
+                    if publisher is not None and token is not None:
+                        if not self._holds(publisher, token):
+                            # Superseded while this frame waited for room:
+                            # nothing more from this connection is queued.
+                            break
+
+                        queued = self._submit_claimed(batch, publisher, seq)
+                    else:
+                        queued = self._submit(batch) if batch else None
 
                 except (ValueError, TypeError) as exc:
                     # litelink names the column and what it found. Passed
@@ -2072,12 +2295,23 @@ class Stream:
     @staticmethod
     async def _reply(
         connection: Peer,
-        replies: asyncio.Queue[asyncio.Future[list[int | None]] | str | None],
+        replies: asyncio.Queue[asyncio.Future[list[int | None]] | Job | str | None],
     ) -> None:
         """Send each queued frame's reply, in frame order, until told to stop."""
         while (item := await replies.get()) is not None:
             if isinstance(item, str):
                 reply = item
+            elif isinstance(item, Job):
+                try:
+                    offsets = await item.done
+                except SequenceGap as gap:
+                    # Nothing of the frame was appended, and the connection
+                    # stays open: the publisher resends from `expected`.
+                    reply = publish_error("gap", expected=gap.expected, got=gap.got)
+                except Exception as exc:  # noqa: BLE001 — answered, not raised
+                    reply = publish_error("commit_failed", detail=str(exc))
+                else:
+                    reply = publish_ack(offsets, dup=item.skip)
             else:
                 try:
                     reply = publish_ack(await item)

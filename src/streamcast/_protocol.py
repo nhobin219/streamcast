@@ -52,7 +52,8 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 import msgspec
 
 from streamcast import _filter
-from streamcast._errors import ProtocolError, Rejected
+from streamcast._dedupe import check_publisher_id
+from streamcast._errors import ProtocolError, Rejected, SequenceGap
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -101,23 +102,29 @@ negative offset is refused rather than being given a second meaning.
 
 
 class Publish:
-    """The sentinel `parse_subscribe` returns for `?publish`.
+    """What `parse_subscribe` returns for `?publish`, where an offset would be.
 
     Its own TYPE rather than a string or a flag in the tuple, so a caller
     that forgets to handle it gets a type error rather than treating a
     publisher as a subscriber asking for offset `"publish"`. Named rather than
     private because narrowing needs `isinstance`, and an identity check
     against a `Final` instance narrows nothing.
+
+    `publisher` is the exactly-once publisher id from `?publisher=`, or None
+    for a plain publisher.
     """
 
-    __slots__ = ()
+    __slots__ = ("publisher",)
+
+    def __init__(self, publisher: str | None = None) -> None:
+        self.publisher = publisher
 
     def __repr__(self) -> str:  # pragma: no cover — diagnostics only
-        return "PUBLISH"
+        return "PUBLISH" if self.publisher is None else f"PUBLISH({self.publisher!r})"
 
 
 PUBLISH: Final = Publish()
-"""What a `?publish` request resolves to, where an offset would otherwise be."""
+"""What a plain `?publish` request resolves to."""
 
 
 def encode(
@@ -251,7 +258,7 @@ class Greeting:
 
     **With `where` set this is the offset WINDOW, not a count.** Unfiltered,
     `end - start` is exactly how many messages arrive before the live queue
-    begins, and `docs/SPEC.md` §6b's recovery loop reads precisely that many.
+    begins, and a loop reading a replay by count reads precisely that many.
     Filtered, the server cannot know the count without scanning first, so the
     window bounds what it will read and the number delivered is at most that.
     A loop that must terminate on a count wants an unfiltered subscription.
@@ -324,6 +331,24 @@ class Greeting:
     a greeting without the field, from a server that never grouped.
     """
 
+    publisher: PublisherMark | None = None
+    """On an exactly-once publisher's greeting, where the broker has it.
+
+    `last_seq` is the last seq the broker appended for this publisher (0 for
+    none) and `last_offset` the offset that row got (None for none). The next
+    row to send is `last_seq + 1`; a sender deletes what it holds at or below
+    `last_seq`, which landed. None on every other greeting.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PublisherMark:
+    """An exactly-once publisher's place, as its greeting reports it."""
+
+    id: str
+    last_seq: int
+    last_offset: int | None
+
 
 def greeting(
     *,
@@ -337,6 +362,7 @@ def greeting(
     stream_id: str | None = None,
     where: dict[str, object] | None = None,
     metadata_hint: str | None = None,
+    publisher: dict[str, object] | None = None,
 ) -> str:
     """The greeting, as the JSON that goes on the wire.
 
@@ -350,22 +376,28 @@ def greeting(
     a subscriber confirm the server understood the predicate rather than
     assume it, and it is the field that says `replay` is an UPPER BOUND on
     this subscription rather than a count — see `Greeting.where`.
+
+    `publisher` is `{id, last_seq, last_offset}` on an exactly-once
+    publisher's greeting, and the key is absent from every other: a greeting
+    nobody asked a new field of is byte for byte what it was.
     """
-    return _ENCODER.encode(
-        {
-            "streamcast": VERSION,
-            "stream": stream,
-            "end_offset": end_offset,
-            "replay": list(replay) if replay is not None else None,
-            "durable": durable,
-            "group_commit": group_commit,
-            "schema": schema,
-            "metadata": metadata,
-            "metadata_hint": metadata_hint,
-            "stream_id": stream_id,
-            "where": where,
-        }
-    ).decode()
+    fields: dict[str, object] = {
+        "streamcast": VERSION,
+        "stream": stream,
+        "end_offset": end_offset,
+        "replay": list(replay) if replay is not None else None,
+        "durable": durable,
+        "group_commit": group_commit,
+        "schema": schema,
+        "metadata": metadata,
+        "metadata_hint": metadata_hint,
+        "stream_id": stream_id,
+        "where": where,
+    }
+    if publisher is not None:
+        fields["publisher"] = publisher
+
+    return _ENCODER.encode(fields).decode()
 
 
 def parse_greeting(frame: str | bytes) -> Greeting:
@@ -419,6 +451,19 @@ def parse_greeting(frame: str | bytes) -> Greeting:
         where=raw_where if isinstance(raw_where := fields.get("where"), dict) else None,
         durable=bool(fields.get("durable", False)),
         group_commit=bool(fields.get("group_commit", False)),
+        publisher=_mark(fields.get("publisher")),
+    )
+
+
+def _mark(raw: object) -> PublisherMark | None:
+    if not isinstance(raw, dict):
+        return None
+
+    last_offset = raw.get("last_offset")
+    return PublisherMark(
+        id=str(raw.get("id", "")),
+        last_seq=int(raw.get("last_seq", 0)),
+        last_offset=None if last_offset is None else int(last_offset),
     )
 
 
@@ -461,13 +506,59 @@ def encode_publish(
     return _ENCODER.encode(payload)
 
 
-def publish_ack(offsets: list[int | None]) -> str:
+def decode_publish_seq(
+    frame: str | bytes,
+) -> tuple[int, dict[str, object] | list[dict[str, object]]]:
+    """An exactly-once publish frame: `[seq, row]` or `[seq, [rows]]`.
+
+    A group's rows take `seq`, `seq + 1`, … in order. Seqs start at 1, so a
+    seq below it is refused here as a malformed frame rather than judged.
+    """
+    try:
+        payload = _DECODER.decode(frame)
+    except msgspec.DecodeError as exc:
+        msg = f"publish frame is not JSON: {exc}"
+        raise ProtocolError(msg) from None
+
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 2  # noqa: PLR2004 — a pair
+        or isinstance(payload[0], bool)
+        or not isinstance(payload[0], int)
+    ):
+        msg = "an exactly-once publish frame is [seq, row] or [seq, [rows]]"
+        raise ProtocolError(msg)
+
+    seq, rows = payload
+    if seq < 1:
+        msg = f"seq={seq}; an exactly-once publisher's seqs start at 1"
+        raise ProtocolError(msg)
+
+    return seq, decode_publish(_ENCODER.encode(rows))
+
+
+def encode_publish_seq(
+    seq: int, payload: dict[str, object] | list[dict[str, object]]
+) -> bytes:
+    """An exactly-once publish frame: `[seq, row]` or `[seq, [rows]]`."""
+    return _ENCODER.encode([seq, payload])
+
+
+def publish_ack(offsets: list[int | None], dup: int = 0) -> str:
     """What the server says once the rows are durable.
 
     The offsets assigned, in the order the rows were sent — a list even for a
     single row, so a publisher parses one shape. `null` on a stream with no
     log, for the same reason a message frame carries `null` there.
+
+    `dup` is how many leading rows of an exactly-once frame were already in
+    the log: their offsets are the original ones, or `null` where the broker
+    no longer remembers them (`_dedupe`). Absent when there were none, so a
+    plain publisher's reply is unchanged.
     """
+    if dup:
+        return _ENCODER.encode({"ok": offsets, "dup": dup}).decode()
+
     return _ENCODER.encode({"ok": offsets}).decode()
 
 
@@ -496,6 +587,9 @@ def parse_publish_reply(frame: str | bytes) -> list[int | None]:
         raise ProtocolError(msg)
 
     if "error" in payload:
+        if payload["error"] == "gap":
+            raise SequenceGap(int(payload["expected"]), int(payload["got"]))
+
         detail = payload.get("detail")
         raise Rejected(str(detail) if detail else str(payload["error"]))
 
@@ -581,7 +675,7 @@ def parse_subscribe(
     name = split.path.lstrip("/")
     query = dict(parse_qsl(split.query, keep_blank_values=True))
 
-    unknown = set(query) - {"offset", "publish", "where"}
+    unknown = set(query) - {"offset", "publish", "publisher", "where"}
     if unknown:
         msg = f"unknown query parameter(s): {', '.join(sorted(unknown))}"
         raise ValueError(msg)
@@ -606,7 +700,14 @@ def parse_subscribe(
             msg = "publish takes no where=; a publisher receives nothing"
             raise ValueError(msg)
 
+        if "publisher" in query:
+            return name, Publish(check_publisher_id(query["publisher"])), None
+
         return name, PUBLISH, None
+
+    if "publisher" in query:
+        msg = "publisher= names an exactly-once publisher; it needs publish"
+        raise ValueError(msg)
 
     raw = query.get("offset")
     if raw is None:
@@ -629,21 +730,26 @@ def parse_subscribe(
     return name, offset, where
 
 
-def publish_path(uri: str) -> str:
+def publish_path(uri: str, publisher: str | None = None) -> str:
     """The stream's URI, as the URL a publisher actually opens.
 
     `?publish` is added here rather than asked of the caller, so one address
     serves both ends: `publish(uri)` and `connect(uri)` take the same string.
+    `publisher` adds `&publisher=<id>`, percent-encoded: the opt-in to
+    exactly-once. A query parameter rather than a first frame, because a
+    server from before the feature refuses an unknown parameter at the open
+    (4400) with nothing appended, where it would read a first frame as a row.
     """
     split = urlsplit(uri)
-    if any(
-        key == "publish" for key, _ in parse_qsl(split.query, keep_blank_values=True)
-    ):
-        return uri
+    keys = {key for key, _ in parse_qsl(split.query, keep_blank_values=True)}
+    parts = [split.query] if split.query else []
+    if "publish" not in keys:
+        parts.append("publish")
 
-    query = f"{split.query}&publish" if split.query else "publish"
+    if publisher is not None and "publisher" not in keys:
+        parts.append(f"publisher={quote(check_publisher_id(publisher), safe='')}")
 
-    return urlunsplit(split._replace(query=query))
+    return urlunsplit(split._replace(query="&".join(parts)))
 
 
 def stream_name(stream: str) -> str:
@@ -682,8 +788,11 @@ __all__ = [
     "EARLIEST",
     "VERSION",
     "PUBLISH",
+    "PublisherMark",
     "decode_publish",
+    "decode_publish_seq",
     "encode_publish",
+    "encode_publish_seq",
     "publish_ack",
     "publish_error",
     "publish_path",

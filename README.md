@@ -605,44 +605,35 @@ rows to the process that already owns the handle resolves the concurrency where 
 actually be resolved: any number of publishers, one writer. Offsets stay contiguous and a
 batch stays one commit even with publishers racing.
 
-> ⚠️ **Publishing is at-least-once under retry.** A row is durable when `send` returns. If
-> the connection drops before the reply arrives, the publisher cannot tell whether the
-> append happened — retrying may duplicate the row, not retrying may lose it. streamcast
-> does not resolve that ambiguity; a publisher that cannot tolerate a duplicate carries its
-> own key in the row and deduplicates downstream, which is the only place it is decidable.
-> The fix is small: carry a publisher key and a per-publisher sequence as columns, and on
-> reconnect replay from the offset you were last acked for, filtering in memory. The offset
-> bounds the read; the key identifies your rows in it. [`SPEC.md`](docs/SPEC.md) §6b has it.
+> ⚠️ **A plain publisher is at-least-once under retry.** A row is durable when `send`
+> returns. If the connection drops before the reply arrives, the publisher cannot tell
+> whether the append happened — retrying may duplicate the row, not retrying may lose it.
+> A publisher that cannot tolerate a duplicate names itself, below.
 
-#### Recovering a producer
+#### Exactly-once publishing
 
-`cursor=` records the offset this publisher was last acknowledged for, and `cursor_uri=`
-ships it to object storage so a producer can resume on another box. The same two keywords
-a consumer takes, doing the same job at the other end of the stream — and distinct from
-[recovering a server](#recovering-a-server), which moves the log itself.
+On a stream served with `exactly_once=True`, a publisher that names itself has its rows
+deduped by the broker:
 
 ```python
-async with streamcast.publish(
-    uri, cursor=".trades-producer.offset",
-    cursor_uri="s3://streamcast/producer1/cursor.offset",
-) as producer:
-    start = producer.resumed_from          # where this publisher got to, or None
+stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA, exactly_once=True)
+
+async with streamcast.publish(uri, publisher="enricher") as out:
+    seq = out.info.publisher.last_seq + 1   # where the broker has this publisher
+    await out.send(row, seq=seq)            # rows 1, 2, 3, … with no holes
 ```
 
-**It does not resume by itself, and that is the difference from a consumer.** A consumer
-cursor is enough on its own: the server replays from it. A producer cursor says where this
-publisher got to, not what it should send next — that is its own outbox, or a position in
-whatever it reads from, and the library cannot know either. So it is reported and you act
-on it.
+The publisher id names one ordered sequence. The broker keeps the last seq it appended for
+it, committed in the same transaction as the rows, so a resent row is answered with its
+original offset instead of being appended twice, and a seq past the next raises
+`SequenceGap` with nothing appended. After a reconnect the greeting says where the broker
+has the publisher: drop what you hold at or below `last_seq` and send from the next. A
+stream not served exactly-once, and a server from before 0.23, refuse the publisher
+(`ExactlyOnceUnavailable`) rather than taking its rows at least once.
 
-Acting on it is the replay in [`SPEC.md`](docs/SPEC.md) §6b: subscribe from
-`resumed_from` **inclusive**, and the first row is this publisher's own last acknowledged
-one, so the sequence it carried comes back out of the log. That is why one integer on disk
-is enough.
-
-Saves are throttled to once a second and settled on a clean exit; `producer.commit()`
-forces one, or `commit(offset)` states what you consider settled. A cursor that lags only
-widens the replay — a cursor that leads would skip rows and duplicate them.
+**Best effort across a lost buffer**: the marks live in the log's buffer, so they survive a
+restart and a migration, come back with a WAL-replica restore, and are lost by a restore
+from the published table alone. [`SPEC.md`](docs/SPEC.md) §6b has the whole of it.
 
 ### Consumer
 
@@ -683,8 +674,7 @@ here, and `offset + 1` with the same `where=` picks up exactly where it left off
 One consequence worth knowing: `replay` in the greeting stops being a count. Unfiltered,
 `end - start` is exactly how many messages arrive before live begins; filtered, it is the
 offset window and the number delivered is at most that. A loop that must terminate on a
-count — the publisher recovery in [`docs/SPEC.md`](docs/SPEC.md) §6b — wants an unfiltered
-subscription.
+count wants an unfiltered subscription.
 
 ### Resuming
 

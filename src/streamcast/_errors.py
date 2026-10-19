@@ -42,6 +42,15 @@ class Close(IntEnum):
     """The stream is retired: finished, and taking no rows. Sent to a
     publisher; a subscriber still reads its history. See `StreamRetired`."""
 
+    SUPERSEDED = 4409
+    """Another connection claimed this exactly-once publisher id. Sent to the
+    older connection, whose rows queued before the claim all commit. See
+    `Superseded`."""
+
+    EXACTLY_ONCE_UNAVAILABLE = 4412
+    """A publisher asked for exactly-once and this stream does not offer it:
+    `why` is `stream`. See `ExactlyOnceUnavailable`."""
+
     NOT_REPLAYABLE = 4416
     """The requested offset cannot be served. `why` says which of the five
     reasons it is — see `NotReplayable`."""
@@ -283,6 +292,66 @@ class Rejected(StreamcastError):
     """
 
 
+class SequenceGap(StreamcastError):
+    """An exactly-once publisher sent a seq above the next one the broker
+    expects: rows between were never sent, or were lost on the way.
+
+    **Not a `Rejected`**, deliberately. A sender that drops a rejected row
+    and carries on must not treat a gap the same way: dropping the rows in
+    the gap would be silent loss. Nothing of the frame was appended, and the
+    connection stays open, so the missing rows can be sent from `expected`.
+    """
+
+    def __init__(self, expected: int, got: int) -> None:
+        self.expected = expected
+        self.got = got
+        super().__init__(
+            f"sequence gap: the broker expects seq {expected} next and got {got}; "
+            f"send from {expected}"
+        )
+
+
+class Superseded(StreamcastError):
+    """Another connection claimed this publisher id (4409).
+
+    One live connection per publisher id and stream: a publisher that
+    reconnects claims the id, and the broker ends the older connection after
+    everything it had queued has committed. Seen by the older connection, it
+    usually means two processes share an id, and an id names ONE ordered
+    sequence.
+    """
+
+    def __init__(self, stream: str, publisher: str | None = None) -> None:
+        self.stream = stream
+        self.publisher = publisher
+        who = f" {publisher!r}" if publisher else ""
+        super().__init__(
+            f"another connection claimed publisher{who} on stream {stream!r}"
+        )
+
+
+class ExactlyOnceUnavailable(StreamcastError):
+    """A publisher asked for exactly-once (`publisher=`) and cannot have it.
+
+    `why` is `stream` for a stream not served with `exactly_once=True`, or
+    `broker` for a server from before the feature, which refuses the
+    `publisher` query parameter. Never fallen back from silently: a publisher
+    that asked for exactly-once and got at-least-once would duplicate rows
+    without knowing it.
+    """
+
+    def __init__(self, stream: str, why: str) -> None:
+        self.stream = stream
+        self.why = why
+        reason = {
+            "stream": "the stream is not served with exactly_once=True",
+            "broker": "the server predates exactly-once publishing (0.23.0)",
+        }.get(why, why or "the server gave no reason")
+        super().__init__(
+            f"exactly-once publishing to {stream!r} is unavailable: {reason}"
+        )
+
+
 class TooSlow(StreamcastError):
     """The server dropped this subscriber for falling too far behind.
 
@@ -307,12 +376,15 @@ class TooSlow(StreamcastError):
 
 __all__ = [
     "Close",
+    "ExactlyOnceUnavailable",
     "IngestFailed",
     "NotReplayable",
     "ProtocolError",
     "Rejected",
+    "SequenceGap",
     "StreamNotFound",
     "StreamRetired",
     "StreamcastError",
+    "Superseded",
     "TooSlow",
 ]

@@ -56,11 +56,13 @@ from streamcast._codec import from_greeting
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
+    ExactlyOnceUnavailable,
     NotReplayable,
     ProtocolError,
     StreamcastError,
     StreamNotFound,
     StreamRetired,
+    Superseded,
     TooSlow,
 )
 from streamcast._limits import PAGE_BYTES, PAGE_ROWS, pages
@@ -155,6 +157,14 @@ def _refusal(
             at if isinstance(at, int) else None,
             end if isinstance(end, int) else None,
         )
+
+    if close.code == Close.SUPERSEDED:
+        return Superseded(stream)
+
+    if close.code == Close.EXACTLY_ONCE_UNAVAILABLE:
+        why = fields.get("why")
+
+        return ExactlyOnceUnavailable(stream, why if isinstance(why, str) else "")
 
     if close.code == Close.TOO_SLOW:
         backlog = fields.get("backlog")

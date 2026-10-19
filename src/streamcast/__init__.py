@@ -110,19 +110,28 @@ from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
 from streamcast._errors import (
     Close,
+    ExactlyOnceUnavailable,
     IngestFailed,
     NotReplayable,
     ProtocolError,
     Rejected,
+    SequenceGap,
     StreamcastError,
     StreamNotFound,
     StreamRetired,
+    Superseded,
     TooSlow,
 )
-from streamcast._limits import MAX_BACKLOG, PAGE_BYTES, PAGE_ROWS
+from streamcast._limits import (
+    DEDUPE_WINDOW,
+    MAX_BACKLOG,
+    MAX_PUBLISHERS,
+    PAGE_BYTES,
+    PAGE_ROWS,
+)
 from streamcast._live import Live
 from streamcast._maintain import Maintain
-from streamcast._protocol import EARLIEST, Greeting
+from streamcast._protocol import EARLIEST, Greeting, PublisherMark
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
@@ -136,9 +145,11 @@ except PackageNotFoundError:  # a source tree that was never installed
     __version__ = "0.0.0"
 
 __all__ = [
+    "DEDUPE_WINDOW",
     "EARLIEST",
     "LATEST",
     "MAX_BACKLOG",
+    "MAX_PUBLISHERS",
     "MAX_REPLAY",
     "PAGE_BYTES",
     "PAGE_ROWS",
@@ -149,6 +160,7 @@ __all__ = [
     "SnapshotUnavailable",
     "Close",
     "Cursor",
+    "ExactlyOnceUnavailable",
     "Greeting",
     "IngestFailed",
     "Maintain",
@@ -158,12 +170,15 @@ __all__ = [
     "publish",
     "Rejected",
     "Publication",
+    "PublisherMark",
+    "SequenceGap",
     "Stats",
     "Stream",
     "StreamNotFound",
     "StreamRetired",
     "StreamcastError",
     "Subscription",
+    "Superseded",
     "TooSlow",
     "__version__",
     "connect",

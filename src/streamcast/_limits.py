@@ -173,10 +173,32 @@ def _bound(
         )
 
 
+DEDUPE_WINDOW: Final = 64
+"""Committed ranges an exactly-once stream remembers per publisher, in memory.
+
+What answers a resent duplicate below the publisher's last seq with the
+offset it was first appended at (`_dedupe`). Equal to `MAX_IN_FLIGHT`: a
+connection that drops leaves at most that many frames committed and not yet
+acknowledged, so a resend of all of them finds every one. About 1.5 KiB per
+cached publisher. Not stored: after a restart a duplicate below the last seq
+is answered with `null`.
+"""
+
+MAX_PUBLISHERS: Final = 4_096
+"""Publishers per exactly-once stream whose marks the broker caches.
+
+Past it the least recently active is evicted and re-read from the table by
+key at its next row, so the bound costs a lookup, never correctness: the
+table in the log's buffer is the truth. About 2 KiB each with its ranges, so
+about 8 MiB per stream at the default.
+"""
+
 __all__ = [
+    "DEDUPE_WINDOW",
     "MAX_BACKLOG",
     "MAX_INBOUND",
     "MAX_IN_FLIGHT",
+    "MAX_PUBLISHERS",
     "MAX_TAIL",
     "PAGE_BYTES",
     "PAGE_ROWS",

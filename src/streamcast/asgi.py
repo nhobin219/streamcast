@@ -448,7 +448,7 @@ class _Mounted:
             return
 
         if isinstance(requested, Publish):
-            await stream.serve_publisher(peer)
+            await stream.serve_publisher(peer, requested.publisher)
             return
 
         try:
