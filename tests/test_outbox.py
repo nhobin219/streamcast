@@ -362,4 +362,7 @@ class TestLandedWaiters:
         with pytest.raises(RuntimeError, match="closed before"):
             await waiter
 
+        with pytest.raises(RuntimeError, match="is closed"):
+            await out.landed(1)  # after close: raised, not left waiting
+
         await store.close()

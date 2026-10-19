@@ -427,6 +427,10 @@ class Outbox:
         where that is no longer known (acknowledged before this process, or
         long enough ago to have left `LANDED_KEPT`)."""
         self._raise_failure()
+        if self._closed:
+            msg = "the outbox is closed: nothing will acknowledge this seq"
+            raise RuntimeError(msg)
+
         if seq in self._landed:
             return self._landed[seq]
 
