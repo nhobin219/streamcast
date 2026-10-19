@@ -655,7 +655,9 @@ async with (
 The inbox row's delete, the caller's writes and the outbox row commit
 together; a sender ships the outbox over an exactly-once publication, and a
 receiver keeps the inbox filled up to a bounded window (`inbox_max_bytes`),
-leaving the backlog in the log. [`SPEC.md`](docs/SPEC.md) §6c.
+leaving the backlog in the log. [`SPEC.md`](docs/SPEC.md) §6c, and
+[`examples/outbox_inbox/demo.py`](examples/outbox_inbox/demo.py) runs it end to end
+through two crashes.
 
 ### Consumer
 
