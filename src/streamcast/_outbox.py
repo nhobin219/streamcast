@@ -256,6 +256,20 @@ async def drop(tx: Transaction, stream: str, publisher: str, seq: int) -> None:
     one in ascending order -- each target seq is free by then -- and take one
     off `next_seq`, so the seqs the broker sees stay gapless."""
     dialect = tx.store.dialect
+    # The counter FIRST: it takes the publisher's row lock, so an enqueue in
+    # another transaction that has taken seqs commits before this reads the
+    # rows above `seq`, and its rows are renumbered with the rest. Taken
+    # last, its row would be missed, and its seq left both pending and the
+    # next to be handed out.
+    await tx.execute(
+        sql(
+            dialect,
+            "UPDATE streamcast_publisher_state SET streamcast_next_seq = "
+            "streamcast_next_seq - 1 WHERE streamcast_stream = ? AND "
+            "streamcast_publisher_id = ?",
+        ),
+        (stream, publisher),
+    )
     await tx.execute(
         sql(
             dialect,
@@ -283,16 +297,6 @@ async def drop(tx: Transaction, stream: str, publisher: str, seq: int) -> None:
             ),
             (int(old) - 1, stream, publisher, int(old)),
         )
-
-    await tx.execute(
-        sql(
-            dialect,
-            "UPDATE streamcast_publisher_state SET streamcast_next_seq = "
-            "streamcast_next_seq - 1 WHERE streamcast_stream = ? AND "
-            "streamcast_publisher_id = ?",
-        ),
-        (stream, publisher),
-    )
 
 
 def _text(row: Mapping[str, Any]) -> str:
@@ -472,6 +476,13 @@ class Outbox:
             with contextlib.suppress(BaseException):
                 await self._task
 
+        closed = RuntimeError("the outbox closed before this seq was acknowledged")
+        for waiters in self._waiting.values():
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.set_exception(closed)
+
+        self._waiting.clear()
         self._raise_failure()
 
     def _raise_failure(self) -> None:
@@ -550,6 +561,13 @@ class Outbox:
                     out.info.stream_id or "",
                     mark.last_seq,
                 )
+
+            # Rows the greeting says landed were deleted unsent: their offsets
+            # are not known here, and their waiters are told so.
+            for seq in [s for s in self._waiting if s <= mark.last_seq]:
+                for waiter in self._waiting.pop(seq):
+                    if not waiter.done():
+                        waiter.set_result(None)
 
             if self._outage:
                 self._outage = False

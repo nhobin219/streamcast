@@ -66,7 +66,7 @@ import msgspec
 from websockets.exceptions import ConnectionClosed
 
 from streamcast._client import _arrived, connect
-from streamcast._errors import StreamcastError, StreamMismatch, TooSlow
+from streamcast._errors import StreamMismatch, TooSlow
 from streamcast._limits import BACKOFF, INBOX_MAX_BYTES, INBOX_RESUME_AT, POLL_EVERY
 from streamcast._protocol import stream_name
 from streamcast._store import sql
@@ -416,21 +416,24 @@ class Inbox:
                 if full:
                     self._paused = True
 
-        except StreamcastError as exc:
+        except Exception as exc:  # noqa: BLE001 — surfaced by `recv`
             self._failure = exc
             self._arrived.set()
-        except asyncio.CancelledError:
+        finally:
+            # Every way out, a failure included: a subscription left open
+            # and unread holds broker memory until `max_backlog` drops it.
             if sub is not None:
                 with contextlib.suppress(Exception):
                     await sub.close()
 
-            raise
-        except Exception as exc:  # noqa: BLE001 — surfaced by `recv`
-            self._failure = exc
-            self._arrived.set()
-
     async def _reconnect(self) -> Subscription:
-        assert self._last_received is not None
+        # From the table, not memory: another worker's receiver on this
+        # subscriber id may have received further.
+        async with self._store.transaction() as tx:
+            state = await self._state(tx)
+
+        assert state is not None  # recorded at `_start`
+        self._last_received = max(state[0], self._last_received or state[0])
         sub = await self._connect(self._last_received + 1)
         if sub.info.stream_id != self._stream_id:
             await sub.close()
@@ -478,8 +481,11 @@ class Inbox:
                     break
 
             if take:
-                await self._insert(take)
-                self._rows, self._bytes = rows, size
+                # Added, not assigned: processing may have deleted rows while
+                # the insert waited for the store.
+                added, grew = await self._insert(take)
+                self._rows += added
+                self._bytes += grew
                 self._arrived.set()
 
             if full:
@@ -510,12 +516,37 @@ class Inbox:
 
         self._paused = False
 
-    async def _insert(self, take: list[tuple[int, int | None, str]]) -> None:
+    async def _insert(self, take: list[tuple[int, int | None, str]]) -> tuple[int, int]:
+        """Insert what is above the TABLE's received position, and move it;
+        `(rows, bytes)` actually inserted.
+
+        Judged against the state row, read in this transaction and locked
+        (Postgres) or serialised (SQLite), never against this receiver's
+        memory: several workers on one subscriber id each run a receiver, and
+        one that lags would otherwise insert again rows another worker has
+        already received, processed and deleted -- `ON CONFLICT` cannot see a
+        row that is gone.
+        """
         dialect = self._store.dialect
         now = _now_us()
-        last = take[-1][0]
+        lock = " FOR UPDATE" if dialect == "postgres" else ""
         async with self._store.transaction() as tx:
-            for offset, ts, text in take:
+            [(position,)] = await tx.fetch(
+                sql(
+                    dialect,
+                    "SELECT streamcast_last_received_offset FROM "
+                    "streamcast_subscriber_state WHERE streamcast_stream = ? AND "
+                    "streamcast_subscriber_id = ?" + lock,
+                ),
+                (self._stream, self._subscriber),
+            )
+            fresh = [row for row in take if row[0] > int(position)]
+            if not fresh:
+                self._last_received = max(int(position), self._last_received or 0)
+                return 0, 0
+
+            last = fresh[-1][0]
+            for offset, ts, text in fresh:
                 await tx.execute(
                     sql(
                         dialect,
@@ -541,6 +572,7 @@ class Inbox:
             )
 
         self._last_received = last
+        return len(fresh), sum(len(text.encode()) for _, _, text in fresh)
 
     # -- the state ----------------------------------------------------------
 

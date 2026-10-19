@@ -282,3 +282,84 @@ class TestAnOutage:
         assert len(said) == 2 and "again" in said[1], said
         assert landed(log) == [0.0]
         await store.close()
+
+
+class TestDropWithAConcurrentEnqueue:
+    async def test_a_row_enqueued_meanwhile_is_renumbered_with_the_rest(self, opener):
+        """`drop` takes the publisher's counter first, so an enqueue that took
+        a seq and has not committed is waited for, and its row is moved down
+        with the others: seqs stay 1..n and the next one is free.
+
+        Falsify by moving `drop`'s counter UPDATE back to the end (Postgres;
+        SQLite serialises the whole transaction either way).
+        """
+        sender, caller = await opener(), await opener()
+        async with sender.transaction() as tx:
+            await _outbox.enqueue(tx, "trades", "p", [trade(i) for i in range(7)])
+
+        enqueued = asyncio.Event()
+        release = asyncio.Event()
+
+        async def enqueue() -> None:
+            async with caller.transaction() as tx:
+                assert await _outbox.enqueue(tx, "trades", "p", [trade(7)]) == 8
+                enqueued.set()
+                await release.wait()
+
+        async def dropping() -> None:
+            await enqueued.wait()
+            async with sender.transaction() as tx:
+                await _outbox.drop(tx, "trades", "p", 5)
+
+        task = asyncio.create_task(enqueue())
+        dropper = asyncio.create_task(dropping())
+        await asyncio.sleep(0.3)
+        release.set()
+        await asyncio.gather(task, dropper)
+        assert await outstanding(sender) == [1, 2, 3, 4, 5, 6, 7]
+        async with sender.transaction() as tx:
+            assert await tx.fetch(
+                "SELECT streamcast_next_seq FROM streamcast_publisher_state"
+            ) == [(8,)]
+
+        await sender.close()
+        await caller.close()
+
+
+class TestLandedWaiters:
+    async def test_a_row_the_greeting_says_landed_resolves_its_waiter(
+        self, serve, log, opener
+    ):
+        store = await opener()
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            async with store.transaction() as tx:
+                await _outbox.enqueue(tx, "trades", "p", [trade(0)])
+
+            async with streamcast.publish(uri, publisher="p") as direct:
+                await direct.send(trade(0), seq=1)  # landed; its ack "lost"
+
+            out = _outbox.Outbox(uri, "p", store, poll_every=0.05, backoff=(0.01,))
+            waiter = asyncio.create_task(out.landed(1))
+            await asyncio.sleep(0.1)
+            out.start()
+            async with asyncio.timeout(10):
+                assert await waiter is None, "landed, offset unknown"
+
+            await out.close()
+
+        await store.close()
+
+    async def test_close_fails_the_waiters_it_leaves(self, log, opener):
+        store = await opener()
+        async with store.transaction() as tx:
+            await _outbox.enqueue(tx, "trades", "p", [trade(0)])
+
+        out = _outbox.Outbox("ws://127.0.0.1:1/trades", "p", store, poll_every=0.05)
+        waiter = asyncio.create_task(out.landed(1))
+        await asyncio.sleep(0.1)
+        await out.close()
+        with pytest.raises(RuntimeError, match="closed before"):
+            await waiter
+
+        await store.close()

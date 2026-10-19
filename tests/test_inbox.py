@@ -405,3 +405,43 @@ async def _is_more(value, than) -> bool:
 
 async def _now(value) -> bool:
     return bool(value)
+
+
+class TestTwoWorkersOnOneSubscriber:
+    async def test_a_lagging_receiver_never_inserts_what_another_processed(
+        self, serve, log, opener
+    ):
+        """Two workers, each with its own store and its own receiver, on one
+        subscriber id. B's receiver is held back while A receives and
+        processes every row; released, B must insert none of them again.
+
+        Falsify by judging inserts against the receiver's memory rather than
+        the state row read in `_insert`.
+        """
+        first, second = await opener(), await opener()
+        stream = streamcast.Stream("trades", log=log)
+        async with serve(stream, maintain=False) as uri:
+            async with (
+                streamcast.inbox(uri, subscriber="w", store=first, **FAST) as a,
+                streamcast.inbox(uri, subscriber="w", store=second, **FAST) as b,
+            ):
+                # Hold B's store lock, so B's receiver cannot insert.
+                hold = second._lock._lock  # noqa: SLF001
+                await hold.acquire()
+                try:
+                    await stream.send_many([trade(i) for i in range(3)])
+                    for expected in (1, 2, 3):
+                        offset, *_ = await a.recv()
+                        assert offset == expected
+
+                    await a.commit()
+                    assert await held(first) == []
+                finally:
+                    hold.release()
+
+                await asyncio.sleep(0.5)  # B's receiver gets the store back
+                assert await held(first) == [], "nothing processed comes back"
+                assert b.last_received == 3
+
+        await first.close()
+        await second.close()
