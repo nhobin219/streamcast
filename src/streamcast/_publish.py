@@ -253,7 +253,7 @@ class Publication:
                     # A TEXT frame, as every frame is: the payload is JSON.
                     await self._connection.send(frame, text=True)
                 except ConnectionClosed as closed:
-                    self._pending.pop()  # never written: no reply is owed
+                    self._unowed(done)
                     # The server's reason, where it gave one: a publisher told
                     # it was superseded should not have to read a close code.
                     refusal = _refusal(closed, stream=self._stream, offset=None)
@@ -262,7 +262,7 @@ class Publication:
 
                     raise refusal from closed
                 except BaseException:
-                    self._pending.pop()  # never written: no reply is owed
+                    self._unowed(done)
                     raise
 
             if self._reader is None:
@@ -274,6 +274,16 @@ class Publication:
 
         done.add_done_callback(self._settled)
         return done
+
+    def _unowed(self, done: asyncio.Future[list[int | None]]) -> None:
+        """`done`'s frame was never written, so no reply is owed for it.
+
+        Removed by identity, not popped: when the connection closes, the
+        reader may already have failed and removed every pending future,
+        this one included, before the write raises here.
+        """
+        with contextlib.suppress(ValueError):
+            self._pending.remove(done)
 
     def _settled(self, _done: asyncio.Future[list[int | None]]) -> None:
         """An acknowledgement, or its failure: free the window."""

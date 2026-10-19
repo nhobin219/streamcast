@@ -258,3 +258,30 @@ class TestTheUrl:
 
         with pytest.raises(ValueError, match="different requests"):
             parse_subscribe("/trades?publish&offset=5")
+
+
+class TestAConnectionClosingUnderASend:
+    async def test_the_refusal_is_raised_even_if_the_reader_got_there_first(self):
+        """The reader fails and removes every pending reply when the
+        connection closes; a write that raises afterwards must not find its
+        own entry gone and raise `IndexError` in place of the refusal.
+
+        Falsify by popping the pending deque instead of removing by identity.
+        """
+        from websockets.exceptions import ConnectionClosedError
+        from websockets.frames import Close
+
+        from streamcast._protocol import greeting, parse_greeting
+
+        info = parse_greeting(
+            greeting(stream="t", end_offset=1, replay=None, durable=True)
+        )
+
+        class Closing:
+            async def send(self, frame, text=False):
+                publication._pending.clear()  # the reader, first  # noqa: SLF001
+                raise ConnectionClosedError(Close(4409, '{"error":"superseded"}'), None)
+
+        publication = streamcast.Publication(Closing(), info, "t")  # ty: ignore[invalid-argument-type]
+        with pytest.raises(streamcast.Superseded):
+            await publication.send(trade(0))
