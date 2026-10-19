@@ -140,7 +140,7 @@ rustfs-stop:
 # JavaScript client against a real server, and skips without Node. Put `node`
 # on PATH, or point STREAMCAST_NODE at a binary.
 check-all: lint format-check typecheck
-    STREAMCAST_REQUIRE_S3=1 STREAMCAST_REQUIRE_NODE=1 STREAMCAST_REQUIRE_INTEROP=1 uv run pytest
+    STREAMCAST_REQUIRE_S3=1 STREAMCAST_REQUIRE_NODE=1 STREAMCAST_REQUIRE_INTEROP=1 STREAMCAST_REQUIRE_POSTGRES=1 uv run pytest
 
 # START HERE. Every demo, by name: `just demo` alone lists them. A demo
 # is a producer, a broker and a subscriber, each its own process, and this

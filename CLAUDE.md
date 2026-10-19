@@ -159,6 +159,9 @@ src/streamcast/
     _stream.py      Stream — offsets, fan-out, the subscribe partition
     _writer.py      the durable append on a writer thread per stream, and group commit
     _dedupe.py      exactly-once publishers: each one's mark, committed with its rows
+    _store.py       Store, Transaction: the caller's database, SQLite and Postgres
+    _outbox.py      outbox: rows enqueued in the caller's tx, and the sender
+    _inbox.py       inbox: the receiver, its bounded window, and processing
     _limits.py      the queue bounds' defaults, and serve's per-stream form of each
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest

@@ -778,6 +778,54 @@ path to real HA is a log on Postgres (#165). The broker caches `MAX_PUBLISHERS` 
 publishers per stream and `DEDUPE_WINDOW` (64) committed ranges for each; the table holds
 every mark.
 
+## `outbox` and `inbox`: exactly-once through the caller's database
+
+```python
+store = await streamcast.SqliteStore.open(path, *, create=True)
+store = await streamcast.PostgresStore.connect(dsn, *, create=True, **psycopg_kwargs)
+async with store.transaction() as tx:           # BEGIN ... COMMIT; ROLLBACK on a raise
+    await tx.execute(sql, params) -> int         # the driver's placeholders: ? or %s
+    await tx.fetch(sql, params) -> list[tuple]
+    tx.on_commit(callback)                      # after COMMIT, never on a rollback
+streamcast.store_ddl(dialect) -> list[str]      # for a role without DDL rights
+
+streamcast.outbox(uri, *, publisher, store, max_in_flight=64, send_batch=100,
+                  poll_every=1.0, backoff=BACKOFF, notice=log.warning) -> Outbox
+await out.send(row, *, tx) -> int               # its seq; shipped once tx commits
+await out.send_many(rows, *, tx) -> int         # the first seq
+await out.landed(seq) -> int | None             # the broker's offset
+await out.flush(timeout=None) -> None           # until nothing is pending
+await out.pending() -> int
+
+streamcast.inbox(uri, *, subscriber, store, offset=None,
+                 inbox_max_bytes=INBOX_MAX_BYTES, inbox_max_rows=None,
+                 inbox_resume_at=INBOX_RESUME_AT, catch_up=False) -> Inbox
+async for offset, ts, row, tx in sub: ...       # tx holds the row's delete
+await sub.recv() -> (offset, ts, row, tx)
+await sub.recv_many(limit) -> (rows, tx)        # one tx for the batch
+await sub.commit() -> None                      # end the open tx now
+sub.caught_up() -> bool                         # not "the inbox is empty"
+sub.paused -> bool                              # held at the receive window's bound
+```
+
+**One transaction holds the work, its input and its output.** An inbox row's
+`tx` already holds the row's delete; an outbox `send` takes the same `tx`. A
+crash before COMMIT redelivers the input and enqueues nothing; after it, the
+output ships exactly once (the broker dedupes the publisher's seqs, §6b).
+
+| | |
+|---|---|
+| **the stream's id** | bound at the first connect in each state table, checked at every one after: a recreated stream is `StreamMismatch`, before anything is sent or received |
+| **outbox seqs** | assigned at enqueue in the caller's transaction, gapless; a rollback returns them. Parallel producers take distinct publisher ids |
+| **the sender** | connects only when it has rows; reconciles with the greeting (landed rows deleted unsent; `AcknowledgedRowsLost`, `StoreBehindBroker`); ordered pipelined batches; a refused row dropped and the rest renumbered; an outage said once |
+| **inbox resume** | from `last_received_offset + 1`; unprocessed rows first. A new subscriber starts at the latest offset or `offset=`; one with state refuses `offset=` |
+| **the receive window** | at `inbox_max_bytes` or `inbox_max_rows` the receiver stops and CLOSES its subscription; it reconnects below `inbox_resume_at` of each bound. An empty inbox always takes one row |
+| **one tx per store at a time** | a task asking for a second while it holds one gets `RuntimeError`, not a hang: `sub.commit()` first |
+
+Rows are JSON text in both tables, as on the wire: send a binary column in its
+text encoding. The file `Cursor` (`connect(cursor=)`) stays for a consumer
+with no database. [`SPEC.md`](SPEC.md) §6c has the reasoning.
+
 ## `connect`
 
 ```python

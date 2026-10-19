@@ -38,6 +38,34 @@ time.
 
 ### Added
 
+- **Exactly-once end to end, through the caller's own database** (#152,
+  `docs/SPEC.md` §6c). A process's state, the rows it publishes and the place
+  it has read to now commit in one transaction of its database:
+  - `Store` and `Transaction`, public protocols, with `SqliteStore` (the
+    stdlib's `sqlite3`) and `PostgresStore` (psycopg 3, the new
+    `streamcast[postgres]` extra). The library creates its four tables
+    (`store_ddl(dialect)` for a role without DDL rights): `streamcast_outbox`,
+    `streamcast_publisher_state`, `streamcast_inbox` and
+    `streamcast_subscriber_state`, the stream leading every key.
+  - `streamcast.outbox(uri, publisher=, store=)`: `send(row, tx=)` and
+    `send_many(rows, tx=)` enqueue in the caller's transaction under gapless
+    seqs, and a sender ships them over an exactly-once publication, deleting
+    each on acknowledgement. `landed(seq)`, `flush()` and `pending()`.
+  - `streamcast.inbox(uri, subscriber=, store=)`: a receiver writes rows into
+    the inbox with the received position; `recv()` and iteration yield
+    `(offset, ts, row, tx)` with the row's delete already in `tx`, and
+    `recv_many()` yields a batch in one `tx`. Resume is from the received
+    position; a new subscriber starts at the latest offset or `offset=`.
+  - Consume, transform and publish in one transaction: an inbox row's `tx`
+    is the `tx` an outbox `send` takes.
+  - **The inbox is a bounded receive window.** At `inbox_max_bytes`
+    (`INBOX_MAX_BYTES`, 64 MiB) or `inbox_max_rows` (None) the receiver stops
+    and closes its subscription, and reconnects from the received position
+    below `inbox_resume_at` (`INBOX_RESUME_AT`, half) of each bound.
+  - New errors: `StreamMismatch` (a stream recreated under the same name,
+    refused at connect on both sides), `AcknowledgedRowsLost` and
+    `StoreBehindBroker` (the sender stops rather than renumber over a hole).
+  - New constants: `INBOX_MAX_BYTES`, `INBOX_RESUME_AT`, `SEND_BATCH`.
 - **Exactly-once publishing: the broker dedupes each publisher on its seq**
   (#152). A stream served with `exactly_once=True` (`Stream.new`, `migrate`,
   `restore`, or `Stream(..., exactly_once=True)`) takes publishers that name

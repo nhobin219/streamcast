@@ -193,8 +193,39 @@ table in the log's buffer is the truth. About 2 KiB each with its ranges, so
 about 8 MiB per stream at the default.
 """
 
+INBOX_MAX_BYTES: Final = 64 * 2**20
+"""Bytes of received, unprocessed rows a subscriber's inbox holds before the
+library stops receiving (`streamcast.inbox(..., inbox_max_bytes=)`).
+
+The inbox is a bounded receive window, not a backlog store: the backlog stays
+in the log, durable and published, and is read again from the received
+position. 64 MiB is 64 frames at the broker's 1 MiB `max_size`, so a stream of
+the largest rows still has a working window, and about 65,000 rows at 1 KB,
+enough to keep a processor fed across a reconnect. Counted as the stored JSON
+text's UTF-8 length.
+"""
+
+INBOX_RESUME_AT: Final = 0.5
+"""The low-water mark: receiving resumes once the inbox is below this
+fraction of each of its bounds. Half, so a subscriber held at its bound does
+not reconnect once per processed row."""
+
+SEND_BATCH: Final = 100
+"""Pending outbox rows sent as one frame, `[first_seq, [rows]]`."""
+
+POLL_EVERY: Final = 1.0
+"""Seconds between an outbox's or an inbox's looks at its own tables, for
+rows another process's transaction committed or deleted."""
+
+BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
+"""Seconds before each reconnect of an outbox's sender or an inbox's
+receiver; the last repeats."""
+
 __all__ = [
+    "BACKOFF",
     "DEDUPE_WINDOW",
+    "INBOX_MAX_BYTES",
+    "INBOX_RESUME_AT",
     "MAX_BACKLOG",
     "MAX_INBOUND",
     "MAX_IN_FLIGHT",
@@ -202,6 +233,8 @@ __all__ = [
     "MAX_TAIL",
     "PAGE_BYTES",
     "PAGE_ROWS",
+    "POLL_EVERY",
+    "SEND_BATCH",
     "pages",
     "per_stream",
 ]
