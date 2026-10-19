@@ -28,15 +28,18 @@ prevents it any more than the local path does.
 the way a local `await send(...)` is. If the connection drops before the reply
 arrives, the publisher cannot tell whether the append happened: retrying may
 duplicate a row and not retrying may lose one. With `submit`, up to
-`max_in_flight` rows can be in that state at once. Delivery here is therefore
-AT LEAST ONCE under retry, and the library does not resolve it because it
-cannot: the ambiguity is in the publisher's knowledge, not in the log.
+`max_in_flight` rows can be in that state at once. A plain publisher's
+delivery is therefore AT LEAST ONCE under retry.
 
-Resolving it costs two columns and a replay. Carry a publisher key and a
-per-publisher sequence, and on reconnect subscribe from the offset `send` last
-returned — the offset bounds the window, the key picks your rows out of it,
-and `info.replay` says how many to read. `docs/SPEC.md` §6b has it, including
-the two ways the loop goes wrong silently.
+**`publisher=` makes it exactly once**, on a stream served with
+`exactly_once=True`. The publisher names one ordered sequence and numbers its
+rows 1, 2, 3, … with no holes (`send(row, seq=n)`); the broker keeps the last
+seq it appended for that publisher, committed with the rows, and answers a
+resent row with its original offset instead of appending it again. The
+greeting says where the broker has the publisher (`info.publisher.last_seq`),
+so after a reconnect the publisher drops what it holds at or below that and
+sends from the next. A seq past the next raises `SequenceGap`. Best effort
+across a lost broker buffer: `docs/SPEC.md` §6b.
 """
 
 from __future__ import annotations
@@ -47,27 +50,26 @@ import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
-from litelink import S3Options
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from streamcast._client import _refusal
 from streamcast._codec import from_greeting
-from streamcast._cursor import Cursor
+from streamcast._dedupe import check_publisher_id
+from streamcast._errors import ExactlyOnceUnavailable, ProtocolError
 from streamcast._limits import MAX_IN_FLIGHT
 from streamcast._protocol import (
     Greeting,
     encode_publish,
+    encode_publish_seq,
     parse_greeting,
     parse_publish_reply,
     publish_path,
     stream_name,
 )
-from streamcast._remote import UPLOAD_EVERY, RemoteCursor
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
-    from os import PathLike
 
     from websockets.asyncio.client import ClientConnection
 
@@ -80,14 +82,12 @@ class Publication:
     """A live publish connection. Write-only, and offset-aware."""
 
     __slots__ = (
-        "_acked",
         "_connection",
-        "_cursor",
         "_info",
         "_outbound",
         "_pending",
+        "_publisher",
         "_reader",
-        "_resumed",
         "_stream",
         "_window",
         "_writing",
@@ -98,9 +98,8 @@ class Publication:
         connection: ClientConnection,
         info: Greeting,
         stream: str,
-        cursor: Cursor | None = None,
-        resumed: int | None = None,
         max_in_flight: int = MAX_IN_FLIGHT,
+        publisher: str | None = None,
     ) -> None:
         if max_in_flight < 1:
             msg = f"max_in_flight={max_in_flight}: at least one send must be allowed"
@@ -125,9 +124,7 @@ class Publication:
         # hex column, which keeps its `send` exactly as it was.
         self._outbound = from_greeting(info.schema).outbound
         self._stream = stream
-        self._cursor = cursor
-        self._resumed = resumed
-        self._acked: int | None = resumed
+        self._publisher = publisher
 
     def __repr__(self) -> str:
         return f"<streamcast.Publication {self._stream!r} durable={self._info.durable}>"
@@ -149,25 +146,7 @@ class Publication:
         details, and anything else this class deliberately does not wrap."""
         return self._connection
 
-    @property
-    def resumed_from(self) -> int | None:
-        """The offset this publisher was last acknowledged for, or None.
-
-        What `cursor=` loaded, and the starting point for a recovery replay —
-        subscribe from HERE, inclusive, and the first row is this publisher's
-        own last acknowledged one, so the sequence it carried comes back out
-        of the log. `docs/SPEC.md` §6b.
-
-        **Nothing resumes automatically, and that is the asymmetry with a
-        consumer.** A consumer cursor is enough to resume by itself: the
-        server replays from it. A producer cursor says where this publisher
-        got to, not what it should send next — that is its own outbox, or a
-        position in whatever it reads from, and the library cannot know
-        either. So this is reported and acted on by the caller.
-        """
-        return self._resumed
-
-    async def send(self, row: Row) -> int | None:
+    async def send(self, row: Row, *, seq: int | None = None) -> int | None:
         """Publish one row. Returns its offset once it is durable.
 
         Waits for the acknowledgement, so a loop of `await send(row)` has one
@@ -181,11 +160,19 @@ class Publication:
         schema does not have, a value of the wrong type — with litelink's own
         message naming the column. Nothing was committed, and the connection
         stays open, so a corrected row can be sent next.
+
+        **`seq` is required on an exactly-once publication** (`publisher=`)
+        and refused on any other: the row's place in the publisher's sequence.
+        A row already in the log returns its original offset, or None where
+        the broker no longer remembers it; a seq past the next raises
+        `SequenceGap`, with nothing appended.
         """
-        [offset] = await (await self.submit_many([row], single=True))
+        [offset] = await (await self.submit_many([row], single=True, seq=seq))
         return offset
 
-    async def submit(self, row: Row) -> asyncio.Future[int | None]:
+    async def submit(
+        self, row: Row, *, seq: int | None = None
+    ) -> asyncio.Future[int | None]:
         """Publish one row without waiting for it to be durable.
 
         Returns once the frame is written — waiting first if `max_in_flight`
@@ -201,10 +188,12 @@ class Publication:
         while a commit was in flight together (`group_commit`), and the
         acknowledgements come back in the order the rows were sent.
         """
-        many = await self.submit_many([row], single=True)
+        many = await self.submit_many([row], single=True, seq=seq)
         return asyncio.ensure_future(_first(many))
 
-    async def send_many(self, rows: Iterable[Row]) -> list[int | None]:
+    async def send_many(
+        self, rows: Iterable[Row], *, seq: int | None = None
+    ) -> list[int | None]:
         """Publish a group in ONE transaction. Returns their offsets.
 
         One fsync for the group rather than one each, which is a write
@@ -215,15 +204,18 @@ class Publication:
         commits none of it. That is what one transaction means, and it is the
         behaviour worth having — a partially committed batch would leave the
         publisher unable to say which rows to send again.
+
+        On an exactly-once publication `seq` is the first row's, and the rest
+        take `seq + 1`, … in order.
         """
         rows = list(rows)
         if not rows:
             return []
 
-        return await (await self.submit_many(rows))
+        return await (await self.submit_many(rows, seq=seq))
 
     async def submit_many(
-        self, rows: Iterable[Row], *, single: bool = False
+        self, rows: Iterable[Row], *, single: bool = False, seq: int | None = None
     ) -> asyncio.Future[list[int | None]]:
         """`send_many` without waiting for it: a future of the group's offsets.
 
@@ -231,10 +223,24 @@ class Publication:
         for the window and the order. `single` sends one row as a row rather
         than a list of one — the shape `send` uses on the wire.
         """
+        if self._publisher is None and seq is not None:
+            msg = "seq= is for an exactly-once publication; open it with publisher="
+            raise ValueError(msg)
+
+        if self._publisher is not None and (seq is None or seq < 1):
+            msg = (
+                f"an exactly-once publication needs seq= on every send, from 1; "
+                f"got {seq!r}"
+            )
+            raise ValueError(msg)
+
         outbound = self._outbound
         batch = [dict(row) if outbound is None else outbound(row) for row in rows]
         payload: dict[str, object] | list[dict[str, object]] = (
             batch[0] if single else batch
+        )
+        frame = (
+            encode_publish(payload) if seq is None else encode_publish_seq(seq, payload)
         )
         await self._window.acquire()
         try:
@@ -245,7 +251,16 @@ class Publication:
                 self._pending.append(done)
                 try:
                     # A TEXT frame, as every frame is: the payload is JSON.
-                    await self._connection.send(encode_publish(payload), text=True)
+                    await self._connection.send(frame, text=True)
+                except ConnectionClosed as closed:
+                    self._pending.pop()  # never written: no reply is owed
+                    # The server's reason, where it gave one: a publisher told
+                    # it was superseded should not have to read a close code.
+                    refusal = _refusal(closed, stream=self._stream, offset=None)
+                    if refusal is None:
+                        raise
+
+                    raise refusal from closed
                 except BaseException:
                     self._pending.pop()  # never written: no reply is owed
                     raise
@@ -260,26 +275,9 @@ class Publication:
         done.add_done_callback(self._settled)
         return done
 
-    def _settled(self, done: asyncio.Future[list[int | None]]) -> None:
-        """An acknowledgement, or its failure: free the window, save the cursor."""
+    def _settled(self, _done: asyncio.Future[list[int | None]]) -> None:
+        """An acknowledgement, or its failure: free the window."""
         self._window.release()
-        if done.cancelled() or done.exception() is not None:
-            return
-
-        offsets = done.result()
-        if self._cursor is not None:
-            # **After the acknowledgement, never before**, which is the same
-            # rule a consumer cursor follows for the mirrored reason. A
-            # producer cursor that LAGS makes the recovery window larger —
-            # more to replay, still correct. One that LEADS names a row that
-            # may never have landed, so the window misses it and the
-            # publisher resends what it already wrote. `Cursor.save` is
-            # forward-only and throttled, so a burst of sends costs one
-            # write a second rather than one each.
-            highest = [offset for offset in offsets if offset is not None]
-            if highest and (self._acked is None or max(highest) > self._acked):
-                self._acked = max(highest)
-                self._cursor.save(self._acked)
 
     async def _read(self) -> None:
         """Match each reply to the oldest send still owed one, until the end.
@@ -313,34 +311,6 @@ class Publication:
             if not done.done():
                 done.set_exception(failure)
 
-    def commit(self, offset: int | None = None) -> None:
-        """Save the cursor now, rather than waiting for the throttle.
-
-        The automatic save is throttled to once a second, because an
-        `os.replace` per row on a fast publisher is three syscalls to record
-        something allowed to be stale. That staleness is safe — a lagging
-        producer cursor only widens the recovery replay — but a publisher
-        that is about to exit, or that has just trimmed its outbox, can say
-        so rather than wait.
-
-        `offset` states what YOU consider settled, and is allowed to move the
-        cursor backwards for the same reason `Subscription.commit` is: a
-        publisher correcting an optimistic value downward is the point, and
-        the automatic saves never do it. A no-op without `cursor=`.
-        """
-        if self._cursor is None:
-            return
-
-        if offset is None:
-            if self._acked is None:
-                return
-
-            self._cursor.save(self._acked, force=True)
-            return
-
-        self._acked = offset
-        self._cursor.save(offset, force=True, rewind=True)
-
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """End the connection, once every send in flight is acknowledged.
 
@@ -369,6 +339,16 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     Every served stream takes publishers. One that cannot be written — a
     retired stream — refuses with 4410 (`StreamRetired`).
 
+    **`publisher` opens an exactly-once publication**: 1 to 128 bytes of
+    UTF-8 naming one ordered sequence, stable across restarts, and distinct
+    per parallel producer. Every `send` then carries `seq=`, and
+    `info.publisher` says where the broker has this publisher. A stream not
+    served with `exactly_once=True` refuses it (`ExactlyOnceUnavailable`,
+    `why="stream"`), and so does a server from before the feature
+    (`why="broker"`), each before anything is sent: it never falls back to
+    at least once by itself. A newer connection with the same id ends this
+    one (`Superseded`).
+
     `max_in_flight` (64) is how many sends `submit` keeps unacknowledged
     at once. A server that owes one connection fewer replies than that
     (`serve(max_in_flight=)`) stops reading it, and the rest wait at the
@@ -379,11 +359,10 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     """
 
     __slots__ = (
-        "_cursor",
         "_kwargs",
         "_max_in_flight",
         "_publication",
-        "_remote",
+        "_publisher",
         "_stream",
         "_uri",
     )
@@ -392,33 +371,17 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
         self,
         uri: str,
         *,
-        cursor: str | PathLike[str] | None = None,
-        cursor_uri: str | None = None,
-        s3_options: S3Options | None = None,
-        upload_every: float = UPLOAD_EVERY,
+        publisher: str | None = None,
         max_in_flight: int = MAX_IN_FLIGHT,
         compression: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._uri = uri
+        self._publisher = None if publisher is None else check_publisher_id(publisher)
         self._max_in_flight = max_in_flight
         self._stream = stream_name(uri)
         self._kwargs: dict[str, Any] = {"compression": compression, **kwargs}
         self._publication: Publication | None = None
-        self._cursor = Cursor(cursor) if cursor is not None else None
-
-        self._remote: RemoteCursor | None = None
-        if cursor_uri is not None:
-            if self._cursor is None:
-                msg = "cursor_uri needs a cursor= to ship; it is a copy of one"
-                raise ValueError(msg)
-
-            self._remote = RemoteCursor(
-                self._cursor,
-                cursor_uri,
-                s3_options=s3_options,
-                upload_every=upload_every,
-            )
 
     async def _open(self) -> Publication:
         """Connect, then read the greeting before handing anything back.
@@ -427,7 +390,9 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
         MEANS the server accepted this publisher — a refusal surfaces where
         `publish` was called rather than at whatever `send` reached first.
         """
-        connection = await _ws_connect(publish_path(self._uri), **self._kwargs)
+        connection = await _ws_connect(
+            publish_path(self._uri, self._publisher), **self._kwargs
+        )
         try:
             info = parse_greeting(await connection.recv())
 
@@ -436,33 +401,34 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
             if refusal is None:
                 raise
 
+            if (
+                self._publisher is not None
+                and isinstance(refusal, ProtocolError)
+                and "publisher" in str(refusal)
+            ):
+                # A server from before exactly-once refuses the parameter it
+                # does not know, at the open, with nothing appended.
+                raise ExactlyOnceUnavailable(self._stream, "broker") from None
+
             raise refusal from None
 
         except BaseException:
             await connection.close()
             raise
 
-        # **Local first, remote only when there is no local**, the same order
-        # a consumer resolves them in and for the same reason: the remote
-        # copy lags by up to `upload_every`, so it should decide only when
-        # there is nothing better — which is the box-is-gone case.
-        resumed = self._cursor.load() if self._cursor is not None else None
-        if resumed is None and self._remote is not None and self._cursor is not None:
-            resumed = self._remote.load()
-            if resumed is not None:
-                self._cursor.save(resumed, force=True, rewind=True)
+        if self._publisher is not None and info.publisher is None:
+            # A server that took the parameter and did not answer it is not
+            # deduping this publisher; sending would be at least once.
+            await connection.close()
+            raise ExactlyOnceUnavailable(self._stream, "broker")
 
         self._publication = Publication(
             connection,
             info,
             self._stream,
-            self._cursor,
-            resumed,
             max_in_flight=self._max_in_flight,
+            publisher=self._publisher,
         )
-        if self._remote is not None:
-            self._remote.start()
-
         return self._publication
 
     def __await__(self):  # noqa: ANN204 — an awaitable's own protocol
@@ -477,19 +443,6 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._publication is not None and exc_type is None:
-            # A clean exit settles what was acknowledged, so a publisher that
-            # finishes its work does not leave the last second of it to be
-            # replayed on the next start. An exception leaves it alone: the
-            # throttled value is the safe one, because a wider replay window
-            # costs a scan and a narrower one costs a duplicate.
-            self._publication.commit()
-
-        if self._remote is not None:
-            # Before the socket closes, so the final upload carries whatever
-            # the last acknowledgement saved.
-            self._remote.stop()
-
         if self._publication is not None:
             await self._publication.close()
 

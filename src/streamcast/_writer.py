@@ -35,6 +35,17 @@ throughput the per-call fsync never had. A stream created with
 `group_commit=False` commits each job on its own. A job's rows are
 validated on the loop before they are queued, so one bad row is refused alone
 rather than failing every publisher's rows that shared its transaction.
+
+**Exactly-once publishers are checked here, in the commit.** A stream served
+with `exactly_once=True` hands this thread a `Publishers` cache (`_dedupe`).
+A commit that holds a claimed job runs in litelink's buffer transaction: each
+claimed job is judged against its publisher's mark -- appended, answered as a
+duplicate, or refused as a gap -- and the marks of the publishers that
+appended are written in the same transaction as their rows. The judgement
+runs on this thread, not on the loop, because only here is the mark exactly
+what the log holds: every job queued before this one has committed or failed.
+A failed commit moves no mark, so the jobs queued behind it from the same
+publisher are refused as gaps rather than committed out of order.
 """
 
 from __future__ import annotations
@@ -49,6 +60,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from litelink import WriteHandle
+
+    from streamcast._dedupe import Publishers
 
 GROUP_ROWS: Final = 10_000
 """The most rows one commit takes, however many are queued.
@@ -68,7 +81,27 @@ class Job:
     """As the log stores them, stamped."""
     now: int
     """The wall-clock reading they were stamped with, in nanoseconds."""
-    done: asyncio.Future[list[int]] = field(repr=False)
+    done: asyncio.Future[list[int | None]] = field(repr=False)
+    publisher: str | None = None
+    """The exactly-once publisher that sent them, or None."""
+    seq: int = 0
+    """The first row's seq, for a claimed job; the rest follow it."""
+    skip: int = 0
+    """Leading rows already in the log, set by the writer: not appended."""
+    prior: list[int | None] = field(default_factory=list, repr=False)
+    """The original offsets of those `skip` rows, where they are known."""
+    gap: BaseException | None = None
+    """Set by the writer when the job's first seq is past the next one."""
+
+
+@dataclass(eq=False, slots=True)
+class Probe:
+    """A question for the writer: this publisher's mark, after every job
+    queued before it has committed or failed. What a publisher's greeting
+    reports."""
+
+    publisher: str
+    done: asyncio.Future[tuple[int, int | None]] = field(repr=False)
 
 
 _STOP: Final = object()
@@ -82,7 +115,16 @@ class Writer:
     first job came from.
     """
 
-    __slots__ = ("_deliver", "_fail", "_group", "_log", "_loop", "_queue", "_thread")
+    __slots__ = (
+        "_deliver",
+        "_fail",
+        "_group",
+        "_log",
+        "_loop",
+        "_publishers",
+        "_queue",
+        "_thread",
+    )
 
     def __init__(
         self,
@@ -91,12 +133,14 @@ class Writer:
         fail: Callable[[list[Job], BaseException], None],
         *,
         group: bool = False,
+        publishers: Publishers | None = None,
     ) -> None:
         self._log = log
         self._group = group
+        self._publishers = publishers
         self._deliver = deliver
         self._fail = fail
-        self._queue: queue.SimpleQueue[Job | object] = queue.SimpleQueue()
+        self._queue: queue.SimpleQueue[Job | Probe | object] = queue.SimpleQueue()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
@@ -104,6 +148,25 @@ class Writer:
         """Queue `job`. No await, and never blocks: this queue has no bound
         of its own. `Stream._room` bounds it, at `max_inbound` rows, before
         a job gets here."""
+        self._start()
+        self._queue.put(job)
+
+    def probe(self, publisher: str) -> asyncio.Future[tuple[int, int | None]]:
+        """`(last_seq, last_offset)` for `publisher`, once everything queued
+        before this call has committed or failed. No await: what the caller
+        did before calling is ordered before the answer."""
+        if self._publishers is None:
+            msg = "this stream does not take exactly-once publishers"
+            raise RuntimeError(msg)
+
+        self._start()
+        done: asyncio.Future[tuple[int, int | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._queue.put(Probe(publisher, done))
+        return done
+
+    def _start(self) -> None:
         if self._thread is None:
             self._loop = asyncio.get_running_loop()
             self._thread = threading.Thread(
@@ -113,8 +176,6 @@ class Writer:
             )
             self._thread.start()
 
-        self._queue.put(job)
-
     def _run(self) -> None:
         loop = self._loop
         assert loop is not None  # set before the thread starts
@@ -123,9 +184,14 @@ class Writer:
             if first is _STOP:
                 return
 
+            if isinstance(first, Probe):
+                self._answer(loop, first)
+                continue
+
             jobs: list[Job] = [first]  # ty: ignore[invalid-assignment]
             count = len(first.stored)  # ty: ignore[unresolved-attribute]
             stopping = False
+            held: Probe | None = None
             # Group commit, unless the stream opted out: whatever queued while
             # the last commit ran. Off, each job is its own transaction.
             while self._group and count < GROUP_ROWS:
@@ -138,19 +204,77 @@ class Writer:
                     stopping = True
                     break
 
+                if isinstance(more, Probe):
+                    # Answered after this commit, never inside it: the mark
+                    # it reports must include every job queued before it.
+                    held = more
+                    break
+
                 jobs.append(more)  # ty: ignore[invalid-argument-type]
                 count += len(more.stored)  # ty: ignore[unresolved-attribute]
 
-            rows = [row for job in jobs for row in job.stored]
-            try:
-                offsets = list(self._log.extend(rows))
-            except BaseException as exc:  # noqa: BLE001 — handed to every caller in the group
-                loop.call_soon_threadsafe(self._fail, jobs, exc)
+            if self._publishers is not None and any(
+                job.publisher is not None for job in jobs
+            ):
+                self._commit_claimed(loop, jobs, self._publishers)
             else:
-                loop.call_soon_threadsafe(self._deliver, jobs, offsets)
+                rows = [row for job in jobs for row in job.stored]
+                try:
+                    offsets = list(self._log.extend(rows))
+                except BaseException as exc:  # noqa: BLE001 — handed to every caller in the group
+                    loop.call_soon_threadsafe(self._fail, jobs, exc)
+                else:
+                    loop.call_soon_threadsafe(self._deliver, jobs, offsets)
+
+            if held is not None:
+                self._answer(loop, held)
 
             if stopping:
                 return
+
+    def _commit_claimed(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        jobs: list[Job],
+        publishers: Publishers,
+    ) -> None:
+        """One commit holding claimed jobs: judge, append, mark, together."""
+        try:
+            with self._log.transaction() as tx:
+                publishers.plan(tx, jobs)
+                rows = [
+                    row
+                    for job in jobs
+                    if job.gap is None
+                    for row in job.stored[job.skip :]
+                ]
+                offsets = list(self._log.extend(rows, tx=tx)) if rows else []
+                publishers.write(tx, jobs, offsets)
+
+        except BaseException as exc:  # noqa: BLE001 — handed to every caller in the group
+            # Nothing committed, and no mark moved: each job is failed, and
+            # the judgements `plan` left on them are moot.
+            loop.call_soon_threadsafe(self._fail, jobs, exc)
+            return
+
+        publishers.committed()
+        publishers.settle(jobs, offsets)
+        loop.call_soon_threadsafe(self._deliver, jobs, offsets)
+
+    def _answer(self, loop: asyncio.AbstractEventLoop, probe: Probe) -> None:
+        publishers = self._publishers
+        assert publishers is not None  # `probe` refuses without
+        try:
+            with self._log.transaction() as tx:
+                entry = publishers.entry(tx, probe.publisher)
+                answer = (entry.last_seq, entry.last_offset)
+
+        except BaseException as exc:  # noqa: BLE001 — the prober's to raise
+            loop.call_soon_threadsafe(_settle, probe.done, None, exc)
+            return
+
+        publishers.committed()
+        loop.call_soon_threadsafe(_settle, probe.done, answer, None)
 
     def close(self) -> None:
         """Commit what is queued, then stop. Blocking: call it in a thread."""
@@ -162,4 +286,19 @@ class Writer:
         self._thread = None
 
 
-__all__ = ["GROUP_ROWS", "Job", "Writer"]
+def _settle(
+    done: asyncio.Future[tuple[int, int | None]],
+    answer: tuple[int, int | None] | None,
+    exc: BaseException | None,
+) -> None:
+    if done.done():
+        return
+
+    if exc is not None:
+        done.set_exception(exc)
+    else:
+        assert answer is not None
+        done.set_result(answer)
+
+
+__all__ = ["GROUP_ROWS", "Job", "Probe", "Writer"]

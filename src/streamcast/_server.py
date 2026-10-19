@@ -569,7 +569,7 @@ def serve(
             # Every stream takes publishers; whether it can be written is the
             # stream's to say — a retired one refuses them itself (4410).
             try:
-                await stream.serve_publisher(connection)
+                await stream.serve_publisher(connection, requested.publisher)
             except ConnectionClosed:
                 return
 

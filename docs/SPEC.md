@@ -292,7 +292,9 @@ would turn a rejected subscribe into an empty stream.
 |---|---|---|
 | 4400 | the path or query will not parse | `ProtocolError` |
 | 4404 | nothing served there | `StreamNotFound` |
+| 4409 | another connection claimed this exactly-once publisher id (§6b) | `Superseded` |
 | 4410 | the stream is retired and takes no rows (to a publisher) | `StreamRetired` |
+| 4412 | the stream does not take exactly-once publishers, `why` (§6b) | `ExactlyOnceUnavailable` |
 | 4416 | that offset cannot be served | `NotReplayable` |
 | 4429 | you fell too far behind | `TooSlow` |
 | 1000/1001 | the server finished on purpose | ends the iteration |
@@ -1253,93 +1255,129 @@ A row the schema refuses is answered and the connection stays open, because
 that is what the local call does: `send` raises, the caller catches it, the
 next call works. Closing would make one bad row cost every good one behind it.
 
-### Publishing is at-least-once under retry
+### A plain publisher is at-least-once under retry
 
 A row is durable when `send` returns. If the connection drops before the reply
 arrives, the publisher cannot tell whether the append happened — and with
 `submit`, which keeps up to `max_in_flight` rows unanswered on one connection,
-that is true of every row still in flight. Retrying may
-duplicate the row; not retrying may lose it. **streamcast does not resolve
-this**, and the reason is that it cannot: the ambiguity is in the publisher's
-knowledge, not in the log.
+that is true of every row still in flight. Retrying may duplicate the row; not
+retrying may lose it.
 
 It is worse than the consumer-side ambiguity §8 documents, and worth saying
 so. A re-delivered message is handled by an idempotent consumer; a duplicated
 row is in the log for ever, every consumer sees it, and no cursor undoes it.
 
-**The recommended shape is a publisher key and a per-publisher sequence.**
-Carry both as ordinary columns:
+A publisher that can tolerate a duplicate — most market data, where the same
+trade twice is caught downstream or does not matter — pays nothing and stays
+plain. One that cannot names itself.
+
+### Exactly-once: the broker dedupes each publisher on its seq
 
 ```python
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "publisher": {"type": "string"},       # who wrote it
-        "seq":       {"type": "integer"},      # monotonic, per publisher
-        "price":     {"type": "number"},
-    },
-    "required": ["publisher", "seq", "price"],
-}
+stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA,
+                               exactly_once=True)
+
+async with streamcast.publish(uri, publisher="enricher") as out:
+    seq = out.info.publisher.last_seq + 1          # where the broker has us
+    await out.send(row, seq=seq)                   # rows 1, 2, 3, … no holes
 ```
 
-On reconnect, replay the window you could not account for and filter it in
-memory. The offset `send` already returned is what bounds the read:
+**A publisher id names one ordered sequence.** 1 to 128 bytes of UTF-8,
+stable across restarts, distinct per parallel producer. The publisher numbers
+its rows 1, 2, 3, … with no holes; a frame is `[seq, row]` or `[seq, [rows]]`,
+a group's rows taking `seq`, `seq + 1`, … The broker keeps, per publisher, the
+last seq it appended and the offset that row got, and judges every frame
+against it:
 
-```python
-landed = last_acked_seq
-async with streamcast.connect(uri, offset=last_acked_offset + 1) as sub:
-    # The greeting says exactly what is about to be replayed, so this is a
-    # `for` over a known count rather than a loop working out when to stop.
-    lo, hi = sub.info.replay or (0, 0)
-    for _ in range(hi - lo):
-        _offset, _ts, row = await sub.recv()
-        if row["publisher"] == me:
-            landed = max(landed, int(row["seq"]))
+| frame | answer |
+|---|---|
+| `seq == last_seq + 1` | appended, and the mark moves with the rows |
+| every row `<= last_seq` | appended nothing; the original offsets, `"dup": k` |
+| a group straddling `last_seq` | the rows above it appended; the rest answered as duplicates |
+| `seq > last_seq + 1` | `{"error": "gap", "expected": e, "got": s}`, nothing appended, the connection open |
 
-resume_at = landed + 1
-```
+**Gapless, and a gap is refused rather than skipped.** With seqs that have no
+holes, a gap can only mean rows that were never sent or were lost on the way,
+or a sender bug. `SequenceGap` is deliberately not a `Rejected`: a sender that
+drops a refused row and carries on must never treat a gap the same way, or
+the rows in it are lost silently.
 
-That is the whole of it: an ordinary subscribe, and a comparison. Nothing
-queries the published tables — they lag, so a row published a second ago is not in it —
-and nothing needs new server state.
+**The mark is committed with the rows.** It is a table of streamcast's own in
+the log's buffer, `streamcast_publishers(streamcast_publisher_id,
+streamcast_last_seq, streamcast_last_offset)`, written through litelink's
+buffer transaction (`log.transaction()`, `extend(tx=)`) in the same SQLite
+transaction as the rows it describes. So it can never disagree with them: a
+crash before the commit loses both, after it keeps both. A second database
+would need two commits, and a crash between them either drops rows or
+duplicates them. litelink owns everything else in that file and exposes no
+state API; streamcast touches only its own table.
 
-**A publisher recovering this way needs no litelink**, which is the point of
-doing it over the socket rather than against the log. It needs streamcast and
-the ability to reach the server, exactly like a consumer; no Iceberg reader,
-no object-storage credentials, no second dependency on a box whose only job
-is to publish. The same argument as `catch_up` reading the published tables rather
-than the WAL replica (§5), one layer out.
+**The judgement runs on the stream's writer thread, in the commit** (`_writer`),
+because only there is the mark exactly what the log holds: every job queued
+before has committed or failed. A failed commit moves no mark, so the jobs
+queued behind it from the same publisher are refused as gaps rather than
+committed out of order. Plain publishers' rows share commits with
+exactly-once ones and never touch the table.
 
-**The offset and the key do different jobs, and both are needed.** The offset
-bounds *where to look*: `send` already returned it, so the replay covers only
-the rows written while the replies still owed were in flight — at most
-`max_in_flight` of this publisher's — however large the log is. The
-key identifies *what to look for*: the window holds other publishers' rows
-too, and `(publisher, seq)` is what picks yours out of it. A row that already
-carries a natural unique key needs no extra columns — match on that instead.
+**The greeting says where the broker has the publisher**: `publisher: {id,
+last_seq, last_offset}` (`0` and `null` for a new one). A publisher that
+reconnects drops what it holds at or below `last_seq` — it landed — and sends
+from the next. Nothing else is needed to resume: there is no read-back of the
+log and no publisher cursor.
 
-Per-publisher keys also mean several publishers on one stream do not
-interfere: each asks only about its own, so recovery is independent of what
-anyone else wrote.
+**One live connection per publisher id.** A new claim takes the id at once and
+closes the older connection with 4409 (`Superseded`). The older handler checks
+its claim directly before it queues a frame, with no await between, so it
+queues nothing after the claim moved; the mark the newer greeting reports is
+asked of the writer after that, so it includes every row the older connection
+queued. Two processes sharing one id is the failure this cannot fix: their
+rows are answered as each other's duplicates, which is silent loss. The id
+names one sequence.
 
-**Two ways to get the loop wrong, both silent.** Reading until some condition
-on the messages blocks for ever when the window is empty, which is the common
-case — a publisher that was acked for everything has nothing to replay, and
-`info.replay` is what says so without a message arriving. And `landed` starts
-at the last acknowledged seq rather than at zero: the replay covers only the
-post-acknowledgement window, so finding nothing in it means the last
-acknowledged row is still the last one that landed. Reading that as "nothing
-landed" resends everything.
+**Duplicates are answered from memory; the mark from the table.** The broker
+caches each publisher's mark (`max_publishers`, 4,096 per stream, least
+recently used out first) together with its last `dedupe_window` committed
+ranges (64), which is what answers a resent row below the mark with its
+original offset. The ranges are not stored. After a restart, or once an entry
+is evicted, a duplicate AT the mark is answered with `last_offset` and an
+older one with `null`. A sender that reads the greeting never resends at or
+below `last_seq`, so only a caller numbering rows by hand meets a `null`.
+Storing the ranges would rewrite about 1.6 KB per publisher in every commit to
+answer a question the greeting already settles. Evicting is always safe: the
+next row re-reads the mark by key.
 
-A ULID in place of the integer works and removes the need to persist a
-counter, since a restart naturally produces higher values; `max()` is still
-well defined over them. What no key removes is the need for the publisher to
-know what it was trying to send, which is its own durable outbox and outside
-this library either way.
+**Opting in is a query parameter, `?publish&publisher=<id>`**, and both ends
+opt in, so nothing changes for anyone who did not ask:
 
-The cost is two columns. A publisher that can tolerate a duplicate — most
-market data, where the same trade twice is caught downstream or does not
-matter — pays nothing and skips all of it.
+| publisher | broker | stream | result |
+|---|---|---|---|
+| plain, any version | any | any | at least once, as before; never deduped |
+| `publisher=` | 0.22 or earlier | — | refused at the open: an older broker refuses an unknown parameter with 4400 before anything is appended, and the client raises `ExactlyOnceUnavailable(why="broker")` |
+| `publisher=` | 0.23 | not `exactly_once` | refused, 4412 `why="stream"` |
+| `publisher=` | 0.23 | `exactly_once=True` | exactly once, within the limit below |
+
+It never falls back to at least once by itself: a publisher that asked for
+exactly-once and silently got at-least-once would duplicate rows without
+knowing it. The protocol stays 4; the greeting's `publisher` key and the
+reply's `dup` key appear only on a connection that asked for them, so every
+other greeting and reply is byte for byte what it was.
+
+**Best effort across a lost buffer.** The mark lives and dies with
+`buffer.db`, and this is a documented limit, not something engineered around:
+
+| event | the mark |
+|---|---|
+| broker restart, or a crash with the disk intact | kept, committed with its rows |
+| `Stream.migrate` | carried: read before the old log retires, kept beside the metadata (`<name>.publishers.json`) so a migration that dies after the retire still has it, written into the new log before the metadata names it current |
+| retention, truncation | unaffected; the mark is not rows |
+| restore from a WAL replica, or failover to one | consistent with the rows it restored; the replication lag loses rows and marks together |
+| restore from the published table alone, or a revive | lost: the published table holds the log's rows and nothing else, and the greeting reports `last_seq = 0` |
+
+There is no recovery from the log itself, because the log carries no publisher
+columns. A publisher that sees `last_seq` below what it saw acknowledged knows
+rows were lost with the buffer. **The path to real HA is a log on Postgres
+(#165)**, where the mark would live in the same replicated database as the
+rows; this design asks nothing of the buffer's replication.
 
 ---
 

@@ -7,6 +7,74 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Upgrading
+
+**Breaking: the publisher cursor is removed** (#152). `publish(cursor=,
+cursor_uri=, s3_options=, upload_every=)`, `Publication.resumed_from` and
+`Publication.commit` are gone. They existed only to bound the read-back a
+publisher made to find which of its rows landed, and exactly-once publishing
+(below) replaces that read-back. A publisher that used the cursor for that
+moves to `publish(uri, publisher=...)` on a stream served with
+`exactly_once=True`; one that used it to log progress reads
+`info.publisher`; one that wants neither drops the keyword. The consumer's
+cursor (`connect(cursor=, cursor_uri=)`, `Subscription.commit`,
+`streamcast.Cursor`) is unchanged.
+
+**Nothing on the wire changed for a connection that does not ask for
+exactly-once.** The protocol stays 4. The greeting's `publisher` key and the
+reply's `dup` key appear only on a connection opened with `?publisher=`, so
+every other greeting and reply is byte for byte what 0.22.0 sends.
+`tests/test_interop.py` passes against 0.19.0, 0.20.1, 0.21.1 and 0.22.0 from
+PyPI in both directions, so a 0.23 process goes in one at a time, clients and
+servers in either order. A 0.22 server serves a log a 0.23 server deduped,
+leaves its table of marks alone, and a 0.23 server reading it again resumes
+the dedupe where it was (measured against each release). Upgrade the brokers,
+then serve streams with `exactly_once=True`, then opt publishers in one at a
+time.
+
+**Requires litelink 0.13.2** (its buffer transaction, `log.transaction()`).
+
+### Added
+
+- **Exactly-once publishing: the broker dedupes each publisher on its seq**
+  (#152). A stream served with `exactly_once=True` (`Stream.new`, `migrate`,
+  `restore`, or `Stream(..., exactly_once=True)`) takes publishers that name
+  themselves, `publish(uri, publisher="enricher")`. Such a publisher numbers
+  its rows 1, 2, 3, … with no holes (`send(row, seq=n)`, `send_many(rows,
+  seq=n)`, and `submit`/`submit_many`). The broker keeps each publisher's last
+  seq and the offset that row got in `streamcast_publishers`, a table in the
+  log's buffer, written in the same transaction as the rows through
+  litelink's buffer transaction, so the two never disagree. A row at or below
+  the mark is answered with its original offset (`{"ok": [...], "dup": k}`)
+  and not appended; the next seq is appended; a seq past the next raises the
+  new `SequenceGap(expected, got)`, which is deliberately not a `Rejected`,
+  with nothing appended and the connection open. The greeting reports
+  `info.publisher` (`PublisherMark(id, last_seq, last_offset)`). One live
+  connection per publisher id: a newer claim ends the older one with 4409
+  (`Superseded`), and its greeting counts every row the older one queued.
+  The opt-in is the `?publisher=` query parameter, so a server from before
+  this release refuses it at the open with nothing appended, which the client
+  raises as `ExactlyOnceUnavailable(why="broker")`; a stream not served
+  exactly-once refuses it with 4412 (`why="stream"`). Neither falls back to at
+  least once.
+- **Exactly-once is best effort across a lost buffer, and documented as
+  such** (`docs/SPEC.md` §6b). The marks survive a restart and are carried by
+  `Stream.migrate`, through a file beside the metadata
+  (`<name>.publishers.json`) so a migration that dies after the retire still
+  has them. A restore from a WAL replica brings them back consistent with the
+  rows it restored; a restore from the published table alone, or a revive,
+  starts with none. The path to real HA is a log on Postgres (#165).
+- `DEDUPE_WINDOW` (64) and `MAX_PUBLISHERS` (4,096): the broker caches each
+  publisher's mark and its last 64 committed ranges in memory, at most 4,096
+  publishers per stream (`Stream(..., max_publishers=)`), least recently used
+  out first. The ranges answer a duplicate below the mark with its original
+  offset; after a restart such a duplicate is answered with `null`.
+- `Publication.send` and its siblings raise the server's refusal
+  (`Superseded`, `StreamRetired`, …) when the connection was closed with one,
+  rather than the bare `ConnectionClosed`.
+
 ## 0.22.0 — 2026-10-18
 
 ### Upgrading

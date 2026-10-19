@@ -677,8 +677,7 @@ and the `Subscriber` stays in the fan-out set for ever.
 ## `publish`
 
 ```python
-streamcast.publish(uri, *, cursor=None, cursor_uri=None, s3_options=None,
-                   upload_every=30.0, max_in_flight=64,
+streamcast.publish(uri, *, publisher=None, max_in_flight=64,
                    **websockets_kwargs) -> Publication
 
 await producer.send(row) -> int | None          # durable, then fanned out
@@ -687,8 +686,6 @@ await producer.submit(row) -> Future[int | None]        # written; the future: d
 await producer.submit_many(rows) -> Future[list]        # the same, for a group
 producer.info -> Greeting                       # incl. the stream's schema
 producer.connection -> ClientConnection
-producer.resumed_from -> int | None              # the offset last acked, from `cursor`
-producer.commit(offset=None) -> None            # save the cursor now
 await producer.close(code=1000, reason="") -> None
 ```
 
@@ -723,15 +720,6 @@ client, so one address in a config file serves both ends.
 | **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
 | **pipelined** | up to `max_in_flight` (64) frames unanswered per connection, answered in the order sent, so a reply needs no correlation id. `send` waits for its own; `submit` does not |
 
-**`cursor=` records the offset this publisher was last acknowledged for**, and
-`cursor_uri=` ships it to object storage so a producer can resume on another box — the
-same two keywords `connect` takes. It does not resume by itself: a producer cursor says
-where this publisher got to, not what it should send next, which is its own outbox.
-`resumed_from` reports it and you act on it. Saves are throttled to once a second and
-settled on a clean exit; `commit()` forces one, `commit(offset)` states what you consider
-settled. A cursor that lags only widens the recovery replay; one that leads would skip
-rows and duplicate them.
-
 **`submit` is the lever for one publisher.** A loop of `await producer.send(row)` waits a
 round trip per row: about 1,000 rows/s on localhost, less over any real network. A loop of
 `await producer.submit(row)` keeps up to `max_in_flight` rows on the wire; the server
@@ -749,11 +737,46 @@ async with streamcast.publish("ws://localhost:8765/trades") as producer:
     offsets = await asyncio.gather(*futures)   # whenever you need them
 ```
 
-**Publishing is at-least-once under retry.** A row is durable when `send` returns, but if
-the connection drops before the reply arrives the publisher cannot tell whether the append
-happened — and with `submit`, up to `max_in_flight` rows may be in that state at once. Carry a publisher key and a per-publisher sequence as columns and recovery
-becomes a query against the log — [`SPEC.md`](SPEC.md) §6b has the pattern and the
-arithmetic.
+**A plain publisher is at-least-once under retry.** A row is durable when `send` returns,
+but if the connection drops before the reply arrives the publisher cannot tell whether the
+append happened — and with `submit`, up to `max_in_flight` rows may be in that state at
+once. **`publisher=` makes it exactly once** — see below and [`SPEC.md`](SPEC.md) §6b.
+
+### Exactly-once: `publisher=`
+
+```python
+stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA, exactly_once=True)
+
+async with streamcast.publish(uri, publisher="enricher") as out:
+    out.info.publisher -> PublisherMark(id, last_seq, last_offset)   # where the broker has us
+    await out.send(row, seq=n)                  # rows 1, 2, 3, … with no holes
+    await out.send_many(rows, seq=n)            # rows n, n + 1, …
+```
+
+The publisher names one ordered sequence (1 to 128 bytes of UTF-8, stable across
+restarts, distinct per parallel producer) and numbers its rows with no holes. The broker
+keeps the last seq it appended for that publisher, committed in the same transaction as
+the rows in a table of its own in the log's buffer, and judges every frame against it:
+
+| | |
+|---|---|
+| **next seq** | appended |
+| **at or below the mark** | not appended; `send` returns the original offset, or `None` where the broker no longer remembers it (after a restart, below the mark) |
+| **past the next** | `SequenceGap(expected, got)`, nothing appended, the connection open. Not a `Rejected`: a gap is never a row to drop |
+| **another connection, same id** | the older one ends with `Superseded` (4409); the newer greeting's `last_seq` counts every row the older one queued |
+| **stream not `exactly_once`** | `ExactlyOnceUnavailable(why="stream")` at `publish()` (4412) |
+| **server before 0.23** | `ExactlyOnceUnavailable(why="broker")` at `publish()`: it refuses the parameter, nothing appended |
+
+`seq=` is required on every send of an exactly-once publication and refused on a plain
+one. After a reconnect, drop what you hold at or below `info.publisher.last_seq` (it
+landed) and send from the next.
+
+**Best effort across a lost buffer.** The marks survive a restart and `Stream.migrate`,
+and come back with a WAL-replica restore (minus the replication lag, rows and marks
+together). A restore from the published table alone, or a revive, starts with none. The
+path to real HA is a log on Postgres (#165). The broker caches `MAX_PUBLISHERS` (4,096)
+publishers per stream and `DEDUPE_WINDOW` (64) committed ranges for each; the table holds
+every mark.
 
 ## `connect`
 
@@ -905,8 +928,8 @@ and that disagreement would surface as a resume delivering what the live stream 
 
 **`replay` in the greeting becomes an upper bound.** Unfiltered, `end - start` is exactly
 what arrives before live; filtered, the count is unknown until the scan runs, so the window
-bounds it. The recovery loop in [`SPEC.md`](SPEC.md) §6b reads a count and therefore wants
-an unfiltered subscription.
+bounds it. A loop that reads a replay by count therefore wants an unfiltered
+subscription.
 
 `Greeting.where` echoes the applied filter, so a subscriber can confirm the server
 understood the predicate rather than assume it.
