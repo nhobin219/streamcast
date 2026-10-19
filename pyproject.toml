@@ -63,12 +63,14 @@ dependencies = [
     # `replication` and `column_ddl` are not used here, so 0.13.0 making them
     # private again breaks nothing; 0.13.1 for a table's metadata JSON
     # fsynced before the catalog names it, so a power loss cannot leave a
-    # log that will not open (litelink#198).
+    # log that will not open (litelink#198); 0.14.0 for the buffer's write
+    # transaction (`log.transaction()`, `extend(tx=)`), which commits each
+    # exactly-once publisher's mark with its rows (litelink#205).
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.13.1,<0.14",
+    "litelink>=0.14.0,<0.15",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a
