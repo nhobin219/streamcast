@@ -7,20 +7,46 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.23.0 — 2026-10-19
+
+Exactly-once publishing and consuming (#152), in three parts:
+- the broker dedupes each publisher on its seq (#166);
+- an outbox and an inbox in the caller's own database, with a bounded
+  receive window (#167);
+- a runnable example of both through two crashes (#168).
 
 ### Upgrading
 
-**Breaking: the publisher cursor is removed** (#152). `publish(cursor=,
+**Breaking: the publisher cursor is removed** (#166). `publish(cursor=,
 cursor_uri=, s3_options=, upload_every=)`, `Publication.resumed_from` and
 `Publication.commit` are gone. They existed only to bound the read-back a
 publisher made to find which of its rows landed, and exactly-once publishing
-(below) replaces that read-back. A publisher that used the cursor for that
-moves to `publish(uri, publisher=...)` on a stream served with
-`exactly_once=True`; one that used it to log progress reads
-`info.publisher`; one that wants neither drops the keyword. The consumer's
-cursor (`connect(cursor=, cursor_uri=)`, `Subscription.commit`,
-`streamcast.Cursor`) is unchanged.
+(below) replaces that read-back. The consumer's cursor (`connect(cursor=,
+cursor_uri=)`, `Subscription.commit`, `streamcast.Cursor`) is unchanged.
+Passing a removed keyword raises `TypeError` when the publication opens. To migrate:
+
+- **A publisher that used the cursor to read back what landed** moves to an
+  exactly-once publication on a stream served with `exactly_once=True`.
+  Either it numbers its own rows:
+
+  ```python
+  async with streamcast.publish(uri, publisher="enricher") as out:
+      seq = out.info.publisher.last_seq + 1     # where the broker has it
+      await out.send(row, seq=seq)
+  ```
+
+  or it lets an outbox in its database number and ship them, in the same
+  transaction as its state:
+
+  ```python
+  async with streamcast.outbox(uri, publisher="enricher", store=store) as out:
+      async with store.transaction() as tx:
+          await out.send(row, tx=tx)
+  ```
+
+- **A publisher that used it to log progress** reads `info.publisher` on an
+  exactly-once publication, or the offsets `send` returns.
+- **A publisher that wanted neither** drops the keywords.
 
 **Nothing on the wire changed for a connection that does not ask for
 exactly-once.** The protocol stays 4. The greeting's `publisher` key and the
@@ -34,11 +60,16 @@ the dedupe where it was (measured against each release). Upgrade the brokers,
 then serve streams with `exactly_once=True`, then opt publishers in one at a
 time.
 
-**Requires litelink 0.14.0** (its buffer transaction, `log.transaction()`), up from 0.13.1.
+**Requires `litelink>=0.14.0,<0.15`** (its buffer transaction,
+`log.transaction()`), up from 0.13.1. An application that pins litelink
+itself raises that pin with this upgrade.
+
+**`streamcast[postgres]`** is a new extra: psycopg 3 for `PostgresStore`.
+Nothing else needs it, and SQLite needs nothing.
 
 ### Added
 
-- **Exactly-once end to end, through the caller's own database** (#152,
+- **Exactly-once end to end, through the caller's own database** (#167,
   `docs/SPEC.md` §6c). A process's state, the rows it publishes and the place
   it has read to now commit in one transaction of its database:
   - `Store` and `Transaction`, public protocols, with `SqliteStore` (the
@@ -67,7 +98,7 @@ time.
     `StoreBehindBroker` (the sender stops rather than renumber over a hole).
   - New constants: `INBOX_MAX_BYTES`, `INBOX_RESUME_AT`, `SEND_BATCH`.
 - **Exactly-once publishing: the broker dedupes each publisher on its seq**
-  (#152). A stream served with `exactly_once=True` (`Stream.new`, `migrate`,
+  (#166). A stream served with `exactly_once=True` (`Stream.new`, `migrate`,
   `restore`, or `Stream(..., exactly_once=True)`) takes publishers that name
   themselves, `publish(uri, publisher="enricher")`. Such a publisher numbers
   its rows 1, 2, 3, … with no holes (`send(row, seq=n)`, `send_many(rows,
@@ -102,6 +133,20 @@ time.
 - `Publication.send` and its siblings raise the server's refusal
   (`Superseded`, `StreamRetired`, …) when the connection was closed with one,
   rather than the bare `ConnectionClosed`.
+- **`examples/outbox_inbox/`** (#168): a producer, an enricher and a consumer,
+  each with its own SQLite database, around one broker. The producer dies with
+  orders committed and unshipped, and the enricher dies inside its
+  consume-transform-publish transaction. Every order still reaches the
+  enriched stream and the consumer exactly once.
+  `tests/test_outbox_inbox_example.py` runs it.
+
+### Fixed
+
+- **A publish write that failed after the connection closed raised
+  `IndexError`** in place of the server's refusal (#167). When a publish
+  connection closed, the reader failed and removed every pending reply, and a
+  write that raised afterwards popped the now-empty queue. The write's own
+  reply is now removed by identity, if it is still there.
 
 ## 0.22.0 — 2026-10-18
 
