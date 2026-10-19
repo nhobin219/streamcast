@@ -690,7 +690,7 @@ class Stream:
                 # transaction, and kept on disk before it is retired. Written
                 # even when empty, so a file left by an earlier migration can
                 # never be taken for this log's.
-                _dedupe.stash(carried, _dedupe.read_all(old))
+                _dedupe.stash(carried, old.name, _dedupe.read_all(old))
 
             new_log, sealed = _seal_and_succeed(
                 old,
@@ -709,7 +709,7 @@ class Stream:
         try:
             # Before the metadata names the new log current, so no server ever
             # serves it without them; idempotent, so a re-run writes them again.
-            marks = _dedupe.unstash(carried)
+            marks = _dedupe.unstash(carried, current)
             if marks:
                 _dedupe.write_all(new_log, marks)
 
@@ -2167,7 +2167,12 @@ class Stream:
             self._claims[publisher] = (token, connection)
             # No await since the claim moved: the probe queues behind every
             # job the older connection could still queue, which is none.
-            probe = self._writer.probe(publisher)
+            try:
+                probe = self._writer.probe(publisher)
+            except BaseException:
+                self._release(publisher, token)
+                raise
+
             if previous is not None:
                 closing = asyncio.create_task(
                     previous[1].close(Close.SUPERSEDED, refusal("superseded"))

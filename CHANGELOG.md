@@ -34,7 +34,7 @@ the dedupe where it was (measured against each release). Upgrade the brokers,
 then serve streams with `exactly_once=True`, then opt publishers in one at a
 time.
 
-**Requires litelink 0.13.2** (its buffer transaction, `log.transaction()`).
+**Requires litelink 0.14.0** (its buffer transaction, `log.transaction()`), up from 0.13.1.
 
 ### Added
 

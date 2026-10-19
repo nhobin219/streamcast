@@ -206,7 +206,8 @@ class TestTheMarks:
 
         version, python = release
         root = tmp_path / "data"
-        ours = [interop_peer.row(i) for i in (-100, -99)]
+        indices = (-100, -99)
+        ours = [interop_peer.row(i) for i in indices]
 
         async def dedupe() -> None:
             stream = streamcast.Stream.new(
@@ -232,7 +233,9 @@ class TestTheMarks:
 
         asyncio.run(dedupe())
         report = pair(python, python, root)
-        assert_works(report, client=version, before=[r["event_ts"] for r in ours])
+        assert_works(
+            report, client=version, before=[1_790_038_800_000_000 + i for i in indices]
+        )
         assert asyncio.run(reopened()) == (2, 2)
 
     def test_an_older_server_refuses_an_exactly_once_publisher(self, release, tmp_path):

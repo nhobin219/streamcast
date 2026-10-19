@@ -309,6 +309,20 @@ class TestTheMarkIsDurable:
         await migrated.aclose()
 
 
+class TestTheCarriedFile:
+    def test_marks_read_from_another_log_are_never_applied(self, tmp_path):
+        """A file a crash left behind names the log it was read from, so a
+        later migration of a different log cannot take it for its own.
+
+        Falsify by ignoring the log name in `unstash`.
+        """
+        path = tmp_path / "trades.publishers.json"
+        _dedupe.stash(path, "trades", [("a", 3, 7)])
+        assert _dedupe.unstash(path, "trades") == [("a", 3, 7)]
+        assert _dedupe.unstash(path, "trades-v2") is None
+        assert _dedupe.unstash(tmp_path / "missing.json", "trades") is None
+
+
 def migrated_home(root):
     from streamcast import _metadata
 
@@ -383,6 +397,20 @@ class TestOverTheWire:
                 await streamcast.publish(f"ws://127.0.0.1:{port}/trades", publisher="a")
 
         assert refused.value.why == "broker"
+
+    async def test_a_probe_that_raises_leaves_no_claim(self, serve, log, monkeypatch):
+        from streamcast import _writer
+
+        def broken(self, publisher):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(_writer.Writer, "probe", broken)
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            with pytest.raises(Exception):  # noqa: B017, PT011 — the server's 1011
+                await streamcast.publish(uri, publisher="a")
+
+        assert stream._claims == {}  # noqa: SLF001
 
     async def test_a_newer_connection_supersedes_an_older_one(self, serve, log):
         stream = streamcast.Stream("trades", log=log, exactly_once=True)

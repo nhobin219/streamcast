@@ -25,7 +25,9 @@ publisher also keeps its last `window` committed ranges, `(first_seq, count,
 first_offset)` -- a resend that regroups rows is still answered row by row.
 The ranges are memory only. After a restart, or once an entry is evicted, a
 duplicate AT the mark is answered with `last_offset` and an older one with
-`null`. A sender that reads the greeting's `last_seq` deletes everything at
+`null` -- and so is one repeating a row of the same commit whose entry was
+evicted during it, which takes more publishers in one commit than the cache
+holds. A sender that reads the greeting's `last_seq` deletes everything at
 or below it instead of resending, so only a caller numbering rows by hand
 meets a `null`. Storing the ranges would rewrite about 1.6 KB per publisher
 in every commit to answer a question the greeting already settles.
@@ -298,11 +300,12 @@ def carried(root: Path, name: str) -> Path:
     return root / f"{name}.publishers.json"
 
 
-def stash(path: Path, marks: Sequence[tuple[str, int, int]]) -> None:
-    """Write `marks` to `path` durably: a temporary file, fsynced, renamed."""
+def stash(path: Path, log: str, marks: Sequence[tuple[str, int, int]]) -> None:
+    """Write `marks`, read from the log named `log`, to `path` durably: a
+    temporary file, fsynced, renamed."""
     temporary = path.with_suffix(".json.tmp")
     with temporary.open("w") as handle:
-        json.dump([list(mark) for mark in marks], handle)
+        json.dump({"log": log, "marks": [list(mark) for mark in marks]}, handle)
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -314,14 +317,23 @@ def stash(path: Path, marks: Sequence[tuple[str, int, int]]) -> None:
         os.close(directory)
 
 
-def unstash(path: Path) -> list[tuple[str, int, int]] | None:
-    """The marks `stash` wrote, or None if there are none."""
+def unstash(path: Path, log: str) -> list[tuple[str, int, int]] | None:
+    """The marks `stash` wrote from the log named `log`, or None.
+
+    Keyed by the log they were read from, because a file a crash left behind
+    can outlive its migration: a log retired some other way (`Stream.retire`)
+    and then migrated never stashed its own, and an earlier log's marks
+    applied to its successor would send every publisher back to an old seq.
+    """
     try:
         raw = json.loads(path.read_text())
     except FileNotFoundError:
         return None
 
-    return [(str(p), int(s), int(o)) for p, s, o in raw]
+    if not isinstance(raw, dict) or raw.get("log") != log:
+        return None
+
+    return [(str(p), int(s), int(o)) for p, s, o in raw["marks"]]
 
 
 __all__ = [
