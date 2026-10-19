@@ -19,7 +19,7 @@ There are two kinds of example:
   Most run against live public feeds from Bitstamp, so there is nothing to
   configure and no credentials to set.
 - **Patterns you read**, where the code is the point: `keyed_table/`,
-  `migration/` and the one-shot `otel/demo.py`. They put the three roles in
+  `migration/`, `outbox_inbox/` and the one-shot `otel/demo.py`. They put the three roles in
   one process, talking over sockets as separate processes would, so a test
   can run each end to end. `uv run python -m examples.<path>` runs one by
   hand.
@@ -275,6 +275,32 @@ comparator watches the four outputs live, and DuckDB joins B against D and C
 against E. An empty diff means the migration does what production does. Once
 it's empty, the cutover is C reading D's stream, and B retires with its
 history still a queryable table.
+
+## Exactly-once end to end: an outbox and an inbox
+
+```
+uv run python -m examples.outbox_inbox.demo
+```
+
+`outbox_inbox/demo.py` is a producer, an enricher and a consumer, each with
+its own SQLite database, around one broker. The producer places each order
+and publishes it in one transaction of its database (`streamcast.outbox`).
+The enricher reads orders through an inbox (`streamcast.inbox`), keeps a
+running total per symbol, and publishes each enriched order, with the input
+row's delete, the total and the output row in one transaction:
+
+```python
+async for offset, ts, row, tx in inbox:
+    await tx.execute("INSERT INTO totals ... ON CONFLICT ... DO UPDATE ...", ...)
+    await out.send({**row, "running_total": total}, tx=tx)
+```
+
+It crashes twice on purpose. The producer dies with half its orders committed
+and unshipped, and its next run ships them. The enricher dies inside its
+transaction, so the order it held is delivered again and nothing it had
+enqueued exists. Every order still reaches the enriched stream once, the
+consumer once, and the totals are right. `tests/test_outbox_inbox_example.py`
+runs it. [`docs/SPEC.md`](../docs/SPEC.md) §6c has the reasoning.
 
 ## OpenTelemetry logs, traces and metrics, in a dashboard
 
