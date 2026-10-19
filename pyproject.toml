@@ -85,6 +85,11 @@ dependencies = [
 # not `uvicorn`, which is the deployer's choice — mounting works in any ASGI
 # app and the adapter touches nothing above the WebSocket class.
 asgi = ["starlette>=0.40"]
+# The Postgres adapter for a CALLER's database (`PostgresStore`), where an
+# outbox and an inbox commit with the caller's own state. psycopg 3, for its
+# native asyncio connection; the adapter's tests pass at the 3.1 floor and on
+# the latest. SQLite needs nothing: it is the stdlib's.
+postgres = ["psycopg>=3.1"]
 
 [project.urls]
 Source = "https://github.com/nhobin219/streamcast"
@@ -126,6 +131,9 @@ dev = [
     # about before. `test_schema.py` asserts the mapping against a real
     # validator rather than against my reading of the spec.
     "jsonschema>=4.20",
+    # A TEST dependency, with its bundled libpq, for the Postgres adapter's
+    # contract tests against a throwaway cluster on loopback.
+    "psycopg[binary]>=3.1",
     "ruff>=0.15.0",
     # TEST dependencies for the ASGI transport. `starlette` is the adapter's
     # own target; `uvicorn` is here because every claim `tests/test_asgi.py`

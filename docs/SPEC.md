@@ -1379,6 +1379,123 @@ rows were lost with the buffer. **The path to real HA is a log on Postgres
 (#165)**, where the mark would live in the same replicated database as the
 rows; this design asks nothing of the buffer's replication.
 
+## 6c. Exactly-once end to end: the caller's database
+
+§6b makes the broker append each publisher's row once. That is half of
+exactly-once. The other half is the process: its own state, the rows it
+publishes and the place it has read to must commit together, or a crash
+between them duplicates or loses work. They can only commit together in the
+database the state already lives in. So streamcast keeps an outbox and an
+inbox there, written in the caller's own transaction.
+
+```python
+store = await streamcast.SqliteStore.open("state.db")       # or PostgresStore.connect(dsn)
+
+async with (
+    streamcast.inbox(in_uri, subscriber="enricher", store=store) as sub,
+    streamcast.outbox(out_uri, publisher="enricher", store=store) as out,
+):
+    async for offset, ts, row, tx in sub:                  # tx holds the row's delete
+        await tx.execute("UPDATE totals SET n = n + 1")
+        await out.send(transform(row), tx=tx)              # enqueued in the same tx
+```
+
+**The chain, each handoff one local transaction or idempotent across a crash:**
+
+1. The receiver writes received rows into the inbox, and the received position with them.
+2. One caller transaction holds the caller's writes, the inbox row's delete, and the outbox rows with their seqs.
+3. The sender ships the outbox. The broker appends each `(publisher, seq)` once (§6b), and the sender deletes rows as they are acknowledged.
+
+Nothing needs a shared or two-phase transaction.
+
+### `Store` and `Transaction`
+
+The protocols are public; `SqliteStore` (the stdlib's `sqlite3`, its one
+connection on a thread of its own so an fsync never blocks the loop) and
+`PostgresStore` (psycopg 3, `streamcast[postgres]`, explicit `BEGIN` on an
+autocommit connection with no session state, so it works behind a
+transaction pooler) implement them.
+
+- **The transaction is an explicit object, never a reentrant depth.** A
+  depth counted per connection lets another task's block join one that
+  suspended; a `tx` passed by value makes "which transaction" a fact.
+- **One transaction at a time per store.** A task that asks for a second
+  while it holds one is refused (`RuntimeError`) rather than left waiting on
+  itself. An inbox row's transaction is open until the loop asks for the
+  next row; `Inbox.commit()` ends it early.
+- **A lost connection inside a block is the caller's to see**, never a
+  silent re-run, and everything the block wrote rolls back with it.
+- **A COMMIT whose answer was lost may have committed**, so every library
+  write is safe to find already done.
+
+### The tables
+
+The stream leads every key, every column is prefixed, rows are JSON text and
+times are integer UTC microseconds on both databases (`store_ddl(dialect)`
+for a role without DDL rights):
+
+| table | key | holds |
+|---|---|---|
+| `streamcast_outbox` | stream, publisher id, seq | pending rows; deleted on acknowledgement; no offset column |
+| `streamcast_publisher_state` | stream, publisher id | `streamcast_next_seq`, `streamcast_stream_id` |
+| `streamcast_inbox` | stream, subscriber id, `litelink_offset` | received, unprocessed rows with `streamcast_ts`; deleted when processed |
+| `streamcast_subscriber_state` | stream, subscriber id | `streamcast_last_received_offset`, `streamcast_stream_id` |
+
+**The stream's id lives in the two state tables only**, bound at the first
+connect and checked at every one after. A stream recreated under the same
+name, whose offsets and seqs started again, is refused with
+`StreamMismatch` before a row is sent or received: a subscriber resuming
+above its new end would wait silently, and a publisher's rows would be
+answered as duplicates of the old stream's.
+
+### The outbox
+
+- **Seqs are assigned at enqueue, inside the caller's transaction, gapless.**
+  The counter moves with the rows that take it, so a rollback returns its
+  seqs. The UPDATE takes the publisher's row lock (Postgres) or the database's
+  (SQLite) before anything is read, so a second enqueuer waits for the first
+  to commit and takes the next seq: seqs commit in seq order. Parallel
+  producers take distinct publisher ids.
+- **The greeting reconciles the two sides at every connect**: rows at or
+  below `last_seq` landed and are deleted unsent; `last_seq` below what was
+  acknowledged (the lowest pending seq minus one, or `next_seq - 1`) is
+  `AcknowledgedRowsLost`; `last_seq` at or above `next_seq` is
+  `StoreBehindBroker`. Both stop the sender. No acknowledged seq is stored:
+  the lowest pending seq already says it.
+- **The sender** connects only when it has rows, ships ordered batches
+  (`SEND_BATCH`) pipelined to `max_in_flight`, sends a refused batch again row
+  by row and renumbers the refused row away so seqs stay 1..n, says an outage
+  once and its end once, backs off (`BACKOFF`), and polls (`POLL_EVERY`) for
+  rows another process committed. A refusal of the connection itself is
+  raised from the next `send` and the block's exit.
+
+### The inbox
+
+- **Resume is from `last_received_offset + 1`**, and rows received but not
+  processed are handed out first. A subscriber with no state starts at the
+  latest offset or at `offset=`; one with state refuses `offset=`.
+- **Rows are processed in any order**, each deleted in the transaction that
+  processed it. On Postgres several workers take different rows
+  (`FOR UPDATE SKIP LOCKED`).
+- **An empty inbox does NOT mean caught up.** It means what was received has
+  been processed. `caught_up()` answers the other question: everything the
+  broker held at the current connection's greeting is in, and nothing more
+  waits on the socket.
+- **The inbox is a bounded receive window, not a backlog store.** The
+  backlog stays in the log. At `inbox_max_bytes` (`INBOX_MAX_BYTES`, 64 MiB)
+  or `inbox_max_rows` (None) of unprocessed rows, the receiver inserts
+  nothing more and **closes its subscription**: a subscriber that only
+  stopped reading would hold broker memory until `max_backlog` dropped it
+  (§4). It reconnects from `last_received_offset + 1` once the inbox is below
+  `inbox_resume_at` (`INBOX_RESUME_AT`, half) of each bound. The received
+  position advances only to the last row inserted, so frames read past the
+  bound come again. An empty inbox always takes one row, so a row larger
+  than the bound is delivered rather than blocking for ever.
+
+The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
+consumer without a database: one file, no driver, right for an idempotent
+consumer.
+
 ---
 
 ## 7. Invariants

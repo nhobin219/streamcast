@@ -352,6 +352,59 @@ class ExactlyOnceUnavailable(StreamcastError):
         )
 
 
+class StreamMismatch(StreamcastError):
+    """A saved position or publisher state belongs to another stream of the
+    same name: one deleted and recreated, whose offsets and seqs started again.
+
+    Refused before anything is read or sent, never resumed: a subscriber that
+    resumed above a recreated stream's end would wait silently for offsets it
+    reaches only later, and a publisher's rows would be answered as duplicates
+    of the old stream's. Moving the saved state is the operator's act.
+    """
+
+    def __init__(self, stream: str, recorded: str, given: str) -> None:
+        self.stream = stream
+        self.recorded = recorded
+        self.given = given
+        super().__init__(
+            f"stream {stream!r} is now {given!r}, but this database's state was "
+            f"recorded for {recorded!r}: the stream was recreated under the same "
+            f"name. Its saved position and seqs do not apply to it"
+        )
+
+
+class AcknowledgedRowsLost(StreamcastError):
+    """The broker's mark for this publisher is below rows it acknowledged.
+
+    The rows the outbox deleted on those acknowledgements are gone from the
+    broker too: its buffer was lost, restored from a replica that lagged, or
+    rebuilt from the published table alone (`docs/SPEC.md` §6b, best effort).
+    The sender stops rather than renumber over the hole.
+    """
+
+    def __init__(self, first: int, last: int) -> None:
+        self.first = first
+        self.last = last
+        super().__init__(
+            f"the broker no longer holds seqs {first} to {last}, which it "
+            f"acknowledged: its buffer was lost or restored behind them"
+        )
+
+
+class StoreBehindBroker(StreamcastError):
+    """This database is older than the broker's record of its publisher:
+    restored from a backup, say. Rows enqueued now would take seqs the broker
+    already holds and be answered as duplicates, so the sender stops."""
+
+    def __init__(self, next_seq: int, last_seq: int) -> None:
+        self.next_seq = next_seq
+        self.last_seq = last_seq
+        super().__init__(
+            f"the broker has this publisher at seq {last_seq}, but this database "
+            f"would number its next row {next_seq}: the database is behind"
+        )
+
+
 class TooSlow(StreamcastError):
     """The server dropped this subscriber for falling too far behind.
 
@@ -375,6 +428,7 @@ class TooSlow(StreamcastError):
 
 
 __all__ = [
+    "AcknowledgedRowsLost",
     "Close",
     "ExactlyOnceUnavailable",
     "IngestFailed",
@@ -382,6 +436,8 @@ __all__ = [
     "ProtocolError",
     "Rejected",
     "SequenceGap",
+    "StoreBehindBroker",
+    "StreamMismatch",
     "StreamNotFound",
     "StreamRetired",
     "StreamcastError",

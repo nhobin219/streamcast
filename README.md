@@ -635,6 +635,28 @@ stream not served exactly-once, and a server from before 0.23, refuse the publis
 restart and a migration, come back with a WAL-replica restore, and are lost by a restore
 from the published table alone. [`SPEC.md`](docs/SPEC.md) §6b has the whole of it.
 
+#### Exactly-once end to end: an outbox and an inbox
+
+A process whose state lives in a database can commit its input, its work and
+its output in one transaction of that database:
+
+```python
+store = await streamcast.SqliteStore.open("state.db")   # or PostgresStore.connect(dsn)
+
+async with (
+    streamcast.inbox(in_uri, subscriber="enricher", store=store) as sub,
+    streamcast.outbox(out_uri, publisher="enricher", store=store) as out,
+):
+    async for offset, ts, row, tx in sub:
+        await tx.execute("UPDATE totals SET n = n + 1")
+        await out.send(transform(row), tx=tx)
+```
+
+The inbox row's delete, the caller's writes and the outbox row commit
+together; a sender ships the outbox over an exactly-once publication, and a
+receiver keeps the inbox filled up to a bounded window (`inbox_max_bytes`),
+leaving the backlog in the log. [`SPEC.md`](docs/SPEC.md) §6c.
+
 ### Consumer
 
 ```python

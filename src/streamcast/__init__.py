@@ -109,6 +109,7 @@ from streamcast._catchup import CatchUpUnavailable
 from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
 from streamcast._errors import (
+    AcknowledgedRowsLost,
     Close,
     ExactlyOnceUnavailable,
     IngestFailed,
@@ -116,27 +117,35 @@ from streamcast._errors import (
     ProtocolError,
     Rejected,
     SequenceGap,
+    StoreBehindBroker,
     StreamcastError,
+    StreamMismatch,
     StreamNotFound,
     StreamRetired,
     Superseded,
     TooSlow,
 )
+from streamcast._inbox import Inbox, inbox
 from streamcast._limits import (
     DEDUPE_WINDOW,
+    INBOX_MAX_BYTES,
+    INBOX_RESUME_AT,
     MAX_BACKLOG,
     MAX_PUBLISHERS,
     PAGE_BYTES,
     PAGE_ROWS,
+    SEND_BATCH,
 )
 from streamcast._live import Live
 from streamcast._maintain import Maintain
+from streamcast._outbox import Outbox, outbox
 from streamcast._protocol import EARLIEST, Greeting, PublisherMark
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._server import serve
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
+from streamcast._store import PostgresStore, SqliteStore, Store, Transaction, store_ddl
 from streamcast._stream import MAX_REPLAY, Stream
 
 try:
@@ -147,12 +156,16 @@ except PackageNotFoundError:  # a source tree that was never installed
 __all__ = [
     "DEDUPE_WINDOW",
     "EARLIEST",
+    "INBOX_MAX_BYTES",
+    "INBOX_RESUME_AT",
     "LATEST",
     "MAX_BACKLOG",
     "MAX_PUBLISHERS",
     "MAX_REPLAY",
     "PAGE_BYTES",
     "PAGE_ROWS",
+    "SEND_BATCH",
+    "AcknowledgedRowsLost",
     "CatchUpUnavailable",
     "Live",
     "Reader",
@@ -162,27 +175,38 @@ __all__ = [
     "Cursor",
     "ExactlyOnceUnavailable",
     "Greeting",
+    "Inbox",
     "IngestFailed",
     "Maintain",
     "S3Options",
     "NotReplayable",
+    "Outbox",
+    "PostgresStore",
     "ProtocolError",
     "publish",
     "Rejected",
     "Publication",
     "PublisherMark",
     "SequenceGap",
+    "SqliteStore",
     "Stats",
+    "Store",
+    "StoreBehindBroker",
     "Stream",
+    "StreamMismatch",
     "StreamNotFound",
     "StreamRetired",
     "StreamcastError",
     "Subscription",
     "Superseded",
     "TooSlow",
+    "Transaction",
     "__version__",
     "connect",
     "from_arrow",
+    "inbox",
+    "outbox",
     "serve",
+    "store_ddl",
     "to_arrow",
 ]

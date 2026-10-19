@@ -234,3 +234,118 @@ def bucket(s3: litelink.S3Options) -> str:
         fs.mkdir(name)
 
     return f"s3://{name}/{uuid.uuid4().hex}"
+
+
+# -- the caller's database ---------------------------------------------------
+#
+# `PostgresStore` is tested against a throwaway cluster: `initdb` and `pg_ctl`
+# in a temp directory, listening on a Unix socket there and nowhere else. The
+# binaries come from STREAMCAST_PG_BIN, PATH, or a Debian layout; without them
+# the Postgres half of each store test SKIPS, and STREAMCAST_REQUIRE_POSTGRES
+# (which `just check-all` and CI set) turns that skip into a failure.
+
+
+def _pg_bin() -> Path | None:
+    import glob  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    named = os.environ.get("STREAMCAST_PG_BIN")
+    if named:
+        return Path(named)
+
+    found = shutil.which("pg_ctl")
+    if found:
+        return Path(found).parent
+
+    debian = sorted(glob.glob("/usr/lib/postgresql/*/bin/pg_ctl"))
+    return Path(debian[-1]).parent if debian else None
+
+
+@pytest.fixture(scope="session")
+def postgres_cluster(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """A DSN to the cluster's `postgres` database, or a skip."""
+    import subprocess  # noqa: PLC0415
+
+    binaries = _pg_bin()
+    if binaries is None or not (binaries / "initdb").exists():
+        if os.environ.get("STREAMCAST_REQUIRE_POSTGRES"):
+            pytest.fail("STREAMCAST_REQUIRE_POSTGRES is set but no initdb was found")
+
+        pytest.skip("no Postgres binaries (set STREAMCAST_PG_BIN, or install them)")
+
+    root = tmp_path_factory.mktemp("pg")
+    data, sockets = root / "data", root / "s"
+    sockets.mkdir()
+    subprocess.run(
+        [str(binaries / "initdb"), "-D", str(data), "-U", "streamcast", "-A", "trust"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            str(binaries / "pg_ctl"),
+            "-D",
+            str(data),
+            "-l",
+            str(root / "log"),
+            "-o",
+            f"-k {sockets} -c listen_addresses='' -c fsync=off",
+            "-w",
+            "start",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        yield f"host={sockets} user=streamcast dbname=postgres"
+    finally:
+        subprocess.run(
+            [str(binaries / "pg_ctl"), "-D", str(data), "-m", "immediate", "stop"],
+            capture_output=True,
+        )
+
+
+@pytest.fixture
+async def postgres_dsn(postgres_cluster: str) -> AsyncIterator[str]:
+    """A fresh database in the cluster, dropped after the test."""
+    import psycopg  # noqa: PLC0415
+    from psycopg import sql  # noqa: PLC0415
+
+    name = f"t_{uuid.uuid4().hex}"
+    async with await psycopg.AsyncConnection.connect(
+        postgres_cluster, autocommit=True
+    ) as c:
+        await c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+
+    yield postgres_cluster.replace("dbname=postgres", f"dbname={name}")
+
+    async with await psycopg.AsyncConnection.connect(
+        postgres_cluster, autocommit=True
+    ) as c:
+        await c.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(name)
+            )
+        )
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def opener(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[..., Any]:
+    """`await opener()` opens a store on this test's database: a SQLite file
+    in the temp directory, or a fresh Postgres database. Each call is another
+    connection to the same database, as a second process would have."""
+    if request.param == "sqlite":
+        path = tmp_path / "state.db"
+
+        async def sqlite(**kwargs: Any) -> Any:
+            return await streamcast.SqliteStore.open(path, **kwargs)
+
+        return sqlite
+
+    dsn = request.getfixturevalue("postgres_dsn")
+
+    async def postgres(**kwargs: Any) -> Any:
+        return await streamcast.PostgresStore.connect(dsn, **kwargs)
+
+    return postgres
