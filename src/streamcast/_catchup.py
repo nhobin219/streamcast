@@ -48,6 +48,7 @@ from streamcast import _filter, _metadata, _snapshot
 from streamcast._errors import NotReplayable, StreamcastError
 from streamcast._limits import PAGE_BYTES, PAGE_ROWS
 from streamcast._protocol import EARLIEST
+from streamcast._published import ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -143,6 +144,7 @@ class Catcher:
     __slots__ = (
         "_first",
         "_handshake",
+        "_memory_limit",
         "_name",
         "_page_bytes",
         "_page_rows",
@@ -169,8 +171,12 @@ class Catcher:
         *,
         page_bytes: int | None = PAGE_BYTES,
         page_rows: int | None = PAGE_ROWS,
+        memory_limit: str | None = None,
     ) -> None:
         self._uri = uri
+        # The cap on the DuckDB database the gap is read through, as
+        # `Stream.snapshot` takes it; None leaves DuckDB's default.
+        self._memory_limit = memory_limit
         # How much of the gap one query reads: see `_limits.PAGE_BYTES`.
         self._page_bytes = page_bytes
         self._page_rows = page_rows
@@ -196,6 +202,7 @@ class Catcher:
                 self._uri,
                 s3_options=self._s3,
                 stream_id=self._stream_id,
+                cache=ReadCache(memory_limit=self._memory_limit),
             )
         except _snapshot.SnapshotUnavailable as exc:
             raise CatchUpUnavailable(str(exc)) from exc
