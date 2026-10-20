@@ -7,6 +7,19 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.22.1 — 2026-10-20
+
+A fix on the 0.22 line, for readers that cannot take 0.23's breaking changes yet.
+
+### Fixed
+
+- **Opening a published table no longer reads every data file.** `Table.open`
+  (every snapshot read) learned the table's extent and row count with
+  `min/max/count(*)` over `iceberg_scan`, a request per data file; a log that
+  publishes every few minutes has thousands of small files, and one open took
+  20+ s, minutes on a loaded box. They now come from the manifests' per-file
+  statistics, falling back to the scan only when those cannot answer exactly.
+
 ## 0.22.0 — 2026-10-18
 
 ### Upgrading
