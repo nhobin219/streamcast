@@ -45,6 +45,8 @@ from urllib.parse import unquote, urlsplit
 
 import pyarrow as pa
 from litelink import S3Options, current_metadata, duckdb_connection
+from pyiceberg.conversions import from_bytes
+from pyiceberg.table import StaticTable
 
 from streamcast._log import COLUMN
 
@@ -147,6 +149,43 @@ class Owning:
             self._reader.close()
         finally:
             self._cursor.close()
+
+
+def _counted_from_manifests(
+    metadata: str, s3_options: S3Options | None
+) -> tuple[int | None, int | None, int] | None:
+    """The lowest and highest offset and the row count of the snapshot at
+    `metadata`, from its manifests' per-file statistics: one read of the
+    manifest list and one per manifest, never a data file.
+
+    The query this replaces read every data file's footer to answer the same
+    three numbers, so opening a table cost a request per file, and a table of
+    many small files (a log that publishes every few minutes) took tens of
+    seconds to open — on every read, of every reader. None when the
+    statistics cannot answer exactly — a file without bounds on the offset
+    column, or a delete file whose rows a count would include — and the
+    caller asks DuckDB as before.
+    """
+    properties = {} if s3_options is None else s3_options.catalog_properties()
+    table = StaticTable.from_metadata(metadata, properties=properties)
+    field = table.schema().find_field(COLUMN)
+    low: int | None = None
+    high: int | None = None
+    count = 0
+    for task in table.scan().plan_files():
+        data = task.file
+        lower = (data.lower_bounds or {}).get(field.field_id)
+        upper = (data.upper_bounds or {}).get(field.field_id)
+        if task.delete_files or lower is None or upper is None:
+            return None
+
+        first = int(from_bytes(field.field_type, lower))
+        last = int(from_bytes(field.field_type, upper))
+        low = first if low is None else min(low, first)
+        high = last if high is None else max(high, last)
+        count += data.record_count
+
+    return low, high, count
 
 
 def _quoted(text: str) -> str:
@@ -278,7 +317,7 @@ class Table:
     ) -> Table:
         """The table for log `name` under the `published` prefix, as it is now.
 
-        Blocking — a hint read, a schema read and an extent query, each a GET
+        Blocking — a hint read, a schema read and the manifests' statistics, each a GET
         or more against an `s3://` table — so a caller on an event loop runs it
         in a thread.
 
@@ -298,9 +337,15 @@ class Table:
             metadata = path(current_metadata(uri, s3_options=s3_options))
             scan = f"iceberg_scan({_quoted(metadata)})"
             schema = connected.execute(f"SELECT * FROM {scan} LIMIT 0").arrow().schema
-            low, high, count = connected.execute(
-                f'SELECT min("{COLUMN}"), max("{COLUMN}"), count(*) FROM {scan}'
-            ).fetchone() or (None, None, 0)
+            counted = _counted_from_manifests(metadata, s3_options)
+            low, high, count = (
+                counted
+                if counted is not None
+                else connected.execute(
+                    f'SELECT min("{COLUMN}"), max("{COLUMN}"), count(*) FROM {scan}'
+                ).fetchone()
+                or (None, None, 0)
+            )
         except BaseException:
             if shared is None:
                 connected.close()
