@@ -7,6 +7,17 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.22.3 — 2026-10-20
+
+### Fixed
+
+- **A reader that passes no `s3_options` opens a published table again.**
+  0.22.1's manifest read handed pyiceberg no properties when a reader passed
+  no options, rather than resolving them from the environment as litelink
+  does, so a non-AWS endpoint (`AWS_ENDPOINT_URL`) never reached it and the
+  open asked AWS itself (`ACCESS_DENIED`). Readers passing explicit options
+  were unaffected.
+
 ## 0.22.2 — 2026-10-20
 
 ### Fixed

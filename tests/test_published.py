@@ -211,6 +211,33 @@ def test_an_s3_table_reads_with_the_readers_own_credentials(tmp_path, s3, bucket
         table.close()
 
 
+@pytest.mark.replication
+def test_an_s3_table_opened_without_options_reads_with_the_environments(
+    tmp_path, s3, bucket
+):
+    """A reader that passes no `s3_options` reads with what the environment
+    resolves (the `s3` fixture puts its endpoint and key there), the extent
+    read from the manifests included: 0.22.1 handed pyiceberg no properties,
+    so a non-AWS endpoint in the environment never reached it and the open
+    asked AWS itself (ACCESS_DENIED)."""
+    log = litelink.new(
+        tmp_path, "trades", schema=SCHEMA, published=bucket, s3_options=s3
+    )
+    with log:
+        log.extend([{"i": i} for i in range(4)])
+        while log.seal(flush=True) is not None:
+            pass
+
+        log.publish(flush=True)
+
+    table = _published.Table.open(bucket, "trades", None)
+    try:
+        assert table.extent == (1, 5)
+        assert table.record_count == 4
+    finally:
+        table.close()
+
+
 def publish(log: litelink.WriteHandle, start: int, count: int) -> None:
     log.extend([{"i": i} for i in range(start, start + count)])
     while log.seal(flush=True) is not None:
