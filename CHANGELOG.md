@@ -7,6 +7,18 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- **A reopened stream reads its published table with its own `s3_options`**
+  (released on the 0.22 line as 0.22.2). `litelink.open` was called without
+  them on every reopen, so a server whose streams publish to different stores
+  could not restart once a stream had published (`ACCESS_DENIED` on its own
+  metadata).
+- **Opening a published table reads its manifests, not every data file**
+  (0.22.1).
+
 ## 0.23.0 — 2026-10-19
 
 Exactly-once publishing and consuming (#152), in three parts:

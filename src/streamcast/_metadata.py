@@ -487,7 +487,9 @@ def single(stream: str, log: LogHandle) -> Metadata:
     )
 
 
-def complete(metadata: Metadata, log: LogHandle) -> Metadata:
+def complete(
+    metadata: Metadata, log: LogHandle, s3_options: S3Options | None = None
+) -> Metadata:
     """`metadata` with what a version-1 file lacks, and the live log's start.
 
     `log` is the live log. A sealed log's published prefix is read from its
@@ -509,7 +511,9 @@ def complete(metadata: Metadata, log: LogHandle) -> Metadata:
             )
 
         if (root / entry.name).is_dir():
-            with litelink.open(root, entry.name, read_only=True) as sealed:
+            with litelink.open(
+                root, entry.name, read_only=True, s3_options=s3_options
+            ) as sealed:
                 return replace(
                     entry,
                     published=entry.published or sealed.published,
@@ -670,7 +674,7 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     elif found.live_log.name == log.name:
         # Filled in where a version-1 file, or a live log with no rows when
         # it was written, left them unknown — and rewritten only if so.
-        completed = complete(found, log)
+        completed = complete(found, log, s3_options)
         changed = completed != found
         found = completed
 
