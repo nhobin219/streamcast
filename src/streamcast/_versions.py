@@ -261,6 +261,21 @@ def fetch(
     unreachable endpoint — raises, because treating it as "one log" would
     restore the stream's first log as though it were its current one.
     """
+    found = _published(published, stream, s3_options)
+    if found is None:
+        return None
+
+    metadata = found[1]
+    if metadata.manifest is not None:
+        metadata = dataclasses.replace(metadata, manifest=_manifest.name(stream))
+
+    return metadata
+
+
+def _published(
+    published: str, stream: str, s3_options: S3Options | None
+) -> tuple[_Remote, _metadata.Metadata] | None:
+    """`fetch`'s read, with `manifest` as the name it has under the prefix."""
     store = _Remote(published, stream, s3_options)
     found = current(store)
     if found is None:
@@ -284,11 +299,80 @@ def fetch(
 
         return None
 
-    metadata = _metadata.Metadata.from_json(raw.decode())
+    return store, _metadata.Metadata.from_json(raw.decode())
+
+
+def adopt(
+    home: str | os.PathLike[str],
+    published: str,
+    stream: str,
+    s3_options: S3Options | None = None,
+) -> _metadata.Metadata | None:
+    """Write the copy under a remote `published` prefix into a `home` that has
+    no metadata, and return it as `load` reads it; None if there is no copy.
+
+    **For a home that lost its metadata while its logs survived.** Describing
+    the logs afresh instead mints a new `stream_id`, and the next upload puts
+    it over the copy every reader resolves — with the copy's sealed logs and
+    retention gone from it too. The copy is what the stream is, so the home
+    takes it, its manifest included: a sealed log's statistics are recorded
+    nowhere else once the log has left this disk.
+
+    A compare-and-swap against no version, so a home that gained one meanwhile
+    is never overwritten (`Conflict`).
+    """
+    found = _published(published, stream, s3_options)
+    if found is None:
+        return None
+
+    store, metadata = found
+    manifest = None
     if metadata.manifest is not None:
+        data = store.read(metadata.manifest)
+        manifest = None if data is None else pq.read_table(pa.BufferReader(data))
         metadata = dataclasses.replace(metadata, manifest=_manifest.name(stream))
 
-    return metadata
+    commit(home, metadata, manifest=manifest, expected=None)
+    return load(home, stream)[1]
+
+
+def occupied(
+    published: str, stream: str, s3_options: S3Options | None = None
+) -> str | None:
+    """What a remote `published` prefix already holds of `stream`, in words for
+    a refusal; None if it holds nothing of it.
+
+    Its metadata, or anything under `<published>/<stream>/`, where its first
+    log publishes: the log's table, or the WAL replica litelink ships beside
+    it (`<log>/_wal/`). The second matters on its own — a stream that
+    replicated its WAL and never published has no table for litelink to
+    refuse, and an empty log created here would be shipped as the replica's
+    next transaction, so a restore from then on returns it empty.
+    """
+    try:
+        found = fetch(published, stream, s3_options)
+    except FileNotFoundError:
+        # A missing bucket holds nothing to replace. Refusing it is `serve`'s,
+        # at the first upload (`_metadata.ensure`), as it was: a stream may
+        # be created and written before its bucket exists.
+        return None
+
+    if found is not None:
+        return f"the stream's metadata under {published}"
+
+    if not stream:
+        # The stream at `/` publishes at the prefix itself, beside others.
+        return None
+
+    directory = f"{published.rstrip('/')}/{stream}"
+    filesystem, key = _remote._filesystem(directory, s3_options)  # noqa: SLF001
+    # One level, not the whole tree: an object anywhere under it shows here
+    # as a file or a directory, and a large table would otherwise be listed
+    # page by page to learn what its first entry already says.
+    if filesystem.get_file_info(pafs.FileSelector(key, allow_not_found=True)):
+        return f"the log's published table or WAL replica at {directory}"
+
+    return None
 
 
 def manifest_uri(uri: str, manifest: str) -> str:

@@ -873,6 +873,11 @@ until its first version is written.
 - **`stream_id` is minted once**, when the file is first written, as
   Iceberg's `table-uuid` is. A `file://` path can exist on two machines for
   two different streams, and the id is how a reader tells them apart.
+  A home that has lost its metadata while its logs survive does not mint
+  another: `serve`, `migrate`, `retire` and `retain` adopt the published
+  copy, manifest included, and refuse when that copy's live log is not the
+  one they opened. A new id uploaded over the copy would turn away every
+  reader that recorded the old one, and drop the copy's sealed logs with it.
 - **Each log says where it is read from.** `published` is the prefix its
   table sits under, at `<published>/<name>` — every log publishes, to
   `file://<root>/<name>/published` when nothing else is configured. A reader
@@ -1570,6 +1575,17 @@ result serves and appends like any other. Its schema and `sort_by` come from
 the stream's metadata, exactly — an Iceberg schema keeps no Arrow field
 metadata, where a binary column's encoding lives — and litelink checks them
 against the replica or the table.
+
+**`Stream.new` refuses to create a stream where its published prefix already
+holds it.** That means its metadata, its first log's table, or that log's WAL
+replica, and the refusal is a `FileExistsError` naming `Stream.restore`. It
+looks only when the stream is not on this disk, with one metadata read and a
+one-level listing. Creating an empty one there was the ordinary startup on a
+box that lost its disk. Its first `serve` uploaded the empty stream's
+metadata over the copy. litestream 0.5.16 also does not refuse an empty
+database behind an existing replica: it ships it as the replica's next
+transaction, so every restore after that returns the empty stream.
+Restoring, or starting afresh at another prefix, is the caller's choice.
 
 **Offsets are fenced, not reissued**, and that is what makes the move safe for
 consumers. litelink skips 2**20 past what a replica recorded, or 2**40 past what
