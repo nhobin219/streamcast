@@ -34,7 +34,13 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
 from streamcast._errors import Close, NotReplayable, ProtocolError
-from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, _bound
+from streamcast._limits import (
+    MAX_BACKLOG,
+    MAX_IN_FLIGHT,
+    MAX_INBOUND,
+    _bound,
+    message_bytes,
+)
 from streamcast._maintain import ROLES, Maintain, Supervisor, stop
 from streamcast._process import environment
 from streamcast._protocol import Publish, parse_subscribe, refusal
@@ -419,6 +425,7 @@ def serve(
     max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
     max_inbound: int | Mapping[str, int] = MAX_INBOUND,
     max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
+    max_message_bytes: int | Mapping[str, int] | None = None,
     stats: bool | str = True,
     compression: str | None = None,
     **kwargs: Any,
@@ -510,6 +517,16 @@ def serve(
     connection to that stream; inbound is shared across its publishers. These
     count rows and frames, not bytes or total process memory. See `_limits`.
 
+    **`max_message_bytes` is each stream's frame limit**, in the same two
+    forms: the bytes one publish frame may carry. websockets' `max_size`
+    becomes the largest of them, and a frame over its own stream's limit
+    closes the connection with 1009, as websockets does for a frame over its
+    own. Unset, it is the `max_size`
+    passed here if there is one, so a server configured with that before
+    behaves the same, or `_limits.MAX_MESSAGE_BYTES` (1 MiB, websockets'
+    default); passing both is refused. A subscriber to a stream of rows
+    larger than 1 MiB passes its own `max_size` to `connect`.
+
     A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to
     send, and is closed by the keepalive when its pongs stop arriving.
@@ -517,7 +534,18 @@ def serve(
     routes = _routes(streams)
     # The queue bounds, before anything is written or started: a map that
     # misses a stream, or names one not served, fails the call.
-    _bound(routes, max_backlog, max_inbound, max_in_flight)
+    given_max_size = "max_size" in kwargs
+    message = _bound(
+        routes,
+        max_backlog,
+        max_inbound,
+        max_in_flight,
+        message_bytes(max_message_bytes, kwargs),
+    )
+    if message is not None and not given_max_size:
+        # The transport's limit is the largest stream's: it is what one frame
+        # can hold in memory before the stream it belongs to is consulted.
+        kwargs["max_size"] = max(message.values())
 
     # **Every stream's metadata file, before anything else.** Written if it is
     # not there and synced to its S3 copy, and a failure is a failure to

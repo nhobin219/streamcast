@@ -184,6 +184,7 @@ class Stream:
         "_log",
         "_max_backlog",
         "_max_in_flight",
+        "_max_message_bytes",
         "_max_inbound",
         "_max_replay",
         "_name",
@@ -385,6 +386,9 @@ class Stream:
         self._max_backlog = MAX_BACKLOG
         self._max_inbound = MAX_INBOUND
         self._max_in_flight = MAX_IN_FLIGHT
+        # None checks nothing here: the transport's own frame limit is the
+        # only one, as for a stream no `serve` or `asgi` has bounded.
+        self._max_message_bytes: int | None = None
         self._max_replay = max_replay
         # Read ONCE, here, and maintained by `send` thereafter. litelink's
         # `end_offset()` is a SQLite read and `append` returns the offset it
@@ -1808,7 +1812,14 @@ class Stream:
             self._waiting.append(waiter)
             await waiter
 
-    def _bound(self, *, max_backlog: int, max_inbound: int, max_in_flight: int) -> None:
+    def _bound(
+        self,
+        *,
+        max_backlog: int,
+        max_inbound: int,
+        max_in_flight: int,
+        max_message_bytes: int | None = None,
+    ) -> None:
         """Set the queue bounds `serve` and `asgi` were given for this stream.
 
         A new `max_backlog` applies to subscribers that join after it, and a
@@ -1817,6 +1828,7 @@ class Stream:
         self._max_backlog = max_backlog
         self._max_in_flight = max_in_flight
         self._max_inbound = max_inbound
+        self._max_message_bytes = max_message_bytes
 
     def _drained(self, rows: int) -> None:
         """`rows` left the queue — committed or failed. Wake every waiter to
@@ -2227,9 +2239,29 @@ class Stream:
             asyncio.Queue(maxsize=self._max_in_flight)
         )
         replying = asyncio.create_task(self._reply(connection, replies))
+        oversized: str | None = None
         try:
             async for frame in connection:
                 seq = 0
+                limit = self._max_message_bytes
+                if limit is not None:
+                    # UTF-8 bytes, as the frame came in. An ASCII `str` is
+                    # measured without the copy an encode would make.
+                    size = (
+                        len(frame)
+                        if isinstance(frame, bytes) or frame.isascii()
+                        else len(frame.encode())
+                    )
+                    if size > limit:
+                        # Closed as websockets closes a frame over its own
+                        # limit, once the frames before it are answered: a
+                        # publisher meets one refusal for an oversized frame,
+                        # whichever stream's limit is the transport's.
+                        oversized = refusal(
+                            "too_big", size=size, limit=limit, stream=self._name
+                        )
+                        break
+
                 try:
                     if publisher is None:
                         rows = decode_publish(frame)
@@ -2281,6 +2313,9 @@ class Stream:
             # go out if the connection lets them.
             await replies.put(None)
             await replying
+
+        if oversized is not None:
+            await connection.close(CloseCode.MESSAGE_TOO_BIG, oversized)
 
     @staticmethod
     async def _reply(

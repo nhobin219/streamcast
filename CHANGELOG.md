@@ -9,6 +9,30 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **`max_message_bytes=` on `serve` and `asgi`: a frame limit per stream**
+  (#170).
+  - **Forms and default.** It takes one int or a map naming every stream, as
+    `max_backlog`, `max_inbound` and `max_in_flight` do. Unset, it is the
+    `max_size` passed to `serve` if there is one, so existing servers
+    behave the same, or 1 MiB (`_limits.MAX_MESSAGE_BYTES`). Passing both is
+    refused.
+  - **Before, one server-wide limit had to fit every stream.** That was
+    websockets' `max_size`: a stream of large rows either raised it for every
+    stream on the server, or had its 1.1 MB batches closed at 1 MiB.
+  - **Now `serve` sets websockets' `max_size` to the largest stream's
+    limit.** A frame over its own stream's limit closes the connection with
+    1009, as websockets does, with a reason naming both sizes.
+  - **Under `asgi` the ASGI server's own limit still applies first.**
+  - A subscriber to rows over 1 MiB passes `max_size` to `connect`, as
+    before.
+  - **An outbox row over its stream's limit is resent for ever.** The
+    sender retries on `ConnectionClosed`, as it already did for a frame over
+    the transport's `max_size`. A stream whose limit is set below the others
+    makes that reachable at the lower size, so size `SEND_BATCH` and rows to
+    fit.
+
 ### Documentation
 
 - Remove feed-parsing and publisher-column recovery recipes from the README.
