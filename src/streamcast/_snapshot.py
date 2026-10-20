@@ -37,14 +37,18 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import re
 import threading
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+import duckdb
 import pyarrow as pa
 from litelink import S3Options
 
+# Under another name: `_identity` here is who a read is made as.
+from streamcast import _identity as _keys
 from streamcast import (
     _limits,
     _log,
@@ -61,8 +65,6 @@ from streamcast._published import DEFAULT_CACHE, ReadCache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-
-    import duckdb
 
     from streamcast._metadata import Entry
 
@@ -665,6 +667,20 @@ class Snapshot:
 
         return " AND ".join(terms)
 
+    def _star(self) -> str:
+        """`*` as a reader means it: every column but the derived ones.
+
+        `_streamcast_id` is plumbing (SPEC §5, "A declared identity"), 16 poorly compressible bytes
+        a row that every `SELECT *` export would otherwise copy; a reader who
+        wants it names it. Present in every log of a stream whose live log
+        has it, since an identity is fixed for the stream's life, and in the
+        tail and the empty table built from the live log's entry.
+        """
+        if self.metadata.live_log.identity is None:
+            return "*"
+
+        return f'* EXCLUDE ("{_keys.COLUMN}")'
+
     def _relevant(
         self,
         start: int | None,
@@ -743,6 +759,10 @@ class Snapshot:
 
         union = " UNION ALL BY NAME ".join(parts)
         conditions = [_term_sql(term) for term in filters]
+        keyed = _keyed(self.metadata.live_log, filters)
+        if keyed is not None:
+            conditions.insert(0, keyed)
+
         if where is not None:
             conditions.append(f"({where})")
 
@@ -773,7 +793,9 @@ class Snapshot:
         """
 
         frozen = self._frozen()
-        projection = "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
+        projection = (
+            self._star() if columns is None else ", ".join(f'"{c}"' for c in columns)
+        )
 
         def plan(cursor: duckdb.DuckDBPyConnection) -> pa.RecordBatchReader:
             rows = self._select(
@@ -816,9 +838,15 @@ class Snapshot:
 
         def plan(cursor: duckdb.DuckDBPyConnection) -> pa.RecordBatchReader:
             rows = self._select(cursor, frozen, start_offset, end_offset, None, filters)
+            # `_streamcast_id` is in `log` only for a query that names it: a
+            # view has no hidden columns, so hiding it from `SELECT *` and
+            # keeping it selectable by name means building `log` per query.
+            star = "*" if _names(query, _keys.COLUMN) else self._star()
             # A temporary view is the cursor's own, so two readers' `log`
             # never replace each other.
-            cursor.execute(f"CREATE OR REPLACE TEMP VIEW log AS {rows}")
+            cursor.execute(
+                f"CREATE OR REPLACE TEMP VIEW log AS SELECT {star} FROM ({rows})"
+            )
             return cursor.execute(query).to_arrow_reader(batch_size)
 
         return Reader(self, plan)
@@ -869,6 +897,7 @@ class Snapshot:
                 for record in frozen.tail.to_pylist():
                     offset = record.pop(_log.COLUMN)
                     ts = record.pop(_log.STAMP)
+                    record.pop(_keys.COLUMN, None)
                     if start <= offset < high:
                         yield offset, ts, record
 
@@ -937,6 +966,63 @@ class Snapshot:
 
     async def __aexit__(self, *_: object) -> None:
         await self.close()
+
+
+def _keyed(live: Entry, filters: Sequence[_manifest.Term]) -> str | None:
+    """`_streamcast_id` equal to the key of `filters`' values, when they fix
+    every identity column with `==`; None otherwise.
+
+    Added beside the natural terms, not in place of them. The natural
+    columns carry the statistics: DuckDB skips files and row groups on their
+    bounds, while a hash's bounds rule nothing out, so dropping them would
+    read every file. The key term is the one that filters the rows that
+    survive, on one fixed-width column. Since every row matching the natural
+    terms has exactly this key, adding it changes no answer; a value the key
+    cannot encode (a type the column does not hold) adds nothing, and the
+    natural terms answer alone.
+    """
+    if live.identity is None:
+        return None
+
+    values: dict[str, object] = {}
+    for column, operator, value in filters:
+        if operator == "==" and column in live.identity and column not in values:
+            values[column] = value
+
+    if len(values) != len(live.identity):
+        return None
+
+    identity = _keys.Identity(live.identity, _schema.to_arrow(live.schema))
+    try:
+        key = identity.key(values)
+    except ValueError:
+        return None
+
+    blob = "".join(f"\\x{byte:02x}" for byte in key)
+    return f"\"{_keys.COLUMN}\" = '{blob}'::BLOB"
+
+
+_IDENTIFIER: Final = re.compile(r'"((?:[^"]|"")*)"|([A-Za-z_][A-Za-z0-9_$]*)')
+
+
+def _names(query: str, column: str) -> bool:
+    """Whether `query` names `column` as an identifier, by DuckDB's tokenizer:
+    not inside a string or a comment, quoted or not, in any case — DuckDB
+    resolves a quoted identifier without regard to case as well."""
+    for start, kind in duckdb.tokenize(query):
+        if kind != duckdb.token_type.identifier:
+            continue
+
+        found = _IDENTIFIER.match(query, start)
+        if found is None:
+            continue
+
+        quoted, bare = found.groups()
+        name = quoted.replace('""', '"') if quoted is not None else bare
+        if name is not None and name.lower() == column:
+            return True
+
+    return False
 
 
 def _term_sql(term: _manifest.Term) -> str:
@@ -1208,7 +1294,9 @@ def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
     """The broker's rows as Arrow, typed as the live log declares them.
 
     With `streamcast_ts` from each frame, so a tail row carries the stamp a
-    published one does — null where the log has none.
+    published one does — null where the log has none — and `_streamcast_id`
+    computed from its columns, as the writer did, so a join or a key filter
+    finds the broker's rows as it finds the published ones.
     """
     declared = _schema.to_arrow(live.schema)
     schema = pa.schema(
@@ -1218,7 +1306,13 @@ def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
             *declared,
         ]
     )
-    return pa.Table.from_pylist(records, schema=schema)
+    table = pa.Table.from_pylist(records, schema=schema)
+    if live.identity is None:
+        return table
+
+    identity = _keys.Identity(live.identity, declared)
+    keys = [identity.key(record) for record in records]
+    return table.append_column(_keys.field(live.identity), pa.array(keys, _keys.TYPE))
 
 
 __all__ = [

@@ -83,7 +83,7 @@ from typing import TYPE_CHECKING, Final
 
 import litelink
 
-from streamcast import _log, _schema
+from streamcast import _identity, _log, _schema
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -130,6 +130,11 @@ class Entry:
     not known: a log described before this was recorded, and not on this
     disk to ask. With `schema` and `system_schema`, the log's whole shape,
     which a restore from a published table needs (litelink 0.10.1)."""
+    identity: tuple[str, ...] | None = None
+    """The columns the log's `_streamcast_id` is derived from, in order, or
+    None for a log without one (`_identity`). Recorded here as well as on the
+    log's own schema, because an Iceberg schema keeps no field metadata: a
+    reader and a restore learn it from this file."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +283,7 @@ class Metadata:
                         "schema": entry.schema,
                         "system_schema": entry.system_schema,
                         "sort_by": _listed(entry.sort_by),
+                        **_identified(entry),
                     }
                     for entry in self.sealed_logs
                 ],
@@ -289,6 +295,7 @@ class Metadata:
                     "schema": live.schema,
                     "system_schema": live.system_schema,
                     "sort_by": _listed(live.sort_by),
+                    **_identified(live),
                 },
                 "manifest": self.manifest,
                 **({} if self.retention is None else {"retention": self.retention}),
@@ -353,6 +360,7 @@ class Metadata:
                     start_ts=entry.get("start_ts"),
                     end_ts=entry.get("end_ts"),
                     sort_by=_tupled(entry.get("sort_by")),
+                    identity=_tupled(entry.get("identity")),
                 )
                 for entry in fields["sealed_logs"]
             ),
@@ -365,6 +373,7 @@ class Metadata:
                 published=live.get("published"),
                 start_ts=live.get("start_ts"),
                 sort_by=_tupled(live.get("sort_by")),
+                identity=_tupled(live.get("identity")),
             ),
             manifest=fields.get("manifest"),
             retirement=(
@@ -410,6 +419,12 @@ def _tupled(sort_by: list[str] | None) -> tuple[str, ...] | None:
     return None if sort_by is None else tuple(sort_by)
 
 
+def _identified(entry: Entry) -> dict[str, object]:
+    """`identity` for an entry that has one, and nothing for one that does
+    not: a file describing no identity reads the same to every version."""
+    return {} if entry.identity is None else {"identity": list(entry.identity)}
+
+
 def describe(
     name: str,
     start: int,
@@ -428,6 +443,7 @@ def describe(
         _schema.from_arrow(_log.system(schema)),
         published=published,
         sort_by=None if sort_by is None else tuple(sort_by),
+        identity=_identity.declared(schema),
     )
 
 
@@ -439,10 +455,13 @@ def _system_names(system_schema: dict[str, object]) -> list[str]:
 def shape(entry: Entry) -> pa.Schema:
     """The log's table schema, exactly, rebuilt from its entry: the declared
     columns — binary encodings included, which no Iceberg schema keeps — and
-    the system columns that log has."""
-    return _log.with_system(
-        _schema.to_arrow(entry.schema),
-        names=_system_names(entry.system_schema),
+    the system columns that log has, and `_streamcast_id` if it has one."""
+    return _log.with_identity(
+        _log.with_system(
+            _schema.to_arrow(entry.schema),
+            names=_system_names(entry.system_schema),
+        ),
+        entry.identity,
     )
 
 

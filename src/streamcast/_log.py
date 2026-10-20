@@ -55,7 +55,7 @@ import pyarrow as pa
 # `_protocol.OFFSET`, which this module aliases it to.
 from litelink import OFFSET as COLUMN
 
-from streamcast import _schema
+from streamcast import _identity, _schema
 from streamcast._protocol import encode_projected as _encode_projected
 
 if TYPE_CHECKING:
@@ -145,6 +145,21 @@ type is a NEW name — `streamcast_ts_v2` — beside the old one.
 `tests/test_stamp.py` pins every existing entry for that reason.
 """
 
+
+def owned(name: str) -> bool:
+    """Whether streamcast fills the column `name`: a `SYSTEM` column, or the
+    derived key.
+
+    `_streamcast_id` is not in `SYSTEM`, because it is not on every log: a
+    stream has it only when it declares an identity (`_identity`), so
+    `is_current` must not ask for it and `with_system` must not add it. It is
+    owned all the same — the writer fills it, a row or a source may not
+    supply it, and the wire and the greeting leave it out. A function rather
+    than a set, so it reads `SYSTEM` as it is when asked.
+    """
+    return name in SYSTEM or name == _identity.COLUMN
+
+
 _SYSTEM_ARROW: Final = _schema.to_arrow(
     {
         "type": "object",
@@ -166,9 +181,11 @@ def columns(log: Readable) -> tuple[str, ...]:
 
     The `SYSTEM` columns are not among them either, for the same reason: they
     are the server's, not the application's. `streamcast_ts` is element 1 of
-    the frame, beside the row rather than in it.
+    the frame, beside the row rather than in it. Nor is `_streamcast_id`
+    (`_identity`): it is derived from the row's own columns, so a frame that
+    carried it would carry nothing a reader cannot compute.
     """
-    return tuple(name for name in log.schema.names if name not in SYSTEM)
+    return tuple(name for name in log.schema.names if not owned(name))
 
 
 def declared(schema: pa.Schema) -> pa.Schema:
@@ -179,7 +196,7 @@ def declared(schema: pa.Schema) -> pa.Schema:
     are read from the same `log.schema` by different expressions, and filtering
     only one tells a subscriber about a column no frame will ever carry.
     """
-    return pa.schema([field for field in schema if field.name not in SYSTEM])
+    return pa.schema([field for field in schema if not owned(field.name)])
 
 
 def system(schema: pa.Schema) -> pa.Schema:
@@ -218,6 +235,23 @@ def with_system(schema: pa.Schema, names: Iterable[str] | None = None) -> pa.Sch
             schema = schema.append(field)
 
     return schema
+
+
+def with_identity(schema: pa.Schema, identity: Sequence[str] | None) -> pa.Schema:
+    """`schema` with `_streamcast_id` appended, if the stream declares an
+    identity; `schema` itself otherwise. Checks the declaration against the
+    columns first, so a log is never created with one that cannot be filled."""
+    if identity is None:
+        return schema
+
+    _identity.Identity(identity, schema)
+    return schema.append(_identity.field(identity))
+
+
+def identity(log: LogHandle) -> _identity.Identity | None:
+    """What fills `log`'s `_streamcast_id`, or None for a log without one."""
+    columns = _identity.declared(log.schema)
+    return None if columns is None else _identity.Identity(columns, log.schema)
 
 
 def is_current(log: LogHandle) -> bool:
@@ -449,12 +483,15 @@ __all__ = [
     "columns",
     "declared",
     "earliest",
+    "identity",
     "is_current",
     "lowest",
+    "owned",
     "replay",
     "rows",
     "rows_from",
     "stamped",
     "system",
+    "with_identity",
     "with_system",
 ]

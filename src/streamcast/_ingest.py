@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from streamcast import _log
+from streamcast import _identity, _log
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -40,19 +40,30 @@ class _Kept:
 
 
 class Source:
-    """The reader litelink loads: stamped if the log is, and remembered."""
+    """The reader litelink loads: stamped if the log is, keyed if it has an
+    identity, and remembered."""
 
     def __init__(
-        self, reader: pa.RecordBatchReader, *, stamp: bool, keep_bytes: int
+        self,
+        reader: pa.RecordBatchReader,
+        *,
+        stamp: bool,
+        keep_bytes: int,
+        identity: _identity.Identity | None = None,
     ) -> None:
         self._source = reader
         self._stamp = stamp
+        self._identity = identity
         self._keep_bytes = keep_bytes
         self._kept: collections.deque[_Kept] = collections.deque()
         self._kept_bytes = 0
         field = pa.field(_log.STAMP, pa.int64(), nullable=False)
         self._field = field
         schema = reader.schema.append(field) if stamp else reader.schema
+        self._key = None if identity is None else _identity.field(identity.columns)
+        if self._key is not None:
+            schema = schema.append(self._key)
+
         self.reader = pa.RecordBatchReader.from_batches(schema, self._batches())
 
     def _batches(self) -> Iterator[pa.RecordBatch]:
@@ -63,6 +74,13 @@ class Source:
                 now = time.time_ns() // 1_000
                 stamp = pa.array([now] * batch.num_rows, pa.int64())
                 batch = batch.append_column(self._field, stamp)  # noqa: PLW2901
+
+            if self._identity is not None and self._key is not None:
+                # Derived from the source's own values, so a row the key
+                # cannot encode — a null identity value — is refused here,
+                # with the column named, before litelink sees the batch.
+                keys = self._identity.keys(batch)
+                batch = batch.append_column(self._key, keys)  # noqa: PLW2901
 
             self._keep(_Kept(index, row, batch))
             row += batch.num_rows

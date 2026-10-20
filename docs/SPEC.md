@@ -618,6 +618,122 @@ The rest is decided, not incidental:
   stamped only if its own schema has the column. The metadata file's
   `system_schema` says which.
 
+### A declared identity: `_streamcast_id`
+
+A stream's rows often have a natural composite key — `(session_id,
+line_number)`, `(symbol, event_ts)` — and every consumer that dedupes, joins or
+looks a row up by it pays at query time: several columns read, several
+predicates, string comparisons. A stream may declare it, once, at creation:
+
+```python
+Stream.new("lines", root=..., schema=SCHEMA, identity=("session_id", "line_number"))
+```
+
+and the writer fills a derived column, `_streamcast_id`, on every row it
+appends — `send`, `send_many`, a publisher's frames and `Stream.ingest` alike.
+The publisher never sends it: a row or a source that carries it is refused,
+since a supplied key is either redundant or wrong, and a wrong one stored makes
+every join on it miss silently.
+
+**The key is XXH3-128 over the identity columns' values, in declaration
+order, and nothing else.** Each value is encoded as:
+
+| column type | bytes |
+|---|---|
+| boolean | one byte, `0x00` or `0x01` |
+| int32, int64 | its two's complement, little-endian, 4 or 8 bytes |
+| fixed-size binary (`bytesN`) | its N bytes |
+| string | a 4-byte little-endian length, then its UTF-8 bytes |
+| binary | a 4-byte little-endian length, then its bytes |
+
+The encodings are concatenated and hashed with XXH3-128, seed 0, and the column
+holds the hash's canonical 16 bytes (big-endian, xxHash's
+`XXH128_canonicalFromHash`, which is what every binding's `digest()` returns),
+as a `fixed_size_binary(16)` column. A reader in any language computes the
+same key from the same values; `tests/test_identity.py` pins golden vectors.
+
+* **No per-stream domain tag.** A constant prefix adds nothing to the key's
+  collision properties, and a per-stream one would make the same key hash
+  differently in two streams, so a join across them on `_streamcast_id` would
+  find nothing.
+* **Lengths on variable-width values**, because without them `("ab", "c")`
+  and `("a", "bc")` are the same bytes. A fixed-width value needs none.
+* **Booleans, integers, strings and binaries only, required and non-null.**
+  Equality is not identity for a float (`0.0 == -0.0`, `NaN != NaN`), a nested
+  value has no encoding, and neither does a null.
+* **128 bits**, because a 64-bit key over 10⁹ rows collides with a probability
+  in the percent range, and 128 bits puts it near 10⁻²⁰ for what a UUID costs.
+
+**One identity per stream.** A row has one identity — what makes it this row.
+Other keys it carries (a thread id, a request id) are references to other
+things and stay ordinary columns. `identity=` takes one tuple.
+
+**Opt-in, because it is not free**: 16 bytes of high-entropy data a row,
+which compresses poorly — about 6 GB on a 400-million-row stream.
+
+**It is not a primary key.** The log is append-only, and a row whose key is
+already in it is appended again; the key makes the duplicate cheap to see. A
+writer that wants exactly once uses an exactly-once publisher (§6b), or
+dedupes on the key before sending; a reader dedupes after.
+
+**Fixed for the life of the stream.** The declaration lives on the log's own
+schema, as field metadata on `_streamcast_id` (litelink keeps field metadata
+through `new` and `open`), and in each log's entry in the metadata file as
+`identity`, since an Iceberg schema keeps no field metadata and a reader or a
+restore learns it there. `Stream.new` on an existing log refuses an
+`identity=` that is not the log's, in either direction, as it refuses another
+schema. `Stream.migrate` takes the same `identity=` and refuses one that
+differs — added, dropped or reordered — and a schema that removes or retypes
+an identity column: every log of a stream is keyed alike, or a join on the key
+across the seam would miss what a join on the natural columns finds. Whether a
+migration may add an identity to a stream that has none, keying only its new
+logs, is open.
+
+**Hidden from `*`, selectable by name.** `Snapshot.scan`, `Snapshot.sql`,
+`Stream.scan`, `Stream.sql` and `Live` read `*` as `* EXCLUDE
+("_streamcast_id")`, so a `SELECT *` export does not copy 16 bytes a row
+nobody asked for. Naming it returns it: `scan(columns=[..., "_streamcast_id"])`,
+or a `sql` query that names it, for which `log` includes it — a view has no
+hidden columns, so whether `log` carries it is decided per query, by DuckDB's
+tokenizer, from whether the query names it outside a string or a comment. A
+query that names it sees it in its `*` too. **A raw `iceberg_scan` of the
+published table outside streamcast shows it** as the ordinary column it is:
+Iceberg has no hidden columns. It is never on the wire, nor in the greeting's
+`schema`, nor in a catch-up's rows: a frame that carried it would carry
+nothing a reader cannot compute.
+
+**A lookup by the whole key is filtered on it.** When `filters=` fix every
+identity column with `==` (on `scan`, `sql` and `live`'s `where=` alike), the
+reader adds `"_streamcast_id" = <key>`, computed from the literals. It is
+added beside the natural terms, not in place of them: the natural columns
+carry the statistics that prune whole logs (the manifest) and files and row
+groups (DuckDB on the Iceberg bounds), while a hash's bounds rule nothing out.
+Every row the natural terms match has exactly that key, so the term changes no
+answer; a literal the key cannot encode — a string for an integer column —
+adds nothing, and the natural terms answer alone. A `where=` string is not
+rewritten, for the reason SQL is not mined for pruning terms (#57). A join or
+a dedupe names the column itself.
+
+The broker's tail rows, which no table holds yet, are keyed by the reader as
+the writer keyed the published ones, so a join or a key filter in a `Live`
+view or an `as_of_offset=LATEST` snapshot finds them too.
+
+### Library columns: what is visible, and what is plumbing
+
+Columns this library owns follow one naming rule:
+
+* **A column that carries meaning on every row is visible, with no
+  underscore**: `litelink_offset`, `streamcast_ts`. A reader wants them in a
+  `SELECT *`; they are what an offset and a stamp are.
+* **Derived plumbing is underscore-prefixed, hidden from `*` in streamcast's
+  own read paths, and selectable by name**, as Iceberg's metadata columns are
+  (`_file`, `_pos`). `_streamcast_id` is the first such column. Hidden-then-shown
+  is the softer change if one is ever wanted visible.
+
+A declaration may not name either kind (`_log.OWNED`). The exactly-once
+bookkeeping is neither: it is not on the log at all, but in the publisher,
+outbox and inbox state tables (§6b, §6c).
+
 ### The counter
 
 `Stream.end_offset` is read from the log **once**, at construction, and
@@ -830,7 +946,8 @@ opened read-only on the rerun, and the migration carries on from there.
                   "schema": {…}, "system_schema": {…}}],
  "live_log": {"name": "trades-v2", "published": "s3://market-data/prod",
               "start_offset": 1001, "start_ts": 1790042411000000,
-              "schema": {…}, "system_schema": {…}},
+              "schema": {…}, "system_schema": {…},
+              "identity": ["trade_id"]},
  "manifest": "00004-9f2c….manifest.parquet"}
 ```
 
@@ -869,6 +986,11 @@ until its first version is written.
   that has no rows yet.
 - **`manifest` points to the sealed logs' statistics**, and is null until
   there is a sealed log to describe.
+- **`identity` names a log's identity columns**, in order, on a log that has
+  one, and is absent otherwise (§5, "A declared identity"). An Iceberg schema
+  keeps no field metadata, so this is where a reader and a restore learn which
+  columns `_streamcast_id` is derived from. A version that does not know the
+  key reads the file as it did and ignores it.
 - **Version 1 is still read.** A version-1 file has no `published` or
   timestamps; `serve` fills them in from the logs on this disk and rewrites
   it as version 2.
@@ -1067,6 +1189,9 @@ opened, and are applied to the rows as well, so the answer does not depend on
 what was pruned. SQL is not mined for terms: a misread predicate would drop a
 log that held matches and answer short, so that waits on a sound extractor
 (#57).
+
+**`*` leaves `_streamcast_id` out**, and `filters=` that fix every identity
+column with `==` are filtered on it as well; see "A declared identity" above.
 
 **The caller's conditions apply over the union, not inside each log.** A log
 from before a migration added a column has no such column, so a condition on

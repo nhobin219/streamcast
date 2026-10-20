@@ -83,7 +83,7 @@ streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
-                      max_replay=100_000)
+                      max_replay=100_000, identity=None)
 
 streamcast.Stream.migrate(name="", *, root, schema, ...)  # a new log, a new schema
 streamcast.Stream.restore(name="", *, root, published,    # on a box without the log
@@ -164,6 +164,28 @@ it and `serve`'s `max_backlog` is what drops the subscriber, so size the two tog
 while live messages queue behind it. The defaults are exported as
 `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
 from them rather than restate them.
+
+**`identity=("session_id", "line_number")` declares what makes a row this row**, and the
+writer fills `_streamcast_id` on every row: XXH3-128 over those columns' values, 16 bytes
+(`docs/SPEC.md` §5, "A declared identity", has the encoding). Dedupe and join on it:
+
+```python
+stream = streamcast.Stream.new("lines", root="data", schema=SCHEMA,
+                               identity=("session_id", "line_number"))
+
+await Stream.sql(uri, "SELECT * FROM log")                    # no _streamcast_id
+await Stream.sql(uri, "SELECT _streamcast_id, text FROM log")  # named, so there
+await Stream.scan(uri, filters=[("session_id", "==", "s1"),   # also filtered on
+                                ("line_number", "==", 4)])     # the key
+```
+
+It is hidden from `*` in `scan`, `sql` and `live`, and selectable by name; a raw
+`iceberg_scan` of the published table shows it. Identity columns are booleans, integers,
+strings or binaries, required and non-null. It is opt-in (16 bytes a row), fixed at creation
+— an open or a `migrate` that declares another identity is refused, as is a migration that
+removes or retypes an identity column — and it is not a primary key: a row whose key is
+already in the log is appended again. A row or an `ingest` source that carries
+`_streamcast_id` is refused.
 
 `group_commit` (on by default) lets the stream commit sends from several publishers in one
 transaction when they queue behind a commit in flight — more throughput under concurrent

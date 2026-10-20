@@ -78,6 +78,11 @@ dependencies = [
     # 0.386 against 4.989 to decode (12.9x). At stdlib speed the encode would
     # cost more than the Parquet read it rides on.
     "msgspec>=0.18",
+    # XXH3-128 for a declared identity's `_streamcast_id` (`_identity`).
+    # Imported here, so declared here rather than relied on through litelink,
+    # which requires it too; 3.6.0 is litelink's floor, and has the one-shot
+    # `xxh3_128_digest` this uses.
+    "xxhash>=3.6.0",
 ]
 
 [project.optional-dependencies]

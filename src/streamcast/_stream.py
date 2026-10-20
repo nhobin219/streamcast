@@ -51,6 +51,7 @@ from websockets.frames import CloseCode
 from streamcast import (
     _dedupe,
     _filter,
+    _identity,
     _ingest,
     _live,
     _log,
@@ -179,6 +180,7 @@ class Stream:
         "_declared",
         "_end_offset",
         "_floor",
+        "_identity",
         "_last_send",
         "_last_send_ts",
         "_log",
@@ -364,6 +366,9 @@ class Stream:
         # created before the column existed, or one a caller opened and passed
         # in, may not have it, and its shape is not this library's to change.
         self._stamped = log is not None and _log.stamped(log)
+        # What fills `_streamcast_id`, for a log that declares an identity. Read
+        # off the log's schema, the declaration's home, like the stamp.
+        self._identity = None if log is None else _log.identity(log)
         self._floor = floor
         # Read off the metadata file at `ensure_metadata`, which `serve` calls
         # before the first subscribe; the greeting names it so a reader can
@@ -436,6 +441,7 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         exactly_once: bool = False,
+        identity: Sequence[str] | None = None,
     ) -> Stream:
         """A stream and the log underneath it, created if it is not there yet.
 
@@ -494,6 +500,17 @@ class Stream:
         `docs/SPEC.md` §6b). Like `group_commit` it is passed at each open,
         not stored, and turning it off and on again leaves the marks valid:
         plain publishers never touch them.
+
+        **`identity=("session_id", "line_number")` declares what makes a row
+        this row**, and the writer fills `_streamcast_id` on every row: the
+        XXH3-128 of those columns' values, 16 bytes, so a dedupe or a join
+        reads one column (`_identity`, SPEC §5, "A declared identity"). Hidden from `SELECT *` in
+        `snapshot`, `scan`, `sql` and `live`, selectable by name. Opt-in,
+        because it costs 16 poorly compressible bytes a row. Unlike
+        `exactly_once` it IS stored, on the log's schema: it is part of the
+        stream's shape, fixed at creation, and an open that declares another
+        is refused as a different schema is. It is not a primary key: a row
+        whose key is already in the log is appended again.
         """
         # Its own directory for a new stream, or the layout it already has;
         # the published side follows (`_metadata.home`).
@@ -502,7 +519,9 @@ class Stream:
             published = _metadata.within(published, name)
 
         root = home
-        retired = _open_retired(root, name, schema=schema, s3_options=s3_options)
+        retired = _open_retired(
+            root, name, schema=schema, identity=identity, s3_options=s3_options
+        )
         if retired is not None:
             log, metadata = retired
             return cls._read_only(
@@ -523,6 +542,7 @@ class Stream:
             config=config,
             published=published,
             s3_options=s3_options,
+            identity=identity,
         )
 
         return cls(
@@ -552,6 +572,7 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         exactly_once: bool = False,
+        identity: Sequence[str] | None = None,
     ) -> Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
@@ -588,6 +609,13 @@ class Stream:
         logs are read together with `UNION ALL BY NAME`, where a changed type
         coerces silently rather than failing; see `_metadata.check_types`.
 
+        **The identity is fixed for the life of the stream** (`new`'s
+        `identity=`): pass the one the stream has. A migration that declares
+        another — adds one, drops it, reorders it — is refused, and so is one
+        whose schema removes an identity column. Every log of a stream is
+        keyed alike, or a join on `_streamcast_id` across the seam would miss
+        what a join on the natural columns finds.
+
         **There is no rename.** A column under a new name is one column
         removed and another added, and nothing is backfilled or merged: a
         read across the seam returns both, each null in the logs that did not
@@ -613,7 +641,9 @@ class Stream:
         either side.
         """
         root = _metadata.home(root, name)
-        opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
+        opened = _open_retired(
+            root, name, schema=schema, identity=identity, s3_options=s3_options
+        )
         if opened is not None:
             # Retired, so served as it is: never migrated onto a new log, which
             # is what reviving does (`restore(..., revive=True)`).
@@ -658,6 +688,7 @@ class Stream:
                 # one log at the stream's name, described now.
                 metadata = _metadata.single(name, old)
 
+            _check_identity(name, old, declared, identity)
             _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
 
             if (
@@ -701,6 +732,7 @@ class Stream:
                 root,
                 metadata.next_name(),
                 declared=declared,
+                identity=identity,
                 sort_by=sort_by,
                 config=config,
                 s3_options=s3_options,
@@ -918,7 +950,10 @@ class Stream:
         # says otherwise; a part not recorded is left to litelink to read.
         current = None if metadata is None else metadata.current
         shape = (
-            _log.with_system(_declaration(schema))
+            _log.with_identity(
+                _log.with_system(_declaration(schema)),
+                None if current is None else current.identity,
+            )
             if schema is not None
             else None
             if current is None
@@ -1225,9 +1260,17 @@ class Stream:
                 msg = f"{_log.STAMP!r} is stamped by the server; a source cannot supply it"
                 raise ValueError(msg)
 
+            if _identity.COLUMN in reader.schema.names:
+                msg = (
+                    f"{_identity.COLUMN!r} is derived by the server from the "
+                    f"stream's identity; a source cannot supply it"
+                )
+                raise ValueError(msg)
+
             loading = _ingest.Source(
                 reader,
                 stamp=_log.stamped(log),
+                identity=_log.identity(log),
                 keep_bytes=2 * log.config.target_row_group_size,
             )
             # litelink loads only behind rows already in files, so what the
@@ -1325,7 +1368,7 @@ class Stream:
             log = litelink.new(
                 root,
                 successor,
-                schema=_log.with_system(declared),
+                schema=_log.with_identity(_log.with_system(declared), current.identity),
                 sort_by=retirement.sort_by,
                 config=config,  # ty: ignore[invalid-argument-type]
                 published=None if not _metadata.remote(location) else location,
@@ -1925,7 +1968,11 @@ class Stream:
         check = self._check_stored
         assert writer is not None  # only called with a log
         assert check is not None
-        stored = [self._stamp_row(row, now) for row in rows] if self._stamped else rows
+        stored = (
+            [self._stored(row, now) for row in rows]
+            if self._stamped or self._identity is not None
+            else rows
+        )
         for row in stored:
             check(row)
 
@@ -2016,6 +2063,29 @@ class Stream:
             return None
 
         return now // 1_000
+
+    def _stored(self, row: Row, now: int) -> Row:
+        """`row` as the log stores it: stamped, and keyed if the stream
+        declares an identity. A copy, never `row`; see `_stamp_row`.
+
+        **A row that carries `_streamcast_id` is refused**, as one carrying
+        the stamp is: the key is derived from the row, so a supplied one is
+        either redundant or wrong, and a wrong one stored would make every
+        join on it silently miss.
+        """
+        stored = self._stamp_row(row, now) if self._stamped else row
+        if self._identity is None:
+            return stored
+
+        if _identity.COLUMN in row:
+            msg = (
+                f"{_identity.COLUMN!r} is derived by the server from the "
+                f"identity columns {list(self._identity.columns)}; a row "
+                f"cannot supply it"
+            )
+            raise ValueError(msg)
+
+        return {**stored, _identity.COLUMN: self._identity.key(row)}
 
     @staticmethod
     def _stamp_row(row: Row, now: int) -> Row:
@@ -2603,6 +2673,7 @@ def _open_retired(
     name: str,
     *,
     schema: Mapping[str, object],
+    identity: Sequence[str] | None = None,
     s3_options: object | None = None,
 ) -> tuple[LogHandle, _metadata.Metadata] | None:
     """The retired stream's log opened read-only, and its metadata — or None
@@ -2625,6 +2696,12 @@ def _open_retired(
         )
         raise ValueError(msg)
 
+    try:
+        _same_identity(name, log, identity)
+    except ValueError:
+        log.close()
+        raise
+
     return log, metadata
 
 
@@ -2637,6 +2714,7 @@ def _open_or_create(
     config: object | None,
     published: str | None,
     s3_options: object | None,
+    identity: Sequence[str] | None = None,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
     """The log for this stream, created if it is not there yet, and its metadata.
 
@@ -2670,7 +2748,7 @@ def _open_or_create(
         return litelink.new(
             root,
             name,
-            schema=_log.with_system(declared),
+            schema=_log.with_identity(_log.with_system(declared), identity),
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
             published=published,
@@ -2696,7 +2774,74 @@ def _open_or_create(
         )
         raise ValueError(msg)
 
+    try:
+        _same_identity(name, log, identity)
+    except ValueError:
+        log.close()
+        raise
+
     return log, metadata
+
+
+def _tupled(identity: Sequence[str] | None) -> tuple[str, ...] | None:
+    return None if identity is None else tuple(identity)
+
+
+def _same_identity(name: str, log: LogHandle, identity: Sequence[str] | None) -> None:
+    """Refuse an open whose `identity=` is not the one the log was created
+    with. Compared both ways: a declaration left out is as silently ignored
+    as a different one, and the caller would believe its rows unkeyed."""
+    found = _identity.declared(log.schema)
+    if found != _tupled(identity):
+        msg = (
+            f"stream {name!r} has identity {found!r} and this call declares "
+            f"{_tupled(identity)!r}; the identity is fixed when the stream is "
+            f"created, so declare the one it has"
+        )
+        raise ValueError(msg)
+
+
+def _check_identity(
+    name: str, log: LogHandle, declared: pa.Schema, identity: Sequence[str] | None
+) -> None:
+    """What `Stream.migrate` refuses about an identity, before anything moves.
+
+    The successor must be keyed exactly as the stream is: the same columns,
+    in the same order, each still present with the type it had. A changed
+    type is refused for every column by `_metadata.check_types` too; it is
+    named here first so the message says it is the identity that forbids it.
+    """
+    found = _identity.declared(log.schema)
+    if found is not None:
+        removed = [column for column in found if column not in declared.names]
+        if removed:
+            msg = (
+                f"stream {name!r} is keyed on {list(found)}, and this schema "
+                f"removes {removed}; an identity column cannot be removed"
+            )
+            raise ValueError(msg)
+
+        retyped = [
+            column
+            for column in found
+            if declared.field(column).type != log.schema.field(column).type
+            or declared.field(column).nullable
+        ]
+        if retyped:
+            msg = (
+                f"stream {name!r} is keyed on {list(found)}, and this schema "
+                f"changes the type of {retyped}; an identity column keeps its "
+                f"type, required and non-null, for the life of the stream"
+            )
+            raise ValueError(msg)
+
+    if found != _tupled(identity):
+        msg = (
+            f"stream {name!r} has identity {found!r} and this migration "
+            f"declares {_tupled(identity)!r}; the identity is fixed for the "
+            f"life of the stream, so pass the one it has"
+        )
+        raise ValueError(msg)
 
 
 def _options(s3_options: object | None) -> S3Options | None:
@@ -2714,7 +2859,7 @@ def _options(s3_options: object | None) -> S3Options | None:
 def _declaration(schema: Mapping[str, object]) -> pa.Schema:
     """A declaration as Arrow, refusing the one name streamcast owns."""
     declared = _schema.to_arrow(schema)
-    reserved = [name for name in declared.names if name in _log.SYSTEM]
+    reserved = [name for name in declared.names if _log.owned(name)]
     if reserved:
         msg = (
             f"{', '.join(map(repr, reserved))} is a column streamcast owns and "
@@ -2763,6 +2908,7 @@ def _seal_and_succeed(
     name: str,
     *,
     declared: pa.Schema,
+    identity: Sequence[str] | None,
     sort_by: Sequence[str] | None,
     config: object | None,
     s3_options: object | None,
@@ -2806,7 +2952,7 @@ def _seal_and_succeed(
         created = litelink.new(
             root,
             name,
-            schema=_log.with_system(declared),
+            schema=_log.with_identity(_log.with_system(declared), identity),
             sort_by=old.sort_by if sort_by is None else sort_by,
             config=old.config if config is None else config,  # ty: ignore[invalid-argument-type]
             # The same published location, unless it was litelink's local
@@ -2827,6 +2973,7 @@ def _seal_and_succeed(
             orphan.end_offset() == start
             and _log.lowest(orphan) is None
             and list(_log.declared(orphan.schema)) == list(declared)
+            and _identity.declared(orphan.schema) == _tupled(identity)
             and _log.is_current(orphan)
         ):
             return orphan, statistics

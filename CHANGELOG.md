@@ -9,6 +9,43 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- **Declared identity columns** (#159). `Stream.new(..., identity=("session_id",
+  "line_number"))` makes the writer fill `_streamcast_id` on every row it
+  appends, by `send` or `ingest`: XXH3-128 over the identity columns' values in
+  declaration order, with no domain tag, fixed-width values as little-endian
+  bytes and strings and binaries length-prefixed (SPEC §5, "A declared
+  identity"). It is hidden from `SELECT *` in `snapshot`, `scan`, `sql` and
+  `live` and selectable by name, so a join or a dedupe reads one 16-byte
+  column. `filters=` that fix every identity column with `==` are also
+  filtered on it, beside the natural terms, which keep their pruning. The
+  identity is fixed for the life of the stream: `Stream.new` on an existing
+  log and `Stream.migrate` refuse another one, and `migrate` refuses removing
+  or retyping an identity column. It is not a primary key, and it is opt-in.
+  Each log's metadata entry records it as `identity`.
+  - **Cost, measured on a 2-vCPU box under load** (min over alternating
+    rounds; the medians were noise): `send_many` 12.74 → 15.66 µs a row, of
+    which the key is 1.36 µs; `ingest` 632 → 1707 ns a row. A stream that
+    declares no identity takes the old path.
+  - **SPEC states the naming rule for library columns.** One that carries
+    meaning on every row is visible with no underscore (`litelink_offset`,
+    `streamcast_ts`); derived plumbing is underscore-prefixed, hidden from `*`
+    and selectable by name. `_streamcast_id` is the first such column.
+  - **Upgrade the readers of a stream before declaring an identity on it.**
+    Measured against 0.23.0 on a stream this release keyed: its
+    `Stream.new` refuses to open the log (the columns differ from its
+    declaration), so an older server fails closed; but its readers show
+    `_streamcast_id` in `SELECT *`, and its catch-up rows carry the key, which
+    the live frames do not. A stream that declares no identity is unchanged
+    for every version.
+- **Breaking: `_streamcast_id` is a reserved column name.** A schema that
+  declares it is refused, as one declaring `streamcast_ts` is, and so is
+  opening a log an earlier release created with an application column of
+  that name: rename it with `Stream.migrate` before upgrading.
+- `xxhash>=3.6.0` is a direct dependency. It was already installed through
+  litelink, at the same floor.
+
 ### Fixed
 
 - **A reopened stream reads its published table with its own `s3_options`**

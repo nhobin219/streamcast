@@ -2045,6 +2045,7 @@ dependencies = [
     { name = "litelink" },
     { name = "msgspec" },
     { name = "websockets" },
+    { name = "xxhash" },
 ]
 
 [package.optional-dependencies]
@@ -2081,6 +2082,7 @@ requires-dist = [
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.1" },
     { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
     { name = "websockets", specifier = ">=14,<18" },
+    { name = "xxhash", specifier = ">=3.6.0" },
 ]
 provides-extras = ["asgi", "postgres"]
 
