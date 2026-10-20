@@ -42,7 +42,7 @@ import time
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import litelink
 from websockets.exceptions import ConnectionClosed
@@ -450,7 +450,7 @@ class Stream:
             published = _metadata.within(published, name)
 
         root = home
-        retired = _open_retired(root, name, schema=schema)
+        retired = _open_retired(root, name, schema=schema, s3_options=s3_options)
         if retired is not None:
             log, metadata = retired
             return cls._read_only(
@@ -552,7 +552,7 @@ class Stream:
         stopped resumes exactly at the seam and loses nothing.
         """
         root = _metadata.home(root, name)
-        opened = _open_retired(root, name, schema=schema)
+        opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
         if opened is not None:
             # Retired, so served as it is: never migrated onto a new log, which
             # is what reviving does (`restore(..., revive=True)`).
@@ -572,13 +572,17 @@ class Stream:
         current = name if metadata is None else metadata.current.name
         retired = False
         try:
-            old: LogHandle | None = litelink.open(root, current)
+            old: LogHandle | None = litelink.open(
+                root, current, s3_options=_options(s3_options)
+            )
         except litelink.RetiredError:
             # **A migration that died after retiring this log** and before
             # committing the metadata. The retire is done and cannot be undone
             # — litelink refuses a writer on the log from here on — so this
             # run carries on from creating, or adopting, its successor.
-            old = litelink.open(root, current, read_only=True)
+            old = litelink.open(
+                root, current, read_only=True, s3_options=_options(s3_options)
+            )
             retired = True
         except FileNotFoundError:
             msg = (
@@ -908,11 +912,15 @@ class Stream:
         current = name if metadata is None else metadata.current.name
         finished = False
         try:
-            log: LogHandle = litelink.open(root, current)
+            log: LogHandle = litelink.open(
+                root, current, s3_options=_options(s3_options)
+            )
         except litelink.RetiredError:
             # litelink retired it — a retire that died before the metadata
             # was written. Only the record is left to make.
-            log = litelink.open(root, current, read_only=True)
+            log = litelink.open(
+                root, current, read_only=True, s3_options=_options(s3_options)
+            )
             finished = True
         except FileNotFoundError:
             msg = f"there is no stream {name!r} at {root} to retire"
@@ -1013,7 +1021,9 @@ class Stream:
             if metadata is None:
                 # Not served yet, so no metadata: what serve would write.
                 try:
-                    log = litelink.open(root, name, read_only=True)
+                    log = litelink.open(
+                        root, name, read_only=True, s3_options=_options(s3_options)
+                    )
                 except FileNotFoundError:
                     msg = f"there is no stream {name!r} at {root} to set retention on"
                     raise FileNotFoundError(msg) from None
@@ -1201,7 +1211,7 @@ class Stream:
         if (Path(root) / successor).exists():
             # **A revive that died after creating the log** and before saving
             # the metadata: carried on from, if it is what that run made.
-            log = litelink.open(root, successor)
+            log = litelink.open(root, successor, s3_options=_options(s3_options))
             if (
                 log.end_offset() != retirement.end_offset
                 or _log.lowest(log) is not None
@@ -2355,7 +2365,11 @@ class Stream:
 
 
 def _open_retired(
-    root: str | PathLike[str], name: str, *, schema: Mapping[str, object]
+    root: str | PathLike[str],
+    name: str,
+    *,
+    schema: Mapping[str, object],
+    s3_options: object | None = None,
 ) -> tuple[LogHandle, _metadata.Metadata] | None:
     """The retired stream's log opened read-only, and its metadata — or None
     if the stream is not retired. The declared schema is checked as for a
@@ -2365,7 +2379,9 @@ def _open_retired(
         return None
 
     declared = _declaration(schema)
-    log = litelink.open(root, metadata.current.name, read_only=True)
+    log = litelink.open(
+        root, metadata.current.name, read_only=True, s3_options=_options(s3_options)
+    )
     if list(_log.declared(log.schema)) != list(declared):
         found = list(_log.columns(log))
         log.close()
@@ -2408,7 +2424,7 @@ def _open_or_create(
     metadata = _metadata.load(root, name)
     current = name if metadata is None else metadata.current.name
     try:
-        log = litelink.open(root, current)
+        log = litelink.open(root, current, s3_options=_options(s3_options))
     except FileNotFoundError:
         if metadata is not None:
             msg = (
@@ -2447,6 +2463,18 @@ def _open_or_create(
         raise ValueError(msg)
 
     return log, metadata
+
+
+def _options(s3_options: object | None) -> S3Options | None:
+    """The `S3Options` a signature here takes as `object`, typed for the
+    `litelink.open` that reopens a log.
+
+    Every open of a stream's log is given the stream's own options. An open
+    without them resolved credentials from the environment, which on a server
+    whose streams publish to different stores is another store's key: the
+    restart after a stream's first publish could not read its own metadata.
+    """
+    return cast("S3Options | None", s3_options)
 
 
 def _declaration(schema: Mapping[str, object]) -> pa.Schema:
@@ -2560,7 +2588,7 @@ def _seal_and_succeed(
         # made and nothing has written to it; anything else is a log with
         # rows the metadata does not account for, which is not a decision to
         # make on the caller's behalf.
-        orphan = litelink.open(root, name)
+        orphan = litelink.open(root, name, s3_options=_options(s3_options))
         if (
             orphan.end_offset() == start
             and _log.lowest(orphan) is None
