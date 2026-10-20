@@ -132,6 +132,59 @@ class TestALocalTable:
             finally:
                 pinned.close()
 
+    def test_the_extent_comes_from_the_manifests_and_agrees_with_a_scan(
+        self, tmp_path, monkeypatch
+    ):
+        """Opening reads the manifests' statistics, never every data file: a
+        table of many small files took tens of seconds to open while a scan
+        counted them, on every read. The numbers are the scan's."""
+        with published_log(tmp_path, 3) as log:
+            # A second publish, so the extent spans more than one file.
+            log.extend([{"i": i} for i in range(3, 7)])
+            while log.seal(flush=True) is not None:
+                pass
+
+            log.publish(flush=True)
+            uri = f"{log.published.rstrip('/')}/trades"
+            metadata = _published.path(_published.current_metadata(uri))
+            counted = _published._counted_from_manifests(metadata, None)
+            assert counted == (1, 7, 7)
+
+            scan = f"iceberg_scan('{metadata}')"
+            scanned = (
+                duckdb.connect()
+                .execute(
+                    "INSTALL iceberg; LOAD iceberg; "
+                    f'SELECT min("litelink_offset"), max("litelink_offset"), count(*) FROM {scan}'
+                )
+                .fetchone()
+            )
+            assert counted == scanned
+
+            # And `open` takes that path: with the scan made to fail, it still opens.
+            real = _published.connection
+
+            def no_extent_scan(*args, **kwargs):
+                connected = real(*args, **kwargs)
+
+                class Guarded:
+                    def execute(self, sql, *rest):
+                        assert "count(*)" not in sql, "open scanned for its extent"
+                        return connected.execute(sql, *rest)
+
+                    def __getattr__(self, name):
+                        return getattr(connected, name)
+
+                return Guarded()
+
+            monkeypatch.setattr(_published, "connection", no_extent_scan)
+            table = _published.Table.open(log.published, "trades", None)
+            try:
+                assert table.extent == (1, 8)
+                assert table.record_count == 7
+            finally:
+                table.close()
+
     def test_a_table_never_published_is_an_error_not_an_empty_read(self, tmp_path):
         with litelink.new(tmp_path, "trades", schema=SCHEMA) as log:
             with pytest.raises(Exception, match="version-hint"):
