@@ -18,6 +18,8 @@ there was nothing to have changed from. Everything above it is ordinary.
   metadata).
 - **Opening a published table reads its manifests, not every data file**
   (0.22.1).
+- **A reader that passes no `s3_options` opens a published table again**
+  (0.22.3): the manifest read resolves them from the environment.
 
 ## 0.23.0 — 2026-10-19
 

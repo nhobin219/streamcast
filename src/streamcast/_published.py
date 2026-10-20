@@ -166,7 +166,11 @@ def _counted_from_manifests(
     column, or a delete file whose rows a count would include — and the
     caller asks DuckDB as before.
     """
-    properties = {} if s3_options is None else s3_options.catalog_properties()
+    # Resolved, as litelink resolves its own: what the caller did not set
+    # comes from the environment, the endpoint included. Unresolved, a reader
+    # that passes no options gave pyiceberg none, and a non-AWS endpoint in
+    # the environment never reached it (0.22.1).
+    properties = (s3_options or S3Options()).resolved().catalog_properties()
     table = StaticTable.from_metadata(metadata, properties=properties)
     field = table.schema().find_field(COLUMN)
     low: int | None = None
