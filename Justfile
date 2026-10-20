@@ -176,3 +176,10 @@ bench-snapshot *args:
 # with the default.
 bench-deflate *args:
     uv run python benchmarks/deflate.py {{args}}
+
+# What a declared identity's `_streamcast_id` costs and saves, in the bytes and
+# requests a reader sends the object store: `build`, then `measure`, then
+# `clean`. Needs `just rustfs` (or AWS_ENDPOINT_URL), and numpy, which
+# streamcast does not depend on, for the generator. See benchmarks/README.md.
+bench-identity *args:
+    uv run --with numpy python benchmarks/identity.py {{args}}
