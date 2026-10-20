@@ -7,6 +7,20 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.22.2 — 2026-10-20
+
+### Fixed
+
+- **A reopened stream reads its published table with its own `s3_options`.**
+  `Stream.new` passed them to `litelink.new`, which creates a log, but not to
+  `litelink.open`, which reopens one (nor did `migrate`, `retire`, `retain`, a
+  revive, or a retired stream's open), so a reopened log resolved credentials
+  from the environment. On a server whose streams publish to different stores,
+  that is another store's key: every restart after a stream's first publish
+  failed reading its own metadata (`ACCESS_DENIED`), and the server did not
+  start. Maintainer processes are unchanged: `serve` already hands each its
+  stream's options through its environment.
+
 ## 0.22.1 — 2026-10-20
 
 A fix on the 0.22 line, for readers that cannot take 0.23's breaking changes yet.
