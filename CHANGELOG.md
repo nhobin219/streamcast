@@ -26,6 +26,18 @@ there was nothing to have changed from. Everything above it is ordinary.
   (0.22.1).
 - **A reader that passes no `s3_options` opens a published table again**
   (0.22.3): the manifest read resolves them from the environment.
+- **A send on a closing or closed publish connection raises
+  `ConnectionClosed`**, the exception a publisher reconnects on.
+  - Before, websockets' `send_context` aborted the transport first, and on an
+    asyncio transport whose `connection_lost` had already run, the abort
+    raised `AttributeError` instead (#106). Any other exception from a
+    connection that is no longer open is now raised as the connection's end,
+    chained from the original, or as the refusal its close code carries.
+  - A send that loses the race with the reader no longer leaves its failed
+    reply unretrieved, so asyncio logs no "Future exception was never
+    retrieved" (#154).
+  - The `IndexError('pop from an empty deque')` in that race was fixed in
+    0.23.0; a test now covers it.
 
 ## 0.23.0 — 2026-10-19
 
