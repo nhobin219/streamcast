@@ -1,0 +1,6449 @@
+{
+  "build": {
+    "prefix": "s3://streamcast-demo/identity-bench/feec3cfc0a17",
+    "shape": {
+      "rows": 5000000,
+      "concurrent": 1000,
+      "mean_lines": 2000,
+      "batch": 250000,
+      "seed": 180
+    },
+    "streams": {
+      "natural": {
+        "metadata_uri": "s3://streamcast-demo/identity-bench/feec3cfc0a17/cc17ffacd51e/natural/natural.metadata/version-hint.text",
+        "table": "s3://streamcast-demo/identity-bench/feec3cfc0a17/cc17ffacd51e/natural/natural",
+        "identity": null,
+        "ingest_seconds": 38.59228501399048,
+        "samples": [
+          {
+            "row": 0,
+            "session_id": "65eb9314-f53f-434b-89bb-c303a85da246",
+            "line_number": 0
+          },
+          {
+            "row": 79365,
+            "session_id": "359d616f-a7d2-4044-9061-b3a2a7abe3df",
+            "line_number": 75
+          },
+          {
+            "row": 158730,
+            "session_id": "e77cbe2d-b598-4bcf-ad8f-3121cad95ae5",
+            "line_number": 167
+          },
+          {
+            "row": 238095,
+            "session_id": "fe35db7e-072e-462e-8409-5eefa066ead3",
+            "line_number": 249
+          },
+          {
+            "row": 317460,
+            "session_id": "2b37f66b-0b16-4bc8-8d98-3a1690cffd4f",
+            "line_number": 321
+          },
+          {
+            "row": 396825,
+            "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+            "line_number": 396
+          },
+          {
+            "row": 476190,
+            "session_id": "2ef0b736-bff4-48a3-8782-1cb73e7fd74d",
+            "line_number": 469
+          },
+          {
+            "row": 555555,
+            "session_id": "8bd0f9c6-b17b-4c21-97df-b639df5cf29d",
+            "line_number": 532
+          },
+          {
+            "row": 634920,
+            "session_id": "0b9aa65b-7719-4fdb-a080-9536de548c25",
+            "line_number": 135
+          },
+          {
+            "row": 714285,
+            "session_id": "20c15d99-b658-4252-ab3c-b9d9298e7333",
+            "line_number": 749
+          },
+          {
+            "row": 793650,
+            "session_id": "58e63ed3-b2c5-478c-b1d7-1d1758842f8d",
+            "line_number": 284
+          },
+          {
+            "row": 873015,
+            "session_id": "f14d7bfa-6b70-4fc1-ad89-74203cc65bc7",
+            "line_number": 895
+          },
+          {
+            "row": 952380,
+            "session_id": "8e69c343-fff3-4393-9cc0-8201d6c2bb88",
+            "line_number": 917
+          },
+          {
+            "row": 1031745,
+            "session_id": "02e27e57-3f62-4b78-b0dc-8ce4bb006376",
+            "line_number": 1045
+          },
+          {
+            "row": 1111110,
+            "session_id": "11de4d5e-8074-47f5-a1af-fa0c34296917",
+            "line_number": 1118
+          },
+          {
+            "row": 1190475,
+            "session_id": "5ce84bed-2ea6-4987-90e5-42cd65a8db6e",
+            "line_number": 1177
+          },
+          {
+            "row": 1269841,
+            "session_id": "7fb6eb30-7487-46ee-b4b9-9b42d2b4df55",
+            "line_number": 783
+          },
+          {
+            "row": 1349206,
+            "session_id": "412f7c45-60b8-49df-9f92-054fccd17c1c",
+            "line_number": 1074
+          },
+          {
+            "row": 1428571,
+            "session_id": "a1e9452e-b953-40a8-9c37-a3db9ad56477",
+            "line_number": 1396
+          },
+          {
+            "row": 1507936,
+            "session_id": "241ae24d-edd4-4673-89fd-6becc57aa5d3",
+            "line_number": 256
+          },
+          {
+            "row": 1587301,
+            "session_id": "2ecb8e1b-faaf-47b0-bc09-57dcdd87c065",
+            "line_number": 813
+          },
+          {
+            "row": 1666666,
+            "session_id": "68bc1c85-e9ae-4847-9bc3-1956e6748457",
+            "line_number": 1773
+          },
+          {
+            "row": 1746031,
+            "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+            "line_number": 1313
+          },
+          {
+            "row": 1825396,
+            "session_id": "4c07c619-dd75-4717-b84f-8363437f0731",
+            "line_number": 1881
+          },
+          {
+            "row": 1904761,
+            "session_id": "a4f11476-f664-42c2-8100-308dc31ad671",
+            "line_number": 1908
+          },
+          {
+            "row": 1984126,
+            "session_id": "3141139f-26a3-46f1-a1f8-c450d4b4592f",
+            "line_number": 2035
+          },
+          {
+            "row": 2063491,
+            "session_id": "7417f6aa-51c6-47cb-9c2f-518ac4cd2408",
+            "line_number": 572
+          },
+          {
+            "row": 2142856,
+            "session_id": "b8af62a6-40d7-4a47-a31b-914524f24785",
+            "line_number": 1637
+          },
+          {
+            "row": 2222221,
+            "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+            "line_number": 2274
+          },
+          {
+            "row": 2301586,
+            "session_id": "9fa242e1-8e46-420b-aa53-98e9757d2250",
+            "line_number": 1268
+          },
+          {
+            "row": 2380951,
+            "session_id": "01b481dd-aad5-4157-8c97-a122916fb7e8",
+            "line_number": 150
+          },
+          {
+            "row": 2460316,
+            "session_id": "9b39feff-7392-4af4-a896-62ef9910231a",
+            "line_number": 485
+          },
+          {
+            "row": 2539682,
+            "session_id": "b81d7fab-dfe9-4de2-a41e-3808966a348b",
+            "line_number": 2592
+          },
+          {
+            "row": 2619047,
+            "session_id": "766f7c67-0597-4466-a000-2380d504312a",
+            "line_number": 2684
+          },
+          {
+            "row": 2698412,
+            "session_id": "cb3366b6-c973-462a-9dd9-551dc4ba90ec",
+            "line_number": 1991
+          },
+          {
+            "row": 2777777,
+            "session_id": "dfc7b1e8-e228-4607-9116-ba94c7997b68",
+            "line_number": 2301
+          },
+          {
+            "row": 2857142,
+            "session_id": "f9c8d673-4d94-4792-a79e-882f9238e130",
+            "line_number": 102
+          },
+          {
+            "row": 2936507,
+            "session_id": "018111dc-f92b-4010-8c6d-b1561f2fdac8",
+            "line_number": 2942
+          },
+          {
+            "row": 3015872,
+            "session_id": "35fcc467-e018-4615-b37d-0d3a42bc447a",
+            "line_number": 1246
+          },
+          {
+            "row": 3095237,
+            "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+            "line_number": 619
+          },
+          {
+            "row": 3174602,
+            "session_id": "79cce124-3b46-4c8e-b471-b59ce31dc635",
+            "line_number": 426
+          },
+          {
+            "row": 3253967,
+            "session_id": "121f08ff-6cdc-4453-a017-be36726c07cd",
+            "line_number": 2763
+          },
+          {
+            "row": 3333332,
+            "session_id": "2714618b-a532-4439-8e79-583a04e3e751",
+            "line_number": 327
+          },
+          {
+            "row": 3412697,
+            "session_id": "9582c643-f714-422e-9637-e1773a9ce095",
+            "line_number": 1708
+          },
+          {
+            "row": 3492062,
+            "session_id": "a6d34ed9-d6a9-4ed2-a64d-fdea81bdbf05",
+            "line_number": 2309
+          },
+          {
+            "row": 3571427,
+            "session_id": "5866166e-faf9-49ee-b676-bed01afe000d",
+            "line_number": 1342
+          },
+          {
+            "row": 3650792,
+            "session_id": "44f3a969-9b1e-45b3-8a93-214af0cae113",
+            "line_number": 3539
+          },
+          {
+            "row": 3730157,
+            "session_id": "06a9c8eb-525f-4646-a0c2-7956641890c4",
+            "line_number": 1949
+          },
+          {
+            "row": 3809523,
+            "session_id": "7c224079-2432-48fe-86ad-ed49afb29354",
+            "line_number": 1025
+          },
+          {
+            "row": 3888888,
+            "session_id": "ef386307-5416-4a4b-a20a-1ce86cb6a4e6",
+            "line_number": 851
+          },
+          {
+            "row": 3968253,
+            "session_id": "068c073b-dc87-48cf-88b3-bf57aafce886",
+            "line_number": 1984
+          },
+          {
+            "row": 4047618,
+            "session_id": "623e1aeb-c37b-4f64-a84e-d96878a7f6b5",
+            "line_number": 4072
+          },
+          {
+            "row": 4126983,
+            "session_id": "35c2b61d-9c7d-41b9-bbaf-21441fac4f6d",
+            "line_number": 863
+          },
+          {
+            "row": 4206348,
+            "session_id": "b49cee67-e2c1-4fad-ad8c-55ac4a4d84a6",
+            "line_number": 1166
+          },
+          {
+            "row": 4285713,
+            "session_id": "25f4862c-fa8e-41d2-8813-740f26fe7751",
+            "line_number": 25
+          },
+          {
+            "row": 4365078,
+            "session_id": "c3555152-0c8b-4035-9707-9dfc69442153",
+            "line_number": 141
+          },
+          {
+            "row": 4444443,
+            "session_id": "36430cab-2c5a-4c07-9694-22218d545ac3",
+            "line_number": 4004
+          },
+          {
+            "row": 4523808,
+            "session_id": "ef1651b4-3f82-48f8-8d47-e6f225a1e92d",
+            "line_number": 524
+          },
+          {
+            "row": 4603173,
+            "session_id": "4f8e4dd0-13c5-4365-a1e4-9f76c3c844bc",
+            "line_number": 563
+          },
+          {
+            "row": 4682538,
+            "session_id": "a38ccc53-4e43-4497-8034-6136e97ceda6",
+            "line_number": 3444
+          },
+          {
+            "row": 4761903,
+            "session_id": "eab4739d-650c-4675-872a-edb27c07cc8b",
+            "line_number": 4177
+          },
+          {
+            "row": 4841268,
+            "session_id": "d00f723f-adb2-4ba0-a4bb-30f68ebcf9bd",
+            "line_number": 1367
+          },
+          {
+            "row": 4920633,
+            "session_id": "0ce8f8e5-2b7b-4477-8066-9638e9753ca2",
+            "line_number": 2194
+          },
+          {
+            "row": 4999999,
+            "session_id": "c3370edc-03fd-4277-901c-98fb4f1c0e6b",
+            "line_number": 949
+          }
+        ],
+        "layout": {
+          "files": 1,
+          "rows": 5000000,
+          "row_groups": 14,
+          "bytes": 226029757,
+          "column_bytes": {
+            "litelink_offset": 8540373,
+            "session_id": 6997158,
+            "line_number": 7114053,
+            "ts": 12569490,
+            "kind": 1276890,
+            "tokens": 7648609,
+            "text": 181844224,
+            "streamcast_ts": 21396
+          },
+          "column_encodings": {
+            "litelink_offset": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "session_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "line_number": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "kind": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "tokens": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "text": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "streamcast_ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ]
+          },
+          "column_has_stats": {
+            "litelink_offset": true,
+            "session_id": true,
+            "line_number": true,
+            "ts": true,
+            "kind": true,
+            "tokens": true,
+            "text": true,
+            "streamcast_ts": true
+          }
+        }
+      },
+      "keyed": {
+        "metadata_uri": "s3://streamcast-demo/identity-bench/feec3cfc0a17/e84540c98bd2/keyed/keyed.metadata/version-hint.text",
+        "table": "s3://streamcast-demo/identity-bench/feec3cfc0a17/e84540c98bd2/keyed/keyed",
+        "identity": [
+          "session_id",
+          "line_number"
+        ],
+        "ingest_seconds": 53.40845988201909,
+        "samples": [
+          {
+            "row": 0,
+            "session_id": "65eb9314-f53f-434b-89bb-c303a85da246",
+            "line_number": 0
+          },
+          {
+            "row": 79365,
+            "session_id": "359d616f-a7d2-4044-9061-b3a2a7abe3df",
+            "line_number": 75
+          },
+          {
+            "row": 158730,
+            "session_id": "e77cbe2d-b598-4bcf-ad8f-3121cad95ae5",
+            "line_number": 167
+          },
+          {
+            "row": 238095,
+            "session_id": "fe35db7e-072e-462e-8409-5eefa066ead3",
+            "line_number": 249
+          },
+          {
+            "row": 317460,
+            "session_id": "2b37f66b-0b16-4bc8-8d98-3a1690cffd4f",
+            "line_number": 321
+          },
+          {
+            "row": 396825,
+            "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+            "line_number": 396
+          },
+          {
+            "row": 476190,
+            "session_id": "2ef0b736-bff4-48a3-8782-1cb73e7fd74d",
+            "line_number": 469
+          },
+          {
+            "row": 555555,
+            "session_id": "8bd0f9c6-b17b-4c21-97df-b639df5cf29d",
+            "line_number": 532
+          },
+          {
+            "row": 634920,
+            "session_id": "0b9aa65b-7719-4fdb-a080-9536de548c25",
+            "line_number": 135
+          },
+          {
+            "row": 714285,
+            "session_id": "20c15d99-b658-4252-ab3c-b9d9298e7333",
+            "line_number": 749
+          },
+          {
+            "row": 793650,
+            "session_id": "58e63ed3-b2c5-478c-b1d7-1d1758842f8d",
+            "line_number": 284
+          },
+          {
+            "row": 873015,
+            "session_id": "f14d7bfa-6b70-4fc1-ad89-74203cc65bc7",
+            "line_number": 895
+          },
+          {
+            "row": 952380,
+            "session_id": "8e69c343-fff3-4393-9cc0-8201d6c2bb88",
+            "line_number": 917
+          },
+          {
+            "row": 1031745,
+            "session_id": "02e27e57-3f62-4b78-b0dc-8ce4bb006376",
+            "line_number": 1045
+          },
+          {
+            "row": 1111110,
+            "session_id": "11de4d5e-8074-47f5-a1af-fa0c34296917",
+            "line_number": 1118
+          },
+          {
+            "row": 1190475,
+            "session_id": "5ce84bed-2ea6-4987-90e5-42cd65a8db6e",
+            "line_number": 1177
+          },
+          {
+            "row": 1269841,
+            "session_id": "7fb6eb30-7487-46ee-b4b9-9b42d2b4df55",
+            "line_number": 783
+          },
+          {
+            "row": 1349206,
+            "session_id": "412f7c45-60b8-49df-9f92-054fccd17c1c",
+            "line_number": 1074
+          },
+          {
+            "row": 1428571,
+            "session_id": "a1e9452e-b953-40a8-9c37-a3db9ad56477",
+            "line_number": 1396
+          },
+          {
+            "row": 1507936,
+            "session_id": "241ae24d-edd4-4673-89fd-6becc57aa5d3",
+            "line_number": 256
+          },
+          {
+            "row": 1587301,
+            "session_id": "2ecb8e1b-faaf-47b0-bc09-57dcdd87c065",
+            "line_number": 813
+          },
+          {
+            "row": 1666666,
+            "session_id": "68bc1c85-e9ae-4847-9bc3-1956e6748457",
+            "line_number": 1773
+          },
+          {
+            "row": 1746031,
+            "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+            "line_number": 1313
+          },
+          {
+            "row": 1825396,
+            "session_id": "4c07c619-dd75-4717-b84f-8363437f0731",
+            "line_number": 1881
+          },
+          {
+            "row": 1904761,
+            "session_id": "a4f11476-f664-42c2-8100-308dc31ad671",
+            "line_number": 1908
+          },
+          {
+            "row": 1984126,
+            "session_id": "3141139f-26a3-46f1-a1f8-c450d4b4592f",
+            "line_number": 2035
+          },
+          {
+            "row": 2063491,
+            "session_id": "7417f6aa-51c6-47cb-9c2f-518ac4cd2408",
+            "line_number": 572
+          },
+          {
+            "row": 2142856,
+            "session_id": "b8af62a6-40d7-4a47-a31b-914524f24785",
+            "line_number": 1637
+          },
+          {
+            "row": 2222221,
+            "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+            "line_number": 2274
+          },
+          {
+            "row": 2301586,
+            "session_id": "9fa242e1-8e46-420b-aa53-98e9757d2250",
+            "line_number": 1268
+          },
+          {
+            "row": 2380951,
+            "session_id": "01b481dd-aad5-4157-8c97-a122916fb7e8",
+            "line_number": 150
+          },
+          {
+            "row": 2460316,
+            "session_id": "9b39feff-7392-4af4-a896-62ef9910231a",
+            "line_number": 485
+          },
+          {
+            "row": 2539682,
+            "session_id": "b81d7fab-dfe9-4de2-a41e-3808966a348b",
+            "line_number": 2592
+          },
+          {
+            "row": 2619047,
+            "session_id": "766f7c67-0597-4466-a000-2380d504312a",
+            "line_number": 2684
+          },
+          {
+            "row": 2698412,
+            "session_id": "cb3366b6-c973-462a-9dd9-551dc4ba90ec",
+            "line_number": 1991
+          },
+          {
+            "row": 2777777,
+            "session_id": "dfc7b1e8-e228-4607-9116-ba94c7997b68",
+            "line_number": 2301
+          },
+          {
+            "row": 2857142,
+            "session_id": "f9c8d673-4d94-4792-a79e-882f9238e130",
+            "line_number": 102
+          },
+          {
+            "row": 2936507,
+            "session_id": "018111dc-f92b-4010-8c6d-b1561f2fdac8",
+            "line_number": 2942
+          },
+          {
+            "row": 3015872,
+            "session_id": "35fcc467-e018-4615-b37d-0d3a42bc447a",
+            "line_number": 1246
+          },
+          {
+            "row": 3095237,
+            "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+            "line_number": 619
+          },
+          {
+            "row": 3174602,
+            "session_id": "79cce124-3b46-4c8e-b471-b59ce31dc635",
+            "line_number": 426
+          },
+          {
+            "row": 3253967,
+            "session_id": "121f08ff-6cdc-4453-a017-be36726c07cd",
+            "line_number": 2763
+          },
+          {
+            "row": 3333332,
+            "session_id": "2714618b-a532-4439-8e79-583a04e3e751",
+            "line_number": 327
+          },
+          {
+            "row": 3412697,
+            "session_id": "9582c643-f714-422e-9637-e1773a9ce095",
+            "line_number": 1708
+          },
+          {
+            "row": 3492062,
+            "session_id": "a6d34ed9-d6a9-4ed2-a64d-fdea81bdbf05",
+            "line_number": 2309
+          },
+          {
+            "row": 3571427,
+            "session_id": "5866166e-faf9-49ee-b676-bed01afe000d",
+            "line_number": 1342
+          },
+          {
+            "row": 3650792,
+            "session_id": "44f3a969-9b1e-45b3-8a93-214af0cae113",
+            "line_number": 3539
+          },
+          {
+            "row": 3730157,
+            "session_id": "06a9c8eb-525f-4646-a0c2-7956641890c4",
+            "line_number": 1949
+          },
+          {
+            "row": 3809523,
+            "session_id": "7c224079-2432-48fe-86ad-ed49afb29354",
+            "line_number": 1025
+          },
+          {
+            "row": 3888888,
+            "session_id": "ef386307-5416-4a4b-a20a-1ce86cb6a4e6",
+            "line_number": 851
+          },
+          {
+            "row": 3968253,
+            "session_id": "068c073b-dc87-48cf-88b3-bf57aafce886",
+            "line_number": 1984
+          },
+          {
+            "row": 4047618,
+            "session_id": "623e1aeb-c37b-4f64-a84e-d96878a7f6b5",
+            "line_number": 4072
+          },
+          {
+            "row": 4126983,
+            "session_id": "35c2b61d-9c7d-41b9-bbaf-21441fac4f6d",
+            "line_number": 863
+          },
+          {
+            "row": 4206348,
+            "session_id": "b49cee67-e2c1-4fad-ad8c-55ac4a4d84a6",
+            "line_number": 1166
+          },
+          {
+            "row": 4285713,
+            "session_id": "25f4862c-fa8e-41d2-8813-740f26fe7751",
+            "line_number": 25
+          },
+          {
+            "row": 4365078,
+            "session_id": "c3555152-0c8b-4035-9707-9dfc69442153",
+            "line_number": 141
+          },
+          {
+            "row": 4444443,
+            "session_id": "36430cab-2c5a-4c07-9694-22218d545ac3",
+            "line_number": 4004
+          },
+          {
+            "row": 4523808,
+            "session_id": "ef1651b4-3f82-48f8-8d47-e6f225a1e92d",
+            "line_number": 524
+          },
+          {
+            "row": 4603173,
+            "session_id": "4f8e4dd0-13c5-4365-a1e4-9f76c3c844bc",
+            "line_number": 563
+          },
+          {
+            "row": 4682538,
+            "session_id": "a38ccc53-4e43-4497-8034-6136e97ceda6",
+            "line_number": 3444
+          },
+          {
+            "row": 4761903,
+            "session_id": "eab4739d-650c-4675-872a-edb27c07cc8b",
+            "line_number": 4177
+          },
+          {
+            "row": 4841268,
+            "session_id": "d00f723f-adb2-4ba0-a4bb-30f68ebcf9bd",
+            "line_number": 1367
+          },
+          {
+            "row": 4920633,
+            "session_id": "0ce8f8e5-2b7b-4477-8066-9638e9753ca2",
+            "line_number": 2194
+          },
+          {
+            "row": 4999999,
+            "session_id": "c3370edc-03fd-4277-901c-98fb4f1c0e6b",
+            "line_number": 949
+          }
+        ],
+        "layout": {
+          "files": 1,
+          "rows": 5000000,
+          "row_groups": 15,
+          "bytes": 308706969,
+          "column_bytes": {
+            "litelink_offset": 8925243,
+            "session_id": 7042962,
+            "line_number": 7117947,
+            "ts": 12932807,
+            "kind": 1276614,
+            "tokens": 7657009,
+            "text": 181808060,
+            "streamcast_ts": 21057,
+            "_streamcast_id": 81904422
+          },
+          "column_encodings": {
+            "litelink_offset": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "session_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "line_number": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "kind": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "tokens": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "text": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "streamcast_ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "_streamcast_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ]
+          },
+          "column_has_stats": {
+            "litelink_offset": true,
+            "session_id": true,
+            "line_number": true,
+            "ts": true,
+            "kind": true,
+            "tokens": true,
+            "text": true,
+            "streamcast_ts": true,
+            "_streamcast_id": true
+          }
+        }
+      },
+      "labels_natural": {
+        "metadata_uri": "s3://streamcast-demo/identity-bench/feec3cfc0a17/c062ca8b3296/labels_natural/labels_natural.metadata/version-hint.text",
+        "table": "s3://streamcast-demo/identity-bench/feec3cfc0a17/c062ca8b3296/labels_natural/labels_natural",
+        "identity": null,
+        "ingest_seconds": 12.512755386997014,
+        "samples": [],
+        "layout": {
+          "files": 1,
+          "rows": 500000,
+          "row_groups": 1,
+          "bytes": 2473053,
+          "column_bytes": {
+            "litelink_offset": 769179,
+            "session_id": 779953,
+            "line_number": 730383,
+            "label": 190098,
+            "streamcast_ts": 2149
+          },
+          "column_encodings": {
+            "litelink_offset": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "session_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "line_number": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "label": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "streamcast_ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ]
+          },
+          "column_has_stats": {
+            "litelink_offset": true,
+            "session_id": true,
+            "line_number": true,
+            "label": true,
+            "streamcast_ts": true
+          }
+        }
+      },
+      "labels_keyed": {
+        "metadata_uri": "s3://streamcast-demo/identity-bench/feec3cfc0a17/9fdc056764dd/labels_keyed/labels_keyed.metadata/version-hint.text",
+        "table": "s3://streamcast-demo/identity-bench/feec3cfc0a17/9fdc056764dd/labels_keyed/labels_keyed",
+        "identity": [
+          "session_id",
+          "line_number"
+        ],
+        "ingest_seconds": 13.98614782304503,
+        "samples": [],
+        "layout": {
+          "files": 1,
+          "rows": 500000,
+          "row_groups": 1,
+          "bytes": 10601050,
+          "column_bytes": {
+            "litelink_offset": 769179,
+            "session_id": 779953,
+            "line_number": 730383,
+            "label": 190098,
+            "streamcast_ts": 2149,
+            "_streamcast_id": 8127615
+          },
+          "column_encodings": {
+            "litelink_offset": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "session_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "line_number": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "label": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "streamcast_ts": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ],
+            "_streamcast_id": [
+              "PLAIN",
+              "RLE",
+              "RLE_DICTIONARY",
+              "ZSTD"
+            ]
+          },
+          "column_has_stats": {
+            "litelink_offset": true,
+            "session_id": true,
+            "line_number": true,
+            "label": true,
+            "streamcast_ts": true,
+            "_streamcast_id": true
+          }
+        }
+      }
+    },
+    "versions": {
+      "python": "3.11.17",
+      "streamcast": "0.23.0",
+      "litelink": "0.14.0",
+      "duckdb": "1.5.5",
+      "duckdb_extensions": {
+        "avro": "f9d5902",
+        "httpfs": "827222f",
+        "iceberg": "45163a28",
+        "parquet": "v1.5.5"
+      },
+      "pyarrow": "25.0.1",
+      "xxhash": "4.0.1",
+      "store_endpoint": "http://127.0.0.1:9002",
+      "store_image": "rustfs/rustfs:1.0.0-rc.4"
+    }
+  },
+  "versions": {
+    "python": "3.11.17",
+    "streamcast": "0.23.0",
+    "litelink": "0.14.0",
+    "duckdb": "1.5.5",
+    "duckdb_extensions": {
+      "avro": "f9d5902",
+      "httpfs": "827222f",
+      "iceberg": "45163a28",
+      "parquet": "v1.5.5"
+    },
+    "pyarrow": "25.0.1",
+    "xxhash": "4.0.1",
+    "store_endpoint": "http://127.0.0.1:9002",
+    "store_image": "rustfs/rustfs:1.0.0-rc.4"
+  },
+  "repeat": 3,
+  "heavy_repeat": 3,
+  "memory_limit": "1GB",
+  "core": true,
+  "proxy_only": true,
+  "cache_conditions": {
+    "cold": "fresh DuckDB connection; DuckDB caches disabled; store page cache retained",
+    "warm": "one connection per arm/path after a separate fill run; keys vary by repetition",
+    "excluded": "connection setup, metadata URI resolution, footer attribution setup",
+    "pruned": "natural-column manifest planning is included in every query"
+  },
+  "records": [
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.896806098986417,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624043553455
+        }
+      ],
+      "requests": 34,
+      "bytes": 30468662,
+      "aborted": 0,
+      "bytes_declared": 30468662,
+      "methods": {
+        "HEAD": 1,
+        "GET": 33
+      },
+      "columns": {
+        "text": 14119137,
+        "line_number": 7114053,
+        "session_id": 6923319,
+        "ts": 954861,
+        "litelink_offset": 647351,
+        "tokens": 582693,
+        "kind": 97372,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 1898
+      },
+      "row_groups_read": {
+        "text": 2,
+        "streamcast_ts": 2,
+        "line_number": 14,
+        "session_id": 13,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.5967431690078229,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624049851837
+        }
+      ],
+      "requests": 29,
+      "bytes": 27666547,
+      "aborted": 0,
+      "bytes_declared": 27666547,
+      "methods": {
+        "HEAD": 1,
+        "GET": 28
+      },
+      "columns": {
+        "text": 14113935,
+        "line_number": 5823531,
+        "session_id": 5416881,
+        "ts": 954925,
+        "litelink_offset": 647348,
+        "tokens": 582692,
+        "kind": 97371,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 1886
+      },
+      "row_groups_read": {
+        "text": 2,
+        "streamcast_ts": 2,
+        "line_number": 11,
+        "session_id": 11,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.6027690169867128,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624057652147
+        }
+      ],
+      "requests": 32,
+      "bytes": 29594145,
+      "aborted": 0,
+      "bytes_declared": 29594145,
+      "methods": {
+        "HEAD": 1,
+        "GET": 31
+      },
+      "columns": {
+        "text": 14113820,
+        "line_number": 6764170,
+        "session_id": 6403994,
+        "ts": 954874,
+        "litelink_offset": 647361,
+        "tokens": 582693,
+        "kind": 97369,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 1886
+      },
+      "row_groups_read": {
+        "text": 2,
+        "streamcast_ts": 2,
+        "line_number": 13,
+        "session_id": 12,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.49950591602828354,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624043553455
+        }
+      ],
+      "requests": 34,
+      "bytes": 31116023,
+      "aborted": 0,
+      "bytes_declared": 31116023,
+      "methods": {
+        "HEAD": 1,
+        "GET": 33
+      },
+      "columns": {
+        "text": 14119137,
+        "line_number": 7114053,
+        "session_id": 6923319,
+        "litelink_offset": 1294712,
+        "ts": 954861,
+        "tokens": 582693,
+        "kind": 97372,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 1898
+      },
+      "row_groups_read": {
+        "text": 2,
+        "streamcast_ts": 2,
+        "line_number": 14,
+        "session_id": 13,
+        "litelink_offset": 2,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.19011377997230738,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624043553455
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.20856279495637864,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624049851837
+        }
+      ],
+      "requests": 4,
+      "bytes": 16874750,
+      "aborted": 0,
+      "bytes_declared": 16874750,
+      "methods": {
+        "HEAD": 1,
+        "GET": 3
+      },
+      "columns": {
+        "text": 13869617,
+        "litelink_offset": 1294686,
+        "ts": 954925,
+        "tokens": 582692,
+        "kind": 97371,
+        "session_id": 73839,
+        "streamcast_ts": 1620,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 2,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.2882751349825412,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624057652147
+        }
+      ],
+      "requests": 3,
+      "bytes": 16800763,
+      "aborted": 0,
+      "bytes_declared": 16800763,
+      "methods": {
+        "HEAD": 1,
+        "GET": 2
+      },
+      "columns": {
+        "text": 13869502,
+        "litelink_offset": 1294705,
+        "ts": 954874,
+        "tokens": 582693,
+        "kind": 97369,
+        "streamcast_ts": 1620,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 2,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.8958396490197629,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 37,
+      "bytes": 29292733,
+      "aborted": 0,
+      "bytes_declared": 29292733,
+      "methods": {
+        "HEAD": 1,
+        "GET": 36
+      },
+      "columns": {
+        "text": 12722787,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "_streamcast_id": 241300,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 15,
+        "session_id": 15,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.0892835140693933,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 31,
+      "bytes": 26635745,
+      "aborted": 0,
+      "bytes_declared": 26635745,
+      "methods": {
+        "HEAD": 1,
+        "GET": 30
+      },
+      "columns": {
+        "text": 12693630,
+        "line_number": 5955729,
+        "session_id": 5577341,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "_streamcast_id": 241300,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 12,
+        "session_id": 12,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.8974216759670526,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 35,
+      "bytes": 28484948,
+      "aborted": 0,
+      "bytes_declared": 28484948,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "text": 12704824,
+        "line_number": 6803279,
+        "session_id": 6567622,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "_streamcast_id": 241300,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 14,
+        "session_id": 14,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.80931550799869,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 37,
+      "bytes": 29292733,
+      "aborted": 0,
+      "bytes_declared": 29292733,
+      "methods": {
+        "HEAD": 1,
+        "GET": 36
+      },
+      "columns": {
+        "text": 12722787,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "_streamcast_id": 241300,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 15,
+        "session_id": 15,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.19062509096693248,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.5013118589995429,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 3,
+      "bytes": 14829555,
+      "aborted": 0,
+      "bytes_declared": 14829555,
+      "methods": {
+        "HEAD": 1,
+        "GET": 2
+      },
+      "columns": {
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.40074014791753143,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 3,
+      "bytes": 14840927,
+      "aborted": 0,
+      "bytes_declared": 14840927,
+      "methods": {
+        "HEAD": 1,
+        "GET": 2
+      },
+      "columns": {
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.9133294409839436,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 21,
+      "bytes": 97921461,
+      "aborted": 0,
+      "bytes_declared": 97921461,
+      "methods": {
+        "HEAD": 1,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12722787,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "session_id": 487669,
+        "line_number": 397546,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.1910051449667662,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 21,
+      "bytes": 97982885,
+      "aborted": 0,
+      "bytes_declared": 97982885,
+      "methods": {
+        "HEAD": 1,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "session_id": 492891,
+        "line_number": 482897,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.4051165480632335,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 21,
+      "bytes": 98026469,
+      "aborted": 0,
+      "bytes_declared": 98026469,
+      "methods": {
+        "HEAD": 1,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "line_number": 527726,
+        "session_id": 480274,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.110595596022904,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 21,
+      "bytes": 97680161,
+      "aborted": 0,
+      "bytes_declared": 97680161,
+      "methods": {
+        "HEAD": 1,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "text": 12722787,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "session_id": 487669,
+        "line_number": 397546,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.1860290669137612,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.504256961052306,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 2,
+      "bytes": 15805343,
+      "aborted": 0,
+      "bytes_declared": 15805343,
+      "methods": {
+        "HEAD": 1,
+        "GET": 1
+      },
+      "columns": {
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "session_id": 492891,
+        "line_number": 482897,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.6055382790509611,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 2,
+      "bytes": 15848927,
+      "aborted": 0,
+      "bytes_declared": 15848927,
+      "methods": {
+        "HEAD": 1,
+        "GET": 1
+      },
+      "columns": {
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "line_number": 527726,
+        "session_id": 480274,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.3924746859120205,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 48,
+      "bytes": 104328711,
+      "aborted": 0,
+      "bytes_declared": 104328711,
+      "methods": {
+        "HEAD": 1,
+        "GET": 47
+      },
+      "columns": {
+        "_streamcast_id": 76426278,
+        "text": 12722787,
+        "line_number": 7117947,
+        "session_id": 5893962,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "line_number": 15,
+        "session_id": 12,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.3028932199813426,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 43,
+      "bytes": 91381835,
+      "aborted": 0,
+      "bytes_declared": 91381835,
+      "methods": {
+        "HEAD": 1,
+        "GET": 42
+      },
+      "columns": {
+        "_streamcast_id": 64987390,
+        "text": 12693630,
+        "line_number": 5955729,
+        "session_id": 5577341,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 12,
+        "line_number": 12,
+        "session_id": 12,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.4964825039496645,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 47,
+      "bytes": 104028407,
+      "aborted": 0,
+      "bytes_declared": 104028407,
+      "methods": {
+        "HEAD": 1,
+        "GET": 46
+      },
+      "columns": {
+        "_streamcast_id": 76426278,
+        "text": 12704824,
+        "line_number": 6803279,
+        "session_id": 5926103,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "line_number": 14,
+        "session_id": 12,
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.2868029579985887,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 48,
+      "bytes": 104570199,
+      "aborted": 0,
+      "bytes_declared": 104570199,
+      "methods": {
+        "HEAD": 1,
+        "GET": 47
+      },
+      "columns": {
+        "_streamcast_id": 76184978,
+        "text": 12722787,
+        "line_number": 7117947,
+        "session_id": 6060162,
+        "litelink_offset": 931451,
+        "ts": 895511,
+        "tokens": 534839,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 10976,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "line_number": 15,
+        "session_id": 13,
+        "litelink_offset": 2,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.2067795740440488,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 4,
+      "bytes": 7317093,
+      "aborted": 0,
+      "bytes_declared": 7317093,
+      "methods": {
+        "HEAD": 1,
+        "GET": 3
+      },
+      "columns": {
+        "_streamcast_id": 5719444,
+        "session_id": 982800,
+        "litelink_offset": 614849,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "session_id": 2,
+        "_streamcast_id": 1,
+        "litelink_offset": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.39300361601635814,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 3,
+      "bytes": 14829555,
+      "aborted": 0,
+      "bytes_declared": 14829555,
+      "methods": {
+        "HEAD": 1,
+        "GET": 2
+      },
+      "columns": {
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.3123711049556732,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 3,
+      "bytes": 14840927,
+      "aborted": 0,
+      "bytes_declared": 14840927,
+      "methods": {
+        "HEAD": 1,
+        "GET": 2
+      },
+      "columns": {
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "kind": 89238,
+        "streamcast_ts": 1464,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.2177947709569708,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 27,
+      "bytes": 97921503,
+      "aborted": 0,
+      "bytes_declared": 97921503,
+      "methods": {
+        "HEAD": 6,
+        "GET": 21
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12722787,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "session_id": 487669,
+        "line_number": 397546,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 11018,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.2857798519544303,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 27,
+      "bytes": 97982927,
+      "aborted": 0,
+      "bytes_declared": 97982927,
+      "methods": {
+        "HEAD": 6,
+        "GET": 21
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "session_id": 492891,
+        "line_number": 482897,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 11018,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.4048549920553342,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 27,
+      "bytes": 98026511,
+      "aborted": 0,
+      "bytes_declared": 98026511,
+      "methods": {
+        "HEAD": 6,
+        "GET": 21
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "line_number": 527726,
+        "session_id": 480274,
+        "kind": 89238,
+        "(footer/other)": 20844,
+        "(metadata)": 11018,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.199197764042765,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 27,
+      "bytes": 97680203,
+      "aborted": 0,
+      "bytes_declared": 97680203,
+      "methods": {
+        "HEAD": 6,
+        "GET": 21
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "text": 12722787,
+        "ts": 895511,
+        "litelink_offset": 614863,
+        "tokens": 534839,
+        "session_id": 487669,
+        "line_number": 397546,
+        "kind": 89239,
+        "(footer/other)": 20844,
+        "(metadata)": 11018,
+        "streamcast_ts": 1465
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.49262416199781,
+      "result": [
+        {
+          "litelink_offset": 396826,
+          "session_id": "b0a1aa4f-3598-4e6c-a77a-915aa94fb29d",
+          "line_number": 396,
+          "ts": 1790000396825000,
+          "kind": 0,
+          "tokens": 2177,
+          "streamcast_ts": 1792624089358951
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.6958151439903304,
+      "result": [
+        {
+          "litelink_offset": 1746032,
+          "session_id": "ebe02ed6-8a70-41a6-a4cd-d8fed2f291e0",
+          "line_number": 1313,
+          "ts": 1790001746031000,
+          "kind": 2,
+          "tokens": 3176,
+          "streamcast_ts": 1792624101443765
+        }
+      ],
+      "requests": 11,
+      "bytes": 15816361,
+      "aborted": 0,
+      "bytes_declared": 15816361,
+      "methods": {
+        "HEAD": 6,
+        "GET": 5
+      },
+      "columns": {
+        "text": 12693630,
+        "ts": 895521,
+        "litelink_offset": 614862,
+        "tokens": 534840,
+        "session_id": 492891,
+        "line_number": 482897,
+        "kind": 89238,
+        "(metadata)": 11018,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, SELECT * | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, SELECT *",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.900250703911297,
+      "result": [
+        {
+          "litelink_offset": 3095238,
+          "session_id": "2159916e-671b-47ee-81fb-93988586b0b5",
+          "line_number": 619,
+          "ts": 1790003095237000,
+          "kind": 3,
+          "tokens": 22,
+          "streamcast_ts": 1792624111557053
+        }
+      ],
+      "requests": 11,
+      "bytes": 15859945,
+      "aborted": 0,
+      "bytes_declared": 15859945,
+      "methods": {
+        "HEAD": 6,
+        "GET": 5
+      },
+      "columns": {
+        "text": 12704824,
+        "ts": 895689,
+        "litelink_offset": 614872,
+        "tokens": 534840,
+        "line_number": 527726,
+        "session_id": 480274,
+        "kind": 89238,
+        "(metadata)": 11018,
+        "streamcast_ts": 1464
+      },
+      "row_groups_read": {
+        "litelink_offset": 1,
+        "session_id": 1,
+        "line_number": 1,
+        "ts": 1,
+        "kind": 1,
+        "tokens": 1,
+        "text": 1,
+        "streamcast_ts": 1
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.37409672199282795,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 32,
+      "bytes": 14309934,
+      "aborted": 0,
+      "bytes_declared": 14309934,
+      "methods": {
+        "HEAD": 1,
+        "GET": 31
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6923319,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "line_number": 14,
+        "session_id": 13
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.297142502036877,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 27,
+      "bytes": 11512974,
+      "aborted": 0,
+      "bytes_declared": 11512974,
+      "methods": {
+        "HEAD": 1,
+        "GET": 26
+      },
+      "columns": {
+        "line_number": 5823531,
+        "session_id": 5416881,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "line_number": 11,
+        "session_id": 11
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.2678415640257299,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 30,
+      "bytes": 13440726,
+      "aborted": 0,
+      "bytes_declared": 13440726,
+      "methods": {
+        "HEAD": 1,
+        "GET": 29
+      },
+      "columns": {
+        "line_number": 6764170,
+        "session_id": 6403994,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "line_number": 13,
+        "session_id": 12
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.4876647420460358,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 32,
+      "bytes": 14309934,
+      "aborted": 0,
+      "bytes_declared": 14309934,
+      "methods": {
+        "HEAD": 1,
+        "GET": 31
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6923319,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "line_number": 14,
+        "session_id": 13
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.099529427010566,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.09793754096608609,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 2,
+      "bytes": 73839,
+      "aborted": 0,
+      "bytes_declared": 73839,
+      "methods": {
+        "HEAD": 1,
+        "GET": 1
+      },
+      "columns": {
+        "session_id": 73839,
+        "(metadata)": 0
+      },
+      "row_groups_read": {
+        "session_id": 1
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | natural | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.09559159202035517,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.6965298299910501,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 35,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 15,
+        "session_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.5178201739909127,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 29,
+      "bytes": 11806190,
+      "aborted": 0,
+      "bytes_declared": 11806190,
+      "methods": {
+        "HEAD": 1,
+        "GET": 28
+      },
+      "columns": {
+        "line_number": 5955729,
+        "session_id": 5577341,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 12,
+        "session_id": 12
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.5859749170485884,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 33,
+      "bytes": 13644021,
+      "aborted": 0,
+      "bytes_declared": 13644021,
+      "methods": {
+        "HEAD": 1,
+        "GET": 32
+      },
+      "columns": {
+        "line_number": 6803279,
+        "session_id": 6567622,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 14,
+        "session_id": 14
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.5129358730046079,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 35,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "line_number": 15,
+        "session_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.09989353595301509,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.1855655510444194,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | natural predicate | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "natural predicate",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.11777206195984036,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.2843713279580697,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 20,
+      "bytes": 82177542,
+      "aborted": 0,
+      "bytes_declared": 82177542,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.0843785640317947,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 19,
+      "bytes": 76458098,
+      "aborted": 0,
+      "bytes_declared": 76458098,
+      "methods": {
+        "HEAD": 1,
+        "GET": 18
+      },
+      "columns": {
+        "_streamcast_id": 76426278,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.102452729945071,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 20,
+      "bytes": 82177542,
+      "aborted": 0,
+      "bytes_declared": 82177542,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.9125585800502449,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 20,
+      "bytes": 81936242,
+      "aborted": 0,
+      "bytes_declared": 81936242,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.19245477695949376,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.18363998900167644,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash only | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash only",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.112456772942096,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.4885967079317197,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 46,
+      "bytes": 94713016,
+      "aborted": 0,
+      "bytes_declared": 94713016,
+      "methods": {
+        "HEAD": 1,
+        "GET": 45
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "line_number": 7117947,
+        "session_id": 5417527,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "line_number": 15,
+        "session_id": 11
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.2194644269766286,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 40,
+      "bytes": 76398430,
+      "aborted": 0,
+      "bytes_declared": 76398430,
+      "methods": {
+        "HEAD": 1,
+        "GET": 39
+      },
+      "columns": {
+        "_streamcast_id": 64987390,
+        "line_number": 5955729,
+        "session_id": 5423491,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 12,
+        "line_number": 12,
+        "session_id": 11
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 2.1077954549109563,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 46,
+      "bytes": 89675149,
+      "aborted": 0,
+      "bytes_declared": 89675149,
+      "methods": {
+        "HEAD": 1,
+        "GET": 45
+      },
+      "columns": {
+        "_streamcast_id": 76426278,
+        "line_number": 6803279,
+        "session_id": 6413772,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "line_number": 14,
+        "session_id": 13
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.3997831899905577,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 50,
+      "bytes": 96097151,
+      "aborted": 0,
+      "bytes_declared": 96097151,
+      "methods": {
+        "HEAD": 1,
+        "GET": 49
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "line_number": 15,
+        "session_id": 15
+      }
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.2969793549273163,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.19461798097472638,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | hash beside natural (the PR's rewrite) | keyed | duckdb",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "hash beside natural (the PR's rewrite)",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.2038439940661192,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.2885939211118966,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.1938413290772587,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.0918194180121645,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.3959539229981601,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 26,
+      "bytes": 81936284,
+      "aborted": 0,
+      "bytes_declared": 81936284,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.49939170805737376,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.5255651730112731,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "a. lookup by full key, exists (count)",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.6792709319852293,
+      "result": [
+        {
+          "count_star()": 1
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 5.9854887899709865,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 19,
+      "bytes": 14383773,
+      "aborted": 0,
+      "bytes_declared": 14383773,
+      "methods": {
+        "HEAD": 1,
+        "GET": 18
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 5.50482136302162,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 19,
+      "bytes": 14383773,
+      "aborted": 0,
+      "bytes_declared": 14383773,
+      "methods": {
+        "HEAD": 1,
+        "GET": 18
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 4.780068167019635,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 19,
+      "bytes": 14383773,
+      "aborted": 0,
+      "bytes_declared": 14383773,
+      "methods": {
+        "HEAD": 1,
+        "GET": 18
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.399881586083211,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 19,
+      "bytes": 14383773,
+      "aborted": 0,
+      "bytes_declared": 14383773,
+      "methods": {
+        "HEAD": 1,
+        "GET": 18
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "text": 244318,
+        "(footer/other)": 17560,
+        "(metadata)": 10418,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.3978337231092155,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 3.3179284509969875,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | natural | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 2.8879059799946845,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.58809338696301,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 4.106684474973008,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 6.785194203956053,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 6.989166092942469,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 14434029,
+      "aborted": 0,
+      "bytes_declared": 14434029,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "_streamcast_id": 241300,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 5.299095156951807,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 5.80623894603923,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | natural columns | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 5.08613927999977,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.782817987957969,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 82177542,
+      "aborted": 0,
+      "bytes_declared": 82177542,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 4.407689610961825,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 82177542,
+      "aborted": 0,
+      "bytes_declared": 82177542,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 4.58301958697848,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 82177542,
+      "aborted": 0,
+      "bytes_declared": 82177542,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.8885738619137555,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 20,
+      "bytes": 81936242,
+      "aborted": 0,
+      "bytes_declared": 81936242,
+      "methods": {
+        "HEAD": 1,
+        "GET": 19
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.0025559639325365,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 3.302506495034322,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | hash | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 2.8948690639808774,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 1,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 1
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.5856742670293897,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 39,
+      "bytes": 16110183,
+      "aborted": 0,
+      "bytes_declared": 16110183,
+      "methods": {
+        "HEAD": 2,
+        "GET": 37
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "text": 244318,
+        "labels.label": 203046,
+        "(metadata)": 20010,
+        "(footer/other)": 18847,
+        "labels.streamcast_ts": 2149,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.4982771719805896,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 39,
+      "bytes": 16110183,
+      "aborted": 0,
+      "bytes_declared": 16110183,
+      "methods": {
+        "HEAD": 2,
+        "GET": 37
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "text": 244318,
+        "labels.label": 203046,
+        "(metadata)": 20010,
+        "(footer/other)": 18847,
+        "labels.streamcast_ts": 2149,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.0974084790796041,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 39,
+      "bytes": 16110183,
+      "aborted": 0,
+      "bytes_declared": 16110183,
+      "methods": {
+        "HEAD": 2,
+        "GET": 37
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "text": 244318,
+        "labels.label": 203046,
+        "(metadata)": 20010,
+        "(footer/other)": 18847,
+        "labels.streamcast_ts": 2149,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.0816474889870733,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 39,
+      "bytes": 16097235,
+      "aborted": 0,
+      "bytes_declared": 16097235,
+      "methods": {
+        "HEAD": 2,
+        "GET": 37
+      },
+      "columns": {
+        "line_number": 7114053,
+        "session_id": 6997158,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "text": 244318,
+        "labels.label": 190098,
+        "(metadata)": 20010,
+        "(footer/other)": 18847,
+        "labels.streamcast_ts": 2149,
+        "streamcast_ts": 266
+      },
+      "row_groups_read": {
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "text": 1,
+        "streamcast_ts": 1,
+        "session_id": 14,
+        "line_number": 14
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.38282776705455035,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.5200834639836103,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | natural | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "natural",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.5065601770766079,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.1872256270144135,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 41,
+      "bytes": 16161000,
+      "aborted": 0,
+      "bytes_declared": 16161000,
+      "methods": {
+        "HEAD": 2,
+        "GET": 39
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "_streamcast_id": 241300,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels._streamcast_id": 14715
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.2304606959223747,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 41,
+      "bytes": 16161000,
+      "aborted": 0,
+      "bytes_declared": 16161000,
+      "methods": {
+        "HEAD": 2,
+        "GET": 39
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "_streamcast_id": 241300,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels._streamcast_id": 14715
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.210082198958844,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 41,
+      "bytes": 16161000,
+      "aborted": 0,
+      "bytes_declared": 16161000,
+      "methods": {
+        "HEAD": 2,
+        "GET": 39
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "_streamcast_id": 241300,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels._streamcast_id": 14715
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.2664240889716893,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 41,
+      "bytes": 16161000,
+      "aborted": 0,
+      "bytes_declared": 16161000,
+      "methods": {
+        "HEAD": 2,
+        "GET": 39
+      },
+      "columns": {
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "_streamcast_id": 241300,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels._streamcast_id": 14715
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 1,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.7029909349512309,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.7019425759790465,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | natural columns | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "natural columns",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.8016957320505753,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.5031987529946491,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 26,
+      "bytes": 90523941,
+      "aborted": 0,
+      "bytes_declared": 90523941,
+      "methods": {
+        "HEAD": 2,
+        "GET": 24
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.704995110980235,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 26,
+      "bytes": 90523941,
+      "aborted": 0,
+      "bytes_declared": 90523941,
+      "methods": {
+        "HEAD": 2,
+        "GET": 24
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.3102968860184774,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 26,
+      "bytes": 90523941,
+      "aborted": 0,
+      "bytes_declared": 90523941,
+      "methods": {
+        "HEAD": 2,
+        "GET": 24
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.3953585689887404,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 26,
+      "bytes": 90267926,
+      "aborted": 0,
+      "bytes_declared": 90267926,
+      "methods": {
+        "HEAD": 2,
+        "GET": 24
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "labels._streamcast_id": 8127615,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "_streamcast_id": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.575364230084233,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.620012947008945,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | hash | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 0.7849943870678544,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 5.998486418044195,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 35,
+      "bytes": 96338451,
+      "aborted": 0,
+      "bytes_declared": 96338451,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 5.600834078039043,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 35,
+      "bytes": 96338451,
+      "aborted": 0,
+      "bytes_declared": 96338451,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 5.010974061093293,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 35,
+      "bytes": 96338451,
+      "aborted": 0,
+      "bytes_declared": 96338451,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 5.3807829229626805,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 35,
+      "bytes": 96338451,
+      "aborted": 0,
+      "bytes_declared": 96338451,
+      "methods": {
+        "HEAD": 1,
+        "GET": 34
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 6.298814325942658,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 32,
+      "bytes": 95945564,
+      "aborted": 0,
+      "bytes_declared": 95945564,
+      "methods": {
+        "HEAD": 1,
+        "GET": 31
+      },
+      "columns": {
+        "_streamcast_id": 76184978,
+        "litelink_offset": 7694924,
+        "session_id": 6059336,
+        "line_number": 5974506,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "litelink_offset": 13,
+        "session_id": 13,
+        "line_number": 13
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 5.6261201830348,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 32,
+      "bytes": 96243839,
+      "aborted": 0,
+      "bytes_declared": 96243839,
+      "methods": {
+        "HEAD": 1,
+        "GET": 31
+      },
+      "columns": {
+        "_streamcast_id": 76184978,
+        "litelink_offset": 7993199,
+        "session_id": 6059336,
+        "line_number": 5974506,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 14,
+        "litelink_offset": 13,
+        "session_id": 13,
+        "line_number": 13
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | hash beside natural | keyed | duckdb",
+      "question": "b. dedupe on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 5.477815815014765,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 31,
+      "bytes": 89909532,
+      "aborted": 0,
+      "bytes_declared": 89909532,
+      "methods": {
+        "HEAD": 1,
+        "GET": 30
+      },
+      "columns": {
+        "_streamcast_id": 70465534,
+        "litelink_offset": 7378336,
+        "session_id": 6059336,
+        "line_number": 5974506,
+        "(footer/other)": 20844,
+        "(metadata)": 10976
+      },
+      "row_groups_read": {
+        "_streamcast_id": 13,
+        "litelink_offset": 12,
+        "session_id": 13,
+        "line_number": 13
+      }
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 3.5048589389771223,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 3.9897121619433165,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 3.592687768046744,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 26,
+      "bytes": 82177584,
+      "aborted": 0,
+      "bytes_declared": 82177584,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 4.1076791300438344,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 26,
+      "bytes": 81936284,
+      "aborted": 0,
+      "bytes_declared": 81936284,
+      "methods": {
+        "HEAD": 6,
+        "GET": 20
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "(footer/other)": 20844,
+        "(metadata)": 11018
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15
+      },
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 2.7871689159655944,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 3.203835578984581,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "b. dedupe on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "b. dedupe on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 2.7943458900554106,
+      "result": [
+        {
+          "duplicated": 0
+        }
+      ],
+      "requests": 10,
+      "bytes": 11018,
+      "aborted": 0,
+      "bytes_declared": 11018,
+      "methods": {
+        "HEAD": 6,
+        "GET": 4
+      },
+      "columns": {
+        "(metadata)": 11018
+      },
+      "row_groups_read": {},
+      "files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 2.0161576280370355,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 57,
+      "bytes": 106193037,
+      "aborted": 0,
+      "bytes_declared": 106193037,
+      "methods": {
+        "HEAD": 2,
+        "GET": 55
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 2.1925852129934356,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 57,
+      "bytes": 106193037,
+      "aborted": 0,
+      "bytes_declared": 106193037,
+      "methods": {
+        "HEAD": 2,
+        "GET": 55
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.6959842670476064,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 57,
+      "bytes": 106193037,
+      "aborted": 0,
+      "bytes_declared": 106193037,
+      "methods": {
+        "HEAD": 2,
+        "GET": 55
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 2.0808584300102666,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 57,
+      "bytes": 106554034,
+      "aborted": 0,
+      "bytes_declared": 106554034,
+      "methods": {
+        "HEAD": 2,
+        "GET": 55
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "labels._streamcast_id": 8127615,
+        "line_number": 7117947,
+        "session_id": 7042962,
+        "labels.session_id": 779953,
+        "labels.line_number": 730383,
+        "litelink_offset": 614863,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21129,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "labels._streamcast_id": 1,
+        "labels.session_id": 1,
+        "labels.line_number": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1,
+        "_streamcast_id": 15,
+        "session_id": 15,
+        "line_number": 15,
+        "litelink_offset": 1
+      }
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 0.6188106110785156,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 0.7760118460282683,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | hash beside natural | keyed | duckdb",
+      "question": "c. join two streams on the key",
+      "name": "hash beside natural",
+      "stream": "keyed",
+      "how": "duckdb",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.0127027709968388,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 2,
+      "bytes": 0,
+      "aborted": 0,
+      "bytes_declared": 0,
+      "methods": {
+        "HEAD": 2
+      },
+      "columns": {
+        "(metadata)": 0
+      },
+      "row_groups_read": {}
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 2.7056692889891565,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 38,
+      "bytes": 90524025,
+      "aborted": 0,
+      "bytes_declared": 90524025,
+      "methods": {
+        "HEAD": 12,
+        "GET": 26
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21213,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1
+      },
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 2.599262135918252,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 38,
+      "bytes": 90524025,
+      "aborted": 0,
+      "bytes_declared": 90524025,
+      "methods": {
+        "HEAD": 12,
+        "GET": 26
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21213,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1
+      },
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "cold",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 2.3784519570181146,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 38,
+      "bytes": 90524025,
+      "aborted": 0,
+      "bytes_declared": 90524025,
+      "methods": {
+        "HEAD": 12,
+        "GET": 26
+      },
+      "columns": {
+        "_streamcast_id": 82145722,
+        "labels._streamcast_id": 8142330,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21213,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1
+      },
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "fill",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 2.6960872940253466,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 38,
+      "bytes": 90268010,
+      "aborted": 0,
+      "bytes_declared": 90268010,
+      "methods": {
+        "HEAD": 12,
+        "GET": 26
+      },
+      "columns": {
+        "_streamcast_id": 81904422,
+        "labels._streamcast_id": 8127615,
+        "labels.label": 190098,
+        "(footer/other)": 22513,
+        "(metadata)": 21213,
+        "labels.streamcast_ts": 2149
+      },
+      "row_groups_read": {
+        "_streamcast_id": 15,
+        "labels._streamcast_id": 1,
+        "labels.label": 1,
+        "labels.streamcast_ts": 1
+      },
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 0,
+      "sample_row": 396825,
+      "seconds": 1.6070744009921327,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 20,
+      "bytes": 21213,
+      "aborted": 0,
+      "bytes_declared": 21213,
+      "methods": {
+        "HEAD": 12,
+        "GET": 8
+      },
+      "columns": {
+        "(metadata)": 21213
+      },
+      "row_groups_read": {},
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 1,
+      "sample_row": 1746031,
+      "seconds": 1.513350956956856,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 20,
+      "bytes": 21213,
+      "aborted": 0,
+      "bytes_declared": 21213,
+      "methods": {
+        "HEAD": 12,
+        "GET": 8
+      },
+      "columns": {
+        "(metadata)": 21213
+      },
+      "row_groups_read": {},
+      "files_planned": 1,
+      "label_files_planned": 1
+    },
+    {
+      "arm": "c. join two streams on the key | manifest-pruned on natural, then hash only | keyed | pruned",
+      "question": "c. join two streams on the key",
+      "name": "manifest-pruned on natural, then hash only",
+      "stream": "keyed",
+      "how": "pruned",
+      "path": "proxy",
+      "phase": "warm",
+      "run": 2,
+      "sample_row": 3095237,
+      "seconds": 1.7780238379491493,
+      "result": [
+        {
+          "matched": 500000,
+          "labels": "1749089"
+        }
+      ],
+      "requests": 20,
+      "bytes": 21213,
+      "aborted": 0,
+      "bytes_declared": 21213,
+      "methods": {
+        "HEAD": 12,
+        "GET": 8
+      },
+      "columns": {
+        "(metadata)": 21213
+      },
+      "row_groups_read": {},
+      "files_planned": 1,
+      "label_files_planned": 1
+    }
+  ],
+  "answers_equal": true
+}

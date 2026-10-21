@@ -7,7 +7,7 @@ just bench-replay                # replay, and which layer it is spent in
 just bench-replay --rows 200000
 just bench-snapshot              # reading a stream's history: 100k rows in 1, 4, 16 logs
 just bench-snapshot --rows 1000000 --logs 1 8
-just bench-identity build --rows 20000000   # then `measure`, then `clean`
+just bench-identity build --rows 1000000    # rerun to finish four cached tables
 ```
 
 Three numbers, because three different things could be the bottleneck and only one
@@ -52,11 +52,13 @@ it to be discovered.
 ## `bench-identity`: what `_streamcast_id` costs, in object-store bytes
 
 Measured on 20 million rows in [`results/identity/`](results/identity/README.md).
+Fresh bounded 1M/5M measurements, cache conditions and limitations are in
+[`results/identity-bounded/`](results/identity-bounded/README.md).
 
 ```
 just rustfs
-just bench-identity build --rows 20000000 --out bench-identity    # ~10 min, ~2.3 GB in the store
-just bench-identity measure --out bench-identity                  # every arm, cold and warm
+just bench-identity build --rows 1000000 --out bench-identity     # run four times; one table per invocation
+just bench-identity measure --out bench-identity --core --repeat 3 --heavy-repeat 3
 just bench-identity measure --out bench-identity --only lookup --repeat 3
 just bench-identity clean --out bench-identity                    # delete the tables
 ```
@@ -79,6 +81,23 @@ the Parquet layout read back from the footers (files, row groups, compressed
 bytes and encodings per column) and the versions it ran on. The local logs
 are deleted once published; readers use only S3.
 
+Completed tables are checkpointed atomically after each build and verified against
+their remote Parquet layout before reuse. `--max-tables` defaults to one; repeat
+the same command until all four are present. Use separate `--out` directories for
+1M, 5M and 10M rows: a changed shape is refused rather than mixed with cached data.
+An interrupted table is retried under a new prefix. Its orphaned objects remain
+under the build's prefix until `clean`. Do not run two builders against one output
+directory. `--core` limits measurement to the SQL lookup, dedupe and join arms;
+each arm has a 180-second timeout (`--arm-timeout`) and `--resume` reuses completed
+arms. Keep the same measurement settings when resuming.
+
+For dedupe and join, "hash beside natural" means grouping or joining on both
+representations. The manifest alternative plans on the required natural columns'
+non-null bounds; these global operations have no selective natural predicate, so
+every file survives. This measures planning overhead and hash-only execution,
+without claiming file pruning where the workload offers none. The report checks
+agreement of the recorded answers across arms, ignoring the ingestion timestamp.
+
 `measure` runs every arm in `identity.py`'s `ARMS`: a question (a lookup by
 the full key, as `SELECT *` and as an existence count; 64 keys at once; a
 dedupe; a join of two streams) asked one way of one stream:
@@ -94,7 +113,9 @@ dedupe; a join of two streams) asked one way of one stream:
 Each arm runs `--repeat` times cold (a fresh connection or snapshot, DuckDB's
 caches off) and `--repeat` + 1 times warm (one cached connection; the first,
 `fill`, is kept apart), both through the proxy and straight to the store.
-Latency is read from the direct runs, bytes from the proxied ones. For every
+Both direct and proxy latency are reported; the latter includes the Python
+forwarding hop. `--proxy-only` omits the direct phases for a bounded traffic run.
+For every
 proxied run it records the requests, the bytes, and **those bytes by Parquet
 column and the number of row groups each was read from**, from mapping each
 ranged GET onto the column chunks in the file's footer: this is what says

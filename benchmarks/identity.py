@@ -1,7 +1,7 @@
 """What `_streamcast_id` costs and saves, measured in object-store bytes and requests.
 
     just rustfs
-    just bench-identity build --rows 20000000 --out bench-identity
+    just bench-identity build --rows 1000000 --out bench-identity  # repeat four times
     just bench-identity measure --out bench-identity
     just bench-identity clean --out bench-identity
 
@@ -44,6 +44,7 @@ forwarding proxy that records requests and bytes, and straight to the store,
 whose wall times are the latency figures (the proxy's are inflated by a
 Python hop). Arms that can be explained also get one `EXPLAIN ANALYZE`
 through the proxy, saved beside the results with the bytes it read.
+`--proxy-only` omits the direct phases and records proxy latency and traffic.
 
 "Cold" is DuckDB-cold, not disk-cold: the store serves from the page cache
 of a box that just wrote the files. The store is the `just rustfs` container
@@ -74,7 +75,7 @@ import litelink
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
-from pyiceberg.expressions import And, BooleanExpression, EqualTo, Or
+from pyiceberg.expressions import And, BooleanExpression, EqualTo, NotNull, Or
 from pyiceberg.table import StaticTable
 
 import streamcast
@@ -394,15 +395,47 @@ async def build(args: argparse.Namespace) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     options = rustfs()
-    prefix = f"s3://{args.bucket}/identity-bench/{uuid.uuid4().hex[:12]}"
     shape = Shape(args.rows, args.concurrent, args.mean_lines, args.batch, args.seed)
-    streams = {}
+    checkpoint = out / "build.json"
+    manifest: dict[str, Any]
+    if checkpoint.exists():
+        manifest = json.loads(checkpoint.read_text())
+        if manifest["shape"] != shape.__dict__:
+            raise ValueError("cached build has a different shape; use another --out")
+
+    else:
+        manifest = {
+            "prefix": f"s3://{args.bucket}/identity-bench/{uuid.uuid4().hex[:12]}",
+            "shape": shape.__dict__,
+            "streams": {},
+            "versions": versions(),
+        }
+
+    prefix = manifest["prefix"]
+    streams = manifest["streams"]
+    completed = 0
     for table in TABLES:
+        if table.name in streams:
+            # A stopped container can lose its data while the checkpoint survives.
+            actual = layout(data_files(streams[table.name]["table"], options), options)
+            if actual != streams[table.name]["layout"]:
+                raise ValueError(
+                    f"cached {table.name} layout changed; use another --out"
+                )
+
+            print(f"reusing {table.name}: {actual['rows']:,} rows", file=sys.stderr)
+            continue
+
+        if completed >= args.max_tables:
+            break
+
         print(
             f"building {table.name} from {shape.rows:,} rows under {prefix}",
             file=sys.stderr,
         )
-        built = await publish(table, shape, prefix, options, out)
+        built = await publish(
+            table, shape, f"{prefix}/{uuid.uuid4().hex[:12]}", options, out
+        )
         built["layout"] = layout(data_files(built["table"], options), options)
         print(
             f"  {built['ingest_seconds']:.1f} s to ingest {built['layout']['rows']:,} rows; "
@@ -411,15 +444,16 @@ async def build(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         streams[table.name] = built
+        # Commit one complete table at a time. An interrupted table has its own
+        # prefix and is never mistaken for a completed one on the next attempt.
+        pending = checkpoint.with_suffix(".pending")
+        pending.write_text(json.dumps(manifest, indent=2, default=list))
+        pending.replace(checkpoint)
+        completed += 1
 
-    manifest = {
-        "prefix": prefix,
-        "shape": shape.__dict__,
-        "streams": streams,
-        "versions": versions(),
-    }
-    (out / "build.json").write_text(json.dumps(manifest, indent=2, default=list))
-    print(f"wrote {out / 'build.json'}", file=sys.stderr)
+    print(
+        f"cached {len(streams)}/{len(TABLES)} tables in {checkpoint}", file=sys.stderr
+    )
 
 
 # -- the arms ------------------------------------------------------------------
@@ -454,6 +488,11 @@ def natural_filter(sample: dict[str, Any]) -> BooleanExpression:
 def any_of(sample: dict[str, Any]) -> BooleanExpression:
     terms = [natural_filter(s) for s in sample["batch"]]
     return Or(*terms) if len(terms) > 1 else terms[0]
+
+
+def all_keys(_: dict[str, Any]) -> BooleanExpression:
+    """Global dedupe/join have no selective predicate; required keys admit all files."""
+    return And(NotNull(term="session_id"), NotNull(term="line_number"))
 
 
 def values(sample: dict[str, Any], *, keys: bool) -> str:
@@ -677,6 +716,57 @@ ARMS: list[Arm] = [
             ("hash", "keyed", 't."_streamcast_id" = l."_streamcast_id"'),
         )
     ],
+]
+
+# The full-table operations also compare the proposed alternatives on the SAME
+# keyed files. Hash beside natural means both keys in GROUP BY / ON. With no
+# selective predicate, manifest selection legitimately returns every data file.
+ARMS += [
+    Arm(
+        DEDUPE,
+        "hash beside natural",
+        "keyed",
+        "duckdb",
+        constant(
+            "SELECT count(*) AS duplicated FROM (SELECT session_id, line_number, "
+            '"_streamcast_id" FROM {main} GROUP BY ALL HAVING count(*) > 1)'
+        ),
+    ),
+    Arm(
+        DEDUPE,
+        "manifest-pruned on natural, then hash only",
+        "keyed",
+        "pruned",
+        constant(
+            'SELECT count(*) AS duplicated FROM (SELECT "_streamcast_id" '
+            "FROM {files} GROUP BY ALL HAVING count(*) > 1)"
+        ),
+        prune=all_keys,
+    ),
+    Arm(
+        JOIN,
+        "hash beside natural",
+        "keyed",
+        "duckdb",
+        constant(
+            "SELECT count(*) AS matched, sum(l.label) AS labels "
+            "FROM {main} t JOIN {labels} l ON t.session_id = l.session_id "
+            'AND t.line_number = l.line_number AND t."_streamcast_id" = l."_streamcast_id"'
+        ),
+        labels="labels_keyed",
+    ),
+    Arm(
+        JOIN,
+        "manifest-pruned on natural, then hash only",
+        "keyed",
+        "pruned",
+        constant(
+            "SELECT count(*) AS matched, sum(l.label) AS labels "
+            'FROM {files} t JOIN {labels} l ON t."_streamcast_id" = l."_streamcast_id"'
+        ),
+        prune=all_keys,
+        labels="labels_keyed",
+    ),
 ]
 
 
@@ -911,6 +1001,13 @@ async def execute(
 
         listed = ", ".join(quoted(f) for f in files)
         sql = sql.replace("{files}", f"read_parquet([{listed}])")
+        if arm.labels is not None:
+            label_files = await asyncio.to_thread(
+                files_for, arm, streams[arm.labels], sample, context.options
+            )
+            notes["label_files_planned"] = len(label_files)
+            listed = ", ".join(quoted(f) for f in label_files)
+            sql = sql.replace("{labels}", f"read_parquet([{listed}])")
     else:
         sql = sql.replace("{main}", f"iceberg_scan({quoted(metadata[arm.stream])})")
         if arm.labels is not None:
@@ -940,6 +1037,9 @@ async def measure(args: argparse.Namespace) -> None:
     out = Path(args.out)
     manifest = json.loads((out / "build.json").read_text())
     streams = manifest["streams"]
+    if set(streams) != {t.name for t in TABLES}:
+        raise ValueError("build is incomplete; run build again to finish cached tables")
+
     direct = rustfs()
     explains = out / "explain"
     explains.mkdir(exist_ok=True)
@@ -986,7 +1086,12 @@ async def measure(args: argparse.Namespace) -> None:
         repeat = (
             args.repeat if arm.question not in (DEDUPE, JOIN) else args.heavy_repeat
         )
-        for path, options in (("proxy", through), ("direct", direct)):
+        paths = (
+            (("proxy", through),)
+            if args.proxy_only
+            else (("proxy", through), ("direct", direct))
+        )
+        for path, options in paths:
             runs = [("cold", i, False) for i in range(repeat)]
             runs += [("fill", 0, True)] + [("warm", i, True) for i in range(repeat)]
             warm: Context | None = None
@@ -1079,6 +1184,13 @@ def orchestrate(args: argparse.Namespace, progress: Path) -> None:
         json.loads(line)["arm"] for line in progress.read_text().splitlines() if line
     }
     arms = [a for a in ARMS if not args.only or any(o in a.id for o in args.only)]
+    if args.core:
+        arms = [
+            a
+            for a in arms
+            if a.question in (LOOKUP, EXISTS, DEDUPE, JOIN) and a.how != "streamcast"
+        ]
+
     for number, arm in enumerate(arms, 1):
         if arm.id in done:
             continue
@@ -1102,7 +1214,10 @@ def orchestrate(args: argparse.Namespace, progress: Path) -> None:
         if not args.explain:
             command.append("--no-explain")
 
-        subprocess.run(command, check=True)
+        if args.proxy_only:
+            command.append("--proxy-only")
+
+        subprocess.run(command, check=True, timeout=args.arm_timeout)
 
 
 def report(
@@ -1116,8 +1231,31 @@ def report(
         "repeat": args.repeat,
         "heavy_repeat": args.heavy_repeat,
         "memory_limit": args.memory_limit,
+        "core": args.core,
+        "proxy_only": args.proxy_only,
+        "cache_conditions": {
+            "cold": "fresh DuckDB connection; DuckDB caches disabled; store page cache retained",
+            "warm": "one connection per arm/path after a separate fill run; keys vary by repetition",
+            "excluded": "connection setup, metadata URI resolution, footer attribution setup",
+            "pruned": "natural-column manifest planning is included in every query",
+        },
         "records": records,
     }
+    answers: dict[tuple[Any, ...], object] = {}
+    for record in records:
+        answer = record["result"]
+        if isinstance(answer, list):
+            answer = [
+                {k: v for k, v in row.items() if k != "streamcast_ts"} for row in answer
+            ]
+
+        key = (record["question"], record["phase"], record["run"], record["sample_row"])
+        if key in answers and answers[key] != answer:
+            raise AssertionError(f"different answers for {key}: {record['arm']}")
+
+        answers[key] = answer
+
+    summary["answers_equal"] = True
     (out / f"measure-{stamp}.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
@@ -1212,15 +1350,17 @@ def render(manifest: dict[str, Any], records: list[dict[str, Any]]) -> str:
             "",
             f"## {question}",
             "",
-            "Latency in ms, straight to the store: median (min-max). Bytes and "
+            "Latency in ms: median (min-max), direct and through the proxy. "
+            "Proxy latency includes its forwarding hop; direct latency is absent "
+            "with --proxy-only. Bytes and "
             "requests through the counting proxy: MB is what reached DuckDB; "
             "aborted is how many requests it hung up on mid-body, and MB asked "
             "what all its requests asked for. Columns are the last cold run.",
             "",
             "| arm | stream | how | cold ms | warm ms | cold MB | cold requests | "
             "aborted (MB asked) | warm MB | cold bytes by column, MB (row groups) "
-            "| result |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
+            "| result | proxy cold ms | proxy warm ms | warm requests |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---:|",
         ]
         for arm in arms:
             mine = [r for r in records if r["arm"] == arm and r["question"] == question]
@@ -1253,7 +1393,10 @@ def render(manifest: dict[str, Any], records: list[dict[str, Any]]) -> str:
                 f"{spread([float(r['aborted']) for r in cold])} "
                 f"({spread([r['bytes_declared'] / 1e6 for r in cold], 2)}) | "
                 f"{spread([r['bytes'] / 1e6 for r in warm], 2)} | "
-                f"{by_column}{planned} | {json.dumps(first['result'])[:80]} |"
+                f"{by_column}{planned} | {json.dumps(first['result'])[:80]} | "
+                f"{spread([r['seconds'] * 1e3 for r in cold])} | "
+                f"{spread([r['seconds'] * 1e3 for r in warm])} | "
+                f"{spread([float(r['requests']) for r in warm])} |"
             )
 
     return "\n".join(lines) + "\n"
@@ -1304,8 +1447,14 @@ def clean(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    b = sub.add_parser("build", help="generate and publish the four streams")
-    b.add_argument("--rows", type=int, default=20_000_000)
+    b = sub.add_parser("build", help="generate and checkpoint missing streams")
+    b.add_argument("--rows", type=int, default=1_000_000)
+    b.add_argument(
+        "--max-tables",
+        type=int,
+        default=1,
+        help="build at most this many missing tables, checkpointing each; rerun to finish",
+    )
     b.add_argument(
         "--concurrent", type=int, default=1_000, help="sessions open at once"
     )
@@ -1326,11 +1475,25 @@ def main() -> None:
     )
     m.add_argument("--memory-limit", default="1.5GB", help="DuckDB's, per database")
     m.add_argument(
+        "--arm-timeout",
+        type=int,
+        default=180,
+        help="seconds per arm process; completed arms remain resumable",
+    )
+    m.add_argument(
         "--resume", action="store_true", help="skip arms already in records.jsonl"
     )
     m.add_argument("--arm", help=argparse.SUPPRESS)
     m.add_argument("--no-explain", dest="explain", action="store_false")
     m.add_argument("--only", nargs="*", help="run arms whose id contains one of these")
+    m.add_argument(
+        "--core", action="store_true", help="lookup, dedupe and join SQL arms only"
+    )
+    m.add_argument(
+        "--proxy-only",
+        action="store_true",
+        help="record proxy latency and traffic, omitting separate direct-store runs",
+    )
     c = sub.add_parser("clean", help="delete a build's tables from the store")
     c.add_argument("--out", default="bench-identity")
     args = parser.parse_args()
