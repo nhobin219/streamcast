@@ -89,8 +89,10 @@ except ImportError:
         "this benchmark needs numpy: uv run --with numpy python benchmarks/identity.py"
     )
 
-sys.path.insert(0, str(Path(__file__).parent))
-from s3proxy import CountingProxy, Seen  # noqa: E402  # ty: ignore[unresolved-import]
+# The repository root, so the proxy imports as `benchmarks.s3proxy` however this
+# script is started: by path, its own directory is what Python puts first.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from benchmarks.s3proxy import CountingProxy, Seen  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
