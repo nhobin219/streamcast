@@ -1,0 +1,87 @@
+# a. lookup by full key, exists (count) | manifest-pruned on natural, then hash only | keyed | pruned
+# requests 73, bytes 328,163,096, aborted 0 (asked for 328,163,096) {"files_planned": 3}
+# bytes by column (row groups read):
+#   _streamcast_id: 328,071,342 (58)
+#   (footer/other): 79,730 (-)
+#   (metadata): 12,024 (-)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) FROM read_parquet(['s3://streamcast-demo/identity-bench/5f93f3838fc5/keyed/keyed/data/ingested/1-4b3bc20c.parquet', 's3://streamcast-demo/identity-bench/5f93f3838fc5/keyed/keyed/data/ingested/8738151-37906248.parquet', 's3://streamcast-demo/identity-bench/5f93f3838fc5/keyed/keyed/data/ingested/17476301-2b247396.parquet']) WHERE "_streamcast_id" = '\xb0\x0c\x0a\x02\xcf\x62\x1f\x47\xee\xfc\xac\x05\xaa\x19\xbc\xd3'::BLOB
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││           in: 312.9 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 3             ││
+││              #GET: 61             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 4.11s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        READ_PARQUET       │
+│                           │
+│          Filters:         │
+│  _streamcast_id='\xB0\x0C │
+│ \x0A\x02\xCFb\x1FG\xEE\xFC│
+│ \xAC\x05\xAA\x19\xBC\xD3':│
+│           :BLOB           │
+│                           │
+│    Total Files Read: 3    │
+│                           │
+│        Filename(s):       │
+│    s3://streamcast-demo   │
+│      /identity-bench      │
+│ /5f93f3838fc5/keyed/keyed │
+│ /data/ingested/1-4b3bc20c │
+│ .parquet, s3://streamcast │
+│    -demo/identity-bench   │
+│ /5f93f3838fc5/keyed/keyed │
+│   /data/ingested/8738151  │
+│  -37906248.parquet, s3:/  │
+│ /streamcast-demo/identity │
+│ -bench/5f93f3838fc5/keyed │
+│    /keyed/data/ingested   │
+│ /17476301-2b247396.parquet│
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           8.18s           │
+└───────────────────────────┘
+

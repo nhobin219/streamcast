@@ -1,0 +1,131 @@
+# b. dedupe on the key | natural columns | natural | duckdb
+# requests 59, bytes 61,977,239, aborted 0 (asked for 61,977,239) {}
+# bytes by column (row groups read):
+#   line_number: 33,370,675 (53)
+#   session_id: 28,071,344 (53)
+#   text: 456,812 (2)
+#   (footer/other): 65,114 (-)
+#   (metadata): 10,932 (-)
+#   streamcast_ts: 2,362 (2)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) AS duplicated FROM (SELECT session_id, line_number FROM iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/natural/natural/metadata/00002-f060738f-ae5f-4f62-a2fa-2212f488783e.metadata.json') GROUP BY ALL HAVING count(*) > 1)
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││            in: 59.1 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││              #GET: 58             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 18.10s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             42            │
+│                           │
+│                           │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│     (count_star() > 1)    │
+│                           │
+│                           │
+│                           │
+│           0 rows          │
+│           0.11s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│          Groups:          │
+│             #0            │
+│             #1            │
+│                           │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           32.73s          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│         session_id        │
+│        line_number        │
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           0.01s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        ICEBERG_SCAN       │
+│                           │
+│        Projections:       │
+│         session_id        │
+│        line_number        │
+│                           │
+│    Total Files Read: 2    │
+│                           │
+│        Filename(s):       │
+│    s3://streamcast-demo   │
+│      /identity-bench      │
+│   /5f93f3838fc5/natural   │
+│  /natural/data/ingested/1 │
+│  -b796de49.parquet, s3:/  │
+│ /streamcast-demo/identity │
+│    -bench/5f93f3838fc5    │
+│   /natural/natural/data   │
+│     /ingested/12201633    │
+│     -f76f0224.parquet     │
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           2.99s           │
+└───────────────────────────┘
+

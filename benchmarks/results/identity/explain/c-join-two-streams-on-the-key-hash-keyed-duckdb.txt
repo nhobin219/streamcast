@@ -1,0 +1,121 @@
+# c. join two streams on the key | hash | keyed | duckdb
+# requests 73, bytes 361,392,867, aborted 0 (asked for 361,392,867) {}
+# bytes by column (row groups read):
+#   _streamcast_id: 328,071,342 (58)
+#   labels._streamcast_id: 32,447,300 (3)
+#   labels.label: 760,483 (3)
+#   (footer/other): 82,888 (-)
+#   (metadata): 22,090 (-)
+#   labels.streamcast_ts: 8,764 (3)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) AS matched, sum(l.label) AS labels FROM iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/keyed/keyed/metadata/00002-fe3d930c-86d2-411f-9098-e6753d936f00.metadata.json') t JOIN iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/labels_keyed/labels_keyed/metadata/00002-95b82362-1302-4529-973e-8802485b0fcf.metadata.json') l ON t."_streamcast_id" = l."_streamcast_id"
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││           in: 344.6 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 2             ││
+││              #GET: 71             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 6.91s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│          sum(#0)          │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.01s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│           label           │
+│                           │
+│                           │
+│                           │
+│       2,000,000 rows      │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: INNER     │
+│                           │
+│        Conditions:        │
+│      _streamcast_id =     │
+│       _streamcast_id      ├──────────────┐
+│                           │              │
+│                           │              │
+│                           │              │
+│       2,000,000 rows      │              │
+│           7.11s           │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         TABLE_SCAN        │
+│    ────────────────────   ││    ────────────────────   │
+│         Function:         ││         Function:         │
+│        ICEBERG_SCAN       ││        ICEBERG_SCAN       │
+│                           ││                           │
+│        Projections:       ││        Projections:       │
+│       _streamcast_id      ││       _streamcast_id      │
+│                           ││           label           │
+│      Dynamic Filters:     ││                           │
+│ optional: _streamcast_id>=││    Total Files Read: 1    │
+│ '\x00\x00\x05+8n\xAA0\xE4 ││                           │
+│  \x04k\xC4U\xC0\x9B\xC3': ││        Filename(s):       │
+│    :BLOB AND optional:    ││    s3://streamcast-demo   │
+│  _streamcast_id<='\xFF\xFF││      /identity-bench      │
+│  \xD0\xF6l@\xAF\x83^K\x88 ││ /5f93f3838fc5/labels_keyed│
+│   \x87=\xD7B\x22'::BLOB   ││     /labels_keyed/data    │
+│                           ││    /ingested/1-1979ba07   │
+│    Total Files Read: 3    ││          .parquet         │
+│                           ││                           │
+│        Filename(s):       ││                           │
+│    s3://streamcast-demo   ││                           │
+│      /identity-bench      ││                           │
+│ /5f93f3838fc5/keyed/keyed ││           0.64s           │
+│ /data/ingested/1-4b3bc20c ││                           │
+│ .parquet, s3://streamcast ││                           │
+│    -demo/identity-bench   ││                           │
+│ /5f93f3838fc5/keyed/keyed ││                           │
+│   /data/ingested/8738151  ││                           │
+│  -37906248.parquet, s3:/  ││                           │
+│ /streamcast-demo/identity ││                           │
+│ -bench/5f93f3838fc5/keyed ││                           │
+│    /keyed/data/ingested   ││                           │
+│ /17476301-2b247396.parquet││                           │
+│                           ││                           │
+│                           ││                           │
+│                           ││                           │
+│      19,999,990 rows      ││       2,000,000 rows      │
+│           5.32s           ││          (0.64s)          │
+└───────────────────────────┘└───────────────────────────┘
+

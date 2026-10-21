@@ -1,0 +1,91 @@
+# a. lookup by full key, SELECT * | filters= (natural terms) | natural | streamcast
+# requests 161, bytes 106,403,263, aborted 0 (asked for 106,403,263) {}
+# bytes by column (row groups read):
+#   line_number: 33,020,792 (52)
+#   litelink_offset: 29,778,075 (46)
+#   session_id: 27,552,019 (52)
+#   text: 14,326,429 (3)
+#   ts: 954,925 (1)
+#   tokens: 582,692 (1)
+#   kind: 97,371 (1)
+#   (footer/other): 65,114 (-)
+#   (metadata): 21,864 (-)
+#   streamcast_ts: 3,982 (3)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT * FROM log WHERE session_id = '2ecb8e1b-faaf-47b0-bc09-57dcdd87c065' AND line_number = 813
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││           in: 101.4 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││             #GET: 156             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 4.49s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        ICEBERG_SCAN       │
+│                           │
+│        Projections:       │
+│      litelink_offset      │
+│         session_id        │
+│        line_number        │
+│             ts            │
+│            kind           │
+│           tokens          │
+│            text           │
+│       streamcast_ts       │
+│                           │
+│          Filters:         │
+│   litelink_offset>=1 AND  │
+│  litelink_offset<20000001 │
+│ session_id='2ecb8e1b-faaf │
+│  -47b0-bc09-57dcdd87c065' │
+│      line_number=813      │
+│                           │
+│    Total Files Read: 2    │
+│                           │
+│        Filename(s):       │
+│    s3://streamcast-demo   │
+│      /identity-bench      │
+│   /5f93f3838fc5/natural   │
+│  /natural/data/ingested/1 │
+│  -b796de49.parquet, s3:/  │
+│ /streamcast-demo/identity │
+│    -bench/5f93f3838fc5    │
+│   /natural/natural/data   │
+│     /ingested/12201633    │
+│     -f76f0224.parquet     │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           8.40s           │
+└───────────────────────────┘
+

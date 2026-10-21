@@ -1,0 +1,127 @@
+# b. dedupe on the key | hash | keyed | duckdb
+# requests 65, bytes 328,163,054, aborted 0 (asked for 328,163,054) {}
+# bytes by column (row groups read):
+#   _streamcast_id: 328,071,342 (58)
+#   (footer/other): 79,730 (-)
+#   (metadata): 11,982 (-)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) AS duplicated FROM (SELECT "_streamcast_id" FROM iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/keyed/keyed/metadata/00002-fe3d930c-86d2-411f-9098-e6753d936f00.metadata.json') GROUP BY ALL HAVING count(*) > 1)
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││           in: 312.9 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││              #GET: 64             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 14.99s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             42            │
+│                           │
+│                           │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│     (count_star() > 1)    │
+│                           │
+│                           │
+│                           │
+│           0 rows          │
+│           0.02s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           22.29s          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│       _streamcast_id      │
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           0.08s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        ICEBERG_SCAN       │
+│                           │
+│        Projections:       │
+│       _streamcast_id      │
+│                           │
+│    Total Files Read: 3    │
+│                           │
+│        Filename(s):       │
+│    s3://streamcast-demo   │
+│      /identity-bench      │
+│ /5f93f3838fc5/keyed/keyed │
+│ /data/ingested/1-4b3bc20c │
+│ .parquet, s3://streamcast │
+│    -demo/identity-bench   │
+│ /5f93f3838fc5/keyed/keyed │
+│   /data/ingested/8738151  │
+│  -37906248.parquet, s3:/  │
+│ /streamcast-demo/identity │
+│ -bench/5f93f3838fc5/keyed │
+│    /keyed/data/ingested   │
+│ /17476301-2b247396.parquet│
+│                           │
+│                           │
+│                           │
+│      20,000,000 rows      │
+│           6.77s           │
+└───────────────────────────┘
+

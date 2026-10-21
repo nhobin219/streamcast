@@ -1,0 +1,125 @@
+# c. join two streams on the key | natural columns | natural | duckdb
+# requests 119, bytes 69,356,455, aborted 0 (asked for 69,356,455) {}
+# bytes by column (row groups read):
+#   line_number: 33,370,675 (53)
+#   session_id: 28,071,344 (53)
+#   labels.line_number: 3,335,635 (2)
+#   labels.session_id: 3,257,294 (2)
+#   labels.label: 770,968 (2)
+#   text: 456,812 (2)
+#   (footer/other): 67,038 (-)
+#   (metadata): 20,467 (-)
+#   labels.streamcast_ts: 3,860 (1)
+#   streamcast_ts: 2,362 (2)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) AS matched, sum(l.label) AS labels FROM iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/natural/natural/metadata/00002-f060738f-ae5f-4f62-a2fa-2212f488783e.metadata.json') t JOIN iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/labels_natural/labels_natural/metadata/00002-f4f2b686-2881-43e8-babf-19609440b707.metadata.json') l ON t.session_id = l.session_id AND t.line_number = l.line_number
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││            in: 66.1 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 2             ││
+││             #GET: 117             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 4.80s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│          sum(#0)          │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.01s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│           label           │
+│                           │
+│                           │
+│                           │
+│       2,000,000 rows      │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: INNER     │
+│                           │
+│        Conditions:        │
+│  session_id = session_id  │
+│ line_number = line_number ├──────────────┐
+│                           │              │
+│                           │              │
+│                           │              │
+│       2,000,000 rows      │              │
+│           6.05s           │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         TABLE_SCAN        │
+│    ────────────────────   ││    ────────────────────   │
+│         Function:         ││         Function:         │
+│        ICEBERG_SCAN       ││        ICEBERG_SCAN       │
+│                           ││                           │
+│        Projections:       ││        Projections:       │
+│         session_id        ││         session_id        │
+│        line_number        ││        line_number        │
+│                           ││           label           │
+│      Dynamic Filters:     ││                           │
+│   optional: session_id>=  ││    Total Files Read: 1    │
+│  '000475ec-877c-479f-8b9d ││                           │
+│     -b1d0a618e467' AND    ││        Filename(s):       │
+│   optional: session_id<=  ││    s3://streamcast-demo   │
+│  'fffc8297-82e5-4f63-b1f6 ││      /identity-bench      │
+│       -2b5722e1eff8'      ││       /5f93f3838fc5       │
+│  optional: line_number>=0 ││      /labels_natural      │
+│  AND optional: line_number││    /labels_natural/data   │
+│          <=16044          ││    /ingested/1-290e805e   │
+│                           ││          .parquet         │
+│    Total Files Read: 2    ││                           │
+│                           ││                           │
+│        Filename(s):       ││                           │
+│    s3://streamcast-demo   ││                           │
+│      /identity-bench      ││           0.36s           │
+│   /5f93f3838fc5/natural   ││                           │
+│  /natural/data/ingested/1 ││                           │
+│  -b796de49.parquet, s3:/  ││                           │
+│ /streamcast-demo/identity ││                           │
+│    -bench/5f93f3838fc5    ││                           │
+│   /natural/natural/data   ││                           │
+│     /ingested/12201633    ││                           │
+│     -f76f0224.parquet     ││                           │
+│                           ││                           │
+│                           ││                           │
+│                           ││                           │
+│      20,000,000 rows      ││       2,000,000 rows      │
+│           2.38s           ││          (0.36s)          │
+└───────────────────────────┘└───────────────────────────┘
+

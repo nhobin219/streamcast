@@ -1,0 +1,86 @@
+# a. lookup by full key, exists (count) | natural predicate | natural | duckdb
+# requests 110, bytes 61,108,031, aborted 0 (asked for 61,108,031) {}
+# bytes by column (row groups read):
+#   line_number: 33,020,792 (52)
+#   session_id: 27,552,019 (52)
+#   text: 456,812 (2)
+#   (footer/other): 65,114 (-)
+#   (metadata): 10,932 (-)
+#   streamcast_ts: 2,362 (2)
+
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT count(*) FROM iceberg_scan('s3://streamcast-demo/identity-bench/5f93f3838fc5/natural/natural/metadata/00002-f060738f-ae5f-4f62-a2fa-2212f488783e.metadata.json') WHERE session_id = '2ecb8e1b-faaf-47b0-bc09-57dcdd87c065' AND line_number = 813
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││            in: 58.2 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││             #GET: 109             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 1.70s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│    ────────────────────   │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        ICEBERG_SCAN       │
+│                           │
+│          Filters:         │
+│ session_id='2ecb8e1b-faaf │
+│  -47b0-bc09-57dcdd87c065' │
+│      line_number=813      │
+│                           │
+│    Total Files Read: 2    │
+│                           │
+│        Filename(s):       │
+│    s3://streamcast-demo   │
+│      /identity-bench      │
+│   /5f93f3838fc5/natural   │
+│  /natural/data/ingested/1 │
+│  -b796de49.parquet, s3:/  │
+│ /streamcast-demo/identity │
+│    -bench/5f93f3838fc5    │
+│   /natural/natural/data   │
+│     /ingested/12201633    │
+│     -f76f0224.parquet     │
+│                           │
+│                           │
+│                           │
+│           1 row           │
+│           2.99s           │
+└───────────────────────────┘
+
