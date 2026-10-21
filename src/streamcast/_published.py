@@ -321,9 +321,10 @@ class Table:
     ) -> Table:
         """The table for log `name` under the `published` prefix, as it is now.
 
-        Blocking — a hint read, a schema read and the manifests' statistics, each a GET
-        or more against an `s3://` table — so a caller on an event loop runs it
-        in a thread.
+        Blocking: resolves the hint, reads the schema and Iceberg manifest
+        statistics, and scans data only if offset bounds are missing or
+        delete files are present. S3 reads use the supplied options, resolved
+        from the environment when omitted. Run it in a thread on an event loop.
 
         `shared` is a connection to read through rather than a new one, which
         is how a snapshot reads all of a stream's logs on one connection; it

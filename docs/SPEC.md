@@ -68,15 +68,15 @@ published tables when a consumer has fallen past what the server will replay.
 Reading a stream's whole history from another machine (`Stream.snapshot`) is
 in too, because catch-up is built on it.
 
-Out: acknowledgements, consumer groups, topic hierarchies and wildcard
-subscriptions, delivery guarantees beyond "a contiguous prefix",
-authentication, and transport security. Wildcards are out for a reason worth
-stating, since "broker" invites them: a subscriber resumes by offset and an
-offset belongs to one log, so a subscription spanning streams would need a
-cursor per stream rather than the single integer §3 rests on. The last two
-belong to whatever owns the socket — `websockets` under `serve`, the host
-application and its ASGI server under `streamcast.asgi` — and are passed
-through rather than reimplemented ([`SECURITY.md`](../SECURITY.md)).
+Out: broker-side consumer acknowledgements and consumer groups, topic hierarchies and
+wildcard subscriptions, authentication, and transport security. Publisher
+acknowledgements and the transactional outbox/inbox are described in §6b–6c. Wildcards
+are out for a reason worth stating, since "broker" invites them: a subscriber resumes by
+offset and an offset belongs to one log, so a subscription spanning streams would need a
+cursor per stream rather than the single integer §3 rests on. The last two belong to
+whatever owns the socket — `websockets` under `serve`, the host application and its ASGI
+server under `streamcast.asgi` — and are passed through rather than reimplemented
+([`SECURITY.md`](../SECURITY.md)).
 
 ---
 
@@ -377,8 +377,9 @@ between-state. Every offset from `frontier` up is already in this subscriber's
 queue, because it joined the set first.
 
 **The two sets partition the stream exactly.** Nothing is in both; nothing is in
-neither. That is what makes a resume exactly-once rather than best-effort, and
-it holds while a publisher is running, which is the only case that matters.
+neither. This prevents a gap or duplicate at the replay/live join while publishers
+are running. It does not make application processing across reconnects exactly-once;
+that needs the transaction in §6c.
 
 ```
        replayed from the log          live, from this subscriber's queue
@@ -478,14 +479,17 @@ one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
-The broker's three bounds are `serve`'s keywords, not the `Stream`'s: they
-are the serving process's settings, and change with a restart rather than
-with the stream. Each is one int for every stream or a map naming every
-stream served, checked in full before any stream is set.
+The broker's three bounds are `serve`'s keywords, not the `Stream`'s: they are the
+serving process's settings, and change with a restart rather than with the stream. Each
+is one int for every stream or a map naming every stream served, checked in full before
+any stream is set. `max_in_flight` is still a per-connection window: the mapping chooses
+it for connections to each stream, while `max_inbound` is shared across the stream's
+publishers.
 
 ### What bounds memory, at each end
 
-Neither end can be run out of memory by the other, or by a stall:
+These are queue and read budgets, not a process memory limit. Rows vary in width,
+connections add their own queues, and an oversized inbound batch is admitted alone:
 
 | where | what | bound | at the bound |
 |---|---|---|---|
@@ -495,7 +499,7 @@ Neither end can be run out of memory by the other, or by a stall:
 | both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB) | the connection stops being read |
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |
 | client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
-| client | a catch-up | one batch at a time | — |
+| client | a catch-up | `page_bytes` (64 MiB of Arrow) and optional `page_rows` per query | the next page is read after this one |
 | client | a `recv_many` batch, and the read it leaves waiting | `limit` rows, plus one during a catch-up | — |
 | client | a snapshot's rows from the broker | `max_tail`, 1,000,000 rows | the snapshot is refused |
 | client | a live view's unpublished rows | `max_tail`, 1,000,000 rows | the view stops; its next query raises |
@@ -602,9 +606,8 @@ those: every declared column is still a real column.
 
 The rest is decided, not incidental:
 
-* **One value per commit.** `send_many` is one transaction; its rows share a
-  stamp, because distinct values would claim an order in time the commit does
-  not have.
+* **One value per send.** Rows in a `send_many` share a stamp. Group commit may
+  combine several sends, each retaining the stamp assigned when it was queued.
 * **Wall clock**, because a stored time has to mean something on another
   machine. A clock step on the server shows in it; it is monotonic in offset
   only while the server's clock is.
@@ -620,10 +623,11 @@ The rest is decided, not incidental:
 
 ### The counter
 
-`Stream.end_offset` is read from the log **once**, at construction, and
-maintained by `send` thereafter — `append` returns the offset it assigned, so
-asking the log per message would be a round trip for a number the previous call
-already returned. It cannot drift, because litelink allows exactly one writer.
+`Stream.end_offset` is read from the log **once**, at construction, and maintained by
+`send` thereafter — `append` returns the offset it assigned, so asking the log per
+message would be a round trip for a number the previous call already returned. It stays
+consistent provided this broker is the log's only writer; litelink does not enforce that
+across hosts (§8b).
 
 A server restarted against an existing log continues its offsets. It must: a
 restart that reset them would hand the same integers to different data, and
@@ -1033,13 +1037,16 @@ scan cannot keep.
 
 ### Reading a stream's history: `Stream.snapshot`
 
-A stream is a sequence of logs, each publishing an ordinary Iceberg table, and
-its metadata file says which, in order, where each is published, and the
-offsets and `streamcast_ts` range each holds. `Stream.snapshot(metadata_uri)`
-reads that file and then the tables, on the reader's machine with the reader's
-credentials. The tables are read through DuckDB's `iceberg_scan`, each pinned
-to the snapshot its `version-hint.text` named when it was opened, and the logs
-are read as one table with `UNION ALL BY NAME`.
+A stream is a sequence of logs, each publishing an ordinary Iceberg table, and its
+metadata file says which, in order, where each is published, and the offsets and
+`streamcast_ts` range each holds. `Stream.snapshot(metadata_uri)` reads that file and
+then the tables, on the reader's machine with the reader's credentials. The tables are
+read through DuckDB's `iceberg_scan`, each pinned to the snapshot its
+`version-hint.text` named when it was opened, and the logs are read as one table with
+`UNION ALL BY NAME`. Opening a table reads offset bounds and row counts from its Iceberg
+manifests, without scanning data files. Missing offset statistics or delete files
+require a fallback scan. S3 reads in both paths use the caller's options, resolved from
+the environment when omitted.
 
 **A fixed point, named at most one way.** Nothing: everything published.
 `as_of_offset=N`: every row up to and including `N`, with the rows above the
@@ -1213,11 +1220,6 @@ The live runner is a *subscriber* of A and *embeds* B in its own process — a
 over the wire in this topology — each stage publishes into a `Stream` it
 holds. A stage that cannot hold one publishes remotely instead (§6b).
 
-The dashboard box runs a litelink capture with S3 publishing off, so it keeps a
-local window and drops what ages out. On restart it reads the maximum offset it
-persisted and hands that back on its subscription; B replays the difference.
-That is the whole recovery path, and it is the same two calls at every hop.
-
 **Offsets are per server.** A message that travels A → runner → B has one offset
 in A's log and a different one in B's. They are not translated and must not be
 compared: a consumer's cursor is only meaningful against the server that issued
@@ -1257,19 +1259,11 @@ next call works. Closing would make one bad row cost every good one behind it.
 
 ### A plain publisher is at-least-once under retry
 
-A row is durable when `send` returns. If the connection drops before the reply
-arrives, the publisher cannot tell whether the append happened — and with
-`submit`, which keeps up to `max_in_flight` rows unanswered on one connection,
-that is true of every row still in flight. Retrying may duplicate the row; not
-retrying may lose it.
-
-It is worse than the consumer-side ambiguity §8 documents, and worth saying
-so. A re-delivered message is handled by an idempotent consumer; a duplicated
-row is in the log for ever, every consumer sees it, and no cursor undoes it.
-
-A publisher that can tolerate a duplicate — most market data, where the same
-trade twice is caught downstream or does not matter — pays nothing and stays
-plain. One that cannot names itself.
+A row is durable when `send` returns. If the connection drops before the reply arrives,
+the publisher cannot tell whether the append happened — and with `submit`, which keeps
+up to `max_in_flight` frames unanswered on one connection, that is true of every row
+still in flight, including whole batches. Retrying may duplicate the row; not retrying
+may lose it.
 
 ### Exactly-once: the broker dedupes each publisher on its seq
 
@@ -1292,7 +1286,7 @@ against it:
 | frame | answer |
 |---|---|
 | `seq == last_seq + 1` | appended, and the mark moves with the rows |
-| every row `<= last_seq` | appended nothing; the original offsets, `"dup": k` |
+| every row `<= last_seq` | appended nothing; original offsets where still known, otherwise `null`; `"dup": k` |
 | a group straddling `last_seq` | the rows above it appended; the rest answered as duplicates |
 | `seq > last_seq + 1` | `{"error": "gap", "expected": e, "got": s}`, nothing appended, the connection open |
 
@@ -1336,7 +1330,7 @@ names one sequence.
 
 **Duplicates are answered from memory; the mark from the table.** The broker
 caches each publisher's mark (`max_publishers`, 4,096 per stream, least
-recently used out first) together with its last `dedupe_window` committed
+recently used out first) together with its last `DEDUPE_WINDOW` committed
 ranges (64), which is what answers a resent row below the mark with its
 original offset. The ranges are not stored. After a restart, or once an entry
 is evicted, a duplicate AT the mark is answered with `last_offset` and an
@@ -1373,11 +1367,10 @@ other greeting and reply is byte for byte what it was.
 | restore from a WAL replica, or failover to one | consistent with the rows it restored; the replication lag loses rows and marks together |
 | restore from the published table alone, or a revive | lost: the published table holds the log's rows and nothing else, and the greeting reports `last_seq = 0` |
 
-There is no recovery from the log itself, because the log carries no publisher
-columns. A publisher that sees `last_seq` below what it saw acknowledged knows
-rows were lost with the buffer. **The path to real HA is a log on Postgres
-(#165)**, where the mark would live in the same replicated database as the
-rows; this design asks nothing of the buffer's replication.
+There is no recovery from the log itself, because the log carries no publisher columns.
+A publisher that sees `last_seq` below what it saw acknowledged knows its
+acknowledgement history is no longer intact; rows may still be in the published table
+even when their marks are lost.
 
 ## 6c. Exactly-once end to end: the caller's database
 
@@ -1406,7 +1399,9 @@ async with (
 2. One caller transaction holds the caller's writes, the inbox row's delete, and the outbox rows with their seqs.
 3. The sender ships the outbox. The broker appends each `(publisher, seq)` once (§6b), and the sender deletes rows as they are acknowledged.
 
-Nothing needs a shared or two-phase transaction.
+Nothing needs a shared or two-phase transaction. This covers writes in the caller's
+transaction, not external side effects. Broker buffer loss still has the limits in §6b,
+and schema-rejected outbox rows are logged and dropped, as described below.
 
 ### `Store` and `Transaction`
 
@@ -1548,7 +1543,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 | the server dies | subscribers see a reset; on restart they resume from their cursors and the log fills the gap |
 | the log is full / the disk is full | `append` raises, `send` raises, **nothing is broadcast** — the failure is at the publisher, where it can be handled |
 | a replay outruns `max_backlog` | the subscriber is dropped right after catching up. Size the two together (§4) |
-| two publishers on one log | litelink refuses: one writer per log. A second server on the same directory fails to open |
+| two servers write one log | unsupported; litelink has no cross-host writer lock, so stop the old writer before restoring (§8b) |
 | the server is restored from a replica | offsets are fenced by litelink and jump; a consumer resuming into the fence gets `ahead` rather than silence |
 | a publisher writes to a retired stream | refused with 4410 (`StreamRetired`); its readers are unaffected |
 | a consumer was down past `max_replay` | refused with `too_old`; `catch_up=True` reads the gap from the published tables and then connects (§5) |
@@ -1651,11 +1646,6 @@ from its cursor again, which may be well below where it got to, because the
 cursor only advances as rows are handled. That is the safe direction and it
 costs a re-read; a consumer that cannot afford it should commit more often.
 
-**Registered intent.** One designated publisher and many read-only nodes,
-coordinated through the server, so that exactly one process pushes to S3 and
-the rest are local-only. The registration would have to propagate to the
-litelink tier to be worth anything, which is where the design stops.
-
 **Bytes, not messages, for `max_backlog`.** The queue is bounded in messages
 because that is what it holds; an operator thinks in memory. A byte bound needs
 the frame length per entry, which is one `len()` — the open question is whether
@@ -1670,25 +1660,12 @@ live single row in a 1-row batch is mostly framing overhead. The cost is the
 client unpacking batches transparently. Two encoders and two client paths is
 the price; nobody has needed it yet.
 
-**Large binary payloads.** A `binary` column suits identifiers, hashes and
-small values: it goes through litelink's SQLite buffer like any other value. A
-payload of a megabyte or more belongs in litelink's blob fields (its SPEC
-§15), which are not built. OTel's `bytes_value` is the first real use for them
-(#40).
-
 **A consumer cursor that is not last-writer-wins.** `cursor_uri` ships one
 integer to object storage on an interval so a consumer can resume on another
 box, and two consumers sharing a key overwrite each other. That is documented
 rather than solved: the fix is a compare-and-set, which S3 gained only
-recently and which litelink does not use either — and the failure it prevents
-is re-delivery, which is the safe direction. A consumer that needs more wants
-its cursor committed in the same transaction as its work, in its own database.
-
-**A batching consumer's cursor.** The automatic save advances as the consumer
-reads, which for a batch is ahead of what it has flushed — so such a consumer
-must drive `streamcast.Cursor` itself. A `connect(..., autosave=False)` that
-kept the load-at-connect and dropped the automatic write would close the gap;
-it is one keyword and has not been needed yet.
+recently — and the failure it prevents is re-delivery, which is the safe direction.
+A consumer that needs transactional processing can use `inbox` (§6c).
 
 **Compression per stream rather than per connection.** permessage-deflate keeps
 a compressor per connection, so a frame encoded once is compressed N times; the

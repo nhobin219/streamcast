@@ -2,9 +2,9 @@
 
 A publisher that opts in (`publish(uri, publisher=...)`) numbers its rows
 1, 2, 3, … with no holes, and the broker keeps, per publisher, the last seq it
-appended and the offset that row got. A row at or below that mark is already
-in the log, so it is answered with its original offset and appended nothing; the
-next seq is appended; anything above it is a gap and is refused. Gapless
+appended and the offset that row got. A row at or below that mark is not
+appended again; its reply carries the original offset if still known, or None.
+The next seq is appended; anything above it is a gap and is refused. Gapless
 because a hole can only mean lost rows or a sender bug, and papering over one
 would hide exactly what this exists to stop.
 
@@ -41,9 +41,7 @@ returns, so it is never a second truth.
 `buffer.db`. A broker restart keeps it; a restore from a WAL replica brings it
 back consistent with the rows it restored, minus the replication lag; a
 restore from the published table alone loses it, because the published
-table holds the log's rows and nothing else. Real HA is a log on Postgres
-(#165), where the mark would live in the same replicated database as the
-rows. `docs/SPEC.md` §6b.
+table holds the log's rows and nothing else. A revive also starts without marks. `docs/SPEC.md` §6b.
 """
 
 from __future__ import annotations

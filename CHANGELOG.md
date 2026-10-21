@@ -9,6 +9,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Documentation
+
+- Remove feed-parsing and publisher-column recovery recipes from the README.
+  Align delivery guarantees, transactional outbox/inbox lifecycle, published-table
+  opening, S3 options on reopen, and per-stream queue settings with the current API.
+
 ### Fixed
 
 - **A reopened stream reads its published table with its own `s3_options`**

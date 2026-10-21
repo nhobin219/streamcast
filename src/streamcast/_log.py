@@ -113,9 +113,8 @@ two subtract directly.
 to mean something to a reader on another machine, and a monotonic clock does
 not. It is monotonic in offset only while the server's clock is.
 
-**One value per commit, not per row.** `send_many` is one transaction and its
-rows become durable together; distinct values would claim an ordering in time
-the commit does not have.
+**One value per send.** A `send_many` shares one stamp across its rows.
+Group commit may combine several sends, each with its own queue-time stamp.
 
 Stamped only on a log that has the column. `Stream.new` creates every log with
 it, but a log from before it existed, or a handle a caller opened and passed in,
