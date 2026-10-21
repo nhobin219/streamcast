@@ -74,6 +74,15 @@ class Request:
     bytes_in: int
     """Request body bytes sent to the store."""
     seconds: float
+    declared: int = 0
+    """The response's Content-Length: what the request asked the store for."""
+    aborted: bool = False
+    """The client closed the connection before the body was all sent.
+
+    DuckDB does this: it can issue a ranged GET and drop the connection once
+    it no longer needs the rest. `bytes_out` is then what reached it, and
+    `declared` what it had asked for; the store sent at least the first,
+    and at most the second plus what the socket buffers held."""
 
 
 @dataclass
@@ -89,6 +98,16 @@ class Seen:
     @property
     def bytes_out(self) -> int:
         return sum(r.bytes_out for r in self.log)
+
+    @property
+    def aborted(self) -> int:
+        return sum(r.aborted for r in self.log)
+
+    @property
+    def bytes_declared(self) -> int:
+        """What the requests asked for, read in full or not. A HEAD's
+        Content-Length is the object's size, not a body it asked for."""
+        return sum(max(r.declared, r.bytes_out) for r in self.log if r.method != "HEAD")
 
     def methods(self) -> dict[str, int]:
         return dict(Counter(r.method for r in self.log))
@@ -108,6 +127,8 @@ class Seen:
         return {
             "requests": self.requests,
             "bytes": self.bytes_out,
+            "aborted": self.aborted,
+            "bytes_declared": self.bytes_declared,
             "methods": self.methods(),
         }
 
@@ -210,16 +231,27 @@ class CountingProxy:
                 self.send_header("Content-Length", str(size))
                 self.end_headers()
                 sent = 0
-                if self.command != "HEAD":
-                    if payload is not None:
+                aborted = False
+                try:
+                    if self.command == "HEAD":
+                        response.read()
+                    elif payload is not None:
                         self.wfile.write(payload)
                         sent = len(payload)
                     else:
                         while chunk := response.read(CHUNK):
                             self.wfile.write(chunk)
                             sent += len(chunk)
-                else:
-                    response.read()
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client hung up mid-body. Recorded, not raised: a
+                    # request the count dropped would undercount exactly the
+                    # reads a reader abandons. The upstream connection holds
+                    # the unread rest of the body, so it cannot be reused.
+                    aborted = True
+                    self.close_connection = True
+                    if self.upstream is not None:
+                        self.upstream.close()
+                        self.upstream = None
 
                 proxy._record(
                     Request(
@@ -230,6 +262,8 @@ class CountingProxy:
                         sent,
                         len(body or b""),
                         time.perf_counter() - started,
+                        size,
+                        aborted,
                     )
                 )
 
