@@ -1,0 +1,184 @@
+# streamcast
+
+A JSON WebSocket pubsub framework for structured data. Publishers write, subscribers
+read, and every message is optionally appended to a litelink log — an Iceberg table —
+before any subscriber sees it. Each message carries the offset it was written at, so a subscriber
+that stops can reconnect and ask for the rest.
+
+A server is a log-backed pub/sub broker: publishers and subscribers are both its clients,
+and it owns the log, assigns the offsets, and is its only writer. Routing is exact-match
+on the stream's name — no topic hierarchy, no wildcards — because a subscriber resumes by
+offset, and an offset belongs to one log.
+
+**The log is the analytical table**, which is the reason litelink is underneath rather
+than an append-only file: no export step and no second copy, so the Parquet a message was
+appended to is the Parquet an analytical engine reads.
+
+Read [`docs/SPEC.md`](docs/SPEC.md) before changing behaviour. It is short and it carries
+the reasoning — particularly §3 (the two atomicity invariants) and §4 (why a slow
+consumer is dropped rather than buffered).
+
+## Commands
+
+```bash
+just check              # lint + format-check + typecheck + tests. What CI runs.
+just test-fast          # skips the backpressure tier, for an inner loop
+just test tests/test_resume.py -k partition
+just bench              # fan-out and publish throughput
+just bench-replay       # replay cost, and which layer it is spent in
+just demo               # every runnable demo; `just demo NAME` runs its processes
+just demo trades        # a live public feed: producer, broker, consumer
+just rustfs             # an S3 endpoint, so the replication tier runs
+just check-all          # every gate with replication and Node REQUIRED, as CI runs it
+```
+
+The replication tier SKIPS without an endpoint, and a skip is not a pass — it is
+where litestream is actually run and where "never two instances on one database"
+is checked. `just rustfs` then `just check-all` is the honest local gate.
+
+The JavaScript client test (`tests/test_node.py`) skips without Node 22+ in the same
+way, and `check-all` requires it: put `node` on PATH or set `STREAMCAST_NODE`. It runs
+the SPEC's reader in the browser's `WebSocket` API, so it is what says a front end can
+read a stream.
+
+## The schema is the caller's, in JSON Schema
+
+The log is an ordinary litelink table with whatever shape the application gave
+it, and `send` takes a **row**. streamcast adds exactly one column of its own,
+`streamcast_ts` — the time the server took the row, stamped at append — on the
+terms litelink owns `litelink_offset`: sent beside the row as framing
+(`[offset, ts, msg]`) and never as a key in it, never in the greeting's
+`schema`, and listed in each log's `system_schema` in the metadata file
+instead. One owned scalar beside the application's columns is not owning
+the shape; see `docs/SPEC.md` §5 for where that line is.
+
+The schema is declared in **JSON Schema** and converted here (`_schema.py`),
+not in litelink: litelink speaks Arrow and is deliberately general about what
+it stores, while streamcast is specifically about JSON websockets, so the
+mapping sits on the side that knows about JSON. `format` carries the width
+JSON Schema will not (`int32` vs `int64`, `float` vs `double`), and anything
+litelink would refuse is refused here where the message can name JSON
+Schema's vocabulary.
+
+An earlier design owned a fixed `(recv_ts, kind, payload)` schema and stored
+each upstream frame whole. That threw away pruning, compression, a queryable
+published table and a cheap replay — everything the table was for — and
+litelink's own example says so in as many words: *"the reason to declare a schema rather than
+store the frame whole."* `docs/SPEC.md` §5 records why, because the mistake
+defended itself in a docstring and could be made again.
+
+## What this library must never do
+
+These are the failures the design exists to prevent. A change that makes one of them
+possible is wrong even if every test passes.
+
+1. **Deliver a message a subscriber cannot account for.** What a subscriber receives is a
+   contiguous prefix from where it subscribed, in increasing offset order. A drop ends it;
+   nothing punches a hole in the middle of it, because a hole is invisible — the offsets
+   on either side still increase. Ordering on one connection is TCP's guarantee and needs
+   no help; `recv`'s offset check is there for the catch-up join, where the rows come from
+   object storage rather than the socket, and as an assertion on I2's partition.
+2. **Let one consumer's speed affect another's.** `Stream.send` must never await a
+   consumer. The broadcast is a synchronous `put_nowait` per subscriber and nothing else.
+3. **Broadcast before the log has the message.** `append` then fan out, never the
+   reverse. A server that died between the two has published nothing it cannot replay.
+4. **Serve a replay that silently starts above where it was asked.** A resume that begins
+   at the wrong place is a hole at the join. Refuse with 4416 instead.
+5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8
+   before offset 7.
+6. **Let a log grow without a maintainer.** Nothing here calls `seal()` except
+   `_maintain`. A server started with `maintain=False` and no external maintainer buffers
+   every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
+   target, with zero Parquet files.
+7. **Hold a socket open while reading the published tables.** `catch_up` reads the gap
+   with NOTHING connected. Opening the connection first closes the window by construction and
+   makes the server queue for a subscriber that is not reading — `max_backlog` then drops
+   it, so the recovery fails on exactly the consumers that needed it. The loop closes the
+   window instead.
+8. **Run two litestream instances against one database.** It is the one thing litestream
+   forbids. The sidecar takes an `flock` beside the log — not beside `log.root`, which is
+   the shared parent — holds it for the server's life, and stands by rather than starting
+   a second. Both it and the maintainer's processes start through `_process.popen`, which sets
+   `PR_SET_PDEATHSIG` so a `SIGKILL` of the server cannot orphan either.
+9. **Save a consumer's cursor ahead of its work.** A cursor behind the work re-delivers,
+   which is safe; a cursor ahead of it skips messages for ever. `_cursor` advances only
+   when the loop asks for the next message, and never when the handler raised.
+10. **Let a replayed frame differ from the live one it repeats.** Both project through
+    the log's declared column order, so the bytes match. `_log.rows` checks each batch's
+    column order against what it projected for exactly this reason — and a catch-up reads
+    through the same function, so a published row is built the same way too.
+
+## The two invariants that fail silently
+
+`docs/SPEC.md` §3. Both compile fine when broken and produce a defect only under a race:
+
+- **`Stream._submit`, `_commit` and `_deliver` contain no `await`.** A durable row is
+  checked and queued for the stream's writer thread in one step, committed in queue order,
+  and handed back in commit order; `_deliver` advances the frontier and fans out in one
+  step against the event loop. The `max_inbound` check (`_room`) is followed directly by
+  `_submit`, with no `await` between, or two senders could take the same room.
+- **Joining the fan-out set and reading the frontier are adjacent statements.** That is
+  what makes the replay range and the live queue partition the stream exactly.
+
+`tests/test_invariants.py` reads the AST and asserts both. **If a change makes one fail,
+the change is probably wrong.** If it is genuinely right, the spec section changes with
+it in the same PR.
+
+## Working here
+
+- **Falsify every test.** Break the code, confirm the test fails, restore, confirm it
+  passes. Two real defects in this repo were found that way — a leaked handler task per
+  disconnect, and a replay that refused every `EARLIEST` once the buffer had sealed.
+- **Comments carry the reasoning, not the mechanics.** Why the obvious alternative was
+  rejected, with the measurement if there was one. Match the density of the file.
+- **`__init__` takes built collaborators and does no I/O.** litelink's rule, and
+  `tests/test_invariants.py` enforces it. Construction that opens a log, reads a cursor,
+  writes a config or probes PATH belongs in a factory — `Stream.new`, `Sidecar.new`,
+  `connect._resolve`. The one recorded exception is `Stream.__init__` reading
+  `end_offset()` off the log it was handed: a read on an injected collaborator rather
+  than the construction of one.
+- **A durable fact has one home.** The stream's name is on the `Stream` and routing reads
+  it; the offset counter is maintained by `send` and nothing re-reads it from the log;
+  refusal sentences live in `_errors._WHY` and both ends build from there.
+- **Conventional Commits**, closed scope list in `scripts/check_commit_msg.py`.
+- Blank line after every compound-statement block — `scripts/check_blank_lines.py --fix`.
+
+## Layout
+
+```
+src/streamcast/
+    _protocol.py    the wire: frames, greeting, refusal codec, subscribe URLs
+    _errors.py      the refusal vocabulary and the close codes that carry it
+    _stream.py      Stream — offsets, fan-out, the subscribe partition
+    _writer.py      the durable append on a writer thread per stream, and group commit
+    _dedupe.py      exactly-once publishers: each one's mark, committed with its rows
+    _store.py       Store, Transaction: the caller's database, SQLite and Postgres
+    _outbox.py      outbox: rows enqueued in the caller's tx, and the sender
+    _inbox.py       inbox: the receiver, its bounded window, and processing
+    _limits.py      the queue bounds' defaults, and serve's per-stream form of each
+    _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
+    _log.py         the litelink tier: columns, replay, earliest
+    _metadata.py    a migrated stream's logs, in order, and which one is current
+    _manifest.py    per-log statistics, and pruning whole logs on them — soundly
+    _published.py   one published table, read with DuckDB as another machine reads it
+    _snapshot.py    Stream.snapshot — a stream's history as of one point, anywhere
+    _live.py        Stream.live — a snapshot kept current with the broker's rows
+    _catchup.py     reading the gap from the published tables when the server will not
+    _cursor.py      where a consumer keeps the offset it finished with
+    _remote.py      shipping a consumer's cursor to S3, for recovery on another box
+    _publish.py     publish, Publication — the producer end, over a socket
+    _schema.py      JSON Schema <-> Arrow, the layer that keeps pyarrow out of sight
+    _codec.py       what JSON needs done to binary and map values, in and out
+    _maintain.py    the maintainer: five role subprocesses, and the supervisor of each
+    _replicate.py   the litestream sidecar: flock-guarded, never two on one db
+    _process.py     starting a child the kernel kills with the server
+    _stats.py       Stats — what a stream reports about itself, and /stats
+    _transport.py   Peer — the four methods a transport must offer
+    _server.py      serve — routing, close codes, maintainer lifetime
+    asgi.py         asgi — the same streams, mounted in an ASGI app
+    _client.py      connect, Subscription, and close code → exception
+```
+
+`_stream.py` is where the correctness lives and `_server.py`/`asgi.py`/`_client.py` are
+transport.
+That split is deliberate: every guarantee in the spec is testable without a socket.
