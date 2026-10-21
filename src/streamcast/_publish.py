@@ -28,14 +28,15 @@ prevents it any more than the local path does.
 the way a local `await send(...)` is. If the connection drops before the reply
 arrives, the publisher cannot tell whether the append happened: retrying may
 duplicate a row and not retrying may lose one. With `submit`, up to
-`max_in_flight` rows can be in that state at once. A plain publisher's
+`max_in_flight` frames can be in that state at once, each possibly a batch. A plain publisher's
 delivery is therefore AT LEAST ONCE under retry.
 
 **`publisher=` makes it exactly once**, on a stream served with
 `exactly_once=True`. The publisher names one ordered sequence and numbers its
 rows 1, 2, 3, … with no holes (`send(row, seq=n)`); the broker keeps the last
 seq it appended for that publisher, committed with the rows, and answers a
-resent row with its original offset instead of appending it again. The
+resent row without appending it again, returning its original offset if known
+or None otherwise. The
 greeting says where the broker has the publisher (`info.publisher.last_seq`),
 so after a reconnect the publisher drops what it holds at or below that and
 sends from the next. A seq past the next raises `SequenceGap`. Best effort
@@ -184,7 +185,7 @@ class Publication:
 
         **The lever for a single publisher.** A loop of `await send(row)` is
         one round trip per row. A loop of `await submit(row)` keeps up to
-        `max_in_flight` rows on the wire, the server commits what arrived
+        `max_in_flight` frames on the wire, the server commits what arrived
         while a commit was in flight together (`group_commit`), and the
         acknowledgements come back in the order the rows were sent.
         """
@@ -359,7 +360,7 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
     at least once by itself. A newer connection with the same id ends this
     one (`Superseded`).
 
-    `max_in_flight` (64) is how many sends `submit` keeps unacknowledged
+    `max_in_flight` (64) is how many frames `submit` keeps unacknowledged
     at once. A server that owes one connection fewer replies than that
     (`serve(max_in_flight=)`) stops reading it, and the rest wait at the
     socket.

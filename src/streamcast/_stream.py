@@ -21,7 +21,7 @@ performance note — it is the correctness argument:
   delivered, so it is durable in the log; every offset from it up is either
   already in the new subscriber's queue or not yet delivered, and will be.
   The two sets partition the stream exactly — no gap, no duplicate — and that
-  is what makes a resume exactly-once.
+  prevents a gap or duplicate at the replay/live join.
 
 If an `await` is ever added inside either, both properties are gone and
 nothing will fail loudly. `tests/test_invariants.py` is the guard: it
@@ -242,8 +242,8 @@ class Stream:
         and `restore` read both off its metadata. `floor` is the offset the
         current log starts at: below it the rows are in a retired log, which
         this server does not replay from. `retired` is the `(root, name)` of
-        each retired log still on this disk, which `serve`'s maintainer keeps
-        maintaining so their retention and eviction carry on.
+        each retired log still on this disk. Retired logs need no routine
+        maintenance; the publish role finishes retirement of legacy logs.
 
         `s3_options` is what `serve` uploads the stream's metadata file with, when the
         log publishes to S3. None resolves from the environment, as litelink
@@ -441,14 +441,10 @@ class Stream:
 
             stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
 
-        **This is where the I/O lives, and that is the whole point of it
-        being a separate call.** litelink says it plainly — *"the initialiser
-        takes already built collaborators and does no I/O, so a test can
-        substitute any of them"* — and puts its own assembly in
-        `litelink.new`. This is the same split under the same name.
-
-        Everything but `name` goes to litelink's `new`, with the stream's
-        name fed through, so a durable stream needs no import but this one.
+        `sort_by`, `config`, `published` and `s3_options` configure the log.
+        Options also reach litelink when reopening an existing log and are
+        retained for metadata uploads and child processes. They are not
+        persisted: pass them on every open or use the environment.
         `name` is both the stream's route and the log's name: one fact, one
         home, and a server cannot serve `/trades` off a log called something
         else.
@@ -461,37 +457,20 @@ class Stream:
         durable policy shared by every process that opens the log, and one
         caller's `set_config` would change another's read tier. Which tiers a
         handle reads is a property of that handle, so it is passed and not
-        stored — reopen with it to get it again.
-
-        **`replay_published=True` with `max_replay=None` makes the server a
-        complete gateway to the log.** Together they mean no subscribe is ever
-        refused for reaching too far back: the server reads whatever the
-        published table holds and streams it as ordinary JSON frames. A client in any
-        language replays the entire history over a plain WebSocket — no
-        litelink, no Iceberg reader, no object-storage credentials, no
-        dependency on this repo. `catch_up` exists because the default is the
-        opposite; this is the setting that makes it unnecessary.
-
-        It is not the default, and the reason is `max_backlog`. A replay is
-        served before the live queue, which fills behind it — so a subscriber
-        reading ten million rows out of S3 accumulates live messages for as
-        long as that takes, and is dropped the moment it catches up if it
-        passed `max_backlog` on the way. **Size the two together**: a server
-        meant to serve whole-history replays wants a backlog matched to the
-        longest replay it will serve, or a stream quiet enough that the
-        arithmetic does not bite. The other cost is thread-shaped — each
-        replay holds a worker from the `to_thread` pool for its whole scan,
-        and that pool is `min(32, cpu + 4)`.
+        stored — reopen with it to get it again. With `max_replay=None`,
+        the server can replay all retained rows of the current log; size
+        `serve(max_backlog=)` for live traffic arriving during the replay.
 
         **`exactly_once=True` lets a publisher that names itself have its
         rows deduped** (`publish(uri, publisher=...)`, `_dedupe`). Each such
         publisher numbers its rows 1, 2, 3, … with no holes; a row at or below
-        the last seq the broker appended is answered with its original offset
-        and not appended again, and a seq past the next is refused as a gap.
+        the last seq the broker appended is not appended again; its reply
+        carries the original offset if known, otherwise None. A seq past the
+        next is refused as a gap.
         The mark is committed with the rows, in the log's buffer, so it
         survives a restart. It does NOT survive losing the buffer: a restore
-        from the published table alone forgets every mark (best effort;
-        `docs/SPEC.md` §6b). Like `group_commit` it is passed at each open,
+        from the published table alone, or a revive, forgets every mark
+        (best effort; `docs/SPEC.md` §6b). Like `group_commit` it is passed at each open,
         not stored, and turning it off and on again leaves the marks valid:
         plain publishers never touch them.
         """
@@ -850,7 +829,7 @@ class Stream:
         lag loses both together. A restore from the published table alone,
         and a revive, start with none: a publisher's next row is judged
         against seq 0, and its sender is told so by the greeting's
-        `last_seq`. Real HA is a log on Postgres (#165). `exactly_once` is
+        `last_seq`. `exactly_once` is
         otherwise as `new` takes it.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
@@ -1718,8 +1697,8 @@ class Stream:
 
         The logs a MIGRATION sealed, not whether this stream is retired —
         that is `retirement`. Empty for a stream that has never migrated.
-        `serve` maintains these beside the current log, so their local
-        retention keeps running; it never writes to them.
+        `serve` excludes them from the maintainer: retirement has already
+        published, evicted and swept them.
         """
         return self._retired
 
@@ -2071,7 +2050,8 @@ class Stream:
             subscriber.offer(row, frame)
 
     async def aclose(self, reason: str = "server shutting down") -> None:
-        """Drop every subscriber with a 1001. Does not close the log.
+        """Drop every subscriber with a 1001, drain the writer, and close an
+        owned log. A borrowed handle stays open.
 
         Concurrently, because `close` waits for each peer's close handshake
         and doing that in series is `close_timeout` per dead connection.

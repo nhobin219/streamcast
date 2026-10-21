@@ -59,7 +59,9 @@ server's writer fed, so its rows group into one commit rather than one round
 trip each; few enough that a dropped connection leaves a short tail to check
 on reconnect (`docs/SPEC.md` §6b). The server's bound: how many replies it
 will owe one connection before it stops reading it — backpressure at the
-socket, not an error. One default, so a publisher on defaults is never held.
+socket, not an error. `serve` and `asgi` take one int or a map choosing the
+window for connections to each served stream; it is not a stream-wide total.
+The two ends share a default.
 """
 
 MAX_TAIL: Final = 1_000_000
@@ -177,10 +179,10 @@ DEDUPE_WINDOW: Final = 64
 """Committed ranges an exactly-once stream remembers per publisher, in memory.
 
 What answers a resent duplicate below the publisher's last seq with the
-offset it was first appended at (`_dedupe`). Equal to `MAX_IN_FLIGHT`: a
-connection that drops leaves at most that many frames committed and not yet
-acknowledged, so a resend of all of them finds every one. About 1.5 KiB per
-cached publisher. Not stored: after a restart a duplicate below the last seq
+offset it was first appended at (`_dedupe`). Matches the default
+`MAX_IN_FLIGHT`; a larger window or cache eviction can leave a duplicate
+without a remembered offset, but never causes it to be appended again.
+About 1.5 KiB per cached publisher. Not stored: after a restart a duplicate below the last seq
 is answered with `null`.
 """
 

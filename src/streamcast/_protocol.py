@@ -249,19 +249,15 @@ class Greeting:
 
     Also the exclusive upper bound of `replay`: everything below it comes from
     the log, everything from it up arrives live. That partition is what makes
-    a resume exactly-once, and publishing the number is what lets a subscriber
-    check it.
+    the replay/live join gap-free, and publishing the number lets a subscriber
+    check it. Processing across reconnects can still redeliver.
     """
 
     replay: tuple[int, int] | None
     """The `[start, end)` about to be replayed, or None for a live-only subscribe.
 
-    **With `where` set this is the offset WINDOW, not a count.** Unfiltered,
-    `end - start` is exactly how many messages arrive before the live queue
-    begins, and a loop reading a replay by count reads precisely that many.
-    Filtered, the server cannot know the count without scanning first, so the
-    window bounds what it will read and the number delivered is at most that.
-    A loop that must terminate on a count wants an unfiltered subscription.
+    This is an offset window, not a row count: restore fences leave gaps in
+    offset space, and `where` can exclude rows within the window.
     """
 
     metadata: str | None

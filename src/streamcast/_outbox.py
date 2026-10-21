@@ -39,7 +39,7 @@ transaction:
 No acknowledged seq is stored: rows are deleted only on acknowledgement, so
 the lowest pending seq already says it, and a second copy could disagree.
 
-**The sender**, carried over from a working consumer's:
+**The sender:**
 
 * it connects only when it has rows, so a quiet process holds no idle
   connection for the broker's keepalive to close;
@@ -58,6 +58,11 @@ the lowest pending seq already says it, and a second copy could disagree.
   `StreamRetired`, `StreamMismatch`, `AcknowledgedRowsLost`,
   `StoreBehindBroker`, or a `SequenceGap` the sender did not cause -- is
   raised from the next `send` and from the block's exit, and never retried.
+
+Closing stops the sender without draining it; pending rows stay for the next
+process. Only writes in the caller's transaction share its atomicity: external
+side effects need their own idempotency. Broker buffer loss has the limits above,
+and a schema rejection drops a row rather than guaranteeing its delivery.
 
 A row is JSON text in the outbox, as it is on the wire: a value JSON cannot
 carry (bytes, a map with non-string keys) is refused at `send`. Send a binary

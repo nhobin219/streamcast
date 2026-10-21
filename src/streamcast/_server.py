@@ -190,7 +190,8 @@ def _supervisors(
     A live-only stream has nothing to sweep, so a server of them spawns
     nothing rather than processes with no work to do.
 
-    **Five per server, not five per log.** A maintainer is a full interpreter
+    **Five per group, not five per log.** Streams with different `S3Options`
+    form separate groups. A maintainer is a full interpreter
     with litelink, pyarrow, pyiceberg and duckdb loaded — ~150-200 MB RSS
     each — so each role's process covers every log, and a new stream costs a
     row in five loops rather than five more interpreters. The roles are split
@@ -499,15 +500,15 @@ def serve(
     A `process_request` of your own still works with it: yours is called for
     every path but this one, whether it is sync or async.
 
-    **Three keywords bound every queue the server keeps**, so a slow
-    consumer, a slow disk or a fast publisher holds memory to a bound rather
-    than running the process out of it: `max_backlog`, the frames a
+    **Three keywords bound the subscriber, commit and reply queues:** `max_backlog`, the frames a
     subscriber may fall behind before it is dropped; `max_inbound`, the rows
     a stream may have queued for commit before a send waits; `max_in_flight`,
     the replies owed one publisher connection before it stops being read.
     Each is one int for every stream, or a map from stream name to int that
     must name exactly the streams served. They are this process's settings,
-    not the streams': a restart may change them. See `_limits`.
+    not the streams': a restart may change them. The in-flight bound is per
+    connection to that stream; inbound is shared across its publishers. These
+    count rows and frames, not bytes or total process memory. See `_limits`.
 
     A subscription is read-only and the server never calls `recv` on one. A
     client that sends anyway fills its own receive buffer, stops being able to

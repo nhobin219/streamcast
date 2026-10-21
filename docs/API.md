@@ -18,23 +18,6 @@ async with streamcast.serve(stream, "localhost", 8765):
     await stream.send({"event_ts": ..., "price": ...})
 ```
 
-The object model is **two classes and two functions**. `Stream` is the broadcast —
-offsets, subscribers, replay — and holds no socket. `serve` puts it behind a port;
-`connect` reads it from the other end. `Subscription` is what a consumer holds.
-
-```
-Stream            send · send_many · end_offset · subscribers · durable · aclose
-  │
-  ├─ serve(…)     ─► websockets.Server
-  └─ connect(…)   ─► Subscription      recv · recv_many · batches · __aiter__ · offset · info · close
-```
-
-`SCHEMA` and `EARLIEST` are exported because they appear in calls you write: the first
-is what a streamcast log is created with, the second is the offset that means
-"everything you still have". `LATEST` is the snapshot point that means "the broker's
-frontier". `Greeting`, `Close`, `Snapshot` and the exception types are exported because
-they appear in what you catch and inspect.
-
 ## The API is `websockets`, with three deviations
 
 `serve` and `connect` are `websockets`' own: same names, same shapes, every keyword passed
@@ -49,7 +32,7 @@ the row. `msg` is a `dict` over your declared columns **and nothing else** — t
 and the stamp are framing, not data, and never appear inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
-because publishing is `Stream.send` in the server's own process. Nothing inherits a
+because publishing uses `Stream.send` locally or `publish` remotely. Nothing inherits a
 method it has to refuse.
 
 **`compression` is `None` here and `"deflate"` there.** permessage-deflate is per
@@ -78,12 +61,13 @@ would let one compressed frame be shared across connections — the same frames 
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_replay=100_000, group_commit=True)
+                  max_replay=100_000, group_commit=True, exactly_once=False,
+                  max_publishers=4096)
 
 streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
-                      max_replay=100_000)
+                      max_replay=100_000, exactly_once=False)
 
 streamcast.Stream.migrate(name="", *, root, schema, ...)  # a new log, a new schema
 streamcast.Stream.restore(name="", *, root, published,    # on a box without the log
@@ -100,18 +84,13 @@ streamcast.Stream.ingest(name="", source, *, root, s3_options=None,  # Arrow, in
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**Two ways to give it a log, and they are separate calls.** `Stream.new(root=, schema=)`
-creates or opens one — `new` the first time, `open` every time after, which is the
-try/except every caller otherwise writes — and takes litelink's own `new()` keywords
-(`sort_by`, `config`, `published`, `s3_options`) with the stream's name fed through. The plain
-initialiser takes a handle you already opened.
-
-The split follows litelink, whose own handles say it outright: *"the initialiser takes
-already built collaborators and does no I/O, so a test can substitute any of them."*
-`Stream(...)` builds nothing and touches no disk; `Stream.new(...)` is where the I/O is.
-It also deletes two hand-written errors — `new` has no `log=` parameter and `root`/`schema`
-are required, so the bad combinations are refused by the signature rather than checked at
-runtime.
+**`Stream.new` creates or reopens a log**, passing `sort_by`, `config`, `published` and
+`s3_options` to litelink on creation. An existing log keeps its stored configuration
+and published location. The plain
+initialiser takes a handle you already opened and reads its frontier. `s3_options` is
+passed to litelink on creation and reopening, and retained for metadata uploads and child
+processes. Credentials are not persisted: pass the options again on each open, or use the
+environment.
 
 **`log` is what makes an offset a resume cursor**, and it is optional — a
 [tickerplant](https://code.kx.com/q/architecture/)'s log is optional too, and some kdb
@@ -155,15 +134,13 @@ a declared `schema=` rather than adopted, because a declaration that disagreed w
 disk would be silently ignored and every `send` validated against columns the caller never
 wrote down.
 
-`max_replay` bounds
-how far back a subscribe may ask; **`None` removes the bound**, so nothing is ever refused
-as `too_old`. With `replay_published=True` that makes the server a complete gateway to the
-log — any language can replay the whole stream over a plain WebSocket, with no litelink and
-no credentials of its own. The cost is that a long replay accumulates live messages behind
-it and `serve`'s `max_backlog` is what drops the subscriber, so size the two together. **Size them against each other**: a replay streams
-while live messages queue behind it. The defaults are exported as
-`streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a caller that wants to scale
-from them rather than restate them.
+`max_replay` bounds how many rows a subscribe may replay; **`None` removes the bound**,
+so nothing is ever refused as `too_old`. With `replay_published=True` that makes the
+server a complete gateway to the log — any language can replay the retained history over
+a plain WebSocket, with no litelink and no credentials of its own. A long replay
+accumulates live messages behind it; size `serve`'s `max_backlog` against that backlog.
+The defaults are exported as `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a
+caller that wants to scale from them rather than restate them.
 
 `group_commit` (on by default) lets the stream commit sends from several publishers in one
 transaction when they queue behind a commit in flight — more throughput under concurrent
@@ -228,7 +205,8 @@ this is the counter `send` already maintains.
 await stream.aclose(reason="server shutting down") -> None
 ```
 
-Drops every subscriber with a 1001, concurrently. **Does not close the log.**
+Drops every subscriber with a 1001, concurrently, drains the writer and closes a log the
+stream owns. A handle passed with `owns_log=False` stays open.
 
 ## `serve`
 
@@ -248,8 +226,8 @@ subscription, and that is a consequence rather than an omission: a subscriber re
 offset, an offset belongs to one log, so a subscription spanning streams would need a
 cursor per stream.
 
-`streams` is a `Stream` or an iterable of them. Returns exactly what `websockets.serve`
-returns, so all three forms work:
+`streams` is a `Stream` or an iterable of them. Returns a `Server` proxy over
+`websockets.Server`; use it as an async context manager or await it:
 
 ```python
 async with streamcast.serve(stream, "127.0.0.1", 8765):
@@ -263,8 +241,8 @@ Routing is by `Stream.name`. Two streams with one name raise `ValueError` at `se
 rather than resolving: whichever lost would be unreachable, and the subscriber that
 wanted it would get somebody else's messages — which looks like working software.
 
-**Three keywords bound every queue the server keeps**, so neither a slow consumer, a slow
-disk nor a fast publisher can run it out of memory. They are the serving process's
+**Three keywords bound the subscriber, commit and reply queues.** The bounds count frames
+or rows, rather than bytes; size them for the messages and connections served. They are the serving process's
 settings, not the streams', so a restart may change them:
 
 | keyword | bounds | at the bound |
@@ -279,16 +257,17 @@ does a bound below 1:
 
 ```python
 streamcast.serve([trades, quotes], host, port,
-                 max_inbound={"trades": 262_144, "quotes": 65_536}, max_backlog=16_384)
+                 max_inbound={"trades": 262_144, "quotes": 65_536},
+                 max_in_flight={"trades": 128, "quotes": 32}, max_backlog=16_384)
 ```
 
 `max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). Nothing at
 `max_inbound` is refused, and a batch larger than it is let in alone, when nothing else is
 queued.
 
-`host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for a
-server that should only serve its own box, which is the case this library is built for.
-TLS is `ssl=`; authentication is `process_request=`. See [`SECURITY.md`](../SECURITY.md).
+`host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for
+a server that should only serve its own machine. TLS is `ssl=`; authentication is
+`process_request=`. See [`SECURITY.md`](../SECURITY.md).
 
 ### Where a stream's files live
 
@@ -351,11 +330,10 @@ which open the greeting's `metadata`. A stream from before 0.18 has only those, 
 its first version is written. `Stream.snapshot` and `connect(metadata=)` take a
 `<stream>.metadata.json` URI too, and read it through the hint beside it.
 
-**A client reads a greeting at protocol 4 or 5, and a server sends 4**, so clients and
-servers upgrade one at a time: a 0.20.1 client works with a 0.19, 0.20.0 or 0.20.1 server,
-and a 0.20.1 server with a 0.19 or 0.20.1 client. A 0.20.0 client reads only 5 and refuses
-a 0.20.1 server, so upgrade clients first. `info.metadata` is always the best URI the server
-gave: the hint when it names one.
+Clients accept protocol 4 or 5; the server sends 4. `info.metadata` is the best URI
+in the greeting: the hint when one is present. The rolling-upgrade pairs exercised
+by CI are listed in [`tests/test_interop.py`](../tests/test_interop.py); the 0.20.1
+[CHANGELOG](../CHANGELOG.md) entry describes the upgrade order around 0.20.0.
 
 The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
@@ -581,8 +559,7 @@ Serves the same payload for every stream on the port `serve` already listens on,
 `/stats`, or at a path of your own: `stats="/_internal/streams"`. `served_at` is included so
 a caller can measure its own clock skew.
 
-**On by default, unlike `publish=`**, and the asymmetry is deliberate. `publish` grants
-writes that nothing else on the port grants. This discloses strictly *less* than the
+**On by default.** This discloses less than the
 socket beside it: a wrong-path connect is answered with `serves=` naming every stream,
 the greeting carries `end_offset`, and anyone who can reach the port can subscribe and
 read every row in full. Everything here but the subscriber count is derivable by
@@ -722,7 +699,7 @@ client, so one address in a config file serves both ends.
 
 **`submit` is the lever for one publisher.** A loop of `await producer.send(row)` waits a
 round trip per row: about 1,000 rows/s on localhost, less over any real network. A loop of
-`await producer.submit(row)` keeps up to `max_in_flight` rows on the wire; the server
+`await producer.submit(row)` keeps up to `max_in_flight` frames on the wire; the server
 queues each as it reads it, so rows that arrive while a commit is in flight share the next
 (`group_commit`) — measured 8,198 rows/s from one publisher, against 998 with `send`.
 `submit` returns once the frame is written, waiting first if the window is full, with a
@@ -737,10 +714,11 @@ async with streamcast.publish("ws://localhost:8765/trades") as producer:
     offsets = await asyncio.gather(*futures)   # whenever you need them
 ```
 
-**A plain publisher is at-least-once under retry.** A row is durable when `send` returns,
-but if the connection drops before the reply arrives the publisher cannot tell whether the
-append happened — and with `submit`, up to `max_in_flight` rows may be in that state at
-once. **`publisher=` makes it exactly once** — see below and [`SPEC.md`](SPEC.md) §6b.
+A frame may contain a batch. **A plain publisher is at-least-once under retry.** A row
+is durable when `send` returns, but if the connection drops before the reply arrives the
+publisher cannot tell whether the append happened — and with `submit`, up to
+`max_in_flight` frames may be in that state at once. **`publisher=` makes it exactly
+once** — see below and [`SPEC.md`](SPEC.md) §6b.
 
 ### Exactly-once: `publisher=`
 
@@ -773,8 +751,7 @@ landed) and send from the next.
 
 **Best effort across a lost buffer.** The marks survive a restart and `Stream.migrate`,
 and come back with a WAL-replica restore (minus the replication lag, rows and marks
-together). A restore from the published table alone, or a revive, starts with none. The
-path to real HA is a log on Postgres (#165). The broker caches `MAX_PUBLISHERS` (4,096)
+together). A restore from the published table alone, or a revive, starts with none. The broker caches `MAX_PUBLISHERS` (4,096)
 publishers per stream and `DEDUPE_WINDOW` (64) committed ranges for each; the table holds
 every mark.
 
@@ -796,6 +773,7 @@ await out.send_many(rows, *, tx) -> int         # the first seq
 await out.landed(seq) -> int | None             # the broker's offset
 await out.flush(timeout=None) -> None           # until nothing is pending
 await out.pending() -> int
+await out.close() -> None                       # pending rows stay; flush first to drain
 
 streamcast.inbox(uri, *, subscriber, store, offset=None,
                  inbox_max_bytes=INBOX_MAX_BYTES, inbox_max_rows=None,
@@ -811,7 +789,8 @@ sub.paused -> bool                              # held at the receive window's b
 **One transaction holds the work, its input and its output.** An inbox row's
 `tx` already holds the row's delete; an outbox `send` takes the same `tx`. A
 crash before COMMIT redelivers the input and enqueues nothing; after it, the
-output ships exactly once (the broker dedupes the publisher's seqs, §6b).
+accepted output is deduped by the broker ([SPEC §6b](SPEC.md#exactly-once-the-broker-dedupes-each-publisher-on-its-seq)),
+subject to its buffer-loss limit. External side effects are outside this transaction.
 
 | | |
 |---|---|
@@ -821,6 +800,11 @@ output ships exactly once (the broker dedupes the publisher's seqs, §6b).
 | **inbox resume** | from `last_received_offset + 1`; unprocessed rows first. A new subscriber starts at the latest offset or `offset=`; one with state refuses `offset=` |
 | **the receive window** | at `inbox_max_bytes` or `inbox_max_rows` the receiver stops and CLOSES its subscription; it reconnects below `inbox_resume_at` of each bound. An empty inbox always takes one row |
 | **one tx per store at a time** | a task asking for a second while it holds one gets `RuntimeError`, not a hang: `sub.commit()` first |
+
+The next `recv` commits the previous processing transaction. A clean inbox context exit
+also commits it; an exit by exception rolls it back. Closing an outbox stops its sender
+without draining it. Schema-rejected rows are logged and deleted; their seqs are removed
+from the pending sequence. `landed` returns an offset only while it is still known.
 
 Rows are JSON text in both tables, as on the wire: send a binary column in its
 text encoding. The file `Cursor` (`connect(cursor=)`) stays for a consumer
@@ -923,7 +907,7 @@ metadata records:
 
 ```python
 table = await streamcast.Stream.scan(
-    sub.info.metadata, as_of_offset=sub.info.end_offset
+    sub.info.metadata
 ).read_all()
 ```
 
@@ -974,10 +958,8 @@ yields dicts, so there is one implementation and nothing to diverge; pushing the
 into the scan's SQL would prune more but Python and SQL disagree about coercion and NULL,
 and that disagreement would surface as a resume delivering what the live stream did not.
 
-**`replay` in the greeting becomes an upper bound.** Unfiltered, `end - start` is exactly
-what arrives before live; filtered, the count is unknown until the scan runs, so the window
-bounds it. A loop that reads a replay by count therefore wants an unfiltered
-subscription.
+**`replay` in the greeting is an offset window, not a row count.** Filtering and
+restore fences both make `end - start` differ from the number of rows delivered.
 
 `Greeting.where` echoes the applied filter, so a subscriber can confirm the server
 understood the predicate rather than assume it.
@@ -1162,9 +1144,8 @@ goes through pyarrow, which litelink already brings, so this adds no dependency.
 
 **What it deliberately does not solve.** It is periodic, so recovering on another box
 re-delivers whatever happened in the last `upload_every`. Two consumers sharing one key is
-last-writer-wins and is not supported. Re-delivery is the safe direction, and a consumer
-needing exactly-once wants its cursor in the same transaction as its work — its own
-database, not this.
+last-writer-wins and is not supported. Use `inbox` to commit processing and receipt
+state in the caller's database.
 
 Logging is `logging.getLogger("streamcast.cursor")` at DEBUG. Failures to reach the bucket
 are logged and never raised: a disaster-recovery convenience must not become a dependency
@@ -1178,7 +1159,7 @@ failure this whole feature exists to prevent.
 POSIX and Windows both. SQLite was considered and is the wrong tool for one integer: the
 case it would genuinely earn is a cursor committed in the *same transaction* as the
 consumer's work, and that only works in the consumer's own database, which is not a file
-this library can own. `commit()` is the hand-back for that.
+this library can own. `inbox` provides that transaction; a file cursor cannot.
 
 An unreadable or empty file is treated as absent rather than as an error — a cursor is a
 recovery hint, and refusing to start because a save was torn turns a crash into an outage.
@@ -1194,6 +1175,12 @@ StreamcastError
 ├── Rejected           a published row the schema refuses; nothing committed
 ├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
 ├── IngestFailed       `Stream.ingest` stopped partway; `.rows_loaded` is where to resume
+├── Superseded         another connection claimed this publisher id
+├── SequenceGap        publisher seq is above the next expected seq
+├── ExactlyOnceUnavailable the stream or broker cannot dedupe publishers
+├── StreamMismatch     the store is bound to another stream id
+├── AcknowledgedRowsLost the broker mark is below the outbox's acknowledged position
+├── StoreBehindBroker  the broker mark is ahead of the store's next seq
 └── TooSlow            dropped for falling behind; `.offset` is where to resume
 ```
 
@@ -1217,8 +1204,8 @@ below that is reported lost, because `EARLIEST` asks for what is left.
 `.fields` carries whatever numbers survived the close frame — `offset`, `earliest`,
 `behind`, `max_replay`, `end_offset` — and `str(exc)` is a sentence built from them.
 
-`Close` is the code enum: `BAD_REQUEST` 4400, `NO_SUCH_STREAM` 4404, `RETIRED` 4410,
-`NOT_REPLAYABLE` 4416, `TOO_SLOW` 4429.
+`Close` is the code enum: `BAD_REQUEST` 4400, `NO_SUCH_STREAM` 4404, `SUPERSEDED` 4409,
+`RETIRED` 4410, `EXACTLY_ONCE_UNAVAILABLE` 4412, `NOT_REPLAYABLE` 4416, `TOO_SLOW` 4429.
 
 ## The schema is yours
 
@@ -1384,13 +1371,13 @@ async with streamcast.serve(stream, "localhost", 8765):
     ...
 ```
 
-The current log is retired: sealed for good, published in full, and refusing writers from
-then on. Then `trades-v2` is created with the new schema, starting at exactly the offset
-the old log ended at. A new version of the metadata in `root/trades/trades.metadata/` (and
-one beside the published tables, when they are on S3) records the sequence. A migration that dies partway finishes on the
-rerun.
-Offsets carry on as one dense sequence. `Stream.new` and `Stream.restore` open whichever
-log the metadata names as current.
+The current log is retired: sealed for good, published in full, and refusing writers
+from then on. Then `trades-v2` is created with the new schema, starting at exactly the
+offset the old log ended at. A new version of the metadata in
+`root/trades/trades.metadata/` (and one beside the published tables, when they are on
+S3) records the sequence. A migration that dies partway finishes on the rerun. Migration
+introduces no gap at the seam. `Stream.new` and `Stream.restore` open whichever log the
+metadata names as current.
 
 It is **idempotent**: a stream whose current log already has that schema and every
 system column streamcast defines today is opened rather than migrated again, so the call
@@ -1403,7 +1390,9 @@ release) moves onto a log that has it. `metadata.json` records each log's
 column's type, ever, including after it has been removed. Re-adding a name takes the type
 it had. A stream's logs are read together with `UNION ALL BY NAME`, where a changed type
 coerces silently (`int64` beside `string` becomes a string column) rather than failing.
-Widening is refused too.
+Widening is refused too. A rename removes one column and adds another; historical rows
+are not backfilled. The server replays only the current log. `catch_up=True` reads older
+logs through `Stream.snapshot` when a consumer resumes below the migration seam.
 
 ### Loading rows in bulk: `Stream.ingest`
 
@@ -1529,26 +1518,6 @@ retired stream.
 A retired stream's `metadata.json` is version 3, so a streamcast build from before
 retirement refuses it, rather than taking the retired log for a migration that died and
 quietly starting the next one. Reviving writes version 2 again.
-
-**There is no rename.** Changing `price` to `px` removes one column and adds another.
-Nothing is backfilled or merged, so a read across the seam returns both, each null in the
-logs that did not have it. Combining them (`coalesce(px, price)`) is up to your
-application.
-
-**The server replays only the current log.** A consumer that was caught up when the
-server stopped resumes at the seam with nothing lost. One further behind is refused
-`evicted`, with `earliest` at the seam, and `catch_up=True` bridges it: it reads through
-`Stream.snapshot`, which reads every log of the stream. `offset=EARLIEST` means the start
-of the current log.
-
-`sort_by` and `config` default to the current log's. `s3_options=` is what the metadata file is
-uploaded with, both here and at `serve`.
-
-Each migration also adds the retired log to the stream's manifest, a Parquet file beside
-each version of its metadata: per-column bounds
-and counts, read from the log's own Iceberg statistics without opening a data file. It is
-what lets a reader of the whole stream skip logs that can't match (#32). The metadata file
-points to it.
 
 ### Or bring your own litelink log
 
@@ -1753,10 +1722,13 @@ again. `connect` takes none of them: a catch-up reads the gap to its cursor once
 the same files twice, so it reads with litelink's defaults, as does a `live` view's
 catch-up at open or after a dropped connection.
 
-**A cached reader still sees every publish.** Each read resolves the table's current
-metadata with `litelink.current_metadata`, outside DuckDB's caches: through a disk-cached
+**A newly opened snapshot resolves the latest published commit.** An existing snapshot
+stays pinned. Opening resolves the table's current metadata with `litelink.current_metadata`, outside DuckDB's caches: through a disk-cached
 connection, `version-hint.text` would pin a reader to an old snapshot (litelink#141).
-Everything the hint names is written once, and caches safely.
+Everything the hint names is written once, and caches safely. At table open, offset
+bounds and row counts come from Iceberg manifest statistics without reading data files.
+If a file lacks offset bounds or has delete files, opening falls back to a data scan.
+Both paths use `s3_options`, resolved from the environment when omitted.
 
 **Where the metadata file is.** With an `s3://` published location, the copy beside the
 tables, which reads from anywhere. Without one, every log publishes under its own

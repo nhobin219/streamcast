@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 import streamcast
+import streamcast._limits
 from streamcast.asgi import asgi
 
 

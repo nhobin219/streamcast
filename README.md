@@ -139,7 +139,7 @@ Three deliberate exceptions:
   reconnect a resume rather than a restart, and a subscriber that has to ask for it
   separately will forget to. `ts` is when the server took the row.
 - **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
-  Publishing is `Stream.send`, in the server's own process.
+  Publishing uses `Stream.send` locally or `publish` remotely.
 - **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`.
   permessage-deflate is per connection while the encode is shared: `send` encodes a frame
   once and hands the same bytes to every subscriber, and deflate compresses those identical
@@ -223,7 +223,7 @@ async def main():
     stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                    sort_by=("event_ts",))
 
-    # Fan-out, sealing, compaction and WAL shipping: one call.
+    # Fan-out, sealing and compaction; replicate=True also starts WAL shipping.
     async with streamcast.serve(stream, "localhost", 8765):
         async with websockets.connect("wss://ws.bitstamp.net") as feed:
             await feed.send(SUBSCRIBE)
@@ -239,22 +239,18 @@ async def main():
 asyncio.run(main())
 ```
 
-`serve` starts everything the streams need: one maintainer covering every log it serves —
-a set of five subprocesses, one per storage role (seal, compact, publish, clean, clean
+`serve` starts everything the streams need: one maintainer covering every log it serves
+— a set of five subprocesses, one per storage role (seal, compact, publish, clean, clean
 published) — and, with `replicate=True`, one litestream for the logs with
-`wal_replication` on. The maintainer is opt-out (`maintain=False`); litestream is opt-in. Without a maintainer nothing ever seals — litelink
-is explicit that *"a maintainer is not optional"*.
+`wal_replication` on. The maintainer is opt-out (`maintain=False`); litestream is
+opt-in. Streams with different `S3Options` get separate child processes;
+`Maintain(dedicated=("trades",))` also gives a log its own maintainer. Without a
+maintainer nothing ever seals — litelink is explicit that *"a maintainer is not
+optional"*.
 
-**One of each per server, not per log.** A maintainer process is a full interpreter with
-litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured here — so the set of
-five is shared by every log rather than started again for each, and litestream adds
-40–170 MB per process on top.
-The marginal cost mattered more than the total: a stream taking a row a minute cost the
-same as the busiest one, which made "should this be its own stream" a resource question it
-should not be. `Maintain(dedicated=("trades",))` gives a named log a set of its own.
-
-`Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened yourself
-and does no I/O. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you want it.
+`Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened
+yourself and reads its frontier. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you
+want it.
 
 What it captures is a table, queried from its published tables:
 
@@ -281,104 +277,6 @@ stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
 That seals the current log, starts `trades-v2` at the next offset, and records both in a
 metadata file. Columns can be added and removed. A column's type can never change. It is safe
 to leave in your startup: a stream already of that shape is just opened.
-
-### Surviving a feed that changes
-
-`send` validates the row against the schema, so a feed that changes shape breaks capture —
-a missing field, an unexpected type or a new key all raise, and that message is lost:
-
-```
-ValueError: row leaves non-nullable columns NULL: ['price']
-ValueError: row names columns this log does not have: ['surprise']
-```
-
-If keeping every message matters more than strictness, declare the columns nullable, add
-one for the raw message, and parse best-effort:
-
-```python
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "event_ts": {"type": ["integer", "null"]},
-        "price": {"type": ["number", "null"]},
-        "raw": {"type": ["string", "null"]},
-    },
-    "required": ["event_ts", "price", "raw"],
-}
-
-def number(value):                      # whatever the feed sent, or nothing
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-def row(message: str) -> dict:
-    """Best effort: take what parses, keep the whole message either way."""
-    try:
-        data = json.loads(message)["data"]
-    except (ValueError, KeyError, TypeError):
-        data = {}
-
-    return {
-        "event_ts": number(data.get("microtimestamp")),
-        "price": number(data.get("price")),
-        "raw": message,
-    }
-
-await stream.send(row(message))
-```
-
-The row and its source land in **one append**, so a message is never captured without the
-bytes it came from, and whatever the parse missed can be backfilled from the log later.
-Run against a feed that drops a field, sends a non-trade event, and then sends invalid
-JSON, all four rows are captured with the typed columns null and `raw` intact.
-
-`required` still names every column, because in JSON Schema `required` is about the key
-being present and `["number", "null"]` is what makes the value nullable — see
-[`docs/API.md`](docs/API.md). Every column is nullable here precisely because best-effort
-extraction means any of them can be missing.
-
-Two costs, both real. A raw string column roughly doubles the log and compresses worse than
-typed columns, which is [`SPEC.md`](docs/SPEC.md) §5's argument running the other way — this
-is a deliberate trade, not a default. And subscribers receive the column too, since the wire
-carries every declared column.
-
-streamcast does not do the extraction for you. Feeds nest their payloads differently — the
-example above reaches through `["data"]` — so a general extractor needs per-field paths, at
-which point it is a feed-handler layer rather than a flag. It belongs in your feed handler,
-where it already knows the feed.
-
-### Handling multiple publishers
-
-Several publishers writing to one stream interleave in one log, so a row has to say who
-wrote it. Declare a publisher key and a per-publisher sequence alongside your own columns:
-
-```python
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "publisher": {"type": "string"},        # who wrote it
-        "seq": {"type": "integer"},             # monotonic, per publisher
-        "event_ts": {"type": "integer"},
-        "price": {"type": "number"},
-    },
-    "required": ["publisher", "seq", "event_ts", "price"],
-}
-```
-
-The server needs no configuration for this — it already serialises publishers, so offsets
-stay contiguous and a `send_many` stays one commit whoever else is writing. The columns are
-for the **publishers**, so each can find its own rows again after a restart. See
-[recovering a producer](#recovering-a-producer).
-
-**Declare them before anyone publishes.** A column added later means migrating the stream
-to a new log (`Stream.migrate`), and is nullable for ever — older logs read null — so a
-publisher that forgets to set it writes NULL silently, and a recovery scan cannot tell that
-apart from another publisher's row. Declared up front they are `required` and non-null, and a publisher that
-forgets fails loudly at `send`.
-
-A row that already carries a natural unique key needs none of this — match on that instead.
-And a single publisher needs no key at all: its own cursor is enough.
 
 ### Backpressure
 
@@ -482,10 +380,10 @@ stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
                                replay_published=True, max_replay=None)
 ```
 
-Every frame is still JSON over a plain WebSocket, so **a client in any language replays the
-entire stream from offset 1** — no litelink, no Iceberg reader, no object-storage
-credentials, nothing from this repo. `catch_up` exists because the default is the opposite;
-this is the setting that makes it unnecessary.
+Every frame is still JSON over a plain WebSocket, so **a client in any language replays
+the retained history from `offset=EARLIEST`** — no litelink, no Iceberg reader, no
+object-storage credentials, nothing from this repo. `catch_up` exists because the
+default is the opposite; this is the setting that makes it unnecessary.
 
 It is not the default because of `max_backlog`. A replay is served before the live queue,
 which fills behind it, so a subscriber reading ten million rows out of S3 accumulates live
@@ -523,12 +421,12 @@ is published beside it. After a restart the log still holds every row ever writt
 stream that stopped. Nothing sent four seconds in is ordinary; nothing sent six hours in
 is not.
 
-On by default, unlike `publish=`. That grants writes; this discloses strictly less than
-the socket beside it — a wrong-path connect is already answered with the names of every
-stream it serves, the greeting already carries `end_offset`, and anyone who can reach the
-port can subscribe and read every row in full. A server that needs this private needs the
-port private. `stats=False` turns it off, `stats="/_internal/streams"` moves it, and a
-`process_request` of your own still runs for every other path.
+On by default. It discloses less than the socket beside it — a wrong-path connect is
+already answered with the names of every stream it serves, the greeting already carries
+`end_offset`, and anyone who can reach the port can subscribe and read every row in
+full. A server that needs this private needs the port private. `stats=False` turns it
+off, `stats="/_internal/streams"` moves it, and a `process_request` of your own still
+runs for every other path.
 
 ### Mounting in an existing app
 
@@ -623,17 +521,18 @@ async with streamcast.publish(uri, publisher="enricher") as out:
     await out.send(row, seq=seq)            # rows 1, 2, 3, … with no holes
 ```
 
-The publisher id names one ordered sequence. The broker keeps the last seq it appended for
-it, committed in the same transaction as the rows, so a resent row is answered with its
-original offset instead of being appended twice, and a seq past the next raises
-`SequenceGap` with nothing appended. After a reconnect the greeting says where the broker
-has the publisher: drop what you hold at or below `last_seq` and send from the next. A
-stream not served exactly-once, and a server from before 0.23, refuse the publisher
-(`ExactlyOnceUnavailable`) rather than taking its rows at least once.
+The publisher id names one ordered sequence. The broker keeps the last seq it appended
+for it, committed in the same transaction as the rows, so a resent row is not appended
+twice. Its reply carries the original offset if still known, otherwise `None`; a seq
+past the next raises `SequenceGap` with nothing appended. After a reconnect the greeting
+says where the broker has the publisher: drop what you hold at or below `last_seq` and
+send from the next. A stream not served exactly-once, and a server from before 0.23,
+refuse the publisher (`ExactlyOnceUnavailable`) rather than taking its rows at least
+once.
 
 **Best effort across a lost buffer**: the marks live in the log's buffer, so they survive a
 restart and a migration, come back with a WAL-replica restore, and are lost by a restore
-from the published table alone. [`SPEC.md`](docs/SPEC.md) §6b has the whole of it.
+from the published table alone or a revive. [`SPEC.md`](docs/SPEC.md) §6b has the whole of it.
 
 #### Exactly-once end to end: an outbox and an inbox
 
@@ -652,10 +551,12 @@ async with (
         await out.send(transform(row), tx=tx)
 ```
 
-The inbox row's delete, the caller's writes and the outbox row commit
-together; a sender ships the outbox over an exactly-once publication, and a
-receiver keeps the inbox filled up to a bounded window (`inbox_max_bytes`),
-leaving the backlog in the log. [`SPEC.md`](docs/SPEC.md) §6c, and
+The inbox row's delete, the caller's writes and the outbox row commit together; a sender
+ships the outbox over an exactly-once publication, and a receiver keeps the inbox filled
+up to a bounded window (`inbox_max_bytes`), leaving the backlog in the log. Only work
+done in that transaction is atomic; external side effects need their own idempotency.
+The buffer-loss limit above still applies, and the sender logs and drops schema-rejected
+rows, renumbering the pending sequence. [`SPEC.md`](docs/SPEC.md) §6c, and
 [`examples/outbox_inbox/demo.py`](examples/outbox_inbox/demo.py) runs it end to end
 through two crashes.
 
@@ -695,10 +596,8 @@ shared frame. Measured on a four-column row: 162 ns for a one-term predicate aga
 that delivered something the live connection would not is the one failure worth preventing
 here, and `offset + 1` with the same `where=` picks up exactly where it left off.
 
-One consequence worth knowing: `replay` in the greeting stops being a count. Unfiltered,
-`end - start` is exactly how many messages arrive before live begins; filtered, it is the
-offset window and the number delivered is at most that. A loop that must terminate on a
-count wants an unfiltered subscription.
+`replay` in the greeting is an offset window: filtering and restore fences mean `end -
+start` need not equal the number of rows delivered.
 
 ### Resuming
 
@@ -741,7 +640,7 @@ starts at the log's first row. (An older server refuses it as `empty`.)
 
 A local cursor recovers a consumer that restarted. It does not recover one whose machine
 is gone — which is what `cursor_uri` is for, the mirror of
-[recovering a producer](#recovering-a-producer) at this end.
+[recovering a server](#recovering-a-server) at this end.
 
 ```python
 async with streamcast.connect(

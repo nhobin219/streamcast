@@ -376,9 +376,10 @@ class StreamMismatch(StreamcastError):
 class AcknowledgedRowsLost(StreamcastError):
     """The broker's mark for this publisher is below rows it acknowledged.
 
-    The rows the outbox deleted on those acknowledgements are gone from the
-    broker too: its buffer was lost, restored from a replica that lagged, or
-    rebuilt from the published table alone (`docs/SPEC.md` §6b, best effort).
+    The broker no longer remembers those acknowledgements: its buffer was
+    lost, restored from a replica that lagged, or rebuilt from the published
+    table alone (`docs/SPEC.md` §6b, best effort). Published rows may remain
+    even when their marks are gone.
     The sender stops rather than renumber over the hole.
     """
 

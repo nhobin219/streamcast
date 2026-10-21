@@ -51,6 +51,10 @@ kept as it inserts and as this object's transactions delete, and read again
 every `POLL_EVERY` while paused, since other processes' workers may be the
 ones deleting.
 
+A clean context exit commits the open processing transaction; an exit by
+exception rolls it back. Exactly-once processing covers writes in that
+transaction, not external side effects.
+
 The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
 consumer without a database.
 """
