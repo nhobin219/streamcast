@@ -725,11 +725,13 @@ Offsets are per server and are not translated between hops.
 
 ## What it is not
 
-- **Not a message queue.** No topics beyond a name, no consumer groups, and no consumer
-  acknowledgements — where a subscriber has got to is its own cursor, not state the server
-  keeps. A publisher does get an ack, the offset once the row is durable; nothing tracks
-  what a subscriber has consumed. A subscriber needing at-least-once with server-side acks
-  wants one.
+- **No broker-side consumer acknowledgements or consumer groups.** Streams route by name;
+  subscriber progress lives in the consumer's cursor or inbox database. Publishers get
+  an ack once the row is durable. A cursor supports at-least-once processing; the
+  [transactional inbox and outbox](#exactly-once-end-to-end-an-outbox-and-an-inbox), together
+  with publisher deduplication, support exactly-once processing for work committed in the
+  caller's database transaction. External side effects need their own idempotency, and
+  the buffer-loss and schema-rejection limits described there still apply.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
