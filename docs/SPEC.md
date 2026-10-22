@@ -878,6 +878,10 @@ until its first version is written.
   copy, manifest included, and refuse when that copy's live log is not the
   one they opened. A new id uploaded over the copy would turn away every
   reader that recorded the old one, and drop the copy's sealed logs with it.
+  An adopted retirement remains read-only, including through `migrate`:
+  only `restore(..., revive=True)` creates its writable successor. Before
+  adoption commits its local hint, a retry adopts again; after that commit,
+  startup reads the retirement locally. Neither path advances the frontier.
 - **Each log says where it is read from.** `published` is the prefix its
   table sits under, at `<published>/<name>` — every log publishes, to
   `file://<root>/<name>/published` when nothing else is configured. A reader

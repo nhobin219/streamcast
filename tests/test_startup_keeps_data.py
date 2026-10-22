@@ -235,6 +235,138 @@ class TestLostMetadataIsAdopted:
         assert _published(bucket, s3).stream_id
 
 
+class TestRecoveredRetirement:
+    async def test_migrate_refuses_writes_and_revive_keeps_resume_offsets(
+        self, tmp_path, bucket, s3, serve
+    ):
+        first = await _served(tmp_path, bucket, s3)
+        retirement = streamcast.Stream.retire("t", root=tmp_path, s3_options=s3)
+        before = _published(bucket, s3)
+        _lose_metadata(tmp_path)
+
+        recovered = streamcast.Stream.migrate(
+            "t", root=tmp_path, schema=SCHEMA, s3_options=s3
+        )
+        try:
+            # A recovery row at 21 followed by an explicit revive at the old
+            # retirement frontier would acknowledge two different rows at 21.
+            with pytest.raises(streamcast.StreamRetired):
+                await recovered.send({"i": 100})
+
+            assert recovered.retirement == retirement
+            assert recovered.end_offset == 21
+        finally:
+            await recovered.aclose()
+
+        home = _metadata.home(tmp_path, "t")
+        assert not (home / "t-v2").exists()
+        assert _published(bucket, s3) == before
+
+        revived = streamcast.Stream.restore(
+            "t", root=tmp_path, published=bucket, s3_options=s3, revive=True
+        )
+        try:
+            assert await revived.send({"i": 101}) == 21
+            assert await revived.send({"i": 102}) == 22
+            # A consumer that processed 21 and saved its next cursor at 22
+            # receives the next distinct row, rather than skipping a reused 21.
+            async with serve(revived, maintain=False, replicate=False) as uri:
+                async with streamcast.connect(uri, offset=22) as sub:
+                    offset, _ts, row = await sub.recv()
+                    assert (offset, row) == (22, {"i": 102})
+
+                log = revived.log
+                assert log is not None
+                while log.seal(flush=True) is not None:
+                    pass
+
+                log.publish(flush=True)
+                metadata_uri = revived.metadata_uri
+                assert metadata_uri is not None
+                async with await streamcast.Stream.snapshot(
+                    metadata_uri, s3_options=s3
+                ) as snapshot:
+                    table = await snapshot.sql(
+                        "SELECT litelink_offset, i FROM log ORDER BY litelink_offset"
+                    ).read_all()
+
+            assert table.column("litelink_offset").to_pylist() == list(range(1, 23))
+            assert table.column("i").to_pylist() == [*range(20), 101, 102]
+            assert _published(bucket, s3).stream_id == first
+        finally:
+            await revived.aclose()
+
+    @pytest.mark.parametrize("crash", ["before_hint", "after_hint", "after_adopt"])
+    async def test_migrate_retry_after_interrupted_adoption_stays_retired(
+        self, tmp_path, bucket, s3, monkeypatch, crash
+    ):
+        await _served(tmp_path, bucket, s3)
+        retirement = streamcast.Stream.retire("t", root=tmp_path, s3_options=s3)
+        before = _published(bucket, s3)
+        _lose_metadata(tmp_path)
+        home = _metadata.home(tmp_path, "t")
+
+        with monkeypatch.context() as patch:
+            if crash == "after_adopt":
+                real_adopt = _versions.adopt
+
+                def failed_adopt(*args, **kwargs):
+                    adopted = real_adopt(*args, **kwargs)
+                    assert adopted is not None and adopted.retirement == retirement
+                    raise OSError("interrupted retirement adoption")
+
+                patch.setattr(_versions, "adopt", failed_adopt)
+            else:
+                real_write = _versions._Local.write  # noqa: SLF001
+
+                def failed_write(store, name, data):
+                    if store.top == home and name == _versions.HINT:
+                        if crash == "after_hint":
+                            real_write(store, name, data)
+
+                        raise OSError("interrupted retirement adoption")
+
+                    real_write(store, name, data)
+
+                patch.setattr(_versions._Local, "write", failed_write)  # noqa: SLF001
+
+            with pytest.raises(OSError, match="interrupted retirement adoption"):
+                streamcast.Stream.migrate(
+                    "t", root=tmp_path, schema=SCHEMA, s3_options=s3
+                )
+
+        # Before the hint, retry must recover again; after it, retirement is
+        # already durable. Both that retry and every later startup refuse sends.
+        for _ in range(2):
+            recovered = streamcast.Stream.migrate(
+                "t", root=tmp_path, schema=SCHEMA, s3_options=s3
+            )
+            try:
+                with pytest.raises(streamcast.StreamRetired):
+                    await recovered.send({"i": 100})
+
+                assert recovered.retirement == retirement
+            finally:
+                await recovered.aclose()
+
+        assert not (home / "t-v2").exists()
+        assert _published(bucket, s3) == before
+
+    async def test_recovered_retirement_checks_the_declared_schema(
+        self, tmp_path, bucket, s3
+    ):
+        await _served(tmp_path, bucket, s3)
+        streamcast.Stream.retire("t", root=tmp_path, s3_options=s3)
+        before = _published(bucket, s3)
+        _lose_metadata(tmp_path)
+
+        with pytest.raises(ValueError, match="the retired stream"):
+            streamcast.Stream.migrate("t", root=tmp_path, schema=V2, s3_options=s3)
+
+        assert not (_metadata.home(tmp_path, "t") / "t-v2").exists()
+        assert _published(bucket, s3) == before
+
+
 class TestNewRefusesToReplaceAPublishedStream:
     async def test_a_served_stream(self, tmp_path, bucket, s3):
         first = await _served(tmp_path / "a", bucket, s3)

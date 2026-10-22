@@ -82,6 +82,10 @@ there was nothing to have changed from. Everything above it is ordinary.
     is now written into the home and kept. A copy whose live log is not the
     one opened is refused after it is adopted, and the next run opens the
     live log.
+    - A recovered stream retirement is preserved by `migrate`, including
+      after an interrupted adoption. It serves read-only until an explicit
+      revival; creating a writable successor at startup reused acknowledged
+      offsets when that revival resumed at the recorded retirement frontier.
   - **`Stream.new` refuses to create a stream where its prefix already holds
     it**: its metadata, its first log's table, or that log's WAL replica. It
     raises `FileExistsError` naming `Stream.restore`.

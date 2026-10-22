@@ -650,6 +650,25 @@ class Stream:
                 # that lost its metadata, which takes the published copy's.
                 metadata = _metadata.recovered(name, old, _options(s3_options))
 
+            if metadata.retirement is not None:
+                # Adoption can reveal an explicitly retired stream. Reopen
+                # through the same schema check and read-only path as startup;
+                # a retired log alone can also be an interrupted migration.
+                old.close()
+                old = None
+                opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
+                assert opened is not None
+                log, found = opened
+                return cls._read_only(
+                    name,
+                    root,
+                    log,
+                    found,
+                    s3_options=s3_options,
+                    max_replay=max_replay,
+                    replay_published=replay_published,
+                )
+
             _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
 
             if (
