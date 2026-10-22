@@ -1409,7 +1409,8 @@ class Stream:
         cap under one. A query past the limit spills where it can and raises
         `OutOfMemoryException` where it cannot. A limit is a setting of the
         database, so readers asking for different limits read through
-        different databases, as with the caches.
+        different databases, as with the caches. `connect(catch_up=True)`
+        takes it too, for the snapshot its catch-up reads the gap through.
         """
         return await _snapshot.snapshot(
             metadata_uri,

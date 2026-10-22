@@ -110,6 +110,24 @@ class ReadCache:
         )
 
 
+def check_memory_limit(memory_limit: str) -> None:
+    """Refuse a `memory_limit` DuckDB cannot read, at the call that takes it.
+
+    For a caller whose database is opened later and somewhere a DuckDB error
+    would be read as something else: a catch-up's, inside the handling that
+    reports a table it cannot open as a credentials problem. Checked by DuckDB
+    itself, on a throwaway database, so the notation is exactly what it takes.
+    """
+    import duckdb  # noqa: PLC0415 — only for a caller that sets a limit
+
+    with duckdb.connect() as probe:
+        try:
+            probe.execute("SET memory_limit = ?", [memory_limit])
+        except duckdb.Error as exc:
+            msg = f"memory_limit={memory_limit!r}: {exc}"
+            raise ValueError(msg) from exc
+
+
 DEFAULT_CACHE: Final = ReadCache()
 """litelink's defaults: memory on, disk off."""
 

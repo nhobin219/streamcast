@@ -33,11 +33,22 @@ there was nothing to have changed from. Everything above it is ordinary.
     makes that reachable at the lower size, so size `SEND_BATCH` and rows to
     fit.
 
+- **`connect(catch_up=True, memory_limit=)`** caps the DuckDB database a
+  catch-up reads its gap through (`"1GB"`), as `Stream.snapshot`, `scan`,
+  `sql` and `live` already take it (#162).
+  - Before, the catch-up's database sized itself at DuckDB's default, 80% of
+    what the process may use, so two catching-up consumers in one cgroup were
+    allowed 160% of it between them.
+  - Passing the keyword was refused by the websocket, from inside
+    `create_connection`.
+  - A limit DuckDB cannot read is refused at `connect` with a `ValueError`.
+
 ### Documentation
 
 - Remove feed-parsing and publisher-column recovery recipes from the README.
   Align delivery guarantees, transactional outbox/inbox lifecycle, published-table
   opening, S3 options on reopen, and per-stream queue settings with the current API.
+
 
 ### Fixed
 
