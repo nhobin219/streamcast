@@ -445,6 +445,12 @@ class Stream:
 
             stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
 
+        **Not created where `published` already holds it.** When the stream
+        is not on this disk and its remote prefix has its metadata, its
+        table or its WAL replica, this raises `FileExistsError`: that is a
+        box that lost its disk, and an empty stream here would replace the
+        copy at the first `serve`. `Stream.restore` brings it back.
+
         `sort_by`, `config`, `published` and `s3_options` configure the log.
         Options also reach litelink when reopening an existing log and are
         retained for metadata uploads and child processes. They are not
@@ -481,6 +487,7 @@ class Stream:
         # Its own directory for a new stream, or the layout it already has;
         # the published side follows (`_metadata.home`).
         home = _metadata.home(root, name)
+        prefix = published
         if published is not None and home != Path(root):
             published = _metadata.within(published, name)
 
@@ -506,6 +513,7 @@ class Stream:
             config=config,
             published=published,
             s3_options=s3_options,
+            prefix=prefix,
         )
 
         return cls(
@@ -638,8 +646,28 @@ class Stream:
         try:
             if metadata is None:
                 # Never served under this version, so no metadata file yet:
-                # one log at the stream's name, described now.
-                metadata = _metadata.single(name, old)
+                # one log at the stream's name, described now — or a home
+                # that lost its metadata, which takes the published copy's.
+                metadata = _metadata.recovered(name, old, _options(s3_options))
+
+            if metadata.retirement is not None:
+                # Adoption can reveal an explicitly retired stream. Reopen
+                # through the same schema check and read-only path as startup;
+                # a retired log alone can also be an interrupted migration.
+                old.close()
+                old = None
+                opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
+                assert opened is not None
+                log, found = opened
+                return cls._read_only(
+                    name,
+                    root,
+                    log,
+                    found,
+                    s3_options=s3_options,
+                    max_replay=max_replay,
+                    replay_published=replay_published,
+                )
 
             _metadata.check_types(metadata.logs, _schema.from_arrow(declared))
 
@@ -1007,7 +1035,7 @@ class Stream:
 
         try:
             if metadata is None:
-                metadata = _metadata.single(name, log)
+                metadata = _metadata.recovered(name, log, _options(s3_options))
 
             if not finished and isinstance(log, litelink.WriteHandle):
                 if log.config.wal_replication:
@@ -1107,8 +1135,19 @@ class Stream:
                     msg = f"there is no stream {name!r} at {root} to set retention on"
                     raise FileNotFoundError(msg) from None
 
-                with log:
-                    metadata = _metadata.single(name, log)
+                try:
+                    with log:
+                        metadata = _metadata.recovered(name, log, _options(s3_options))
+                except _versions.Conflict:
+                    # Another commit gave the home a version first: read it.
+                    if attempt == 4:
+                        raise
+
+                    continue
+
+                # Adopting the published copy wrote a version: compared
+                # against that, not against the none read above.
+                read = _versions.version(root, name)
 
             try:
                 _versions.commit(
@@ -2653,6 +2692,7 @@ def _open_or_create(
     config: object | None,
     published: str | None,
     s3_options: object | None,
+    prefix: str | None = None,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
     """The log for this stream, created if it is not there yet, and its metadata.
 
@@ -2675,6 +2715,28 @@ def _open_or_create(
     current = name if metadata is None else metadata.current.name
     try:
         log = litelink.open(root, current, s3_options=_options(s3_options))
+    except litelink.RetiredError:
+        if metadata is not None:
+            raise
+
+        # Sealed, with no metadata here to say what follows it: a home that
+        # lost its metadata after a migration or a retire. Its published copy
+        # says, and adopted, it is what the next open reads.
+        with litelink.open(
+            root, current, read_only=True, s3_options=_options(s3_options)
+        ) as first:
+            adopted = _metadata.recovered(name, first, _options(s3_options))
+
+        if _metadata.load(root, name) is None:
+            raise
+
+        msg = (
+            f"stream {name!r} had no metadata in {root}, and its log "
+            f"{current!r} is sealed. Its published copy, which says what "
+            f"follows it (live log {adopted.live_log.name!r}), is now in "
+            f"{root}; run this again to open it."
+        )
+        raise ValueError(msg) from None
     except FileNotFoundError:
         if metadata is not None:
             msg = (
@@ -2682,6 +2744,30 @@ def _open_or_create(
                 f"as the current log, and there is no log at {root}/{current}"
             )
             raise FileNotFoundError(msg) from None
+
+        if published is not None and _metadata.remote(published):
+            # Nothing of it on this disk. A prefix that holds it is a box that
+            # lost its disk, and an empty stream made here would be uploaded
+            # over the metadata at the first `serve`, and shipped over the WAL
+            # replica as its next transaction: a restore after that returns
+            # nothing. Restoring is the caller's choice to make, so refused.
+            # Under the prefix itself too, where a stream from before its own
+            # directory keeps its copy and its log: a box that lost one sees
+            # a new stream's layout here (`_metadata.home`).
+            held = None
+            for where in dict.fromkeys((published, prefix or published)):
+                held = _versions.occupied(where, name, _options(s3_options))
+                if held is not None:
+                    break
+
+            if held is not None:
+                msg = (
+                    f"there is no stream {name!r} at {root}, and {held} already "
+                    f"holds it. Bring it back with Stream.restore({name!r}, "
+                    f"root=..., published=...); to start it afresh, give it a "
+                    f"prefix that holds nothing of it."
+                )
+                raise FileExistsError(msg) from None
 
         return litelink.new(
             root,

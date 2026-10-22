@@ -73,6 +73,32 @@ there was nothing to have changed from. Everything above it is ordinary.
     retrieved" (#154).
   - The `IndexError('pop from an empty deque')` in that race was fixed in
     0.23.0; a test now covers it.
+- **Starting a stream never replaces what its published prefix holds**
+  (#144, #146).
+  - **A home that lost its metadata while its logs survived adopts the
+    published copy.** Before, `serve`, `migrate`, `retire` and `retain`
+    minted a new `stream_id` and uploaded it over the copy, which also
+    dropped the copy's sealed logs and manifest. The copy, manifest included,
+    is now written into the home and kept. A copy whose live log is not the
+    one opened is refused after it is adopted, and the next run opens the
+    live log.
+    - A recovered stream retirement is preserved by `migrate`, including
+      after an interrupted adoption. It serves read-only until an explicit
+      revival; creating a writable successor at startup reused acknowledged
+      offsets when that revival resumed at the recorded retirement frontier.
+  - **`Stream.new` refuses to create a stream where its prefix already holds
+    it**: its metadata, its first log's table, or that log's WAL replica. It
+    raises `FileExistsError` naming `Stream.restore`.
+    - Before, a fresh box with the usual `published=` created an empty stream
+      there. Its first `serve` then replaced the published metadata with the
+      empty stream's, and litestream shipped the empty buffer as the
+      replica's next transaction.
+    - A prefix whose table held data was already refused by litelink with a
+      `ValueError`. That case now gets the `FileExistsError` too.
+    - **A deployment that wipes its disk and calls `Stream.new` on the same
+      prefix to start afresh is now refused.** It used to be clobbered
+      silently. Restore the stream, or give it a prefix that holds nothing
+      of it.
 
 ## 0.23.0 — 2026-10-19
 

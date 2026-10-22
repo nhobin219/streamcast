@@ -487,6 +487,42 @@ def single(stream: str, log: LogHandle) -> Metadata:
     )
 
 
+def recovered(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadata:
+    """The metadata of a stream whose home has none, `log` being its live log.
+
+    **The published copy when there is one**, adopted into the home
+    (`_versions.adopt`): a home that lost its metadata while its logs survived
+    is the same stream, and minting it a new id — `single` — would put that id
+    over the copy at the next upload, refusing every reader that recorded the
+    old one. `single` only when there is no metadata anywhere.
+
+    A copy whose live log is not `log` is refused, after it is adopted: `log`
+    is only what a home without metadata knows to open — the stream's first
+    — and the copy says it is sealed. Opened again, the home names the live
+    log itself.
+    """
+    from streamcast import _versions  # noqa: PLC0415 — it imports this module
+
+    adopted = (
+        _versions.adopt(log.root, log.published, stream, s3_options)
+        if remote(log.published)
+        else None
+    )
+    if adopted is None:
+        return single(stream, log)
+
+    if adopted.live_log.name != log.name:
+        msg = (
+            f"stream {stream!r} had no metadata in {log.root}, and its published "
+            f"copy under {log.published} says the live log is "
+            f"{adopted.live_log.name!r}, not {log.name!r}. The copy is now in "
+            f"{log.root}; run this again to open the live log."
+        )
+        raise ValueError(msg)
+
+    return adopted
+
+
 def complete(
     metadata: Metadata, log: LogHandle, s3_options: S3Options | None = None
 ) -> Metadata:
@@ -657,6 +693,11 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
         if remote(log.published)
         else None
     )
+    if found is None and published is not None:
+        # A home that lost its metadata, and a copy that has it: adopted, not
+        # minted afresh over it (`recovered`). Checked against `log` below.
+        found = _versions.adopt(root, log.published, stream, s3_options)
+
     # A stream served by a build from before the versions has its metadata
     # but no version of it: written now, here and beside the tables.
     unversioned, unpublished = _versions.missing(
