@@ -725,11 +725,9 @@ Offsets are per server and are not translated between hops.
 
 ## What it is not
 
-- **Not a message queue.** No topics beyond a name, no consumer groups, and no consumer
-  acknowledgements — where a subscriber has got to is its own cursor, not state the server
-  keeps. A publisher does get an ack, the offset once the row is durable; nothing tracks
-  what a subscriber has consumed. A subscriber needing at-least-once with server-side acks
-  wants one.
+- **No broker-side consumer acknowledgements or consumer groups.** Routing is exact-match
+  on a stream's name, with no topic hierarchy or wildcards. The broker does not track
+  what a subscriber has consumed.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
