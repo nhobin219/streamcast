@@ -47,10 +47,12 @@ def hint(root, stream: str = "trades") -> Path:
 
 class TestServeWritesIt:
     async def test_a_new_stream_gets_one_at_its_first_serve(self, tmp_path, serve):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             assert not hint(tmp_path).exists(), (
-                "Stream.new stays offline; the file is serve's to write"
+                "Stream.open stays offline; the file is serve's to write"
             )
             async with serve(stream, maintain=False):
                 pass
@@ -80,7 +82,9 @@ class TestServeWritesIt:
         ) as legacy:
             legacy.extend([row(i) for i in range(3)])
 
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             async with serve(stream, maintain=False):
                 pass
@@ -93,10 +97,10 @@ class TestServeWritesIt:
         assert found["live_log"]["system_schema"]["properties"] == {}
 
     async def test_the_id_is_minted_once(self, tmp_path, serve):
-        # A fresh `Stream.new` per serve, as a restart has: `serve` closes the
+        # A fresh `Stream.open` per serve, as a restart has: `serve` closes the
         # log a stream owns when it shuts down.
         async with serve(
-            streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA),
+            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA),
             maintain=False,
         ):
             pass
@@ -104,7 +108,7 @@ class TestServeWritesIt:
         first = written(tmp_path)["stream_id"]
 
         async with serve(
-            streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA),
+            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA),
             maintain=False,
         ):
             pass
@@ -121,7 +125,9 @@ class TestServeWritesIt:
         assert list(tmp_path.iterdir()) == []
 
     async def test_the_asgi_app_writes_it_at_start(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             streams = asgi(stream, maintain=False, replicate=False)
             assert not hint(tmp_path).exists(), (
@@ -135,7 +141,9 @@ class TestServeWritesIt:
 
 class TestMigrationUpdatesIt:
     async def test_the_live_log_is_sealed_into_the_list(self, tmp_path, serve):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
 
@@ -160,7 +168,9 @@ class TestItNamesTheLiveLog:
         a migration under litelink 0.5 was never retired and still opens, so
         `serve` checks the metadata too: here, a log it does not name as live.
         """
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         await stream.send(row(0))
         await stream.aclose()
         await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
@@ -188,7 +198,9 @@ class TestItNamesTheLiveLog:
         Without it a subscribe below the seam would read the live log, find
         nothing there, and be served an empty replay — a silent hole.
         """
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
         await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
@@ -209,8 +221,13 @@ class TestItNamesTheLiveLog:
 @pytest.mark.replication
 class TestThePublishedCopy:
     async def test_serve_uploads_it(self, tmp_path, serve, s3, bucket):
-        stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "trades",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             async with serve(stream, maintain=False, replicate=False):
@@ -226,14 +243,19 @@ class TestThePublishedCopy:
     async def test_an_unchanged_stream_is_not_uploaded_again(
         self, tmp_path, serve, s3, bucket, monkeypatch
     ):
-        first = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        first = streamcast.Stream.open(
+            "trades",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         async with serve(first, maintain=False, replicate=False):
             pass
 
-        stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, s3_options=s3
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA, s3_options=s3
         )
         try:
             uploads: list[str] = []
@@ -257,8 +279,13 @@ class TestThePublishedCopy:
         self, tmp_path, serve, s3
     ):
         missing = f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/prefix"
-        stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=SCHEMA, published=missing, s3_options=s3
+        stream = streamcast.Stream.open(
+            "trades",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=missing,
+            s3_options=s3,
         )
         try:
             with pytest.raises(FileNotFoundError, match="does not exist"):

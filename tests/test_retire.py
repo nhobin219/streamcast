@@ -28,7 +28,13 @@ SCHEMA = {
 
 async def produce(root: Path, count: int = 7, **kwargs: object) -> None:
     """A stream with `count` rows, written and then left: the server stopped."""
-    stream = streamcast.Stream.new("t", root=root, schema=SCHEMA, **kwargs)  # ty: ignore[invalid-argument-type]
+    stream = streamcast.Stream.open(
+        "t",
+        create=True,
+        root=root,
+        schema=SCHEMA,
+        **kwargs,  # ty: ignore[invalid-argument-type]
+    )
     try:
         await stream.send_many([{"i": i} for i in range(count)])
     finally:
@@ -88,7 +94,7 @@ class TestARetiredStreamIsReadOnly:
         streamcast.Stream.retire("t", root=tmp_path)
 
         for opened in (
-            streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA),
+            streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA),
             streamcast.Stream.migrate("t", root=tmp_path, schema=SCHEMA),
         ):
             try:
@@ -104,7 +110,7 @@ class TestARetiredStreamIsReadOnly:
     ):
         await produce(tmp_path)
         streamcast.Stream.retire("t", root=tmp_path)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
 
         async with serve(stream) as uri:
             # The history replays — from the published table, the only copy.
@@ -124,7 +130,7 @@ class TestARetiredStreamIsReadOnly:
 
         await produce(tmp_path)
         streamcast.Stream.retire("t", root=tmp_path)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         planned: list[list[str]] = []
         real = _server._supervisors  # noqa: SLF001
 
@@ -240,8 +246,8 @@ class TestOnAnotherBox:
         """litelink rebuilds a log from its published table when there is no
         replica: fenced above anything the old log may have issued."""
         box_a, box_b = tmp_path / "a", tmp_path / "b"
-        stream = streamcast.Stream.new(
-            "t", root=box_a, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t", create=True, root=box_a, schema=SCHEMA, published=bucket, s3_options=s3
         )
         try:
             await stream.send_many([{"i": i} for i in range(5)])

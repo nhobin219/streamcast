@@ -32,12 +32,14 @@ LIMIT = "77MB"
 async def stream(tmp_path):
     """A stream whose published table holds every row, served with a replay
     window so short that a consumer at offset 1 must catch up from it."""
-    made = streamcast.Stream.new("rows", root=tmp_path, schema=SCHEMA)
+    made = streamcast.Stream.open("rows", create=True, root=tmp_path, schema=SCHEMA)
     assert made.log is not None
     made.log.close()
     table = pa.table({"n": list(range(ROWS)), "text": ["x" * 50] * ROWS})
     streamcast.Stream.ingest("rows", table, root=tmp_path, publish=True, flush=True)
-    served = streamcast.Stream.new("rows", root=tmp_path, schema=SCHEMA, max_replay=10)
+    served = streamcast.Stream.open(
+        "rows", create=True, root=tmp_path, schema=SCHEMA, max_replay=10
+    )
     try:
         yield served
     finally:

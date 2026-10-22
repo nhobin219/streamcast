@@ -139,7 +139,7 @@ class Stream:
     `serve` is what starts the maintainer and, with `replicate=True`, the
     litestream sidecar, and it stops them again.
 
-        stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
+        stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
 
         async with streamcast.serve(stream, "localhost", 8765):
             async for frame in upstream:
@@ -154,10 +154,10 @@ class Stream:
     needs no import but this one.
 
     **Who closes the log depends on who opened it.** `root=`+`schema=` creates
-    it here — `new` the first time, `open` every time after, which is the
-    try/except every caller otherwise writes — and `aclose` closes what it
-    created. Pass `log=` an open handle instead and it stays the caller's, for
-    a process that reads or writes it through litelink as well. The two are
+    it here with `open(create=True)` the first time and reopens it afterward.
+    `aclose` closes what it created. Pass `log=` an open handle instead and it
+    stays the caller's, for a process that reads or writes it through litelink
+    as well. The two are
     mutually exclusive, because a `schema=` beside a `log=` is a declaration
     that cannot be enforced: `open` reads the shape off disk.
 
@@ -227,7 +227,7 @@ class Stream:
         exactly_once: bool = False,
         max_publishers: int = MAX_PUBLISHERS,
     ) -> None:
-        """Takes an already-open log and builds nothing. See `Stream.new`.
+        """Takes an already-open log and builds nothing. See `Stream.open`.
 
         litelink's rule, which this used to break: it took `root=`+`schema=`
         and called `litelink.new`/`open` from here, so constructing a
@@ -251,17 +251,17 @@ class Stream:
         does. It is kept, not used here: this initialiser does no I/O.
 
         `replay_published` says whether a replay may read the log's published
-        table, below what the server holds locally; see `Stream.new`.
+        table, below what the server holds locally; see `Stream.open`.
 
         `schema` is for a stream WITHOUT a log: declared in JSON Schema, as
-        `Stream.new` takes it, and held to exactly the rule a log would hold
+        `Stream.open` takes it, and held to exactly the rule a log would hold
         it to — see `send`. A stream with a log carries its own shape, so
         passing both is refused: two declarations, one of which would be
         silently ignored.
 
         `exactly_once` lets publishers that name themselves
         (`publish(uri, publisher=...)`) have their rows deduped by seq; see
-        `Stream.new`. `max_publishers` bounds the marks cached for them
+        `Stream.open`. `max_publishers` bounds the marks cached for them
         (`MAX_PUBLISHERS`); the table in the log's buffer holds all of them.
         """
         if exactly_once and log is None:
@@ -426,7 +426,7 @@ class Stream:
         self._last_send_ts: float | None = None
 
     @classmethod
-    def new(
+    def open(
         cls,
         name: str = "",
         *,
@@ -440,16 +440,24 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         exactly_once: bool = False,
+        create: bool = False,
+        restore: bool = False,
     ) -> Stream:
-        """A stream and the log underneath it, created if it is not there yet.
+        """Open a stream, checking its declaration against the log on disk.
 
-            stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
+        `create=True` creates it only when neither disk nor published prefix
+        holds it. `restore=True` brings back a published replica when the
+        local log is absent. Both default to False; neither overwrites a
+        replica with an empty stream. A failed store lookup propagates.
+
+            stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
 
         **Not created where `published` already holds it.** When the stream
         is not on this disk and its remote prefix has its metadata, its
         table or its WAL replica, this raises `FileExistsError`: that is a
         box that lost its disk, and an empty stream here would replace the
-        copy at the first `serve`. `Stream.restore` brings it back.
+        copy at the first `serve`. Pass `restore=True` or use `Stream.restore`
+        to bring it back, after stopping the old writer.
 
         `sort_by`, `config`, `published` and `s3_options` configure the log.
         Options also reach litelink when reopening an existing log and are
@@ -486,6 +494,7 @@ class Stream:
         """
         # Its own directory for a new stream, or the layout it already has;
         # the published side follows (`_metadata.home`).
+        original_root = root
         home = _metadata.home(root, name)
         prefix = published
         if published is not None and home != Path(root):
@@ -505,16 +514,35 @@ class Stream:
                 replay_published=replay_published,
             )
 
-        log, metadata = _open_or_create(
-            root,
-            name,
-            schema=schema,
-            sort_by=sort_by,
-            config=config,
-            published=published,
-            s3_options=s3_options,
-            prefix=prefix,
-        )
+        try:
+            log, metadata = _open_or_create(
+                root,
+                name,
+                schema=schema,
+                sort_by=sort_by,
+                config=config,
+                published=published,
+                s3_options=s3_options,
+                prefix=prefix,
+                create=create,
+            )
+        except _PublishedStream:
+            if not restore or prefix is None:
+                raise
+
+            return cls.restore(
+                name,
+                root=original_root,
+                published=prefix,
+                schema=schema,
+                sort_by=sort_by,
+                config=config,
+                s3_options=s3_options,
+                max_replay=max_replay,
+                replay_published=replay_published,
+                group_commit=group_commit,
+                exactly_once=exactly_once,
+            )
 
         return cls(
             name,
@@ -639,7 +667,7 @@ class Stream:
         except FileNotFoundError:
             msg = (
                 f"there is no stream {name!r} at {root} to migrate. "
-                f"Stream.new creates one."
+                f"Stream.open(..., create=True) creates one."
             )
             raise FileNotFoundError(msg) from None
 
@@ -815,7 +843,7 @@ class Stream:
             )
 
         Producer-side failover, and the counterpart to `connect(cursor=)` on
-        the consumer side. `Stream.new` needs the log to be here already;
+        the consumer side. `Stream.open` restores it only with `restore=True`;
         this rebuilds it from its replicated WAL when there is one, and
         otherwise from its published table alone (litelink 0.10), then hands
         back a stream ready to `serve` and `send` to.
@@ -845,7 +873,7 @@ class Stream:
         schema — binary encodings and system columns included, which an
         Iceberg schema does not keep — and its `sort_by`. litelink checks them
         against the replica or the table, and needs them outright for a table
-        no litelink 0.10 publish stamped. `schema=` (JSON Schema, as `new`
+        no litelink 0.10 publish stamped. `schema=` (JSON Schema, as `open`
         takes) and `sort_by=` are for a stream whose metadata predates
         recording them, or to override; `config=` replaces the restored
         log's policy, which is otherwise the replica's, or litelink's default.
@@ -862,7 +890,7 @@ class Stream:
         and a revive, start with none: a publisher's next row is judged
         against seq 0, and its sender is told so by the greeting's
         `last_seq`. `exactly_once` is
-        otherwise as `new` takes it.
+        otherwise as `open` takes it.
 
         ⚠️ **Two writers on one log corrupts it.** The fence stops offsets
         being reused; nothing stops the machine you are failing over FROM if
@@ -879,23 +907,31 @@ class Stream:
         # itself, where a stream created before that layout keeps its copy —
         # and the stream is rebuilt in the layout it was found in.
         metadata = None
-        if _metadata.remote(published):
-            for prefix in (_metadata.within(published, name), published):
-                metadata = _versions.fetch(prefix, name, s3_options)  # ty: ignore[invalid-argument-type]
-                if metadata is not None:
-                    break
-
-            if metadata is not None and prefix != published:
-                root = Path(root) / name
-
-            published = prefix
+        prefixes = tuple(dict.fromkeys((_metadata.within(published, name), published)))
+        for prefix in prefixes:
+            if _versions.occupied(prefix, name, _options(s3_options)) is not None:
+                metadata = (
+                    _versions.fetch(prefix, name, _options(s3_options))
+                    if _metadata.remote(prefix)
+                    else _metadata.load(Path(prefix.removeprefix("file://")), name)
+                )
+                break
 
         else:
-            home = _metadata.home(root, name)
-            if home != Path(root):
-                published = _metadata.within(published, name)
+            msg = (
+                f"no published stream {name!r} at {' or '.join(prefixes)}; "
+                "there is nothing to restore"
+            )
+            raise FileNotFoundError(msg)
 
-            root = home
+        if _metadata.remote(published):
+            if prefix != published:
+                root = Path(root) / name
+
+        else:
+            root = _metadata.home(root, name)
+
+        published = prefix
 
         if metadata is None:
             # A local published location has no copy beside its tables; a box
@@ -999,7 +1035,7 @@ class Stream:
            tables, with the log's statistics added to the manifest. That is
            everything reviving needs, on a box that never held the log.
 
-        From then on the stream is served READ-ONLY: `new` and `migrate` open
+        From then on the stream is served READ-ONLY: `open` and `migrate` open
         it for reading — subscribers replay and catch up, a live view simply
         sees nothing new — every send raises `StreamRetired`, and `serve`
         refuses a publisher with 4410. Its maintainers do not run.
@@ -2545,7 +2581,7 @@ class Stream:
         # object storage. That is the setting that makes a plain WebSocket
         # client in any language able to replay a stream from the beginning
         # with no litelink, no credentials and no dependency on this repo —
-        # see `Stream.new` for what it costs.
+        # see `Stream.open` for what it costs.
         if self._max_replay is not None and behind > self._max_replay:
             # **The offset distance said too far. Ask what it actually costs.**
             # `max_replay` bounds the work a replay does, and that work is
@@ -2683,6 +2719,10 @@ def _open_retired(
     return log, metadata
 
 
+class _PublishedStream(FileExistsError):
+    """A replica was found while opening an absent local log, before creation."""
+
+
 def _open_or_create(
     root: str | PathLike[str],
     name: str,
@@ -2693,13 +2733,13 @@ def _open_or_create(
     published: str | None,
     s3_options: object | None,
     prefix: str | None = None,
+    create: bool = False,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
     """The log for this stream, created if it is not there yet, and its metadata.
 
-    The try/except every caller writes identically: a server has to `new` the
-    first time and `open` every time after, and `new` raises rather than
-    adopting an existing log. Doing it here is most of what makes `root=` +
-    `schema=` worth having.
+    Creation is explicitly requested and only happens when neither the local
+    log nor a published replica exists. Restore dispatch belongs to `open`,
+    which still has the caller's root and published prefix.
 
     **An existing log is checked against the declared schema**, because `open`
     takes none of the shape — it reads it from disk — so a declaration that
@@ -2745,7 +2785,7 @@ def _open_or_create(
             )
             raise FileNotFoundError(msg) from None
 
-        if published is not None and _metadata.remote(published):
+        if published is not None:
             # Nothing of it on this disk. A prefix that holds it is a box that
             # lost its disk, and an empty stream made here would be uploaded
             # over the metadata at the first `serve`, and shipped over the WAL
@@ -2763,11 +2803,24 @@ def _open_or_create(
             if held is not None:
                 msg = (
                     f"there is no stream {name!r} at {root}, and {held} already "
-                    f"holds it. Bring it back with Stream.restore({name!r}, "
+                    f"holds it. Pass restore=True to Stream.open, or bring "
+                    f"it back with Stream.restore({name!r}, "
                     f"root=..., published=...); to start it afresh, give it a "
                     f"prefix that holds nothing of it."
                 )
-                raise FileExistsError(msg) from None
+                raise _PublishedStream(msg) from None
+
+        if not create:
+            msg = (
+                f"there is no stream {name!r} at {root}"
+                + (
+                    f" or its published prefix {prefix or published}"
+                    if published
+                    else ""
+                )
+                + "; pass create=True to create it"
+            )
+            raise FileNotFoundError(msg) from None
 
         return litelink.new(
             root,

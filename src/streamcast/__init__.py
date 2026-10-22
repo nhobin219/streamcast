@@ -5,14 +5,14 @@ litelink log before broadcasting. Subscribers receive `[offset, ts, row]` in
 order and resume by offset. A stream without a log uses null offsets and
 cannot replay. The log is also an Iceberg table, readable without the broker.
 
-Declare columns in JSON Schema; `Stream.new` creates or reopens the log.
+Declare columns in JSON Schema; `Stream.open` creates or reopens the log.
 `serve` runs the maintainer and, with `replicate=True`, the WAL sidecar.
 `Stream.send` publishes locally; `publish` does it over a socket. `connect`
 returns a read-only subscription. Both ends pass transport keywords through
 to `websockets`, with compression off by default because encoding is shared
 while permessage-deflate compresses once per connection.
 
-    stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
+    stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
     async with streamcast.serve(stream, "localhost", 8765):
         async for frame in upstream:
             await stream.send(parse(frame))

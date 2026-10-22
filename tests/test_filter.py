@@ -41,7 +41,7 @@ def trade(i: int) -> dict:
 
 @pytest.fixture
 def stream(tmp_path):
-    made = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
     try:
         yield made
 

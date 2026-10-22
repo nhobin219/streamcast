@@ -339,7 +339,7 @@ def adopt(
 def occupied(
     published: str, stream: str, s3_options: S3Options | None = None
 ) -> str | None:
-    """What a remote `published` prefix already holds of `stream`, in words for
+    """What a `published` prefix already holds of `stream`, in words for
     a refusal; None if it holds nothing of it.
 
     Its metadata, or anything under `<published>/<stream>/`, where its first
@@ -349,6 +349,17 @@ def occupied(
     refuse, and an empty log created here would be shipped as the replica's
     next transaction, so a restore from then on returns it empty.
     """
+    if not _metadata.remote(published):
+        home = Path(published.removeprefix("file://"))
+        if _metadata.load(home, stream) is not None:
+            return f"the stream's metadata under {published}"
+
+        directory = home / stream
+        if directory.is_dir() and any(directory.iterdir()):
+            return f"the log's published table at {directory}"
+
+        return None
+
     try:
         found = fetch(published, stream, s3_options)
     except FileNotFoundError:

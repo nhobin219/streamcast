@@ -175,11 +175,15 @@ async def main(
     root: Path, *, count: int = 20, crash_at: int | None = 7
 ) -> dict[str, Any]:
     """Run it all under `root`; what each side saw."""
-    orders_stream = streamcast.Stream.new(
-        "orders", root=root / "broker", schema=ORDERS, exactly_once=True
+    orders_stream = streamcast.Stream.open(
+        "orders", create=True, root=root / "broker", schema=ORDERS, exactly_once=True
     )
-    enriched_stream = streamcast.Stream.new(
-        "enriched", root=root / "broker", schema=ENRICHED, exactly_once=True
+    enriched_stream = streamcast.Stream.open(
+        "enriched",
+        create=True,
+        root=root / "broker",
+        schema=ENRICHED,
+        exactly_once=True,
     )
     server = await streamcast.serve(
         [orders_stream, enriched_stream], "127.0.0.1", 0, maintain=False

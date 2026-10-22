@@ -33,7 +33,13 @@ WIDER: dict[str, Any] = {
 
 async def served(root, serve, **kwargs: object) -> None:
     """A stream with three rows, served once: `serve` writes its first version."""
-    stream = streamcast.Stream.new("t", root=root, schema=SCHEMA, **kwargs)  # ty: ignore[invalid-argument-type]
+    stream = streamcast.Stream.open(
+        "t",
+        create=True,
+        root=root,
+        schema=SCHEMA,
+        **kwargs,  # ty: ignore[invalid-argument-type]
+    )
     try:
         await stream.send_many([{"i": i} for i in range(3)])
         async with serve(stream, maintain=False):
@@ -117,7 +123,7 @@ class TestACommit:
         assert manifest is not None
         from_before(home, before, manifest)
 
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=WIDER)
         try:
             async with serve(stream, maintain=False):
                 pass
@@ -141,7 +147,7 @@ class TestACommit:
         (home / "t.metadata.json").unlink()
         (home / "t.manifest.parquet").unlink()
 
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=WIDER)
         try:
             async with serve(stream, maintain=False):
                 pass
@@ -172,7 +178,7 @@ class TestACommit:
 class TestTheGreeting:
     async def test_it_names_the_hint(self, tmp_path, serve):
         await served(tmp_path, serve)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -274,7 +280,9 @@ class TestTheReadsItSaves:
         for name in ("t.metadata.json", "t.manifest.parquet"):
             store.delete(name)
 
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=WIDER, s3_options=s3)
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path, schema=WIDER, s3_options=s3
+        )
         try:
             async with serve(stream, maintain=False):
                 pass

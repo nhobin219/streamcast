@@ -43,8 +43,12 @@ SCHEMA = json.loads((Path(__file__).parent / "trades" / "schema.json").read_text
 # 1. The stream, created once at import. `new` opens the log at this root, or
 #    opens what is already there — the same call `examples/broker.py` makes.
 #    Module level because both the lifespan and the mount need the same object.
-trades = streamcast.Stream.new(
-    "trades", root=Path("streamcast-data"), schema=SCHEMA, sort_by=("event_ts",)
+trades = streamcast.Stream.open(
+    "trades",
+    create=True,
+    root=Path("streamcast-data"),
+    schema=SCHEMA,
+    sort_by=("event_ts",),
 )
 
 # 2. The transport. No host, no port: the ASGI server this runs under owns the

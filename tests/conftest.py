@@ -94,7 +94,7 @@ def log(tmp_path: Path) -> Iterator[WriteHandle]:
 
 @pytest.fixture
 def stamped(tmp_path: Path) -> Iterator[WriteHandle]:
-    """`log`, with the `streamcast_ts` column `Stream.new` creates every log with.
+    """`log`, with the `streamcast_ts` column `Stream.open` creates every log with.
 
     `log` is kept WITHOUT it on purpose: that is a log from before the column
     existed, or one a caller opened and passed in, and both must keep working.

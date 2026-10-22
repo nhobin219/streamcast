@@ -133,7 +133,7 @@ it in the same PR.
   rejected, with the measurement if there was one. Match the density of the file.
 - **`__init__` takes built collaborators and does no I/O.** litelink's rule, and
   `tests/test_invariants.py` enforces it. Construction that opens a log, reads a cursor,
-  writes a config or probes PATH belongs in a factory — `Stream.new`, `Sidecar.new`,
+  writes a config or probes PATH belongs in a factory — `Stream.open`, `Sidecar.new`,
   `connect._resolve`. The one recorded exception is `Stream.__init__` reading
   `end_offset()` off the log it was handed: a read on an injected collaborator rather
   than the construction of one.

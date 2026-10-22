@@ -41,7 +41,7 @@ def source(lo: int, hi: int) -> pa.Table:
 
 async def stopped(root, rows: int = 3) -> None:
     """A stream with `rows` sent through the server path, then stopped."""
-    stream = streamcast.Stream.new("t", root=root, schema=SCHEMA)
+    stream = streamcast.Stream.open("t", create=True, root=root, schema=SCHEMA)
     try:
         await stream.send_many([{"i": n, "blob": None} for n in range(rows)])
         stream.ensure_metadata()
@@ -59,7 +59,7 @@ class TestIngesting:
         after = time.time_ns() // 1_000
 
         assert span == (4, 54), "after the three sent rows, dense"
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         assert stream.end_offset == 54
         async with serve(stream) as uri:
             async with streamcast.connect(uri, offset=3) as sub:
@@ -163,8 +163,9 @@ async def small_files(root) -> None:
     litelink commits a load 20 files at a time, so a failure past the 20th
     file leaves the first 20 in the log; 500-row row groups at a tiny target
     make every file 1,000 rows."""
-    stream = streamcast.Stream.new(
+    stream = streamcast.Stream.open(
         "t",
+        create=True,
         root=root,
         schema=PARTIAL,
         config=litelink.LogConfig(

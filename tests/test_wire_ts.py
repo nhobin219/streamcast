@@ -46,7 +46,9 @@ async def frames(uri: str, count: int, *, offset: int | None = None) -> list[byt
 
 class TestTheLiveFrame:
     async def test_it_carries_the_stamp_the_log_stored(self, tmp_path, serve):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -63,7 +65,9 @@ class TestTheLiveFrame:
             await stream.aclose()
 
     async def test_a_group_shares_one_stamp(self, tmp_path, serve):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -95,7 +99,9 @@ class TestTheLiveFrame:
 class TestTheReplayedFrame:
     async def test_it_is_the_live_frame_byte_for_byte(self, tmp_path, serve):
         """I10, with the stamp: read from the log, not taken at replay."""
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             async with serve(stream, maintain=False) as uri:
                 async with websockets.connect(uri) as raw:
@@ -139,7 +145,9 @@ class TestALogWithoutTheStamp:
 
 class TestRowsReadFromTheTables:
     async def test_a_snapshot_carries_the_stored_stamps(self, tmp_path, serve):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         await stream.send_many([row(i) for i in range(3)])
         log = stream.log
         assert log is not None
@@ -177,8 +185,9 @@ class TestRowsReadFromTheTables:
     async def test_catch_up_delivers_the_stored_stamps(
         self, tmp_path, s3, bucket, serve
     ):
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "trades",
+            create=True,
             root=tmp_path,
             schema=SCHEMA,
             published=bucket,

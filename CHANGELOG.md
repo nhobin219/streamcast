@@ -9,6 +9,20 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Breaking — upgrading to 0.24.0
+
+- **Replace `Stream.new` with `Stream.open(..., create=True)`** for server
+  startup. Plain `Stream.open(...)` requires an existing stream. `Stream.new`
+  is removed, with no compatibility alias (#146).
+- `create=True` creates only when the stream exists neither locally nor at
+  its published prefix. A missing local log with a published replica is
+  refused unless `restore=True`, which restores it before opening. Both
+  flags default to False; store errors propagate rather than permitting
+  creation. Stop the old writer before restoring on another machine.
+- `Stream.restore` raises `FileNotFoundError` naming an empty published
+  prefix. Published tables without stream metadata are restored from their
+  actual prefix, including the earlier layout.
+
 ### Added
 
 - **`max_message_bytes=` on `serve` and `asgi`: a frame limit per stream**

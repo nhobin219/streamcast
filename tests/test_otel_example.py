@@ -150,7 +150,9 @@ class TestThePublisher:
         }
 
         async def broker(port: int = 0):  # noqa: ANN202
-            stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
+            stream = streamcast.Stream.open(
+                "t", create=True, root=tmp_path, schema=schema
+            )
             return await streamcast.serve(stream, "127.0.0.1", port, maintain=False)
 
         server = await broker()
@@ -561,7 +563,9 @@ class TestTheAnalytics:
         self, tmp_path, serve
     ):
         """Through `Stream.live`, as the demo runs it: server spans only."""
-        stream = streamcast.Stream.new("spans", root=tmp_path, schema=spans.SCHEMA)
+        stream = streamcast.Stream.open(
+            "spans", create=True, root=tmp_path, schema=spans.SCHEMA
+        )
         rows = [
             *(span_row(i, "checkout", failed=i == 0) for i in range(4)),
             *(span_row(10 + i, "payments", failed=i < 2) for i in range(4)),

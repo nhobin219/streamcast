@@ -67,7 +67,7 @@ def row(i: int, **extra: object) -> dict[str, object]:
 
 async def seeded(root, count: int = 5) -> None:
     """A never-migrated stream at `root` holding `count` rows, closed again."""
-    stream = streamcast.Stream.new("trades", root=root, schema=V1)
+    stream = streamcast.Stream.open("trades", create=True, root=root, schema=V1)
     await stream.send_many([row(i) for i in range(count)])
     await stream.aclose()
 
@@ -163,7 +163,7 @@ class TestItIsSafeAtEveryStart:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V2)
+        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -175,7 +175,7 @@ class TestItIsSafeAtEveryStart:
         (await _migrated(tmp_path, V2)).close()
 
         with pytest.raises(ValueError, match="Stream.migrate"):
-            streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
 
     async def test_a_log_from_before_streamcast_ts_gains_it(self, tmp_path):
         # Same schema, and still a migration: the upgrade path for a log
@@ -191,7 +191,7 @@ class TestItIsSafeAtEveryStart:
             await stream.aclose()
 
     async def test_there_must_be_a_stream_to_migrate(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="Stream.new"):
+        with pytest.raises(FileNotFoundError, match="Stream.open"):
             streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
 
 
@@ -249,8 +249,9 @@ class TestSystemColumns:
 
     async def test_no_system_column_can_be_declared(self, tmp_path):
         with pytest.raises(ValueError, match="streamcast owns"):
-            streamcast.Stream.new(
+            streamcast.Stream.open(
                 "trades",
+                create=True,
                 root=tmp_path,
                 schema=evolve(V1, streamcast_ts={"type": ["integer", "null"]}),
             )
@@ -619,7 +620,7 @@ class TestTheManifest:
     async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V2)
+        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
         await stream.send(row(5, venue="x"))
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
@@ -635,7 +636,7 @@ class TestTheManifest:
         """End to end: statistics from litelink, pruned against a predicate."""
         await seeded(tmp_path)  # event_ts in [base, base + 4]
         (await _migrated(tmp_path, V2)).close()
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V2)
+        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
         await stream.send_many([row(i, venue=None) for i in range(100, 105)])
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
@@ -762,8 +763,13 @@ class TestThePublishedCopy:
     async def test_the_metadata_is_published_beside_the_logs(
         self, tmp_path, s3, bucket
     ):
-        stream = streamcast.Stream.new(
-            "trades", root=tmp_path, schema=V1, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "trades",
+            create=True,
+            root=tmp_path,
+            schema=V1,
+            published=bucket,
+            s3_options=s3,
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
@@ -870,7 +876,7 @@ def test_a_version_1_file_is_read_with_its_new_fields_unknown():
 
 async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     """`ensure` fills in what version 1 lacked, and rewrites the file at 2."""
-    stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
     await stream.send_many([row(i) for i in range(3)])
     async with serve(stream, maintain=False):
         pass
@@ -885,7 +891,7 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     )
     # From before the versions too: the plain file is all there is.
     shutil.rmtree(_metadata.home(tmp_path, "trades") / "trades.metadata")
-    again = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+    again = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
     assert again.log is not None
     while (
         again.log.seal(flush=True) is not None

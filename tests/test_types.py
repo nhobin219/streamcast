@@ -73,7 +73,7 @@ def row(i: int = 0) -> dict[str, object]:
 
 
 def stream_at(tmp_path) -> streamcast.Stream:
-    return streamcast.Stream.new("otel", root=tmp_path, schema=SCHEMA)
+    return streamcast.Stream.open("otel", create=True, root=tmp_path, schema=SCHEMA)
 
 
 class TestTheSchema:

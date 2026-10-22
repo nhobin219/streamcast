@@ -227,7 +227,7 @@ def test_no_initialiser_builds_its_own_collaborators():
     so construction touched the disk and, in one case, the network before
     anything had been awaited.
 
-    Each of those moved to a factory (`Stream.new`, `Sidecar.new`,
+    Each of those moved to a factory (`Stream.open`, `Sidecar.new`,
     `connect._resolve`). This is the audit that found them, kept as a test,
     because the pull back the other way is constant: doing the work in
     `__init__` always looks like one less call at the call site.
@@ -253,7 +253,7 @@ def test_no_initialiser_builds_its_own_collaborators():
 
     assert not offenders, (
         "an initialiser builds a collaborator or does I/O; move it to a "
-        f"factory (see `Stream.new`): {offenders}"
+        f"factory (see `Stream.open`): {offenders}"
     )
 
 

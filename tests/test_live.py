@@ -64,7 +64,7 @@ def held(live: _live.Live) -> int:
 @pytest.fixture
 async def stream(tmp_path) -> AsyncIterator[streamcast.Stream]:
     """Three rows published, two more only on the broker."""
-    made = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
     await made.send_many([row(i) for i in range(3)])
     publish(made)
     await made.send_many([row(i) for i in range(3, 5)])
@@ -276,7 +276,9 @@ class TestWaitingForATime:
     async def test_published_rows_past_it_need_no_new_row(self, tmp_path):
         # Everything published, nothing more sent: an idle stream asked about
         # a time its published rows have already passed.
-        idle = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        idle = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         await idle.send_many([row(i) for i in range(3)])
         publish(idle)
         try:
@@ -344,7 +346,9 @@ class TestNarrowing:
             },
             "required": SCHEMA["required"],
         }
-        binary = streamcast.Stream.new("trades", root=tmp_path, schema=schema)
+        binary = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=schema
+        )
         try:
             async with served(binary) as (_server, broker):
                 with pytest.raises(ValueError, match="binary column"):
@@ -406,7 +410,9 @@ class TestAMigrationUnderAnOpenView:
         port = listening.getsockname()[1]
         broker = f"ws://127.0.0.1:{port}/trades"
         try:
-            old = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+            old = streamcast.Stream.open(
+                "trades", create=True, root=tmp_path, schema=SCHEMA
+            )
             await old.send_many([row(i) for i in range(3)])
             first = await streamcast.serve(old, sock=listening.dup(), maintain=False)
             async with await streamcast.Stream.live(broker, rebase_every=3600) as live:

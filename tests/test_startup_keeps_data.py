@@ -7,7 +7,7 @@ object storage:
   `retain` each described the log afresh, with a new `stream_id`, and
   uploaded that over the published copy: every consumer that records the id
   was refused, and a migrated stream's copy lost its sealed logs.
-- **Its whole home gone.** `Stream.new` created an empty stream at the
+- **Its whole home gone.** `Stream.open` created an empty stream at the
   prefix, and the first `serve` replaced the published metadata (and with WAL
   replication, the replica) with it.
 
@@ -43,8 +43,8 @@ V2: dict[str, Any] = {
 async def _served(root: Path, bucket: str, s3: object, *, rows: int = 20) -> str:
     """A stream with rows published and its metadata written and uploaded, as
     its first `serve` leaves it. Its `stream_id`."""
-    stream = streamcast.Stream.new(
-        "t", root=root, schema=SCHEMA, published=bucket, s3_options=s3
+    stream = streamcast.Stream.open(
+        "t", create=True, root=root, schema=SCHEMA, published=bucket, s3_options=s3
     )
     try:
         await stream.send_many([{"i": i} for i in range(rows)])
@@ -84,8 +84,13 @@ class TestLostMetadataIsAdopted:
         first = await _served(tmp_path, bucket, s3)
         _lose_metadata(tmp_path)
 
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             stream.ensure_metadata()  # what `serve` does before it listens
@@ -151,12 +156,17 @@ class TestLostMetadataIsAdopted:
         # Only the first log is known to a home without metadata, and it is
         # sealed: refused, once the copy that says what follows it is home.
         with pytest.raises(ValueError, match="t-v2"):
-            streamcast.Stream.new(
-                "t", root=tmp_path, schema=V2, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path,
+                schema=V2,
+                published=bucket,
+                s3_options=s3,
             )
 
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=V2, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path, schema=V2, published=bucket, s3_options=s3
         )
         try:
             assert stream.log is not None
@@ -207,12 +217,22 @@ class TestLostMetadataIsAdopted:
         _lose_metadata(tmp_path)
 
         with pytest.raises(ValueError, match="run this again"):
-            streamcast.Stream.new(
-                "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path,
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             assert stream.retirement == before.retirement
@@ -224,8 +244,13 @@ class TestLostMetadataIsAdopted:
     async def test_a_stream_with_no_metadata_anywhere_gets_a_new_id(
         self, tmp_path, bucket, s3
     ):
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             stream.ensure_metadata()
@@ -372,8 +397,13 @@ class TestNewRefusesToReplaceAPublishedStream:
         first = await _served(tmp_path / "a", bucket, s3)
 
         with pytest.raises(FileExistsError, match=r"Stream\.restore"):
-            streamcast.Stream.new(
-                "t", root=tmp_path / "b", schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path / "b",
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
         assert not (tmp_path / "b" / "t").exists(), "nothing created on the new box"
@@ -392,8 +422,13 @@ class TestNewRefusesToReplaceAPublishedStream:
 
     async def test_a_published_table_with_no_metadata_yet(self, tmp_path, bucket, s3):
         # Published and never served: no metadata at the prefix, only the table.
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path / "a", schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path / "a",
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             await stream.send_many([{"i": i} for i in range(5)])
@@ -407,15 +442,25 @@ class TestNewRefusesToReplaceAPublishedStream:
             await stream.aclose()
 
         with pytest.raises(FileExistsError, match=r"Stream\.restore"):
-            streamcast.Stream.new(
-                "t", root=tmp_path / "b", schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path / "b",
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
     async def test_a_stream_served_before_its_first_publish(self, tmp_path, bucket, s3):
         # The metadata is at the prefix and the table is still empty: litelink
         # has nothing of its own to refuse, so this one is streamcast's.
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path / "a", schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path / "a",
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             await stream.send_many([{"i": i} for i in range(5)])
@@ -425,8 +470,13 @@ class TestNewRefusesToReplaceAPublishedStream:
 
         first = _published(bucket, s3).stream_id
         with pytest.raises(FileExistsError, match=r"Stream\.restore"):
-            streamcast.Stream.new(
-                "t", root=tmp_path / "b", schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path / "b",
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
         assert _published(bucket, s3).stream_id == first
@@ -438,8 +488,13 @@ class TestNewRefusesToReplaceAPublishedStream:
             sink.write(b"ltx")
 
         with pytest.raises(FileExistsError, match=r"Stream\.restore"):
-            streamcast.Stream.new(
-                "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path,
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
     async def test_a_stream_from_before_its_own_directory(self, tmp_path, bucket, s3):
@@ -461,13 +516,23 @@ class TestNewRefusesToReplaceAPublishedStream:
 
         assert _versions.fetch(bucket, "t", s3) is not None, "at the prefix itself"
         with pytest.raises(FileExistsError, match=r"Stream\.restore"):
-            streamcast.Stream.new(
-                "t", root=tmp_path / "b", schema=SCHEMA, published=bucket, s3_options=s3
+            streamcast.Stream.open(
+                "t",
+                create=True,
+                root=tmp_path / "b",
+                schema=SCHEMA,
+                published=bucket,
+                s3_options=s3,
             )
 
     async def test_an_empty_prefix_is_created_on(self, tmp_path, bucket, s3):
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         await stream.aclose()
 
@@ -480,7 +545,12 @@ class TestNewRefusesToReplaceAPublishedStream:
             raise AssertionError("an existing stream must open without a listing")
 
         monkeypatch.setattr(_versions, "occupied", refused)
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         await stream.aclose()

@@ -35,8 +35,12 @@ def small_batches(monkeypatch):
 
 async def published(root, count: int = ROWS) -> str:
     """A stream of `count` rows, every one published, and its metadata URI."""
-    stream = streamcast.Stream.new(
-        "t", root=root, schema=SCHEMA, published=(root / "published").as_uri()
+    stream = streamcast.Stream.open(
+        "t",
+        create=True,
+        root=root,
+        schema=SCHEMA,
+        published=(root / "published").as_uri(),
     )
     try:
         await stream.send_many([{"i": i, "side": i % 2} for i in range(count)])

@@ -93,13 +93,18 @@ keyword passed through — `ssl`, `ping_interval`, `process_request`, `max_queue
 rest behave exactly as they do there, and `serve` returns an object that proxies
 `websockets.Server` (`sockets`, `serve_forever`, `connections`, `is_serving`).
 
+`Stream.open` requires an existing local log by default. Servers pass `create=True`
+to create a stream only when it exists nowhere. A published replica with no local log
+is refused unless `restore=True`; stop the old writer before restoring on another
+machine. An empty prefix gives `FileNotFoundError` from `Stream.restore`.
+
 **`publish` has no `websockets` counterpart**; it is streamcast's, shaped like `connect`
 so it reads the same way. WebSocket itself has no verbs — the protocol is frames, and
 both subscribing and publishing here are URL conventions on top of it.
 
 ```python
 streamcast.Stream(name="", *, log=None, owns_log=False, max_replay=100_000)
-streamcast.Stream.new(name="", *, root, schema, sort_by=None, config=None,
+streamcast.Stream.open(name="", *, root, schema, create=False, restore=False, sort_by=None, config=None,
                       published=None, s3_options=None, replay_published=False,
                       max_replay=100_000)                     # None = no bound
     await stream.send(row) -> int | None       # durable, then fan out
@@ -220,7 +225,7 @@ SCHEMA = {
 
 async def main():
     # Creates the stream in data/trades/, or opens it if it is already there.
-    stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+    stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
                                    sort_by=("event_ts",))
 
     # Fan-out, sealing and compaction; replicate=True also starts WAL shipping.
@@ -248,7 +253,7 @@ opt-in. Streams with different `S3Options` get separate child processes;
 maintainer nothing ever seals — litelink is explicit that *"a maintainer is not
 optional"*.
 
-`Stream.new` creates or opens the log; `Stream(log=handle)` takes one you opened
+`Stream.open` creates or opens the log; `Stream(log=handle)` takes one you opened
 yourself and reads its frontier. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you
 want it.
 
@@ -375,7 +380,7 @@ log: no subscribe is refused for reaching too far back, and the server reads the
 table on the subscriber's behalf.
 
 ```python
-stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
                                published="s3://bucket/prefix",
                                replay_published=True, max_replay=None)
 ```
@@ -514,7 +519,7 @@ On a stream served with `exactly_once=True`, a publisher that names itself has i
 deduped by the broker:
 
 ```python
-stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA, exactly_once=True)
+stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA, exactly_once=True)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
     seq = out.info.publisher.last_seq + 1   # where the broker has this publisher

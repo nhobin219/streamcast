@@ -49,9 +49,11 @@ def streams(
     root: Path,
 ) -> tuple[streamcast.Stream, streamcast.Stream, streamcast.Stream]:
     return (
-        streamcast.Stream.new("logs", root=root, schema=logs.SCHEMA),
-        streamcast.Stream.new("spans", root=root, schema=spans.SCHEMA),
-        streamcast.Stream.new("metrics", root=root, schema=metrics.SCHEMA),
+        streamcast.Stream.open("logs", create=True, root=root, schema=logs.SCHEMA),
+        streamcast.Stream.open("spans", create=True, root=root, schema=spans.SCHEMA),
+        streamcast.Stream.open(
+            "metrics", create=True, root=root, schema=metrics.SCHEMA
+        ),
     )
 
 

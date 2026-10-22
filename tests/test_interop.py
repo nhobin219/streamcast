@@ -210,8 +210,12 @@ class TestTheMarks:
         ours = [interop_peer.row(i) for i in indices]
 
         async def dedupe() -> None:
-            stream = streamcast.Stream.new(
-                "trades", root=root, schema=interop_peer.SCHEMA, exactly_once=True
+            stream = streamcast.Stream.open(
+                "trades",
+                create=True,
+                root=root,
+                schema=interop_peer.SCHEMA,
+                exactly_once=True,
             )
             async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as s:
                 uri = f"ws://127.0.0.1:{s.sockets[0].getsockname()[1]}/trades"
@@ -221,8 +225,12 @@ class TestTheMarks:
             await stream.aclose()
 
         async def reopened() -> tuple[int, int | None]:
-            stream = streamcast.Stream.new(
-                "trades", root=root, schema=interop_peer.SCHEMA, exactly_once=True
+            stream = streamcast.Stream.open(
+                "trades",
+                create=True,
+                root=root,
+                schema=interop_peer.SCHEMA,
+                exactly_once=True,
             )
             try:
                 writer = stream._writer  # noqa: SLF001

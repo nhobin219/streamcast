@@ -1,9 +1,8 @@
 """One end of a cross-version pair, run by `tests/test_interop.py`.
 
 The same file runs under this checkout and under an older streamcast installed
-from PyPI into a virtualenv of its own, so it uses only the API every version
-the test pairs has in common: `Stream.new`, `serve`, `publish`, `connect` and
-`Stream.snapshot`. It imports nothing from `tests`, and is run with `python -I`
+from PyPI into a virtualenv of its own. The factory dispatches to that version's
+API; `serve`, `publish`, `connect` and `Stream.snapshot` are shared. It imports nothing from `tests`, and is run with `python -I`
 so the interpreter's own streamcast is the one it imports, never this tree's.
 
     python -I interop_peer.py server ROOT     prints the URI, serves until stdin closes
@@ -42,7 +41,16 @@ def row(i: int) -> dict[str, object]:
 async def server(root: str) -> None:
     # SEALED rows in the published table before serving, so a snapshot reads
     # this version's metadata, manifest and Parquet, not only the broker's tail.
-    stream = streamcast.Stream.new("trades", root=root, schema=SCHEMA)
+    # The helper also runs under releases with the pre-0.24 factory. This is
+    # test-only version dispatch; the library exposes just `open`.
+    factory = getattr(streamcast.Stream, "open", None)
+    if factory is None:
+        old_factory = getattr(streamcast.Stream, "new", None)
+        assert old_factory is not None
+        stream = old_factory("trades", root=root, schema=SCHEMA)
+    else:
+        stream = factory("trades", create=True, root=root, schema=SCHEMA)
+
     await stream.send_many([row(-i) for i in range(SEALED, 0, -1)])
     assert stream.log is not None
     while stream.log.seal(flush=True) is not None:

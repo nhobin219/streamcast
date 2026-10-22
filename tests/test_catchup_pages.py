@@ -31,8 +31,9 @@ MAX_REPLAY = 50
 @pytest.fixture
 async def published(tmp_path):
     """A stream whose every row is published, and that replays only `MAX_REPLAY`."""
-    stream = streamcast.Stream.new(
+    stream = streamcast.Stream.open(
         "t",
+        create=True,
         root=tmp_path,
         schema=SCHEMA,
         published=(tmp_path / "published").as_uri(),

@@ -191,7 +191,7 @@ class TestItIsTheServersToFill:
             "required": [*SCHEMA_JSON.get("required", []), _log.STAMP],
         }
         with pytest.raises(ValueError, match="another name"):
-            streamcast.Stream.new("trades", root=tmp_path, schema=schema)
+            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=schema)
 
     def test_a_column_by_that_name_of_another_type_is_refused(self, tmp_path):
         handle = litelink.new(
@@ -207,7 +207,9 @@ class TestItIsTheServersToFill:
 
 class TestLogsWithoutIt:
     async def test_stream_new_creates_every_log_with_it(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         try:
             assert stream.log is not None
             assert stream.log.schema.names[-1] == _log.STAMP
@@ -221,10 +223,14 @@ class TestLogsWithoutIt:
             await stream.aclose()
 
     async def test_reopening_a_stamped_log_accepts_the_same_declaration(self, tmp_path):
-        first = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        first = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         await first.aclose()
 
-        again = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        again = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         await again.aclose()
 
     async def test_a_log_without_it_opens_and_is_left_alone(self, tmp_path):
@@ -232,7 +238,9 @@ class TestLogsWithoutIt:
         # column is not a side effect an open should have.
         litelink.new(tmp_path, "trades", schema=SCHEMA).close()
 
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         try:
             assert stream.log is not None
             assert _log.STAMP not in stream.log.schema.names

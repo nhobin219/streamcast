@@ -116,7 +116,7 @@ not. It is monotonic in offset only while the server's clock is.
 **One value per send.** A `send_many` shares one stamp across its rows.
 Group commit may combine several sends, each with its own queue-time stamp.
 
-Stamped only on a log that has the column. `Stream.new` creates every log with
+Stamped only on a log that has the column. `Stream.open` creates every log with
 it, but a log from before it existed, or a handle a caller opened and passed in,
 may not — and that log's shape is not this library's to change.
 """
@@ -173,7 +173,7 @@ def columns(log: Readable) -> tuple[str, ...]:
 def declared(schema: pa.Schema) -> pa.Schema:
     """The application's columns: `schema` without the ones streamcast owns.
 
-    What a subscriber is told in the greeting, and what `Stream.new` compares a
+    What a subscriber is told in the greeting, and what `Stream.open` compares a
     declaration against. Filtered here as well as in `columns` because the two
     are read from the same `log.schema` by different expressions, and filtering
     only one tells a subscriber about a column no frame will ever carry.
