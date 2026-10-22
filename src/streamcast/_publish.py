@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from streamcast._client import _refusal
 from streamcast._codec import from_greeting
@@ -262,6 +263,21 @@ class Publication:
                         raise
 
                     raise refusal from closed
+                except Exception as exc:
+                    self._unowed(done)
+                    if self._connection.protocol.state is State.OPEN:
+                        raise
+
+                    # Anything else from a connection that is no longer open
+                    # is the connection being gone, raised as websockets'
+                    # own exception for it: a publisher reconnects on that,
+                    # and dies on anything else. websockets' `send_context`
+                    # aborts the transport before raising it, and on an
+                    # asyncio transport whose `connection_lost` already ran
+                    # the abort raises AttributeError instead (#106).
+                    closed = self._connection.protocol.close_exc
+                    refusal = _refusal(closed, stream=self._stream, offset=None)
+                    raise (closed if refusal is None else refusal) from exc
                 except BaseException:
                     self._unowed(done)
                     raise
@@ -281,10 +297,15 @@ class Publication:
 
         Removed by identity, not popped: when the connection closes, the
         reader may already have failed and removed every pending future,
-        this one included, before the write raises here.
+        this one included, before the write raises here. Its failure is then
+        retrieved: the send raises the connection's end itself, and `done` is
+        never handed out, so asyncio would log it as never retrieved.
         """
         with contextlib.suppress(ValueError):
             self._pending.remove(done)
+
+        if done.done() and not done.cancelled():
+            done.exception()
 
     def _settled(self, _done: asyncio.Future[list[int | None]]) -> None:
         """An acknowledgement, or its failure: free the window."""
