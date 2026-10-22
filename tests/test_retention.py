@@ -80,7 +80,7 @@ async def offsets(root) -> list[int]:
 
 async def one_log(tmp_path, monkeypatch) -> streamcast.Stream:
     """Three rows two days old, three rows new; a window of a day."""
-    stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+    stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
     await write(stream, monkeypatch, T0, [0, 1, 2])
     await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
     stream.ensure_metadata()
@@ -94,7 +94,7 @@ NOW = T0 + 2 * DAY + 60_000_000
 
 class TestTheSetting:
     async def test_it_is_off_unless_set(self, tmp_path, monkeypatch):
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             stream.ensure_metadata()
@@ -109,7 +109,7 @@ class TestTheSetting:
         assert await offsets(tmp_path) == [1, 2, 3]
 
     async def test_it_is_recorded_and_can_be_cleared(self, tmp_path):
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         await stream.aclose()
 
         streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
@@ -159,7 +159,7 @@ class TestTheLiveLog:
     ):
         """The floor is the first row newer than the cutoff, not the last
         older one: an old stamp after a new one is kept."""
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             await write(stream, monkeypatch, T0, [0])
             await write(stream, monkeypatch, T0 + 2 * DAY, [1])
@@ -207,7 +207,7 @@ class TestRetiredLogs:
     async def test_one_wholly_older_is_dropped_then_deleted(
         self, tmp_path, monkeypatch
     ):
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         await write(stream, monkeypatch, T0, [0, 1, 2])
         stream.ensure_metadata()
         await stream.aclose()
@@ -233,8 +233,9 @@ class TestRetiredLogs:
     async def test_one_the_floor_cuts_through_is_truncated(self, tmp_path, monkeypatch):
         """Whole files only: `retire` folds unfinished files into one, so the
         target is small enough that each sealed file is a finished one."""
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "t",
+            create=True,
             root=tmp_path,
             schema=SCHEMA,
             config=litelink.LogConfig(target_compact_size=256),
@@ -328,7 +329,7 @@ class TestRaces:
     ):
         """Nothing newer than the cutoff, and a row lands between the query
         and the end it reads: that row must not be under the floor."""
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             stream.ensure_metadata()
@@ -430,8 +431,9 @@ class TestAFailedSecondHalf:
     ):
         """Between `finish`'s truncate and its commit — a conflict, a crash —
         the log is short; it must not read as published short meanwhile."""
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "t",
+            create=True,
             root=tmp_path,
             schema=SCHEMA,
             config=litelink.LogConfig(target_compact_size=256),
@@ -471,8 +473,13 @@ class TestThePublishedCopy:
         prefix, so the floor reaches it before the home: if it cannot, the
         home does not record a grace those readers never had — not even once
         a later commit carries the same state there."""
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
@@ -523,8 +530,13 @@ class TestThePublishedCopy:
         was. `serve` syncs the published copy at start; built on that, it
         would publish the stream without its floor while the home still
         deletes below it, with no grace for those readers."""
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.Stream.open(
+            "t",
+            create=True,
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
         )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])

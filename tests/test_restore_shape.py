@@ -38,8 +38,8 @@ def row(i: int) -> dict[str, object]:
 
 class TestTheMetadataRecordsTheSort:
     async def test_a_new_stream_records_it(self, tmp_path):
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
         )
         try:
             stream.ensure_metadata()
@@ -54,8 +54,8 @@ class TestTheMetadataRecordsTheSort:
         ] == list(SORT_BY)
 
     async def test_a_file_from_before_it_gets_it_at_the_next_serve(self, tmp_path):
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
         )
         try:
             stream.ensure_metadata()
@@ -79,8 +79,8 @@ class TestTheMetadataRecordsTheSort:
 
     async def test_the_recorded_shape_is_the_logs_exactly(self, tmp_path):
         """Binary encodings and system columns included: what Iceberg loses."""
-        stream = streamcast.Stream.new(
-            "t", root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
         )
         try:
             stream.ensure_metadata()
@@ -99,8 +99,9 @@ class TestTheMetadataRecordsTheSort:
 class TestRestoringIt:
     async def _lost_box(self, root, bucket, s3) -> None:
         """A stream with no WAL replication, published, and then its box gone."""
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "t",
+            create=True,
             root=root,
             schema=SCHEMA,
             sort_by=SORT_BY,
@@ -186,7 +187,7 @@ class TestRestoringIt:
 
 class TestReviving:
     async def test_config_reaches_the_new_log(self, tmp_path):
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             await stream.send(row(0))
         finally:

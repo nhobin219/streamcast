@@ -1,6 +1,6 @@
 """A stream reopened with `s3_options` reads its published table with THEM.
 
-`Stream.new` passed its options to `litelink.new`, which creates a log, and
+`Stream.open` passed its options to `litelink.new`, which creates a log, and
 not to `litelink.open`, which reopens one. A reopened log then resolved its
 credentials from the environment. Where the environment holds another
 store's key — a server whose streams publish to different buckets — every
@@ -24,8 +24,8 @@ SCHEMA = {
 
 
 async def _published_stream(root, bucket, s3) -> None:
-    stream = streamcast.Stream.new(
-        "t", root=root, schema=SCHEMA, published=bucket, s3_options=s3
+    stream = streamcast.Stream.open(
+        "t", create=True, root=root, schema=SCHEMA, published=bucket, s3_options=s3
     )
     try:
         await stream.send_many([{"i": i} for i in range(20)])
@@ -56,8 +56,13 @@ async def test_a_reopened_stream_reads_with_its_own_options(
             monkeypatch.delenv(name, raising=False)
 
     explicit = dataclasses.replace(s3)  # the stream's own, passed explicitly
-    reopened = streamcast.Stream.new(
-        "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=explicit
+    reopened = streamcast.Stream.open(
+        "t",
+        create=True,
+        root=tmp_path,
+        schema=SCHEMA,
+        published=bucket,
+        s3_options=explicit,
     )
     try:
         # What `serve` does for every stream before it listens.

@@ -203,8 +203,9 @@ class TestTheMarkIsDurable:
         """After a restart only the table is left: a duplicate AT the mark gets
         its offset back, an older one gets `None` (the ranges were memory)."""
         root = tmp_path / "data"
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "trades",
+            create=True,
             root=root,
             schema=streamcast.from_arrow(SCHEMA),
             exactly_once=True,
@@ -212,8 +213,9 @@ class TestTheMarkIsDurable:
         await claimed(stream, "a", 1, [trade(0), trade(1), trade(2)])
         await stream.aclose()
 
-        reopened = streamcast.Stream.new(
+        reopened = streamcast.Stream.open(
             "trades",
+            create=True,
             root=root,
             schema=streamcast.from_arrow(SCHEMA),
             exactly_once=True,
@@ -257,8 +259,8 @@ class TestTheMarkIsDurable:
     async def test_migrate_carries_the_marks_to_the_new_log(self, tmp_path):
         root = tmp_path / "data"
         schema = streamcast.from_arrow(SCHEMA)
-        stream = streamcast.Stream.new(
-            "trades", root=root, schema=schema, exactly_once=True
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=root, schema=schema, exactly_once=True
         )
         await claimed(stream, "a", 1, [trade(0), trade(1)])
         await stream.aclose()
@@ -283,8 +285,8 @@ class TestTheMarkIsDurable:
 
         root = tmp_path / "data"
         schema = streamcast.from_arrow(SCHEMA)
-        stream = streamcast.Stream.new(
-            "trades", root=root, schema=schema, exactly_once=True
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=root, schema=schema, exactly_once=True
         )
         await claimed(stream, "a", 1, [trade(0)])
         await stream.aclose()

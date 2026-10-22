@@ -214,7 +214,9 @@ class TestTheStreamOwnsItsLog:
     """`root=` + `schema=` — the whole reason a caller imports one thing."""
 
     async def test_it_creates_the_log(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         try:
             assert stream.durable
             assert (
@@ -230,7 +232,9 @@ class TestTheStreamOwnsItsLog:
             await stream.aclose()
 
     async def test_it_reopens_an_existing_one_and_continues_the_offsets(self, tmp_path):
-        first = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        first = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         await first.send_many(
             [{"event_ts": i, "price": 1.0, "side": 0, "live": True} for i in range(5)]
         )
@@ -238,7 +242,9 @@ class TestTheStreamOwnsItsLog:
 
         # A restart. `new` would raise FileExistsError; the offsets must
         # continue, never restart.
-        second = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        second = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         try:
             assert second.end_offset == 6
         finally:
@@ -250,14 +256,16 @@ class TestTheStreamOwnsItsLog:
         Every send would then be validated against columns the caller never
         wrote down — the failure this convenience would otherwise introduce.
         """
-        await streamcast.Stream.new("trades", root=tmp_path, schema=TRADES).aclose()
+        await streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        ).aclose()
 
         other = {
             "properties": {"different": {"type": "string"}},
             "required": ["different"],
         }
         with pytest.raises(ValueError, match="has columns"):
-            streamcast.Stream.new("trades", root=tmp_path, schema=other)
+            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=other)
 
     async def test_a_log_it_was_handed_is_not_closed(self, log):
         # The caller may be sharing it. A library that closes a borrowed
@@ -278,21 +286,24 @@ class TestTheStreamOwnsItsLog:
         runtime one, and this records that it is structural.
         """
         with pytest.raises(TypeError):
-            streamcast.Stream.new(
+            streamcast.Stream.open(
                 "trades",
+                create=True,
                 log=object(),  # ty: ignore[unknown-argument]
                 root=tmp_path,
                 schema=TRADES,
             )
 
         with pytest.raises(TypeError):
-            streamcast.Stream.new("trades", root=tmp_path)  # ty: ignore[missing-argument]
+            streamcast.Stream.open("trades", create=True, root=tmp_path)  # ty: ignore[missing-argument]
 
         with pytest.raises(TypeError):
-            streamcast.Stream.new("trades", schema=TRADES)  # ty: ignore[missing-argument]
+            streamcast.Stream.open("trades", create=True, schema=TRADES)  # ty: ignore[missing-argument]
 
     async def test_serve_closes_a_log_the_stream_created(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False):
             await stream.send({"event_ts": 1, "price": 1.0, "side": 0, "live": True})
 
@@ -306,7 +317,9 @@ class TestTheGreetingPublishesIt:
     async def test_a_subscriber_learns_the_columns_without_this_repo(
         self, serve, tmp_path
     ):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as sub:
                 assert sub.info.schema == from_arrow(to_arrow(TRADES))
@@ -324,7 +337,9 @@ class TestTheGreetingPublishesIt:
     async def test_it_is_readable_by_a_plain_websocket_client(self, serve, tmp_path):
         import websockets
 
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         async with serve(stream) as uri:
             async with websockets.connect(uri) as raw:
                 greeting = json.loads(await raw.recv())
@@ -352,7 +367,9 @@ class TestRequiredIsEnforced:
     """
 
     async def test_a_missing_required_column_is_refused(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         try:
             with pytest.raises(ValueError, match="non-nullable"):
                 await stream.send({"price": 1.0, "side": 0, "live": True})
@@ -363,7 +380,9 @@ class TestRequiredIsEnforced:
     async def test_an_explicit_none_in_a_required_column_is_refused(self, tmp_path):
         # The other way to violate it, and litelink tells them apart:
         # "Absent from the row" against "Supplied as None".
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         try:
             with pytest.raises(ValueError, match="Supplied as None"):
                 await stream.send(
@@ -374,7 +393,9 @@ class TestRequiredIsEnforced:
             await stream.aclose()
 
     async def test_an_optional_column_may_be_omitted_or_null(self, tmp_path):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         try:
             assert (
                 await stream.send(
@@ -398,7 +419,9 @@ class TestRequiredIsEnforced:
     async def test_nothing_is_broadcast_when_a_row_is_refused(self, serve, tmp_path):
         # The refusal happens inside `append`, before the fan-out — so a
         # subscriber never sees a row the log rejected.
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=TRADES)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=TRADES
+        )
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             with pytest.raises(ValueError, match="non-nullable"):
                 await stream.send({"price": 1.0, "side": 0, "live": True})

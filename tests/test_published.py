@@ -354,7 +354,7 @@ class TestTheReadCache:
             "properties": {"i": {"type": "integer"}},
             "required": ["i"],
         }
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=schema)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=schema)
         await stream.send_many([{"i": i} for i in range(3)])
         assert stream.log is not None
         while stream.log.seal(flush=True) is not None:

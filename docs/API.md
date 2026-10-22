@@ -12,7 +12,7 @@ from streamcast import Cursor, EARLIEST, Maintain, Stream, Subscription, to_arro
 `Stream` creates the log, while `serve` maintains and replicates it:
 
 ```python
-stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA)
+stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
 
 async with streamcast.serve(stream, "localhost", 8765):
     await stream.send({"event_ts": ..., "price": ...})
@@ -64,7 +64,7 @@ streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
                   max_replay=100_000, group_commit=True, exactly_once=False,
                   max_publishers=4096)
 
-streamcast.Stream.new(name="", *, root, schema,          # creates or opens the log
+streamcast.Stream.open(name="", *, root, schema, create=False, restore=False,
                       sort_by=None, config=None, published=None, s3_options=None,
                       replay_published=False, group_commit=True,
                       max_replay=100_000, exactly_once=False)
@@ -84,8 +84,15 @@ streamcast.Stream.ingest(name="", source, *, root, s3_options=None,  # Arrow, in
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**`Stream.new` creates or reopens a log**, passing `sort_by`, `config`, `published` and
-`s3_options` to litelink on creation. An existing log keeps its stored configuration
+**`Stream.open` opens an existing log and checks its declaration.** With
+`create=True` it creates only when neither disk nor published prefix holds the stream,
+passing `sort_by`, `config`, `published` and `s3_options` to litelink on creation.
+A missing local log with a published replica raises `FileExistsError` unless
+`restore=True` is passed; it then restores before opening. An absent stream raises
+`FileNotFoundError` unless `create=True`. An unreachable store propagates its error.
+`Stream.restore` on an empty prefix raises `FileNotFoundError`.
+Stop the old writer before restoring on another machine.
+ An existing log keeps its stored configuration
 and published location. The plain
 initialiser takes a handle you already opened and reads its frontier. `s3_options` is
 passed to litelink on creation and reopening, and retained for metadata uploads and child
@@ -119,7 +126,7 @@ consequence: JSON has no NaN or infinity, so a non-finite float sent on such a s
 subscribers as `null`. Declare a schema to have it refused instead.
 
 ```python
-stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
+stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
                                sort_by=("event_ts",))
 ```
 
@@ -127,7 +134,7 @@ stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA,
 at construction to fix the key order on the wire.
 
 **Who closes it depends on who opened it.** `aclose` closes a log the `Stream` owns —
-which `Stream.new` sets — and never one passed to the initialiser, since that one stays
+which `Stream.open` sets — and never one passed to the initialiser, since that one stays
 yours, for a process that also reads or writes it through litelink. Pass `owns_log=True`
 alongside `log=` to hand over the lifetime of a handle you opened. An existing log is checked against
 a declared `schema=` rather than adopted, because a declaration that disagreed with the
@@ -335,7 +342,7 @@ in the greeting: the hint when one is present. The rolling-upgrade pairs exercis
 by CI are listed in [`tests/test_interop.py`](../tests/test_interop.py); the 0.20.1
 [CHANGELOG](../CHANGELOG.md) entry describes the upgrade order around 0.20.0.
 
-The upload uses the `s3_options=` the stream was created with (`Stream.new`, `Stream.migrate`,
+The upload uses the `s3_options=` the stream was created with (`Stream.open`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
 an earlier release gets its file on its first `serve`, and a version-1 file is rewritten
 as version 2. A `Stream(log=…)` handed a log the
@@ -491,7 +498,7 @@ platform litelink ships no binary for.
 **Both subprocesses get the stream's `S3Options`, through their environment.** litelink
 never persists credentials, so a child that opens a log by name has no other way to learn
 them. `serve` starts each child with the variables below set from the `S3Options` the
-`Stream` was given (`Stream.new(..., s3_options=)`), laid over the server's own
+`Stream` was given (`Stream.open(..., create=True, s3_options=)`), laid over the server's own
 environment. Explicit keys also remove an inherited `AWS_SESSION_TOKEN`, which belongs to
 other keys. A field you leave unset is left to that environment, so a profile, instance
 metadata or SSO all work untouched, and a stream with no `S3Options` resolves in its
@@ -611,7 +618,7 @@ the host app is running and restating them here would be two places to set one t
 
 **`async with` is what starts the maintainers and closes the streams, and it is
 required.** It is the mounted twin of what `serve`'s `wait_closed` does: children
-stopped, then `aclose` on each stream, which closes a log `Stream.new` opened and leaves
+stopped, then `aclose` on each stream, which closes a log `Stream.open` opened and leaves
 a handed-in handle alone. Starlette does not run
 a mounted sub-app's lifespan — documented behaviour, not a bug — so an app relying on
 lifespan events alone starts no maintainer once mounted, and a log with nothing sealing it
@@ -723,7 +730,7 @@ once** — see below and [`SPEC.md`](SPEC.md) §6b.
 ### Exactly-once: `publisher=`
 
 ```python
-stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA, exactly_once=True)
+stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA, exactly_once=True)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
     out.info.publisher -> PublisherMark(id, last_seq, last_offset)   # where the broker has us
@@ -1225,11 +1232,11 @@ SCHEMA = {
     "required": ["event_ts", "price", "amount", "side"],
 }
 
-stream = streamcast.Stream.new("trades", root="data", schema=SCHEMA, sort_by=("event_ts",))
+stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA, sort_by=("event_ts",))
 ```
 
 `Stream` creates the log at `root/name` if it is not there and opens it if it is — the
-`new`/`open` dance every server writes — and **closes it on `aclose`, because it opened
+create-or-open choice every server makes — and **closes it on `aclose`, because it opened
 it.** A log you open yourself and pass as `log=` stays yours, closed by you. Passing both
 is refused.
 
@@ -1376,7 +1383,7 @@ from then on. Then `trades-v2` is created with the new schema, starting at exact
 offset the old log ended at. A new version of the metadata in
 `root/trades/trades.metadata/` (and one beside the published tables, when they are on
 S3) records the sequence. A migration that dies partway finishes on the rerun. Migration
-introduces no gap at the seam. `Stream.new` and `Stream.restore` open whichever log the
+introduces no gap at the seam. `Stream.open` and `Stream.restore` open whichever log the
 metadata names as current.
 
 It is **idempotent**: a stream whose current log already has that schema and every
@@ -1504,7 +1511,7 @@ it refuses writers for good, and records it in `metadata.json`: when (`at`, UTC
 microseconds), where the log ended, its `sort_by` and its `streamcast_ts` span, locally
 and beside the tables. A retire that dies partway finishes on the rerun.
 
-**A retired stream is read-only, and still served.** `new` and `migrate` open its log for
+**A retired stream is read-only, and still served.** `open` and `migrate` open its log for
 reading and set `stream.retirement`. Subscribers replay and catch up, always from the
 published table, its only copy; a `live` view sees nothing new. A local `send` raises
 `StreamRetired`, a publisher is refused with 4410, and it gets no maintainer or sidecar.

@@ -516,8 +516,9 @@ class TestAMigratedStream:
         Without it, a restore of `trades` rebuilds the stream's FIRST log and
         serves it as though no migration had happened.
         """
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "trades",
+            create=True,
             root=tmp_path / "box_a",
             schema=SCHEMA,
             published=bucket,
@@ -554,7 +555,7 @@ class TestAMigratedStream:
             assert revived.log.name == "trades-v2"
             assert revived.schema is not None
             assert "venue" in revived.schema["properties"]  # ty: ignore[unsupported-operator]
-            # The metadata came down with it, so the next `Stream.new` on
+            # The metadata came down with it, so the next `Stream.open` on
             # this box opens the same log.
             assert (
                 _metadata.load(_metadata.home(tmp_path / "box_b", "trades"), "trades")

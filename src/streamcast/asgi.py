@@ -352,7 +352,7 @@ class _Mounted:
         # replay in flight is reading the log in a worker thread, so closing
         # it first would pull the file out from under a scan. `aclose` is a
         # no-op for a stream whose log was handed in — that one is the
-        # caller's — so this only closes what `Stream.new` opened.
+        # caller's — so this only closes what `Stream.open` opened.
         for stream in self._streams.values():
             await stream.aclose()
 

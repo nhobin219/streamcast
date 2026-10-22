@@ -80,8 +80,8 @@ async def main(
             # on it prune whole files.
             order = (sort_by[name],) if name in sort_by else None
             streams.append(
-                streamcast.Stream.new(
-                    name, root=root, schema=schema(source), sort_by=order
+                streamcast.Stream.open(
+                    name, create=True, root=root, schema=schema(source), sort_by=order
                 )
             )
 

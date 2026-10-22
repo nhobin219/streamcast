@@ -28,7 +28,7 @@ SCHEMA: dict[str, Any] = {
 @pytest.fixture
 async def streams(tmp_path):
     made = [
-        streamcast.Stream.new(name, root=tmp_path, schema=SCHEMA)
+        streamcast.Stream.open(name, create=True, root=tmp_path, schema=SCHEMA)
         for name in ("small", "large")
     ]
     try:

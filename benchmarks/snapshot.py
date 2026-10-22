@@ -81,7 +81,7 @@ def row(i: int) -> dict[str, object]:
 async def build(root: Path, rows: int, logs: int) -> str:
     """A stream of `rows` rows across `logs` logs; its metadata URI."""
     per_log = rows // logs
-    stream = streamcast.Stream.new("trades", root=root, schema=schema(1))
+    stream = streamcast.Stream.open("trades", create=True, root=root, schema=schema(1))
     sent = 0
     for version in range(1, logs + 1):
         if version > 1:

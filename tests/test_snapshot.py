@@ -1,6 +1,6 @@
 """`Stream.snapshot`: a stream's history as of a fixed point, from any machine.
 
-Written with a server's own calls — `Stream.new`, `send`, `migrate` — and read
+Written with a server's own calls — `Stream.open`, `send`, `migrate` — and read
 back with nothing but the metadata file's URI, as another machine would.
 """
 
@@ -49,8 +49,13 @@ async def stream_of(
     published: str | None = None,
     s3_options: litelink.S3Options | None = None,
 ) -> streamcast.Stream:
-    stream = streamcast.Stream.new(
-        "trades", root=root, schema=V1, published=published, s3_options=s3_options
+    stream = streamcast.Stream.open(
+        "trades",
+        create=True,
+        root=root,
+        schema=V1,
+        published=published,
+        s3_options=s3_options,
     )
     await stream.send_many([row(i) for i in range(rows)])
     return stream
@@ -146,7 +151,9 @@ class TestTheBroker:
     async def test_a_gap_neither_side_holds_is_refused_with_both_numbers(
         self, tmp_path, serve
     ):
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1, max_replay=2)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=V1, max_replay=2
+        )
         await stream.send_many([row(i) for i in range(3)])
         assert stream.log is not None
         publish(stream.log)
@@ -214,7 +221,7 @@ class TestAMigratedStream:
     ):
         # One send each, a millisecond apart: `send_many` stamps its whole
         # group with one `streamcast_ts`, which would leave nothing to divide.
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
         for i in range(5):
             await stream.send(row(i))
             await asyncio.sleep(0.001)
@@ -370,7 +377,7 @@ class TestAnEmptyStream:
         self, tmp_path, serve
     ):
         """Not a binder error on the first column the query names."""
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=V1)
+        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
         uri = stream.metadata_uri
         assert uri is not None
         await served_once(stream, serve)

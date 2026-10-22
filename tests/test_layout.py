@@ -32,7 +32,13 @@ WIDER: dict[str, Any] = {
 
 async def made(root, name: str = "t", **kwargs: object) -> None:
     """A stream with three rows and its metadata, then closed."""
-    stream = streamcast.Stream.new(name, root=root, schema=SCHEMA, **kwargs)  # ty: ignore[invalid-argument-type]
+    stream = streamcast.Stream.open(
+        name,
+        create=True,
+        root=root,
+        schema=SCHEMA,
+        **kwargs,  # ty: ignore[invalid-argument-type]
+    )
     try:
         await stream.send_many([{"i": i} for i in range(3)])
         stream.ensure_metadata()
@@ -76,7 +82,7 @@ class TestANewStream:
 
     async def test_it_reopens_where_it_is(self, tmp_path):
         await made(tmp_path)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             assert stream.end_offset == 4
             assert stream.metadata_uri == (
@@ -102,7 +108,7 @@ class TestANewStream:
 class TestAStreamFromBefore:
     async def test_it_keeps_its_layout_through_a_migration(self, tmp_path):
         await legacy(tmp_path)
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             assert stream.end_offset == 4, "found where it was"
         finally:
@@ -124,7 +130,9 @@ class TestAStreamFromBefore:
         litelink.new(
             tmp_path, "flat", schema=_log.with_system(streamcast.to_arrow(SCHEMA))
         ).close()
-        stream = streamcast.Stream.new("own", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "own", create=True, root=tmp_path, schema=SCHEMA
+        )
         await stream.aclose()
 
         assert _metadata.home(tmp_path, "flat") == tmp_path
@@ -138,7 +146,9 @@ class TestThePublishedSide:
         self, tmp_path, s3, bucket
     ):
         await made(tmp_path / "a", published=bucket, s3_options=s3)
-        stream = streamcast.Stream.new("t", root=tmp_path / "a", schema=SCHEMA)
+        stream = streamcast.Stream.open(
+            "t", create=True, root=tmp_path / "a", schema=SCHEMA
+        )
         try:
             assert stream.metadata_uri == f"{bucket}/t/t.metadata/{_versions.HINT}"
         finally:

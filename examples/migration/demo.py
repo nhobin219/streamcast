@@ -103,16 +103,20 @@ def diff(
 async def main(root: Path, *, bug: bool = False, count: int = 200) -> dict[str, Any]:
     """Run the demo under `root`: `count` orders of history, then `count` live."""
     streams = {
-        "orders": streamcast.Stream.new("orders", root=root, schema=stages.ORDERS),
-        "positions": streamcast.Stream.new(
-            "positions", root=root, schema=stages.POSITIONS
+        "orders": streamcast.Stream.open(
+            "orders", create=True, root=root, schema=stages.ORDERS
         ),
-        "alerts": streamcast.Stream.new("alerts", root=root, schema=stages.ALERTS),
-        "positions_v2": streamcast.Stream.new(
-            "positions_v2", root=root, schema=stages.POSITIONS_V2
+        "positions": streamcast.Stream.open(
+            "positions", create=True, root=root, schema=stages.POSITIONS
         ),
-        "alerts_shadow": streamcast.Stream.new(
-            "alerts_shadow", root=root, schema=stages.ALERTS
+        "alerts": streamcast.Stream.open(
+            "alerts", create=True, root=root, schema=stages.ALERTS
+        ),
+        "positions_v2": streamcast.Stream.open(
+            "positions_v2", create=True, root=root, schema=stages.POSITIONS_V2
+        ),
+        "alerts_shadow": streamcast.Stream.open(
+            "alerts_shadow", create=True, root=root, schema=stages.ALERTS
         ),
     }
     # No maintainer: a run this short never fills a log enough to seal it. A

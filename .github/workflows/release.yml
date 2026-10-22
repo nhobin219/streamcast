@@ -125,7 +125,7 @@ jobs:
 
           async def main():
               root = Path(tempfile.mkdtemp())
-              stream = streamcast.Stream.new("trades", root=root, schema=SCHEMA,
+              stream = streamcast.Stream.open("trades", create=True, root=root, schema=SCHEMA,
                                              sort_by=("event_ts",))
               try:
                   server = await streamcast.serve(stream, "127.0.0.1", 0,

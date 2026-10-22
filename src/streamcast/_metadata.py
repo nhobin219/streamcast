@@ -725,7 +725,7 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
             f"metadata in {Path(root) / _versions.directory(stream)} says the "
             f"live log is "
             f"{found.live_log.name!r}. A sealed log is never written to again; "
-            f"open the live one, or use Stream.new, which does."
+            f"open the live one, or use Stream.open, which does."
         )
         raise ValueError(msg)
 

@@ -84,7 +84,7 @@ def published_log(tmp_path, s3, bucket):
     handle = litelink.new(
         tmp_path / "data",
         "trades",
-        # Stamped, because that is the shape `Stream.new` creates and so the
+        # Stamped, because that is the shape `Stream.open` creates and so the
         # shape a published table a consumer catches up from actually has.
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         published=bucket,
@@ -178,8 +178,9 @@ class TestTheFilterHoldsAcrossTheJoin:
             },
             "required": ["to", "n"],
         }
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "inbox",
+            create=True,
             root=tmp_path,
             schema=schema,
             published=bucket,
@@ -465,7 +466,7 @@ class TestTheLogIsNamedInTheGreeting:
     ):
         """A stream's name is not the log's, and its published table is the log's.
 
-        `Stream.new` feeds one name through, so the two agree. `Stream(log=)`
+        `Stream.open` feeds one name through, so the two agree. `Stream(log=)`
         takes a handle the caller opened and named, and nothing makes them
         equal. Catch-up asked the published tables for a table named after the STREAM,
         found nothing, and reported it as a credentials failure — the message
@@ -586,15 +587,16 @@ class TestTheWholeHistoryGateway:
             assert got[0][2]["i"] == 0
 
     async def test_the_factory_takes_it_too(self, tmp_path, s3, bucket, serve):
-        """`Stream.new(replay_published=True)`, rather than opening the handle.
+        """`Stream.open(create=True, replay_published=True)`, rather than opening the handle.
 
         The parameter is named for the replay, not for the tier: `published=`
         sits beside it and already means "where", so two near-identical names
         would be the kind a caller sets one of while meaning the other. Each
         replay passes it to litelink's reads as `published=`.
         """
-        stream = streamcast.Stream.new(
+        stream = streamcast.Stream.open(
             "trades",
+            create=True,
             root=tmp_path / "data",
             schema=SCHEMA,
             published=bucket,

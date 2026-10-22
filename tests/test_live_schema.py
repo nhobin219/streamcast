@@ -61,7 +61,9 @@ class TestTheSameRule:
     async def test_a_bad_row_is_refused_exactly_as_a_log_refuses_it(
         self, row, tmp_path
     ):
-        durable = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA)
+        durable = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA
+        )
         try:
             with pytest.raises(ValueError) as with_log:
                 await durable.send(row)

@@ -606,7 +606,7 @@ It is owned on exactly the terms litelink owns its offset:
 * **Never in the greeting's `schema`**, which is filtered by the same rule.
   Each log's `system_schema` in the metadata file names it instead.
 * **The server's to fill.** A row that carries it is refused rather than
-  overwritten, and a declaration that names it is refused at `Stream.new`.
+  overwritten, and a declaration that names it is refused at `Stream.open`.
 
 **This is not owning the shape, and the line is worth drawing precisely.** The
 design this section argues against owned the ROW — a fixed schema with the
@@ -687,7 +687,7 @@ the saving holds only while that does, and a silent reordering would break I6.
 
 **Which tiers a replay reads was decided when the log was opened.** litelink
 passes `published=` per read, and a server reads staging and the buffer only
-unless `Stream.new(replay_published=True)` says otherwise — serving a replay
+unless `Stream.open(create=True, replay_published=True)` says otherwise — serving a replay
 out of object storage is a long network read held on a worker thread while
 the subscriber's socket sits attached, which is the failure `catch_up` avoids
 by doing the same read client-side with nothing connected. A replay that
@@ -704,7 +704,7 @@ onto the other sits on the side that knows about JSON. Putting it in litelink
 was considered and rejected; it would make a JSON codec part of the public
 surface of a library whose value is being general.
 
-What it buys is an import list of one. `Stream.new(name, root=…, schema=…)` creates
+What it buys is an import list of one. `Stream.open(name, create=True, root=…, schema=…)` creates
 the log, `serve` maintains it (and replicates it, with `replicate=True`), and a caller reaches for neither
 litelink nor pyarrow.
 
@@ -792,7 +792,7 @@ and a microsecond one — which the examples use — is not.
 
 ### An existing log is checked, not adopted
 
-`Stream.new(root=…, schema=…)` opens a log that is already there, and litelink's
+`Stream.open(root=…, create=True, schema=…)` opens a log that is already there, and litelink's
 `open` takes none of the shape: it reads it from disk. So a declaration that
 disagreed would be silently ignored and every send validated against columns
 the caller never wrote down. It is compared and refused instead, which is the
@@ -854,7 +854,7 @@ publish to S3 compares it with the copy there and uploads it if they differ. **A
 is a failure to start.** The file is what a reader on another machine starts
 from, so a stream without one can only be read through its own server, and
 that is better found out at deploy than at the first remote read. It is
-`serve`'s job rather than `Stream.new`'s so that a `Stream(log=…)` gets one
+`serve`'s job rather than `Stream.open`'s so that a `Stream(log=…)` gets one
 too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
 `serve` and nothing about the log changes.
 
@@ -1287,7 +1287,7 @@ may lose it.
 ### Exactly-once: the broker dedupes each publisher on its seq
 
 ```python
-stream = streamcast.Stream.new("orders", root="data", schema=SCHEMA,
+stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA,
                                exactly_once=True)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
@@ -1580,9 +1580,16 @@ the stream's metadata, exactly — an Iceberg schema keeps no Arrow field
 metadata, where a binary column's encoding lives — and litelink checks them
 against the replica or the table.
 
-**`Stream.new` refuses to create a stream where its published prefix already
+**`Stream.open` opens an existing local log by default.** `create=True` permits
+creation only when neither disk nor published prefix holds the stream. With neither
+copy and no creation request it raises `FileNotFoundError`, naming where it looked.
+`restore=True` restores a published replica only when the local log is absent; it
+does not imply creation. Both flags default to False. `Stream.restore` raises
+`FileNotFoundError` on an empty prefix. Store errors propagate, never count as absence.
+
+**`Stream.open` refuses to create a stream where its published prefix already
 holds it.** That means its metadata, its first log's table, or that log's WAL
-replica, and the refusal is a `FileExistsError` naming `Stream.restore`. It
+replica, and the refusal is a `FileExistsError` naming `restore=True` and `Stream.restore`. It
 looks only when the stream is not on this disk, with one metadata read and a
 one-level listing. Creating an empty one there was the ordinary startup on a
 box that lost its disk. Its first `serve` uploaded the empty stream's

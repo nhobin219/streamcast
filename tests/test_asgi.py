@@ -41,7 +41,7 @@ from streamcast.asgi import _Peer, asgi  # noqa: E402
 # backpressure, so the rows are large and the stalled client's own queue is 1.
 BULK = "x" * 65_536
 
-# `Stream.new` declares in JSON Schema; conftest's `SCHEMA` is the Arrow one.
+# `Stream.open` declares in JSON Schema; conftest's `SCHEMA` is the Arrow one.
 SCHEMA_JSON = {
     "type": "object",
     "properties": {name: {"type": "number"} for name in ("event_ts", "price")},
@@ -404,7 +404,9 @@ class TestTheChildren:
         start no maintainer once mounted, and a log with nothing sealing it is
         the one failure this library says out loud it must never allow.
         """
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         try:
             streams = asgi(stream, replicate=False)
             async with streams:
@@ -422,12 +424,14 @@ class TestTheChildren:
     async def test_leaving_the_block_closes_a_log_it_opened(self, tmp_path):
         """Symmetry with `serve`, which closes its streams on shutdown.
 
-        A stream built by `Stream.new` owns its log, so something has to close
+        A stream built by `Stream.open` owns its log, so something has to close
         it; `aclose` is a no-op for a handle the caller passed in. Without this
         a mounted app would leak the log it opened, and the leak is invisible
         until a second process tries to write.
         """
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         async with asgi(stream, maintain=False, replicate=False):
             await stream.send({"event_ts": 1.0, "price": 2.0})
 
@@ -447,7 +451,9 @@ class TestTheChildren:
         the one place the two halves could disagree: children owned by the
         host app's lifespan, routing owned by the mount.
         """
-        stream = streamcast.Stream.new("trades", root=tmp_path, schema=SCHEMA_JSON)
+        stream = streamcast.Stream.open(
+            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        )
         try:
             streams = asgi(stream, replicate=False)
 

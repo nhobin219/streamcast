@@ -74,7 +74,7 @@ def plain(value: object) -> object:
 
 
 async def test_a_browser_websocket_reads_and_writes_a_stream(tmp_path, serve, node):
-    stream = streamcast.Stream.new("otel", root=tmp_path, schema=SCHEMA)
+    stream = streamcast.Stream.open("otel", create=True, root=tmp_path, schema=SCHEMA)
     await stream.send_many([row(1), row(2)])
 
     published = row(3)

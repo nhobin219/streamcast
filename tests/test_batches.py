@@ -259,7 +259,7 @@ class TestAgainstAServer:
     async def test_the_queue_it_looks_at_is_websockets(self, tmp_path, serve):
         """`_arrived` reads a private queue: this is what says the installed
         `websockets` still keeps it where it did, and pops it the same way."""
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -278,7 +278,7 @@ class TestAgainstAServer:
             await stream.aclose()
 
     async def test_every_row_once_in_order_within_the_limit(self, tmp_path, serve):
-        stream = streamcast.Stream.new("t", root=tmp_path, schema=SCHEMA)
+        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
         await stream.send_many([{"i": i} for i in range(300)])
         try:
             async with serve(stream, maintain=False) as uri:
