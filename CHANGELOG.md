@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.24.0 — 2026-10-22
 
 ### Breaking — upgrading to 0.24.0
 
@@ -22,6 +22,10 @@ there was nothing to have changed from. Everything above it is ordinary.
 - `Stream.restore` raises `FileNotFoundError` naming an empty published
   prefix. Published tables without stream metadata are restored from their
   actual prefix, including the earlier layout.
+- **No writer lease yet.** `restore=True` does not check whether another
+  process still writes the stream: it is only for a machine whose old writer
+  is known to be stopped. A writer lease, and `break_lease=` for an explicit
+  takeover, follow in the next release (#184).
 
 ### Added
 
