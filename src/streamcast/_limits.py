@@ -9,6 +9,8 @@ So each is a keyword of the call that owns the queue:
     streamcast.serve(streams, host, port, max_backlog=16_384)        # every stream
     streamcast.serve(streams, host, port,
                      max_inbound={"trades": 262_144, "quotes": 65_536})  # per stream
+    streamcast.serve(streams, host, port,
+                     max_message_bytes={"trades": 2**20, "sessions": 8 * 2**20})
     streamcast.publish(uri, max_in_flight=128)
     await streamcast.Stream.live(uri, max_tail=5_000_000)
 
@@ -62,6 +64,30 @@ will owe one connection before it stops reading it — backpressure at the
 socket, not an error. `serve` and `asgi` take one int or a map choosing the
 window for connections to each served stream; it is not a stream-wide total.
 The two ends share a default.
+"""
+
+MAX_MESSAGE_BYTES: Final = 2**20
+"""Bytes one publish frame to a stream may carry, as the server receives it.
+
+`serve`'s default, and websockets' own `max_size` default, so a server that
+sets neither behaves as it did before the per-stream form existed. The frame,
+not the rows decoded from it: the frame is what the server holds in memory
+before anything is checked, and its UTF-8 length is what a publisher can
+measure before sending.
+
+**Per stream, because rows are.** One server often carries small control
+rows beside a stream of large text rows; a single limit has to fit the
+largest, and then every stream takes frames that large. The transport's own
+limit (`max_size`) is the largest stream's, so it still bounds what one frame
+can hold in memory; each stream then refuses what is over its own.
+
+**Refused as websockets refuses a frame over `max_size`**: the connection
+is closed with 1009, its reason naming both sizes. One refusal whichever
+stream's limit is the transport's, where a per-frame error would have
+differed between the largest stream (a close, from websockets) and the rest.
+A stream below the transport's limit answers the frames before the refused
+one first; over the transport's own, websockets closes at once, as it
+always has.
 """
 
 MAX_TAIL: Final = 1_000_000
@@ -152,13 +178,42 @@ def per_stream(
     return {name: chosen[name] for name in names}
 
 
+def message_bytes(
+    value: int | Mapping[str, int] | None, transport: dict[str, object]
+) -> int | Mapping[str, int] | None:
+    """`serve`'s `max_message_bytes`, reconciled with a `max_size` among the
+    keywords it passes through to websockets (`transport`).
+
+    A `max_size` alone is every stream's limit, as it was before this keyword:
+    a server configured that way keeps behaving the same. Both together are
+    refused rather than one silently winning. Neither is `MAX_MESSAGE_BYTES`.
+    """
+    if "max_size" not in transport:
+        return MAX_MESSAGE_BYTES if value is None else value
+
+    if value is not None:
+        msg = (
+            "max_size= and max_message_bytes= together: max_message_bytes sets "
+            "each stream's limit and the transport's max_size from them, so "
+            "pass that alone"
+        )
+        raise ValueError(msg)
+
+    size = transport["max_size"]
+    # websockets 16 also takes `(message, fragment)`: the message size is the one.
+    size = size[0] if isinstance(size, tuple) else size
+    return size if isinstance(size, int) else None
+
+
 def _bound(
     routes: dict[str, Stream],
     max_backlog: int | Mapping[str, int],
     max_inbound: int | Mapping[str, int],
     max_in_flight: int | Mapping[str, int],
-) -> None:
-    """Resolve `serve`'s three bounds per stream and set them on each.
+    max_message_bytes: int | Mapping[str, int] | None = None,
+) -> dict[str, int] | None:
+    """Resolve `serve`'s bounds per stream and set them on each; return each
+    stream's `max_message_bytes`, or None when there is none to check.
 
     Every keyword is checked before any stream is touched, so a bad one
     leaves every stream as it was.
@@ -167,12 +222,20 @@ def _bound(
     backlog = per_stream("max_backlog", max_backlog, names)
     inbound = per_stream("max_inbound", max_inbound, names)
     in_flight = per_stream("max_in_flight", max_in_flight, names)
+    message = (
+        None
+        if max_message_bytes is None
+        else per_stream("max_message_bytes", max_message_bytes, names)
+    )
     for name, stream in routes.items():
         stream._bound(  # noqa: SLF001 — the serving process's settings
             max_backlog=backlog[name],
             max_inbound=inbound[name],
             max_in_flight=in_flight[name],
+            max_message_bytes=None if message is None else message[name],
         )
+
+    return message
 
 
 DEDUPE_WINDOW: Final = 64
@@ -231,6 +294,7 @@ __all__ = [
     "MAX_BACKLOG",
     "MAX_INBOUND",
     "MAX_IN_FLIGHT",
+    "MAX_MESSAGE_BYTES",
     "MAX_PUBLISHERS",
     "MAX_TAIL",
     "PAGE_BYTES",

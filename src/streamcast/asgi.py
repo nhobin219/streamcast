@@ -298,12 +298,15 @@ class _Mounted:
         max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
         max_inbound: int | Mapping[str, int] = MAX_INBOUND,
         max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
+        max_message_bytes: int | Mapping[str, int] | None = None,
     ) -> None:
         # Resolved here, synchronously, exactly as `serve` does: a stream-set
         # collision or a missing litestream should fail at the call rather
         # than inside a lifespan event whose traceback names the framework.
         self._streams = _routes(streams)
-        _bound(self._streams, max_backlog, max_inbound, max_in_flight)
+        _bound(
+            self._streams, max_backlog, max_inbound, max_in_flight, max_message_bytes
+        )
 
         self._maintain = maintain
         # The sidecar resolves litestream here, so a missing binary fails at
@@ -475,6 +478,7 @@ def asgi(
     max_backlog: int | Mapping[str, int] = MAX_BACKLOG,
     max_inbound: int | Mapping[str, int] = MAX_INBOUND,
     max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT,
+    max_message_bytes: int | Mapping[str, int] | None = None,
 ) -> _Mounted:
     """An ASGI app serving `streams`, for mounting in an existing service.
 
@@ -499,6 +503,11 @@ def asgi(
       app that enables compression globally pays that, and the symptom is a
       CPU-bound server dropping subscribers for falling behind.
 
+    **`max_message_bytes` is each stream's frame limit**, as `serve` takes
+    it, checked on each publish frame. The frame limit before it is the ASGI
+    server's (uvicorn's `--ws-max-size`, 16 MiB by default), which this
+    cannot set; unset, only that one applies, as before.
+
     `async with` the returned object from the host app's lifespan. That is
     what starts the maintainers, and Starlette does not run a mounted
     sub-app's lifespan for you.
@@ -510,6 +519,7 @@ def asgi(
         max_backlog=max_backlog,
         max_inbound=max_inbound,
         max_in_flight=max_in_flight,
+        max_message_bytes=max_message_bytes,
     )
 
 

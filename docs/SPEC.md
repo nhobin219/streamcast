@@ -479,7 +479,16 @@ one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
-The broker's three bounds are `serve`'s keywords, not the `Stream`'s: they are the
+Per stream, a frame is at most `serve(max_message_bytes=)`, 1 MiB by default,
+and `max_size` is the largest stream's. One server often carries small rows
+beside large ones. A single limit has to fit the largest, and then every
+stream takes frames that large. A frame over its stream's limit closes the
+connection with 1009, as websockets closes one over `max_size`, with a
+reason naming both sizes. Below the transport's limit, the frames before it
+are answered first. Left unset, it is a `max_size` the caller passed, so a
+server configured that way behaves as before.
+
+The broker's bounds are `serve`'s keywords, not the `Stream`'s: they are the
 serving process's settings, and change with a restart rather than with the stream. Each
 is one int for every stream or a map naming every stream served, checked in full before
 any stream is set. `max_in_flight` is still a per-connection window: the mapping chooses
@@ -496,7 +505,8 @@ connections add their own queues, and an oversized inbound batch is admitted alo
 | broker | a subscriber's outbound queue | `serve(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
 | broker | a stream's rows queued for commit | `serve(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
 | broker | replies owed one publisher connection | `serve(max_in_flight=)`, 64 frames | the connection stops being read |
-| both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB) | the connection stops being read |
+| both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB, or the largest `max_message_bytes`) | the connection stops being read |
+| broker | one publish frame | `serve(max_message_bytes=)` per stream, 1 MiB | the connection is closed, 1009 |
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |
 | client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
 | client | a catch-up | `page_bytes` (64 MiB of Arrow) and optional `page_rows` per query | the next page is read after this one |
