@@ -252,3 +252,50 @@ async def test_open_restores_a_table_without_stream_metadata(
         ]
     finally:
         await restored.aclose()
+
+
+@pytest.mark.replication
+async def test_open_restores_a_missing_log_with_local_metadata(tmp_path, bucket, s3):
+    import shutil
+
+    made = Stream.open(
+        "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3, create=True
+    )
+    try:
+        await made.send({"i": 7})
+        assert made.log is not None
+        while made.log.seal(flush=True) is not None:
+            pass
+
+        made.log.publish(flush=True)
+        made.ensure_metadata()
+    finally:
+        await made.aclose()
+
+    home = _metadata.home(tmp_path, "t")
+    metadata = _metadata.load(home, "t")
+    assert metadata is not None
+    shutil.rmtree(home / metadata.live_log.name)
+    with pytest.raises(FileExistsError, match="restore=True"):
+        Stream.open(
+            "t",
+            root=tmp_path,
+            schema=SCHEMA,
+            published=bucket,
+            s3_options=s3,
+            create=True,
+        )
+
+    restored = Stream.open(
+        "t", root=tmp_path, schema=SCHEMA, published=bucket, s3_options=s3, restore=True
+    )
+    try:
+        assert restored.log is not None
+        assert restored.log.scan(columns=["i"]).read_all().column("i").to_pylist() == [
+            7
+        ]
+        restored.ensure_metadata()
+        after = _metadata.load(home, "t")
+        assert after is not None and after.stream_id == metadata.stream_id
+    finally:
+        await restored.aclose()

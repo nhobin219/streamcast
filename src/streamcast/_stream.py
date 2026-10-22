@@ -2778,13 +2778,6 @@ def _open_or_create(
         )
         raise ValueError(msg) from None
     except FileNotFoundError:
-        if metadata is not None:
-            msg = (
-                f"the metadata at {_metadata.path(root, name)} names {current!r} "
-                f"as the current log, and there is no log at {root}/{current}"
-            )
-            raise FileNotFoundError(msg) from None
-
         if published is not None:
             # Nothing of it on this disk. A prefix that holds it is a box that
             # lost its disk, and an empty stream made here would be uploaded
@@ -2809,6 +2802,13 @@ def _open_or_create(
                     f"prefix that holds nothing of it."
                 )
                 raise _PublishedStream(msg) from None
+
+        if metadata is not None:
+            msg = (
+                f"the metadata at {_metadata.path(root, name)} names {current!r} "
+                f"as the current log, and there is no log at {root}/{current}"
+            )
+            raise FileNotFoundError(msg) from None
 
         if not create:
             msg = (
