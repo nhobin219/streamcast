@@ -725,13 +725,9 @@ Offsets are per server and are not translated between hops.
 
 ## What it is not
 
-- **No broker-side consumer acknowledgements or consumer groups.** Streams route by name;
-  subscriber progress lives in the consumer's cursor or inbox database. Publishers get
-  an ack once the row is durable. A cursor supports at-least-once processing; the
-  [transactional inbox and outbox](#exactly-once-end-to-end-an-outbox-and-an-inbox), together
-  with publisher deduplication, support exactly-once processing for work committed in the
-  caller's database transaction. External side effects need their own idempotency, and
-  the buffer-loss and schema-rejection limits described there still apply.
+- **No broker-side consumer acknowledgements or consumer groups.** Routing is exact-match
+  on a stream's name, with no topic hierarchy or wildcards. The broker does not track
+  what a subscriber has consumed.
 - **Not tuned for high fan-out across a WAN.** `compression` costs CPU per subscriber
   while the encode is shared, so it defaults off — see the API section. Turn it on for
   few subscribers over a WAN.
