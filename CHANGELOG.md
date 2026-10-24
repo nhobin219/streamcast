@@ -11,6 +11,13 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- `inbox(..., initially_paused=False)` accepts a caller-owned startup pause.
+  True validates the stream identity and resume offset before closing the
+  initial subscription and entering the existing receiver wait/resume path.
+  Durable rows and bytes are recounted before the first low-water decision;
+  both bounds must be strictly below their thresholds. The default preserves
+  ordinary startup, with no wire, table or durable schema change.
+
 - `streamcast[broker]`: `streamcast.broker.create_app` serves data WebSockets,
   stats and `/control/v1` through one FastAPI application and one lifespan
   owner (#189). Host-injected authorization and storage profiles separate
