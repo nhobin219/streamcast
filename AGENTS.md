@@ -289,10 +289,10 @@ a sentence the change does not need.
     `## X.Y.Z — <date>`.
 
   It is a minor release for new or breaking API, and a patch for fixes.
-- **A tag is the release, and a PyPI version can never be corrected.** A `v*` tag runs
-  `release.yml`, whose publish job waits for a maintainer to approve the `pypi`
-  environment. Tag only with that approval, and moving or deleting a pushed tag needs it
-  too.
+- **A tag is the release, and a PyPI version can never be corrected.** Push a `v*` tag
+  only once a maintainer has approved that version at that commit; moving or deleting a
+  pushed tag needs the same approval. The tag runs `release.yml`, whose publish job then
+  waits a second time, for a maintainer to approve the `pypi` environment.
 - **A tag goes on `main`, on a tree CI passed.** Confirm `main` carries the version and
   the dated CHANGELOG before tagging; never chain a merge and a tag in one command — a
   blocked merge once put a tag on the previous version. A pull request merged while up
