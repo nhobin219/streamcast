@@ -18,17 +18,27 @@ there was nothing to have changed from. Everything above it is ordinary.
   records desired state, operations and principal-scoped idempotency receipts;
   local ownership locks, worker draining and child readiness gate transitions.
   See `docs/BROKER.md` for the complete controller and consumer contract.
-  On a shared 2-vCPU VM, two phase-aligned runs per adapter with one
-  pipelined publisher, four subscribers, batches/window of 16 and all five
-  real maintainers measured the static ASGI baseline at 1,240 rows/s versus
-  1,032 rows/s managed (−16.8%), ACK p99 at 403 ms versus 943 ms (+134.1%),
-  and mean peak process-group RSS at 928 MiB versus 942 MiB (+1.5%). Each
-  run delivered all 20,800 offsets to every subscriber; 19,200 rows were
-  measured after warmup. Both variants crossed the same scheduled seal/
-  publish boundary. RSS includes the client harness and shared pages in
-  each child; this is local SQLite durability, without S3 or replication.
-  The throughput and latency regressions require explicit tradeoff review
-  before adoption; these measurements do not establish production capacity.
+  On a shared 2-vCPU VM at source `b70f0c9`, fixed B/M/M/B comparisons
+  (two runs per adapter, one pipelined publisher, four subscribers, batches/
+  window of 16, all five real maintainers) measured the static and managed
+  adapters at 1,381/1,372 rows/s (−0.68%), mean per-run ACK p99 at 351/404 ms
+  (+15.20%), and mean peak process-group RSS at 930/937 MiB (+0.82%).
+  Extended runs measured 1,367/1,337 rows/s (−2.19%), 395/393 ms (−0.46%),
+  and RSS +1.15%. These aggregates meet the approved −10%/+25% limits;
+  one adjacent short-run p99 comparison is +25.92%, so the small sample
+  does not establish a worst-run tail guarantee and needs operator review.
+  Every subscriber received 20,800/155,200 dense offsets in short/extended
+  runs, with 19,200/153,600 rows measured after warmup. Each pair used the
+  same source, machine, dependencies and workload across the same scheduled
+  seal/publish boundary. RSS sums the client harness and descendants,
+  counting shared pages per process; durability is local SQLite, without S3
+  or replication. Earlier pre-final-retry measurements remain failures:
+  throughput −16.8%, ACK p99 +134.1%; exact `ecad510` short reproduction
+  measured −5.51% and +61.58%. Shared-VM scheduling is uncontrolled and the
+  before/after series is sequential; neither the causal size of the fix
+  nor production capacity, mixed administrative traffic or large-history
+  admission cost is established. Release and adoption remain gated on
+  coverage and owner acceptance.
 - Host-injected history guards require an original dense replay prefix and
   a captured historical row before data admission, and reject protected
   migrations before intent is accepted. Already migrated or retained history
