@@ -57,6 +57,14 @@ where `bytes | object` narrows in none of them and needs an `assert` on the
 send path to say what the queue already guarantees.
 """
 
+_YIELD_FRAMES: Final = 64
+"""A writable transport's send may not suspend at all.
+
+Without an explicit checkpoint a subscriber drains its entire ready replay
+or backlog in one turn, delaying acknowledgements and every other connection.
+Batch the checkpoint so fairness does not require a task switch per row.
+"""
+
 
 class Subscriber:
     """A connection, its backlog, and the offset it has actually been sent."""
@@ -170,9 +178,14 @@ class Subscriber:
         subscriber is dropped the moment it catches up, having done all the
         work. See `Stream` for the arithmetic the defaults are chosen by.
         """
+        remaining = _YIELD_FRAMES
         if replay is not None:
             async for _offset, frame in replay:
                 await self._connection.send(frame, text=True)
+                remaining -= 1
+                if not remaining:
+                    remaining = _YIELD_FRAMES
+                    await asyncio.sleep(0)
 
         while True:
             frame = await self._queue.get()
@@ -183,6 +196,10 @@ class Subscriber:
                 return
 
             await self._connection.send(frame, text=True)
+            remaining -= 1
+            if not remaining:
+                remaining = _YIELD_FRAMES
+                await asyncio.sleep(0)
 
 
 __all__ = ["Subscriber"]

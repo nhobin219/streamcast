@@ -582,6 +582,14 @@ for every path but this one, sync or async.
 A mounted ASGI app gets no equivalent and needs none — it has routes already, and
 `stream.stats` is the object to write one over.
 
+## Managed broker application
+
+`streamcast.broker.create_app(config)` serves data WebSockets and the HTTP
+management API through one lifespan-owned FastAPI application. Its registry,
+host policy, authentication, controller contract and shutdown model are in
+[`BROKER.md`](BROKER.md). Install `streamcast[broker]`. The static APIs below
+remain available; a managed log has only one server owner.
+
 ## `asgi`
 
 ```python

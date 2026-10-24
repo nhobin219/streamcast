@@ -43,7 +43,6 @@ the premise disappears.
 
 from __future__ import annotations
 
-import asyncio
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -57,6 +56,8 @@ from litelink import OFFSET as COLUMN
 
 from streamcast import _schema
 from streamcast._protocol import encode_projected as _encode_projected
+from streamcast._tasks import reader as scan_reader
+from streamcast._tasks import thread
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
@@ -286,16 +287,15 @@ async def rows(
     # `max_backlog` drops it. That is the exact failure catch-up avoids by
     # doing the same read CLIENT-side with nothing connected, so a request
     # below the local floor is refused and the consumer is pointed there.
-    reader = await asyncio.to_thread(
+    async with scan_reader(
         log.scan,
         columns=names,
         start_offset=start,
         end_offset=stop,
         published=published,
-    )
-    try:
+    ) as reader:
         while True:
-            batch = await asyncio.to_thread(_next_batch, reader)
+            batch = await thread(_next_batch, reader)
             if batch is None:
                 return
 
@@ -328,13 +328,6 @@ async def rows(
                 offset = message.pop(COLUMN)
                 ts = message.pop(STAMP) if stamped else None
                 yield offset, ts, message
-
-    finally:
-        # Releases the DuckDB result the scan is holding. A subscriber that
-        # disconnects mid-replay leaves this generator suspended otherwise,
-        # and under a reconnect storm that is an unbounded number of live
-        # scans against one log.
-        reader.close()
 
 
 def rows_from(log: LogHandle, offset: int, *, published: bool = False) -> int:

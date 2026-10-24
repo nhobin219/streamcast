@@ -56,9 +56,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import fcntl
 import itertools
 import shutil
+import socket as unix_socket
 import subprocess
 import sys
 import tempfile
@@ -366,6 +368,28 @@ class Sidecar:
             [self._binary, "replicate", "-config", str(self._config)], self._env
         )
 
+    @property
+    def ready(self) -> bool:
+        """This supervisor owns every requested log and its child listens."""
+        process = self._process
+        if not (
+            process is not None
+            and process.poll() is None
+            and len(self._owned) == len(self._logs)
+        ):
+            return False
+
+        try:
+            with unix_socket.socket(
+                unix_socket.AF_UNIX, unix_socket.SOCK_STREAM
+            ) as probe:
+                probe.settimeout(0.1)
+                probe.connect(str(self.socket))
+        except OSError:
+            return False
+
+        return True
+
     def start(self) -> None:
         self._watch = asyncio.create_task(self._supervise())
 
@@ -491,6 +515,11 @@ class Sidecar:
         shutil.rmtree(self._workdir, ignore_errors=True)
 
 
+_retiring_spawn: contextvars.ContextVar = contextvars.ContextVar(
+    "retiring_spawn", default=None
+)
+
+
 @contextlib.contextmanager
 def retiring(
     log: WriteHandle, binary: str | None = None, s3_options: S3Options | None = None
@@ -518,7 +547,7 @@ def retiring(
             )
             raise RuntimeError(msg) from None
 
-        process = popen(
+        process = (_retiring_spawn.get() or popen)(
             [litestream_binary(binary), "replicate", "-config", str(config)],
             environment(s3_options),
         )
