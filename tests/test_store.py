@@ -168,3 +168,42 @@ class TestATaskWaitingOnItself:
             assert await tx.fetch("SELECT 1") == [(1,)], "the store still works"
 
         await store.close()
+
+
+class TestACancelledStatement:
+    async def test_the_next_transaction_finds_the_connection_free(self, opener):
+        """A transaction cancelled while its statement runs, and again while
+        it rolls back — an inbox's receiver cancelled at `close` — leaves the one connection
+        free for the next. Its statement runs on whether or not its waiter is
+        cancelled, so the waiter outlives it: let go at once, Postgres answers
+        the next BEGIN with "another command is already in progress", and
+        SQLite's next BEGIN finds a transaction it never opened.
+        """
+        store = await opener()
+        slow = (
+            "SELECT pg_sleep(0.3)"
+            if store.dialect == "postgres"
+            else "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n "
+            "WHERE i < 3000000) SELECT count(*) FROM n"
+        )
+        running = asyncio.Event()
+
+        async def statement() -> None:
+            async with store.transaction() as tx:
+                running.set()
+                await tx.fetch(slow)
+
+        task = asyncio.create_task(statement())
+        await running.wait()
+        await asyncio.sleep(0.05)
+        # Twice, as `Inbox.close` does: the second lands on the ROLLBACK the
+        # first one started.
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled()
+        async with store.transaction() as tx:
+            assert await tx.fetch("SELECT 1") == [(1,)], "the store still works"
+
+        await store.close()

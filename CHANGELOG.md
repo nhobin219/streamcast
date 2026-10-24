@@ -42,7 +42,21 @@ there was nothing to have changed from. Everything above it is ordinary.
 - FastAPI and uvicorn are dependencies; the `asgi` and `broker` extras are
   gone. `docs/BROKER.md` is folded into `docs/API.md` and `docs/SPEC.md`.
 
+- **`inbox(..., initially_paused=)` is removed** (#194). The receiver
+  decides startup itself from the durable inbox and the existing bounds:
+  at or over `inbox_max_bytes` or `inbox_max_rows` it starts paused, closes
+  the checking subscription, and resumes strictly below `inbox_resume_at`
+  of both; under them it starts active, the band between the bounds
+  included. A caller that stored its own pause flag to pass back drops it
+  and reads `Inbox.paused`.
 ### Fixed
+
+- An inbox exited or cancelled before its receiver's first turn now closes
+  the subscription it opened (#191).
+- A store transaction cancelled mid-statement — an inbox's receiver at
+  `close` — waits for that statement before letting the next transaction
+  in. Postgres answered the next BEGIN with "another command is already in
+  progress"; SQLite could leave a BEGIN it never rolled back.
 
 - A publisher sending while the broker fences writes — a stream stopping,
   or its maintainer group being replaced — is closed with 1001 instead of

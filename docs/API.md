@@ -971,7 +971,7 @@ await out.close() -> None                       # pending rows stay; flush first
 
 streamcast.inbox(uri, *, subscriber, store, offset=None,
                  inbox_max_bytes=INBOX_MAX_BYTES, inbox_max_rows=None,
-                 inbox_resume_at=INBOX_RESUME_AT, initially_paused=False,
+                 inbox_resume_at=INBOX_RESUME_AT,
                  catch_up=False) -> Inbox
 async for offset, ts, row, tx in sub: ...       # tx holds the row's delete
 await sub.recv() -> (offset, ts, row, tx)
@@ -994,7 +994,7 @@ subject to its buffer-loss limit. External side effects are outside this transac
 | **the sender** | connects only when it has rows; reconciles with the greeting (landed rows deleted unsent; `AcknowledgedRowsLost`, `StoreBehindBroker`); ordered pipelined batches; a refused row dropped and the rest renumbered; an outage said once |
 | **inbox resume** | from `last_received_offset + 1`; unprocessed rows first. A new subscriber starts at the latest offset or `offset=`; one with state refuses `offset=` |
 | **the receive window** | at `inbox_max_bytes` or `inbox_max_rows` the receiver stops and CLOSES its subscription; it reconnects below `inbox_resume_at` of each bound. An empty inbox always takes one row |
-| **startup pause** | `initially_paused=True` seeds the receiver's existing wait/resume path after identity and offset validation; it closes the initial subscription, recounts durable rows and bytes, then resumes strictly below both low-water bounds. The caller owns persistence of the seed; False preserves ordinary startup |
+| **startup** | after the identity and offset check, the receiver recounts this subscriber's unprocessed rows and bytes in the store. At or over either high bound (`bytes >= inbox_max_bytes`, or `rows >= inbox_max_rows` when set) it starts **paused**: the checking subscription is closed before `inbox()` returns, and it reconnects once both are strictly below `inbox_resume_at` × their bound. Under both high bounds it starts **active**, between the bounds and exactly at the low-water mark included, and receives until a high bound. `inbox_resume_at` decides only the way out of a pause, never the start. No pause state is stored or accepted: a receiver stopped while paused restarts by this rule. `sub.paused` reports what the receiver is doing |
 | **one tx per store at a time** | a task asking for a second while it holds one gets `RuntimeError`, not a hang: `sub.commit()` first |
 
 The next `recv` commits the previous processing transaction. A clean inbox context exit

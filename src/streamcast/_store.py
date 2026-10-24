@@ -48,14 +48,17 @@ import asyncio
 import contextlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeVar
+
+from streamcast._tasks import join
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
     from os import PathLike
 
 Dialect = Literal["sqlite", "postgres"]
+T = TypeVar("T")
 
 SCHEMA_VERSION: Final = 1
 """The version of the library's tables this build writes. A store whose
@@ -314,14 +317,30 @@ class SqliteStore:
 
     async def _run(self, work: Callable[[sqlite3.Connection], Any]) -> Any:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, work, self._connection)
+        future = asyncio.ensure_future(
+            loop.run_in_executor(self._executor, work, self._connection)
+        )
+        # The statement runs on the shared connection whether or not its
+        # waiter is cancelled, so the waiter outlives it: a cancelled BEGIN
+        # that went on to run would otherwise leave a transaction open that
+        # nobody rolls back, and every later BEGIN on the connection fails.
+        cancelled = await join(future)
+        if cancelled:
+            if not future.cancelled():
+                future.exception()
+
+            raise asyncio.CancelledError
+
+        return future.result()
 
     @contextlib.asynccontextmanager
     async def transaction(self) -> AsyncIterator[Transaction]:
         async with self._lock.held():
-            await self._run(lambda c: c.execute("BEGIN IMMEDIATE"))
             tx = _SqliteTransaction(self)
             try:
+                # Inside the try: a cancellation that lands once BEGIN has run
+                # is rolled back below rather than leaving it open.
+                await self._run(lambda c: c.execute("BEGIN IMMEDIATE"))
                 yield tx
             except BaseException:
                 tx._ended()  # noqa: SLF001
@@ -358,16 +377,24 @@ class _PostgresTransaction(_Open):
     async def execute(self, sql: str, params: Sequence[object] = ()) -> int:
         self._check()
         store: PostgresStore = self._store  # ty: ignore[invalid-assignment]
-        cursor = await store._connection.execute(sql, tuple(params) or None)  # noqa: SLF001
-        return cursor.rowcount
+
+        async def run() -> int:
+            cursor = await store._connection.execute(sql, tuple(params) or None)  # noqa: SLF001
+            return cursor.rowcount
+
+        return await store._run(run)  # noqa: SLF001
 
     async def fetch(
         self, sql: str, params: Sequence[object] = ()
     ) -> list[tuple[Any, ...]]:
         self._check()
         store: PostgresStore = self._store  # ty: ignore[invalid-assignment]
-        cursor = await store._connection.execute(sql, tuple(params) or None)  # noqa: SLF001
-        return list(await cursor.fetchall())
+
+        async def run() -> list[tuple[Any, ...]]:
+            cursor = await store._connection.execute(sql, tuple(params) or None)  # noqa: SLF001
+            return list(await cursor.fetchall())
+
+        return await store._run(run)  # noqa: SLF001
 
 
 class PostgresStore:
@@ -412,26 +439,53 @@ class PostgresStore:
 
         return store
 
+    async def _run(self, command: Callable[[], Awaitable[T]]) -> T:
+        """One command on the connection, which its waiter outlives.
+
+        psycopg's connection runs one command at a time. A waiter cancelled
+        while one is in flight — twice, as `Inbox.close` cancels its receiver,
+        the second landing on the ROLLBACK the first began — would release
+        the store's lock with the command still running, and the next
+        transaction's BEGIN fails "another command is already in progress".
+        """
+        task = asyncio.ensure_future(command())
+        cancelled = await join(task)
+        if cancelled:
+            if not task.cancelled():
+                task.exception()
+
+            raise asyncio.CancelledError
+
+        return task.result()
+
+    async def _statement(self, sql: str) -> None:
+        async def run() -> None:
+            await self._connection.execute(sql)
+
+        await self._run(run)
+
     @contextlib.asynccontextmanager
     async def transaction(self) -> AsyncIterator[Transaction]:
         async with self._lock.held():
-            await self._connection.execute("BEGIN")
             tx = _PostgresTransaction(self)
             try:
+                # Inside the try, as for SQLite: a cancellation that lands
+                # once BEGIN has run is rolled back below.
+                await self._statement("BEGIN")
                 yield tx
             except BaseException:
                 tx._ended()  # noqa: SLF001
                 with contextlib.suppress(Exception):
-                    await self._connection.execute("ROLLBACK")
+                    await self._statement("ROLLBACK")
 
                 raise
 
             try:
-                await self._connection.execute("COMMIT")
+                await self._statement("COMMIT")
             except BaseException:
                 tx._ended()  # noqa: SLF001
                 with contextlib.suppress(Exception):
-                    await self._connection.execute("ROLLBACK")
+                    await self._statement("ROLLBACK")
 
                 raise
 

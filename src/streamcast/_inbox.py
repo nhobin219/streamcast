@@ -74,6 +74,7 @@ from streamcast._errors import StreamMismatch, TooSlow
 from streamcast._limits import BACKOFF, INBOX_MAX_BYTES, INBOX_RESUME_AT, POLL_EVERY
 from streamcast._protocol import stream_name
 from streamcast._store import sql
+from streamcast._tasks import join
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -132,6 +133,7 @@ class Inbox:
         "_stream",
         "_stream_id",
         "_subscriber",
+        "_subscription",
         "_task",
         "_uri",
         "_ws",
@@ -147,7 +149,6 @@ class Inbox:
         inbox_max_bytes: int,
         inbox_max_rows: int | None,
         inbox_resume_at: float,
-        initially_paused: bool,
         catch_up: bool,
         poll_every: float,
         backoff: Sequence[float],
@@ -182,7 +183,8 @@ class Inbox:
         self._arrived = asyncio.Event()  # the receiver inserted rows
         self._freed = asyncio.Event()  # processing deleted rows
         self._caught_up = False
-        self._paused = initially_paused
+        self._paused = False
+        self._subscription: Subscription | None = None
         self._closed = False
         self._failure: BaseException | None = None
         self._task: asyncio.Task[None] | None = None
@@ -363,6 +365,13 @@ class Inbox:
                     self._last_received = state[0]
 
             self._stream_id = info.stream_id
+            # Identity validation awaited the network. Processing in another
+            # worker may have changed occupancy meanwhile; decide from the
+            # durable window now, not the count read before connecting.
+            async with self._store.transaction() as tx:
+                self._rows, self._bytes = await self._count(tx)
+
+            self._paused = self._over(self._rows, self._bytes)
             if self._paused:
                 # Validate the saved identity/offset before waiting, but leave
                 # no unread socket holding broker memory during the pause.
@@ -372,6 +381,9 @@ class Inbox:
             await sub.close()
             raise
 
+        # Ownership precedes scheduling: cancellation before the receiver
+        # first runs cannot execute its finally block (#191).
+        self._subscription = None if self._paused else sub
         self._task = asyncio.create_task(
             self._receive(None if self._paused else sub),
             name=f"streamcast-inbox-{self._stream}",
@@ -381,11 +393,26 @@ class Inbox:
         """Stop the receiver, after committing (or, with `exc`, rolling back)
         the open processing transaction."""
         self._closed = True
-        await self._end(exc)
         if self._task is not None:
             self._task.cancel()
-            with contextlib.suppress(BaseException):
-                await self._task
+
+        try:
+            await self._end(exc)
+        finally:
+            stopping = asyncio.create_task(self._stop_receiver())
+            cancelled = await join(stopping)
+            stopping.result()
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _stop_receiver(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+        sub, self._subscription = self._subscription, None
+        if sub is not None:
+            await sub.close()
 
     # -- the receiver -------------------------------------------------------
 
@@ -404,6 +431,7 @@ class Inbox:
                     await self._wait_below_low_water()
                     try:
                         sub = await self._reconnect()
+                        self._subscription = sub
                     except (OSError, ConnectionClosed, TimeoutError, TooSlow):
                         await asyncio.sleep(
                             self._backoff[min(attempt, len(self._backoff) - 1)]
@@ -423,7 +451,7 @@ class Inbox:
                 with contextlib.suppress(Exception):
                     await sub.close()
 
-                sub = None
+                sub = self._subscription = None
                 if full:
                     self._paused = True
 
@@ -649,10 +677,12 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
     receiver that falls past what the server replays. The receive window is
     `inbox_max_bytes` (`INBOX_MAX_BYTES`), `inbox_max_rows` (None) and
     `inbox_resume_at` (`INBOX_RESUME_AT`); see the module.
-    `initially_paused=True` restores a caller-owned pause: startup validates
-    the stream identity and offset, closes that subscription, then the same
-    receiver recounts durable rows and waits strictly below both low-water
-    bounds before reconnecting. It stores no pause state itself. A clean exit
+    Startup validates identity and recounts durable occupancy: at or above
+    either high bound it closes the validation subscription and starts paused;
+    below high it starts active, including between the watermarks. This is a
+    fresh decision, not restoration of the previous process's hysteresis.
+    A paused receiver resumes strictly below both low bounds. `Inbox.paused`
+    observes the receiver's actual state; callers supply no pause flag. A clean exit
     commits the open processing transaction, and an exit by exception rolls
     it back, so the row it held is handed out again. Unknown keywords go to
     `websockets.connect`.
@@ -670,7 +700,6 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
         inbox_max_bytes: int = INBOX_MAX_BYTES,
         inbox_max_rows: int | None = None,
         inbox_resume_at: float = INBOX_RESUME_AT,
-        initially_paused: bool = False,
         catch_up: bool = False,
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
@@ -684,7 +713,6 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
             inbox_max_bytes=inbox_max_bytes,
             inbox_max_rows=inbox_max_rows,
             inbox_resume_at=inbox_resume_at,
-            initially_paused=initially_paused,
             catch_up=catch_up,
             poll_every=poll_every,
             backoff=backoff,
