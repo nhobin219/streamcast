@@ -156,7 +156,7 @@ it in the same PR.
   forbids is answered with why, not built.
 - **A need that is litelink's goes to litelink.** The log is a litelink table; when a fix
   belongs in the storage engine, file it there with a reproduction against litelink
-  alone, not through streamcast (litelink#187, a claim orphaned by a failed commit, went
+  alone, not through streamcast (litelink's issue 187, a claim orphaned by a failed commit, went
   over that way). litelink is released first and this repository raises its floor
   after; a defect spanning both ships as a release of each.
 - **Conventional Commits**, closed scope list in `scripts/check_commit_msg.py`. The
@@ -249,7 +249,8 @@ it breaks and which version it should ship as.
 ## Review
 
 **What this library must never do is the review standard.** The adversarial review in
-`CLAUDE.md` is always run for: anything that deletes, truncates or rewrites durable
+`CLAUDE.md` is expensive and kept for a specific doubt, and these surfaces are always
+one: anything that deletes, truncates or rewrites durable
 state (retention, migration, metadata commits); the catch-up join; the greeting and the
 frames; and anything `serve`'s subprocesses do with credentials. Each of these had a
 reachable critical defect that its first passing suite did not show. Retention took four
@@ -265,8 +266,8 @@ so it is not graded as operability. Bars used so far:
 - two litestreams on one database;
 - a client/server pair the pull request says works and does not.
 
-Reproduce each finding before acting on it, and review the fix in a fresh pass until one
-comes back clean.
+Reproduce each finding before acting on it; the skill says how to send the fix back and
+when the loop is finished.
 
 ## Docs and comments
 
