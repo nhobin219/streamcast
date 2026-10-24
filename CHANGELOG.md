@@ -7,6 +7,27 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed — breaking
+
+- **`inbox(..., initially_paused=)` is removed** (#194). The receiver
+  decides startup itself from the durable inbox and the existing bounds:
+  at or over `inbox_max_bytes` or `inbox_max_rows` it starts paused, closes
+  the checking subscription, and resumes strictly below `inbox_resume_at`
+  of both; under them it starts active, the band between the bounds
+  included. A caller that stored its own pause flag to pass back drops it
+  and reads `Inbox.paused`.
+
+### Fixed
+
+- An inbox exited or cancelled before its receiver's first turn now closes
+  the subscription it opened (#191).
+- A store transaction cancelled mid-statement — an inbox's receiver at
+  `close` — waits for that statement before letting the next transaction
+  in. Postgres answered the next BEGIN with "another command is already in
+  progress"; SQLite could leave a BEGIN it never rolled back.
+
 ## 0.25.0 — 2026-10-24
 
 ### Added
