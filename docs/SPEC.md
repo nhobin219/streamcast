@@ -62,6 +62,15 @@ missed. With one, it has an offset.
 
 ### Scope
 
+The managed application in [`BROKER.md`](BROKER.md) places data WebSockets
+and HTTP control in one FastAPI application. One top-level ASGI lifespan
+owns its registry, durable intent, stream generations and maintenance
+children. Local ownership locks exclude a second managed writer; they do
+not replace deployment fencing of another host or a static server. The host
+injects authentication and storage profiles. Shared maintenance membership
+changes fence writes until replacement children report readiness, while
+neighbor stream objects and connections remain in place.
+
 In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
 published tables when a consumer has fallen past what the server will replay.

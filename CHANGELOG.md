@@ -7,6 +7,38 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- `streamcast[broker]`: `streamcast.broker.create_app` serves data WebSockets,
+  stats and `/control/v1` through one FastAPI application and one lifespan
+  owner (#189). Host-injected authorization and storage profiles separate
+  data grants from management and migration grants. The durable registry
+  records desired state, operations and principal-scoped idempotency receipts;
+  local ownership locks, worker draining and child readiness gate transitions.
+  See `docs/BROKER.md` for the complete controller and consumer contract.
+  On a shared 2-vCPU VM, two phase-aligned runs per adapter with one
+  pipelined publisher, four subscribers, batches/window of 16 and all five
+  real maintainers measured the static ASGI baseline at 1,240 rows/s versus
+  1,032 rows/s managed (−16.8%), ACK p99 at 403 ms versus 943 ms (+134.1%),
+  and mean peak process-group RSS at 928 MiB versus 942 MiB (+1.5%). Each
+  run delivered all 20,800 offsets to every subscriber; 19,200 rows were
+  measured after warmup. Both variants crossed the same scheduled seal/
+  publish boundary. RSS includes the client harness and shared pages in
+  each child; this is local SQLite durability, without S3 or replication.
+  The throughput and latency regressions require explicit tradeoff review
+  before adoption; these measurements do not establish production capacity.
+- Host-injected history guards require an original dense replay prefix and
+  a captured historical row before data admission, and reject protected
+  migrations before intent is accepted. Already migrated or retained history
+  requires a separately reviewed history design.
+
+### Fixed
+
+- Cancelled replay scans and stream shutdown join actual blocking workers
+  before releasing readers or log handles, including repeated cancellation.
+
 ## 0.24.0 — 2026-10-22
 
 ### Breaking — upgrading to 0.24.0

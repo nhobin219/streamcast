@@ -325,7 +325,7 @@ class TestTheConnectionLifecycle:
             await sub.recv()
             await sub.close()
 
-            assert sub.connection.close_code == 1000
+            assert sub.connection.protocol.close_code == 1000
 
     async def test_a_disconnect_detaches_the_subscriber(self, log):
         """The reader task's real job.
