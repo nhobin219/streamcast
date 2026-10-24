@@ -42,6 +42,15 @@ there was nothing to have changed from. Everything above it is ordinary.
 - FastAPI and uvicorn are dependencies; the `asgi` and `broker` extras are
   gone. `docs/BROKER.md` is folded into `docs/API.md` and `docs/SPEC.md`.
 
+### Fixed
+
+- A publisher sending while the broker fences writes — a stream stopping,
+  or its maintainer group being replaced — is closed with 1001 instead of
+  each frame being answered `rejected`. An `outbox` treated that answer as a
+  poison row and deleted it from the caller's database; it now reconnects
+  and resends. Managed streams had this before; static streams gained the
+  fence in this release.
+
 ### Added
 
 - `BrokerConfig(subscriber_yield_every=64)`: the data frames a subscriber

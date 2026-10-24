@@ -15,6 +15,7 @@ import pytest
 
 import streamcast
 from streamcast import _outbox
+from streamcast._errors import Unavailable
 from tests.hosting import serve_streams
 
 from .conftest import SCHEMA, trade
@@ -207,6 +208,47 @@ class TestRecovery:
                 ) as out:
                     await out.flush(timeout=10)
 
+        await store.close()
+
+    async def test_a_fenced_broker_is_an_outage_not_a_poison_row(
+        self, serve, log, opener
+    ):
+        """While the broker fences writes — its maintainer group being
+        replaced — a row is retried, never answered `rejected`: the outbox
+        deletes a rejected row from the caller's database for good.
+
+        Falsify by letting `serve_publisher` answer the fence as it answers a
+        schema mismatch: the row is dropped and never lands.
+        """
+        store = await opener()
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            # The fence as admission sees it, held: the runtime's readiness
+            # monitor would lift a flag set on the generation within a beat.
+            admit = stream._admission  # noqa: SLF001
+            assert admit is not None
+            fenced = True
+
+            def admission() -> None:
+                if fenced:
+                    raise Unavailable("stream unavailable")
+
+                admit()
+
+            stream._admission = admission  # noqa: SLF001
+            async with streamcast.outbox(
+                uri, publisher="p", store=store, **FAST
+            ) as out:
+                async with store.transaction() as tx:
+                    await out.send(trade(0), tx=tx)
+
+                await asyncio.sleep(0.5)
+                assert await outstanding(store) == [1], "the row was dropped"
+                assert landed(log) == []
+                fenced = False
+                await out.flush(timeout=10)
+
+        assert landed(log) == [0.0]
         await store.close()
 
     async def test_a_database_behind_the_broker_stops_the_sender(

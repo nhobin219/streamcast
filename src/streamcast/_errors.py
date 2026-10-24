@@ -256,6 +256,17 @@ fallback below and still gets the code, the numbers and a correct diagnosis of
 """
 
 
+class Unavailable(ValueError):
+    """The broker is not admitting writes to this stream for now: it is
+    stopping, or its maintainers are being replaced and are not ready yet.
+
+    A `ValueError` to a local `Stream.send`, as before. Distinct from one so
+    the publisher path can tell a fence from a bad row: a bad row is answered
+    `rejected`, which an outbox drops from the caller's database for good,
+    while a fence ends the connection with 1001, which a publisher retries.
+    """
+
+
 class NotReplayable(StreamcastError):
     """The requested offset cannot be served, and `why` says which reason.
 

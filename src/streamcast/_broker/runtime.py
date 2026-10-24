@@ -16,6 +16,7 @@ from streamcast import _log, _metadata
 from streamcast._broker.model import NAME, BrokerConfig, Fault, declaration
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._children import _sidecars, _supervisors
+from streamcast._errors import Unavailable
 from streamcast._limits import _bound
 from streamcast._maintain import stop
 from streamcast._stream import Stream
@@ -32,7 +33,7 @@ class Generation:
 
     def check(self) -> None:
         if not self.accepting or not self.writable:
-            raise ValueError("stream unavailable")
+            raise Unavailable("stream unavailable")
 
 
 class BrokerRuntime:

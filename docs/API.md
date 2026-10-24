@@ -251,9 +251,12 @@ seconds), and fails rather than serve without a maintainer: five interpreters
 loading pyarrow and DuckDB can take most of that on a small loaded host. Static
 streams share the maintainer group with managed ones, so a managed stream's
 transition, which replaces the group, also fences a static stream's writes
-until the new group is ready: a local `stream.send` then raises
-`ValueError("stream unavailable")`, and a remote publisher is refused, rather
-than accept rows no maintainer will seal. Retry after a moment.
+until the new group is ready, rather than accept rows no maintainer will seal.
+A local `stream.send` then raises `ValueError("stream unavailable")`; retry
+after a moment. A publisher connection is closed with 1001, as at a stop, with
+nothing of the refused frame queued: `publish` raises `ConnectionClosed` and an
+`outbox` reconnects and resends. It is never answered `rejected`, which an
+outbox would drop from the caller's database.
 
 | setting | default | bounds |
 |---|---|---|

@@ -69,6 +69,7 @@ from streamcast._errors import (
     ProtocolError,
     SequenceGap,
     StreamRetired,
+    Unavailable,
 )
 from streamcast._limits import (
     DEDUPE_WINDOW,
@@ -2331,6 +2332,7 @@ class Stream:
         )
         replying = asyncio.create_task(self._reply(connection, replies))
         oversized: str | None = None
+        fenced = False
         try:
             async for frame in connection:
                 seq = 0
@@ -2389,6 +2391,13 @@ class Stream:
                     else:
                         queued = self._submit(batch) if batch else None
 
+                except Unavailable:
+                    # Not this row's fault, and nothing of it was queued: the
+                    # connection ends as an outage, which a publisher retries,
+                    # rather than `rejected`, which an outbox drops for good.
+                    fenced = True
+                    break
+
                 except (ValueError, TypeError) as exc:
                     # litelink names the column and what it found. Passed
                     # through rather than summarised: a publisher debugging a
@@ -2407,6 +2416,8 @@ class Stream:
 
         if oversized is not None:
             await connection.close(CloseCode.MESSAGE_TOO_BIG, oversized)
+        elif fenced:
+            await connection.close(1001, "stream unavailable")
 
     @staticmethod
     async def _reply(
