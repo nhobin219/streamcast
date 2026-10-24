@@ -49,6 +49,7 @@ there was nothing to have changed from. Everything above it is ordinary.
   of both; under them it starts active, the band between the bounds
   included. A caller that stored its own pause flag to pass back drops it
   and reads `Inbox.paused`.
+
 ### Fixed
 
 - An inbox exited or cancelled before its receiver's first turn now closes
@@ -57,7 +58,6 @@ there was nothing to have changed from. Everything above it is ordinary.
   `close` — waits for that statement before letting the next transaction
   in. Postgres answered the next BEGIN with "another command is already in
   progress"; SQLite could leave a BEGIN it never rolled back.
-
 - A publisher sending while the broker fences writes — a stream stopping,
   or its maintainer group being replaced — is closed with 1001 instead of
   each frame being answered `rejected`. An `outbox` treated that answer as a
