@@ -94,6 +94,7 @@ from streamcast._protocol import (
 from streamcast._published import BATCH, ReadCache
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
+from streamcast._tasks import thread
 from streamcast._writer import Job, Writer
 
 if TYPE_CHECKING:
@@ -174,6 +175,7 @@ class Stream:
     """
 
     __slots__ = (
+        "_admission",
         "_codec",
         "_columns",
         "_declared",
@@ -351,6 +353,7 @@ class Stream:
         )
         # Which connection holds each exactly-once publisher id: one at a
         # time, and the newest claim wins (`serve_publisher`).
+        self._admission = None
         self._claims: dict[str, tuple[object, Peer]] = {}
         # Superseded connections being closed, held so the tasks are not
         # collected mid-close.
@@ -1879,6 +1882,9 @@ class Stream:
         is queued, so it waits rather than deadlocks. A stream with no log
         queues nothing and never waits.
         """
+        if self._admission is not None and self._retirement is None:
+            self._admission()
+
         while (
             self._writer is not None
             and self._queued
@@ -1963,6 +1969,9 @@ class Stream:
             raise StreamRetired(
                 self._name, self._retirement.at, self._retirement.end_offset
             )
+
+        if self._admission is not None:
+            self._admission()
 
         now = time.time_ns()
         codec = self._codec
@@ -2155,13 +2164,13 @@ class Stream:
         # Whatever is queued is committed and delivered first, then the thread
         # stops — before the log it writes to can be closed underneath it.
         if self._writer is not None:
-            await asyncio.to_thread(self._writer.close)
+            await thread(self._writer.close)
 
         # A log this object opened is a log this object closes. One handed in
         # is left alone: the caller may be sharing it, and closing a borrowed
         # handle is how a library becomes one you cannot lend to.
         if self._owned is not None:
-            self._owned.close()
+            await thread(self._owned.close)
             self._owned = None
 
     # -- subscribe ---------------------------------------------------------
@@ -2537,7 +2546,7 @@ class Stream:
             # thread because `coverage()` resolves offset extents from table
             # statistics — local file reads, and a metadata GET when the log
             # has been evicted to its published table.
-            first = await asyncio.to_thread(
+            first = await thread(
                 partial(_log.earliest, log, published=self._replay_published)
             )
             if first is None and self._floor is not None:
@@ -2594,7 +2603,7 @@ class Stream:
             # Only reached when the free check has already failed, so an
             # ordinary subscribe never pays for it — and a subscribe about to
             # be REFUSED can afford 30 ms to find out whether it should be.
-            behind = await asyncio.to_thread(
+            behind = await thread(
                 partial(
                     _log.rows_from, log, requested, published=self._replay_published
                 )
@@ -2651,9 +2660,9 @@ class Stream:
             # published table tells them apart. A rare path, so `coverage()`
             # may read its manifests.
             if start < frontier and not self._replay_published:
-                held = (await asyncio.to_thread(log.coverage)).published
+                held = (await thread(log.coverage)).published
                 if held is not None and held[1] > start:
-                    first_local = await asyncio.to_thread(
+                    first_local = await thread(
                         partial(_log.earliest, log, published=False)
                     )
                     raise NotReplayable(

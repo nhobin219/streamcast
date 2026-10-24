@@ -137,11 +137,34 @@ def test_a_replay_is_read_in_a_thread():
     # `rows`, not `replay`: the batch reader was split out so the CLIENT can
     # reuse it for a catch-up without an encode-then-decode round trip, and
     # the thread hops went with the reader.
-    source = inspect.getsource(_log.rows)
-    assert source.count("asyncio.to_thread") == 2, (
-        "both the scan and each batch read must cross into a thread"
-    )
-    assert "rows(" in inspect.getsource(_log.replay), "replay delegates to rows"
+    node = function(_log, "rows")
+    acquisitions = [
+        child for child in ast.walk(node) if isinstance(child, ast.AsyncWith)
+    ]
+    assert any(
+        isinstance(item.context_expr, ast.Call)
+        and isinstance(item.context_expr.func, ast.Name)
+        and item.context_expr.func.id == "scan_reader"
+        and isinstance(item.context_expr.args[0], ast.Attribute)
+        and item.context_expr.args[0].attr == "scan"
+        for context in acquisitions
+        for item in context.items
+    ), "the scan acquisition must hold a cancellation-safe worker lease"
+    assert any(
+        isinstance(child, ast.Await)
+        and isinstance(child.value, ast.Call)
+        and isinstance(child.value.func, ast.Name)
+        and child.value.func.id == "thread"
+        and isinstance(child.value.args[0], ast.Name)
+        and child.value.args[0].id == "_next_batch"
+        for child in ast.walk(node)
+    ), "each batch read must cross into a cancellation-safe worker thread"
+    assert any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Name)
+        and child.func.id == "rows"
+        for child in ast.walk(function(_log, "replay"))
+    ), "replay delegates to rows"
 
 
 def test_the_wire_key_order_comes_from_one_place():

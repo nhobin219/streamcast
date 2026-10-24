@@ -317,6 +317,7 @@ def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
 
 
 @pytest.mark.replication
+@pytest.mark.slow
 async def test_the_maintainer_publishes_with_the_streams_own_options(
     tmp_path, s3, bucket, monkeypatch
 ):
@@ -354,8 +355,16 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
             "publish",
             env=_process.environment(s3),
         )
+        publisher._ready_file = tmp_path / "publisher.ready"  # noqa: SLF001
         publisher.start()
         try:
+            # Opening a fresh interpreter and its log is not the publication
+            # being checked. Require the real child's post-open receipt first.
+            deadline = time.monotonic() + 60
+            while not publisher.ready:
+                assert time.monotonic() < deadline, "the maintainer never opened"
+                await asyncio.sleep(0.05)
+
             deadline = time.monotonic() + 10
             while log.published_through() < 3:
                 assert time.monotonic() < deadline, "the maintainer never published"

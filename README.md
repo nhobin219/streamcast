@@ -742,6 +742,7 @@ Offsets are per server and are not translated between hops.
 ## Documentation
 
 - [`docs/API.md`](docs/API.md) — every public call, on one page
+- [`docs/BROKER.md`](docs/BROKER.md) — one managed FastAPI application for data and control
 - [`docs/SPEC.md`](docs/SPEC.md) — the design, the protocol, and the invariants
 - [`examples/`](examples/) — a live public feed through a server, and a resuming consumer
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, the gates, and what a good PR looks like

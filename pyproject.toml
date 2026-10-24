@@ -85,6 +85,9 @@ dependencies = [
 # not `uvicorn`, which is the deployer's choice — mounting works in any ASGI
 # app and the adapter touches nothing above the WebSocket class.
 asgi = ["starlette>=0.40"]
+# The managed application owns both HTTP control and data WebSockets. The
+# static Starlette adapter remains independent of this optional dependency.
+broker = ["fastapi>=0.141.1"]
 # The Postgres adapter for a CALLER's database (`PostgresStore`), where an
 # outbox and an inbox commit with the caller's own state. psycopg 3, for its
 # native asyncio connection; the adapter's tests pass at the 3.1 floor and on
@@ -143,11 +146,10 @@ dev = [
     # would prove none of them.
     "starlette>=0.40",
     "uvicorn>=0.30",
-    # For `examples/fastapi_app.py` only. The library needs nothing from it —
-    # `streamcast[asgi]` is Starlette alone — but the example is the answer to
-    # "how do I run this in my service", so it is a real app that really runs
-    # rather than a snippet nobody executed.
-    "fastapi>=0.110",
+    "httpx>=0.28.1",
+    # The managed broker application and the runnable FastAPI example.
+    # The static `asgi` extra continues to require only Starlette.
+    "fastapi>=0.141.1",
     "ty>=0.0.15",
     # FOR AN EXAMPLE ONLY: `examples/otel/` runs OpenTelemetry logs and
     # traces through two streams and re-exports them as OTLP, and
