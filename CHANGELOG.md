@@ -36,6 +36,10 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- Subscriber replay and live pumps yield every 64 frames, so a writable
+  transport cannot monopolize the event loop through an entire ready burst.
+  A deterministic 512-frame probe schedules a competing task on the first
+  send: it runs after frame 64 rather than after all 512 frames, on both paths.
 - Cancelled replay scans and stream shutdown join actual blocking workers
   before releasing readers or log handles, including repeated cancellation.
 

@@ -424,6 +424,12 @@ at all.
 So: one `asyncio.Queue` and one task per subscriber, and `offer` is synchronous,
 never blocks, never raises.
 
+The pump yields every 64 frames across replay and live delivery. Awaiting a
+writable transport's send need not suspend: without this checkpoint, a ready
+subscriber can drain its whole backlog before another connection or publisher
+acknowledgement gets a turn. The checkpoint belongs in the pump, so broadcast
+and the subscribe partition remain atomic.
+
 *Measured*: 500 sends of 64 KB with a subscriber that had stopped reading, under
 2 s total — the stalled socket is not on the publish path at all.
 
