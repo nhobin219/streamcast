@@ -23,6 +23,7 @@ import pytest
 import streamcast
 from streamcast import _maintain
 from streamcast._maintain import ROLES, Maintain, Supervisor
+from tests.hosting import serve_streams
 
 # ~140 bytes a row, so ROWS is ~560 KB — comfortably past SEAL_SIZE, at
 # which litelink's policy says a seal is due.
@@ -88,7 +89,7 @@ class TestTheDefect:
         and the DuckDB read cache mirrors it.
         """
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False):
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=False):
             await fill(stream)
 
             # **No sleep, deliberately.** This used to wait two seconds and
@@ -111,7 +112,7 @@ class TestTheDefect:
     @pytest.mark.slow
     async def test_with_one_the_buffer_drains_into_parquet(self, wide_log):
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST):
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=FAST):
             await fill(stream)
             assert await settle(wide_log), "the maintainer sealed nothing"
 
@@ -128,7 +129,7 @@ class TestTheDefect:
         `buffer.db` held every row it was ever sent. Counted in the file.
         """
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST):
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=FAST):
             await fill(stream)
             assert await settle(wide_log)
 
@@ -143,7 +144,7 @@ class TestTheDefect:
         # The maintainer moves rows from the buffer into Parquet underneath a
         # running server. A replay has to cross that boundary without noticing.
         stream = streamcast.Stream("trades", log=wide_log)
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=FAST) as server:
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=FAST) as server:
             # All of ROWS: fewer would leave the buffer under the target,
             # with nothing due, and this would assert on a seal the policy
             # correctly declined to make.
@@ -172,12 +173,12 @@ def _a_log(root, name):
 class TestLifecycle:
     async def test_a_live_only_stream_starts_no_process(self, serve):
         # Nothing to sweep, so nothing is spawned — not a process with no work.
-        from streamcast._server import _supervisors
+        from streamcast._children import _supervisors
 
         assert _supervisors({"a": streamcast.Stream("a")}, True) == []
 
     async def test_maintain_false_starts_nothing(self, log):
-        from streamcast._server import _supervisors
+        from streamcast._children import _supervisors
 
         assert _supervisors({"a": streamcast.Stream("a", log=log)}, False) == []
 
@@ -192,7 +193,7 @@ class TestLifecycle:
 
         Falsify by returning a set of `Supervisor`s per log in `_supervisors`.
         """
-        from streamcast._server import _supervisors
+        from streamcast._children import _supervisors
 
         others = [_a_log(tmp_path / f"extra{i}", f"s{i}") for i in range(3)]
         try:
@@ -212,7 +213,7 @@ class TestLifecycle:
                 "one process per role, and only one"
             )
             # By the LOG's name, not the route key: the maintainer opens the
-            # log, and `serve` may route it under a different path.
+            # log, and the broker may route it under a different path.
             for sup in made:
                 assert {name for _root, name in sup.targets} == {
                     "trades",
@@ -232,8 +233,8 @@ class TestLifecycle:
         The shared loop sweeps in series, so that delay is real — it is just a
         fine trade for the small streams sharing exists for.
         """
+        from streamcast._children import _supervisors
         from streamcast._maintain import Maintain
-        from streamcast._server import _supervisors
 
         busy = _a_log(tmp_path / "busy", "busy")
         try:
@@ -270,8 +271,8 @@ class TestLifecycle:
 
         Falsify by appending the shared `Supervisor` unconditionally.
         """
+        from streamcast._children import _supervisors
         from streamcast._maintain import Maintain
-        from streamcast._server import _supervisors
 
         other = _a_log(tmp_path / "other", "other")
         try:
@@ -298,8 +299,8 @@ class TestLifecycle:
         refuses a name collision rather than resolving one, for the same
         reason.
         """
+        from streamcast._children import _supervisors
         from streamcast._maintain import Maintain
-        from streamcast._server import _supervisors
 
         with pytest.raises(ValueError, match="does not serve with a log") as raised:
             _supervisors(
@@ -312,15 +313,15 @@ class TestLifecycle:
 
     async def test_a_live_only_stream_cannot_be_dedicated(self):
         """It has no log, so there is nothing for a maintainer to sweep."""
+        from streamcast._children import _supervisors
         from streamcast._maintain import Maintain
-        from streamcast._server import _supervisors
 
         with pytest.raises(ValueError, match="does not serve with a log"):
             _supervisors({"a": streamcast.Stream("a")}, Maintain(dedicated=("a",)))
 
     async def test_the_maintainer_stops_when_the_server_closes(self, log):
         stream = streamcast.Stream("trades", log=log)
-        server = await streamcast.serve(stream, "127.0.0.1", 0)
+        server = await serve_streams(stream, "127.0.0.1", 0)
         alive = list(server._children)  # noqa: SLF001
         assert len(alive) == len(ROLES)
         for child in alive:
@@ -344,7 +345,7 @@ class TestLifecycle:
         lapse, so the replacement takes them cleanly.
         """
         stream = streamcast.Stream("trades", log=log)
-        server = await streamcast.serve(stream, "127.0.0.1", 0)
+        server = await serve_streams(stream, "127.0.0.1", 0)
         supervisor = server._children[0]  # noqa: SLF001
         try:
             first = supervisor._process  # noqa: SLF001
@@ -369,7 +370,7 @@ class TestLifecycle:
         # `_Served` wraps rather than replaces, so everything else is reached
         # through `__getattr__` untouched.
         stream = streamcast.Stream("trades", log=log)
-        async with streamcast.serve(stream, "127.0.0.1", 0) as server:
+        async with serve_streams(stream, "127.0.0.1", 0) as server:
             assert server.sockets
             assert server.is_serving()
             async with streamcast.connect(
@@ -404,7 +405,7 @@ def test_there_is_no_thread_mode_to_get_wrong():
     import inspect
 
     assert "thread" not in inspect.signature(Maintain.__init__).parameters
-    assert "thread" not in inspect.signature(streamcast.serve).parameters
+    assert "thread" not in inspect.signature(serve_streams).parameters
     assert set(Maintain.__dataclass_fields__) == {
         "seal_every",
         "compact_every",
@@ -575,7 +576,7 @@ class TestFlushing:
         monkeypatch.setattr(Supervisor, "start", tracked_start)
         stream = streamcast.Stream("trades", log=wide_log)
         plan = Maintain(flush_every=1.0, publish_every=0.25, compact_every=60.0)
-        server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=plan)
+        server = await serve_streams(stream, "127.0.0.1", 0, maintain=plan)
         try:
             deadline = time.monotonic() + 60
             while not all(child.ready for child in children):
@@ -631,33 +632,39 @@ class TestStopping:
             for step in ("terminate", "closed")
         )
 
-    async def test_the_server_takes_writes_while_the_maintainers_finish(
-        self, log, monkeypatch
-    ):
-        from streamcast import _server  # noqa: PLC0415
+    async def test_writes_are_fenced_before_children_finish(self, log, monkeypatch):
+        from streamcast._broker import runtime
 
-        gate = asyncio.Event()
+        gate, finishing = asyncio.Event(), asyncio.Event()
 
         class Finishing:
-            def start(self) -> None:
-                pass
+            ready = False
+            _ready_file = None
 
-            def terminate(self) -> None:
-                pass
+            def start(self):
+                self.ready = True
 
-            async def wait_closed(self) -> None:
+            def terminate(self):
+                self.ready = False
+                finishing.set()
+
+            async def wait_closed(self):
                 await gate.wait()
 
-        monkeypatch.setattr(_server, "_supervisors", lambda *_: [Finishing()])
+        monkeypatch.setattr(runtime, "_supervisors", lambda *_: [Finishing()])
         stream = streamcast.Stream("trades", log=log)
-        server = await streamcast.serve(stream, "127.0.0.1", 0)
+        server = await serve_streams(stream, "127.0.0.1", 0)
         uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
-        server.close()
-        try:
-            async with streamcast.publish(uri) as producer:
-                offset = await asyncio.wait_for(producer.send(rows(0, 1)[0]), 5)
+        async with streamcast.publish(uri) as producer:
+            assert await producer.send(rows(0, 1)[0]) == 1
+            server.close()
+            try:
+                await asyncio.wait_for(finishing.wait(), 5)
+                with pytest.raises(ValueError, match="unavailable"):
+                    await stream.send(rows(1, 2)[0])
 
-            assert offset == 1
-        finally:
-            gate.set()
-            await server.wait_closed()
+                assert stream.end_offset == 2
+                assert not server.stopping.done()
+            finally:
+                gate.set()
+                await server.wait_closed()

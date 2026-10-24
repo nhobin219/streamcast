@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
 import streamcast
+from tests.hosting import serve_streams
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -110,19 +111,19 @@ class TestServe:
 
     async def test_max_size_and_max_message_bytes_together_are_refused(self, streams):
         with pytest.raises(ValueError, match="max_size"):
-            streamcast.serve(
+            serve_streams(
                 streams, "127.0.0.1", 0, max_size=4_096, max_message_bytes=1_000
             )
 
     async def test_a_map_must_name_every_stream(self, streams):
         with pytest.raises(ValueError, match="'large'"):
-            streamcast.serve(streams, "127.0.0.1", 0, max_message_bytes={"small": 1})
+            serve_streams(streams, "127.0.0.1", 0, max_message_bytes={"small": 1})
 
 
 class TestAsgi:
     async def test_a_mounted_stream_refuses_a_frame_over_its_limit(self, streams):
         pytest.importorskip("uvicorn", reason="the asgi extra is not installed")
-        from streamcast.asgi import asgi  # noqa: PLC0415
+        from tests.hosting import application as asgi  # noqa: PLC0415
         from tests.test_asgi import running  # noqa: PLC0415
 
         app = asgi(

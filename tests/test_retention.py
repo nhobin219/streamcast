@@ -527,7 +527,7 @@ class TestThePublishedCopy:
         self, tmp_path, monkeypatch, s3, bucket
     ):
         """A plain `t.metadata.json` left beside the versions is the stream as it
-        was. `serve` syncs the published copy at start; built on that, it
+        was. The broker syncs the published copy at start; built on that, it
         would publish the stream without its floor while the home still
         deletes below it, with no grace for those readers."""
         stream = streamcast.Stream.open(
@@ -549,7 +549,7 @@ class TestThePublishedCopy:
             _retention.run(home(tmp_path), "t", stream.log, s3_options=s3, now=NOW)
             (home(tmp_path) / "t.metadata.json").write_text(before.to_json())
 
-            stream.ensure_metadata()  # what `serve` does at the restart
+            stream.ensure_metadata()  # what the broker does at the restart
 
             hint = _versions.hint_uri(home(tmp_path), "t", stream.log.published)
             async with await streamcast.Stream.snapshot(hint, s3_options=s3) as snap:

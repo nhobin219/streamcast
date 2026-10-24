@@ -17,15 +17,16 @@ import pyarrow as pa
 import pytest
 
 import streamcast
+from tests.hosting import serve_streams
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
     from litelink import WriteHandle
-    from websockets.asyncio.server import Server
 
     from streamcast import Stream
+    from tests.hosting import Listener
 
 
 SCHEMA = pa.schema(
@@ -125,7 +126,8 @@ def serve() -> Callable[..., contextlib.AbstractAsyncContextManager[str]]:
 
     @contextlib.asynccontextmanager
     async def _serve(*streams: Stream, **kwargs: Any) -> AsyncIterator[str]:
-        server: Server = await streamcast.serve(list(streams), "127.0.0.1", 0, **kwargs)
+        kwargs.setdefault("maintain", False)
+        server: Listener = await serve_streams(list(streams), "127.0.0.1", 0, **kwargs)
         try:
             port = server.sockets[0].getsockname()[1]
             name = streams[0].name
@@ -204,7 +206,7 @@ def s3() -> Iterator[litelink.S3Options]:
     # **Into the environment, for the tests that pass no `S3Options`** —
     # most of them build their streams without any, and litelink resolves
     # what it was not given from the ordinary AWS chain. A stream's own
-    # options reach `serve`'s subprocesses through their environment
+    # options reach the broker's subprocesses through their environment
     # (`_process.environment`); `test_process.py` checks that with this
     # environment cleared.
     #

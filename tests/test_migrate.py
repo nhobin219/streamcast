@@ -18,8 +18,8 @@ import pytest
 
 import streamcast
 from streamcast import _log, _manifest, _metadata, _schema, _versions
+from streamcast._children import _supervisors
 from streamcast._maintain import finish_retiring
-from streamcast._server import _supervisors
 from tests.conftest import current_json
 
 V1: dict[str, Any] = {
@@ -147,7 +147,7 @@ class TestTheSeam:
 class TestItIsSafeAtEveryStart:
     async def test_migrating_again_to_the_same_shape_changes_nothing(self, tmp_path):
         # The shape a server's startup takes: `Stream.migrate(...)` then
-        # `serve`, run on every restart.
+        # the broker's start, run on every restart.
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 

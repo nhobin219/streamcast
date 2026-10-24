@@ -40,7 +40,7 @@ upstream ws feed
 │             ├─► pump ──► subscriber B   │
 │             └─► pump ──► subscriber C   │
 │                                         │
-│   serve() also starts, per stream:      │
+│   its lifespan also starts, per stream: │
 │     maintainer  (5 subprocesses)  §5    │   ← nothing seals without it
 │     litestream  (sidecar)               │   ← only with replicate=True, if the log ships its WAL
 └─────────────────────────────────────────┘
@@ -62,11 +62,11 @@ missed. With one, it has an offset.
 
 ### Scope
 
-The managed application in [`BROKER.md`](BROKER.md) places data WebSockets
+The canonical application in [`API.md`](API.md#dynamic-management) places data WebSockets
 and HTTP control in one FastAPI application. One top-level ASGI lifespan
 owns its registry, durable intent, stream generations and maintenance
 children. Local ownership locks exclude a second managed writer; they do
-not replace deployment fencing of another host or a static server. The host
+not replace deployment fencing of another host or writers outside this runtime. The host
 injects authentication and storage profiles. Shared maintenance membership
 changes fence writes until replacement children report readiness, while
 neighbor stream objects and connections remain in place.
@@ -83,8 +83,8 @@ acknowledgements and the transactional outbox/inbox are described in §6b–6c. 
 are out for a reason worth stating, since "broker" invites them: a subscriber resumes by
 offset and an offset belongs to one log, so a subscription spanning streams would need a
 cursor per stream rather than the single integer §3 rests on. The last two belong to
-whatever owns the socket — `websockets` under `serve`, the host application and its ASGI
-server under `streamcast.asgi` — and are passed through rather than reimplemented
+whatever owns the socket — the ASGI server running the broker application, and the host
+application it is mounted in — and are passed through rather than reimplemented
 ([`SECURITY.md`](../SECURITY.md)).
 
 ---
@@ -480,7 +480,7 @@ settings and check the other.
 A slow consumer is dropped; a slow DISK cannot be. Every publisher on a stream
 feeds one writer thread, and if commits fall behind what arrives, rows queue
 in memory — with nothing bounding them, until the broker is out of it.
-`serve(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
+`BrokerConfig(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
 all its publishers, and at the bound a sender **waits** rather than being
 refused: a local `send` waits for room, and a publisher connection's reader
 stops reading its socket, so TCP holds the remote publisher back and its
@@ -489,21 +489,22 @@ statements with no `await` between them — `tests/test_invariants.py` holds
 them so — or two senders could take the same room. A batch larger than the
 bound is let in when the queue is empty, so it waits rather than deadlocks.
 
-Per connection the bound is `serve(max_in_flight=)`, 64 frames: the replies
-one publisher may be owed. Each frame is at most `websockets`' `max_size`, so
+Per connection the bound is `BrokerConfig(max_in_flight=)`, 64 frames: the replies
+one publisher may be owed. Each frame is at most `transport_max_bytes`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
-Per stream, a frame is at most `serve(max_message_bytes=)`, 1 MiB by default,
-and `max_size` is the largest stream's. One server often carries small rows
+Per stream, a frame is at most `BrokerConfig(max_message_bytes=)`, 1 MiB by
+default, under one `transport_max_bytes` for every stream. One server often carries small rows
 beside large ones. A single limit has to fit the largest, and then every
 stream takes frames that large. A frame over its stream's limit closes the
-connection with 1009, as websockets closes one over `max_size`, with a
+connection with 1009, as one over `transport_max_bytes` is closed, with a
 reason naming both sizes. Below the transport's limit, the frames before it
-are answered first. Left unset, it is a `max_size` the caller passed, so a
-server configured that way behaves as before.
+are answered first. The ASGI server allocates a frame before the application
+sees it, so its own limit (uvicorn's `ws_max_size`) is set to
+`transport_max_bytes` as well.
 
-The broker's bounds are `serve`'s keywords, not the `Stream`'s: they are the
+The broker's bounds are `BrokerConfig`'s fields, not the `Stream`'s: they are the
 serving process's settings, and change with a restart rather than with the stream. Each
 is one int for every stream or a map naming every stream served, checked in full before
 any stream is set. `max_in_flight` is still a per-connection window: the mapping chooses
@@ -517,11 +518,11 @@ connections add their own queues, and an oversized inbound batch is admitted alo
 
 | where | what | bound | at the bound |
 |---|---|---|---|
-| broker | a subscriber's outbound queue | `serve(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
-| broker | a stream's rows queued for commit | `serve(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
-| broker | replies owed one publisher connection | `serve(max_in_flight=)`, 64 frames | the connection stops being read |
-| both | a connection's received frames | `websockets`' `max_queue` (16) × `max_size` (1 MiB, or the largest `max_message_bytes`) | the connection stops being read |
-| broker | one publish frame | `serve(max_message_bytes=)` per stream, 1 MiB | the connection is closed, 1009 |
+| broker | a subscriber's outbound queue | `BrokerConfig(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
+| broker | a stream's rows queued for commit | `BrokerConfig(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
+| broker | replies owed one publisher connection | `BrokerConfig(max_in_flight=)`, 64 frames | the connection stops being read |
+| both | a connection's received frames | `max_queue` (16) × the frame limit (`transport_max_bytes` at the broker, `max_size` at a client) | the connection stops being read |
+| broker | one publish frame | `BrokerConfig(max_message_bytes=)` per stream, 1 MiB | the connection is closed, 1009 |
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |
 | client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
 | client | a catch-up | `page_bytes` (64 MiB of Arrow) and optional `page_rows` per query | the next page is read after this one |
@@ -720,7 +721,7 @@ was considered and rejected; it would make a JSON codec part of the public
 surface of a library whose value is being general.
 
 What it buys is an import list of one. `Stream.open(name, create=True, root=…, schema=…)` creates
-the log, `serve` maintains it (and replicates it, with `replicate=True`), and a caller reaches for neither
+the log, the broker maintains it (and replicates it, with `replicate=True`), and a caller reaches for neither
 litelink nor pyarrow.
 
 **`format` carries the width, because JSON Schema does not.** `integer` does
@@ -863,15 +864,15 @@ opened read-only on the rerun, and the migration carries on from there.
  "manifest": "00004-9f2c….manifest.parquet"}
 ```
 
-**Every durable stream has one, written by `serve`.** Before it listens,
-`serve` writes the file for any stream that has none, and when the logs
+**Every durable stream has one, written by the broker.** Before its lifespan
+admits a connection, the broker writes the file for any stream that has none, and when the logs
 publish to S3 compares it with the copy there and uploads it if they differ. **A failure
 is a failure to start.** The file is what a reader on another machine starts
 from, so a stream without one can only be read through its own server, and
 that is better found out at deploy than at the first remote read. It is
-`serve`'s job rather than `Stream.open`'s so that a `Stream(log=…)` gets one
-too: an initialiser does no I/O. A pre-0.9 log gains its file at its first
-`serve` and nothing about the log changes.
+the broker's job rather than `Stream.open`'s so that a `Stream(log=…)` gets one
+too: an initialiser does no I/O. A pre-0.9 log gains its file the first time a
+broker serves it, and nothing about the log changes.
 
 **It is written as versions, behind a hint**, as an Iceberg table's metadata
 is. Each change is an immutable `<stream>.metadata/<n>-<id>.metadata.json`,
@@ -889,7 +890,7 @@ until its first version is written.
   Iceberg's `table-uuid` is. A `file://` path can exist on two machines for
   two different streams, and the id is how a reader tells them apart.
   A home that has lost its metadata while its logs survive does not mint
-  another: `serve`, `migrate`, `retire` and `retain` adopt the published
+  another: the broker, `migrate`, `retire` and `retain` adopt the published
   copy, manifest included, and refuse when that copy's live log is not the
   one they opened. A new id uploaded over the copy would turn away every
   reader that recorded the old one, and drop the copy's sealed logs with it.
@@ -908,12 +909,12 @@ until its first version is written.
 - **`manifest` points to the sealed logs' statistics**, and is null until
   there is a sealed log to describe.
 - **Version 1 is still read.** A version-1 file has no `published` or
-  timestamps; `serve` fills them in from the logs on this disk and rewrites
+  timestamps; the broker fills them in from the logs on this disk and rewrites
   it as version 2.
-- **The live log it names is the only one `serve` will serve.** A
+- **The live log it names is the only one the broker will serve.** A
   `Stream(log=…)` handed a sealed log is refused at start, because serving
   it would write to a log the file says is finished. Handed the live one, it
-  reads its seam and its retired logs from the file at `serve`.
+  reads its seam and its retired logs from the file at start.
 
 **A missing bucket is not a missing file.** pyarrow reports both as "not
 found", and a restore that read a mistyped bucket as "no copy" would rebuild
@@ -958,7 +959,7 @@ loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
 the server's replay. `EARLIEST` on a freshly migrated stream is where the
 current log begins.
 
-Retired logs stay on disk and in their published tables. `serve`'s maintainer leaves
+Retired logs stay on disk and in their published tables. The broker's maintainer leaves
 them alone: `retire()` published, evicted and swept them completely, and litelink
 refuses them a writer, so there is nothing left to maintain.
 litestream replicates only the current log, since nothing writes to a retired
@@ -1250,7 +1251,7 @@ market feed ─► streamcast A ─► live runner ─► streamcast B ─► da
 ```
 
 The live runner is a *subscriber* of A and *embeds* B in its own process — a
-`Stream` plus a `serve`, exactly as §1 shows. Nothing publishes into a server
+`Stream` plus a broker app, exactly as §1 shows. Nothing publishes into a server
 over the wire in this topology — each stage publishes into a `Stream` it
 holds. A stage that cannot hold one publishes remotely instead (§6b).
 
@@ -1535,6 +1536,23 @@ consumer.
 
 ---
 
+## Canonical runtime ownership
+
+`create_app` constructs one FastAPI application. Its lifespan owns static and
+registry-backed generations, admission, connections, writer drains, maintenance
+and replication children. A mounted host enters that same lifespan explicitly.
+The host runs one ASGI worker; shared storage locks refuse local alias owners,
+not a distributed lease. Registry intent is durable before acknowledgement and
+recovered before admission. Child replacement fences writes until readiness;
+shutdown fences before drain and reap. The management contract and crash/recovery
+ordering are in [API.md](API.md#dynamic-management).
+
+Subscriber checkpoints count outbound data frames across replay and live paths.
+The positive interval is independent of commit grouping, queue sizes and inbox
+processing. It introduces no await into atomic stream operations or the adjacent
+frontier/fan-out join. Network send may complete synchronously, which is why an
+explicit scheduling checkpoint is required.
+
 ## 7. Invariants
 
 | | |
@@ -1615,7 +1633,7 @@ holds it.** That means its metadata, its first log's table, or that log's WAL
 replica, and the refusal is a `FileExistsError` naming `restore=True` and `Stream.restore`. It
 looks only when the stream is not on this disk, with one metadata read and a
 one-level listing. Creating an empty one there was the ordinary startup on a
-box that lost its disk. Its first `serve` uploaded the empty stream's
+box that lost its disk. Its first start of the broker uploaded the empty stream's
 metadata over the copy. litestream 0.5.16 also does not refuse an empty
 database behind an existing replica: it ships it as the replica's next
 transaction, so every restore after that returns the empty stream.

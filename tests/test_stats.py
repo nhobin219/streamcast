@@ -146,9 +146,9 @@ class TestWhatItDeliberatelyDoesNotCarry:
     def test_it_carries_no_server_facts(self):
         """`maintain` and `replicate` belong to whatever owns the children.
 
-        A `Stream` does not own its maintainer — `serve` does, and a mounted
-        app's `_Mounted` does — so reporting them here would be this object
-        answering for something it cannot see.
+        A `Stream` does not own its maintainer — the broker's lifespan does —
+        so reporting them here would be this object answering for something it
+        cannot see.
         """
         fields = set(Stats.__dataclass_fields__)
 
@@ -229,58 +229,36 @@ class TestTheEndpoint:
         assert status == 200
         assert missing != 200, "it does not also answer the default path"
 
-    async def test_a_caller_s_own_process_request_still_runs(self, serve, log):
-        """**Composed, not overwritten.**
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    async def test_host_routes_compose_with_broker_stats(self, log, asynchronous):
+        from starlette.responses import Response
 
-        `process_request` is a keyword a caller may already be using — for
-        auth, or a health check of their own. Assigning ours over it would
-        break that silently, so ours answers its own path and defers.
-
-        Falsify by assigning `kwargs["process_request"]` instead of chaining.
-        """
-        from websockets.datastructures import Headers
-        from websockets.http11 import Response
-
-        def mine(_connection: object, request: object) -> object:
-            if getattr(request, "path", "") == "/mine":
-                return Response(418, "OK", Headers({"Content-Length": "0"}), b"")
-
-            return None
+        from tests.hosting import Listener
 
         stream = streamcast.Stream("trades", log=log)
-        async with serve(
-            stream, maintain=False, stats=True, process_request=mine
-        ) as uri:
-            base = uri.replace("ws://", "http://").replace("/trades", "")
+        app = streamcast.create_app(
+            streams=stream, config=streamcast.BrokerConfig(maintain=False)
+        )
+
+        def mine():
+            return Response(status_code=418)
+
+        async def async_mine():
+            return mine()
+
+        app.get("/mine")(async_mine if asynchronous else mine)
+        async with Listener(app, "127.0.0.1", 0) as server:
+            base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
             theirs, _ = await asyncio.to_thread(_get, f"{base}/mine")
             ours, _ = await asyncio.to_thread(_get, f"{base}{STATS_PATH}")
-            # And a subscribe still reaches the stream through both hooks.
-            async with streamcast.connect(uri) as sub:
+            async with streamcast.connect(
+                base.replace("http://", "ws://") + "/trades"
+            ) as sub:
                 await stream.send(trade(0))
                 assert (await sub.recv())[0] == 1
 
-        assert theirs == 418, "the caller's hook was overwritten"
-        assert ours == 200, "ours stopped answering"
-
-    async def test_an_async_process_request_is_awaited(self, serve, log):
-        """`websockets` accepts either shape, so the wrapper must too."""
-        from websockets.datastructures import Headers
-        from websockets.http11 import Response
-
-        async def mine(_connection: object, request: object) -> object:
-            if getattr(request, "path", "") == "/mine":
-                return Response(418, "OK", Headers({"Content-Length": "0"}), b"")
-
-            return None
-
-        stream = streamcast.Stream("trades", log=log)
-        async with serve(
-            stream, maintain=False, stats=True, process_request=mine
-        ) as uri:
-            base = uri.replace("ws://", "http://").replace("/trades", "")
-            theirs, _ = await asyncio.to_thread(_get, f"{base}/mine")
-
         assert theirs == 418
+        assert ours == 200
 
     async def test_every_served_stream_is_listed(self, serve, log, tmp_path):
         first = streamcast.Stream("trades", log=log)

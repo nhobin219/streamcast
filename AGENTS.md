@@ -87,7 +87,7 @@ possible is wrong even if every test passes.
 5. **Reorder.** Two concurrent senders must not produce a subscriber that sees offset 8
    before offset 7.
 6. **Let a log grow without a maintainer.** Nothing here calls `seal()` except
-   `_maintain`. A server started with `maintain=False` and no external maintainer buffers
+   `_maintain`. A broker run with `maintain=False` and no external maintainer buffers
    every row it ever receives — measured at 15.7 MB and climbing past the 8 MiB seal
    target, with zero Parquet files.
 7. **Hold a socket open while reading the published tables.** `catch_up` reads the gap
@@ -155,7 +155,7 @@ src/streamcast/
     _store.py       Store, Transaction: the caller's database, SQLite and Postgres
     _outbox.py      outbox: rows enqueued in the caller's tx, and the sender
     _inbox.py       inbox: the receiver, its bounded window, and processing
-    _limits.py      the queue bounds' defaults, and serve's per-stream form of each
+    _limits.py      the queue bounds' defaults, and the broker's per-stream form of each
     _subscriber.py  one subscriber: bounded queue, pump, the overflow sentinel
     _log.py         the litelink tier: columns, replay, earliest
     _metadata.py    a migrated stream's logs, in order, and which one is current
@@ -174,11 +174,14 @@ src/streamcast/
     _process.py     starting a child the kernel kills with the server
     _stats.py       Stats — what a stream reports about itself, and /stats
     _transport.py   Peer — the four methods a transport must offer
-    _server.py      serve — routing, close codes, maintainer lifetime
-    asgi.py         asgi — the same streams, mounted in an ASGI app
+    _application.py create_app — the one broker application, and its settings checked
+    _broker/        the runtime its lifespan owns: generations, admission, children,
+                    the registry and the HTTP control API
+    _asgi.py        the WebSocket transport under that app, behind `Peer`
+    _children.py    the maintainer and litestream children, grouped by credentials
     _client.py      connect, Subscription, and close code → exception
 ```
 
-`_stream.py` is where the correctness lives and `_server.py`/`asgi.py`/`_client.py` are
+`_stream.py` is where the correctness lives and `_broker/`, `_asgi.py` and `_client.py` are
 transport.
 That split is deliberate: every guarantee in the spec is testable without a socket.

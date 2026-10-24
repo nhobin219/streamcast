@@ -65,7 +65,7 @@ async def test_a_reopened_stream_reads_with_its_own_options(
         s3_options=explicit,
     )
     try:
-        # What `serve` does for every stream before it listens.
+        # What the broker does for every stream before it admits a connection.
         reopened.ensure_metadata()
         log = reopened.log
         assert log is not None

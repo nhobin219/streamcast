@@ -26,9 +26,10 @@ describe.
 statistics and only they can be pruned: the structure says so, rather than
 leaving a reader to remember that the last entry is special.
 
-**Every durable stream has one, from its first `serve`** — see `ensure`. A
-stream without a readable metadata file cannot be read by anything but its
-own server, so `serve` writes it (and uploads it) or refuses to start.
+**Every durable stream has one, from the first time a broker serves it** —
+see `ensure`. A stream without a readable metadata file cannot be read by
+anything but its own server, so the broker's lifespan writes it (and uploads
+it) or refuses to start.
 
 **`stream_id` is minted once**, when the file is first written, and never
 changes. Iceberg's `table-uuid` for the same reason: a `file://` path that
@@ -59,7 +60,7 @@ point in time skips whole logs without opening them; a bound not yet known is
 null, and a null never skips.
 
 **Version 1** is the same without `published`, `start_ts` and `end_ts`. It is
-read, and `ensure` fills those in and rewrites the file at the next `serve`.
+read, and `ensure` fills those in and rewrites the file when the broker next starts.
 
 **Each entry records the schema its log was created with**, which is the
 history the type rule is checked against: a column's type is fixed for the
@@ -462,7 +463,7 @@ def span(statistics: TierStatistics) -> tuple[int | None, int | None]:
 def single(stream: str, log: LogHandle) -> Metadata:
     """The metadata of a stream that is one log — `log`, live — with a new id.
 
-    What every stream gets at its first `serve`, including one whose log
+    What every stream gets when a broker first serves it, including one whose log
     predates metadata files: writing this is how it gains one, and nothing
     about the log changes.
 
@@ -635,7 +636,7 @@ def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
     **The current version, not the plain copy** (`_versions.load`). The copy
     is written after the hint, so a crash between the two leaves it a version
     behind — and a commit built on it would undo the one it missed: `ensure`
-    at the next `serve` would publish it, taking a retention floor back off
+    at the next broker start would publish it, taking a retention floor back off
     the copy readers elsewhere resolve while the home still deletes below it.
     """
     from streamcast import _versions  # noqa: PLC0415 — it imports this module
@@ -673,10 +674,11 @@ def default_published(log: LogHandle) -> bool:
 def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadata:
     """The stream's metadata, written if it is not there and synced to S3.
 
-    **`serve` calls this for every durable stream before it listens**, and a
-    failure is a failure to start: a stream whose metadata cannot be written,
-    or cannot reach its S3 copy, is one nothing else can read, and finding
-    that out at the first remote read is finding it out too late.
+    **The broker's lifespan calls this for every durable stream before it
+    admits a connection**, and a failure is a failure to start: a stream whose
+    metadata cannot be written, or cannot reach its S3 copy, is one nothing
+    else can read, and finding that out at the first remote read is finding it
+    out too late.
 
     `log` must be the stream's LIVE log. A handle to any other — a retired log
     passed as `Stream(log=…)` — is refused, because serving it would append to

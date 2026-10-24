@@ -1,8 +1,8 @@
-"""The queue bounds as `serve` and `asgi` take them: one int, or one per stream.
+"""The queue bounds as `BrokerConfig` takes them: one int, or one per stream.
 
-They are the serving process's settings, not the streams', so they arrive at
-`serve` — and a per-stream map that leaves a stream out or names one not
-served is refused at the call, before any stream is changed.
+They are the serving process's settings, not the streams', so they arrive in
+`BrokerConfig` — and a per-stream map that leaves a stream out or names one
+not served is refused at `create_app`, before any stream is changed.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import pytest
 
 import streamcast
 import streamcast._limits
-from streamcast.asgi import asgi
+from tests.hosting import application as asgi
 
 
 def streams() -> tuple[streamcast.Stream, streamcast.Stream]:

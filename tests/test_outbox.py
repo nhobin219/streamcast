@@ -15,6 +15,7 @@ import pytest
 
 import streamcast
 from streamcast import _outbox
+from tests.hosting import serve_streams
 
 from .conftest import SCHEMA, trade
 
@@ -189,23 +190,22 @@ class TestRecovery:
 
                 await out.flush(timeout=10)
 
-            # As if the broker's buffer were lost: its mark goes back to 0.
-            async with store.transaction() as tx:
-                await _outbox.enqueue(tx, "trades", "p", [trade(1)])
+        # As if the broker's buffer were lost: its mark goes back to 0. The
+        # first broker has stopped, drained its writer and released the log,
+        # which a second broker over the same log could not take otherwise.
+        async with store.transaction() as tx:
+            await _outbox.enqueue(tx, "trades", "p", [trade(1)])
 
-            writer = stream._writer  # noqa: SLF001
-            assert writer is not None
-            await asyncio.to_thread(writer.close)
-            with log.transaction() as ltx:
-                ltx.execute("DELETE FROM streamcast_publishers")
+        with log.transaction() as ltx:
+            ltx.execute("DELETE FROM streamcast_publishers")
 
-            reborn = streamcast.Stream("trades", log=log, exactly_once=True)
-            async with serve(reborn, maintain=False) as uri2:
-                with pytest.raises(streamcast.AcknowledgedRowsLost):
-                    async with streamcast.outbox(
-                        uri2, publisher="p", store=store, **FAST
-                    ) as out:
-                        await out.flush(timeout=10)
+        reborn = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(reborn, maintain=False) as uri2:
+            with pytest.raises(streamcast.AcknowledgedRowsLost):
+                async with streamcast.outbox(
+                    uri2, publisher="p", store=store, **FAST
+                ) as out:
+                    await out.flush(timeout=10)
 
         await store.close()
 
@@ -272,7 +272,7 @@ class TestAnOutage:
             await asyncio.sleep(0.3)  # several attempts, all refused
             assert len(said) == 1, said
             stream = streamcast.Stream("trades", log=log, exactly_once=True)
-            server = await streamcast.serve([stream], "127.0.0.1", port, maintain=False)
+            server = await serve_streams([stream], "127.0.0.1", port, maintain=False)
             try:
                 await out.flush(timeout=10)
             finally:

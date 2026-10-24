@@ -1,4 +1,4 @@
-"""WAL replication: `serve` runs litestream, and never two of them.
+"""WAL replication: the broker runs litestream, and never two of them.
 
 `wal_replication` is opt-in on a litelink log, and it is what makes the log
 survive losing its machine. These tests need somewhere to ship to — `just
@@ -20,6 +20,7 @@ import pytest
 
 import streamcast
 from streamcast._replicate import Sidecar, SidecarUnavailable
+from tests.hosting import serve_streams
 
 from .conftest import filesystem
 
@@ -95,14 +96,14 @@ class TestItActuallyReplicates:
     async def test_serve_ships_the_wal_with_no_second_process_to_run(
         self, shipped, s3, bucket
     ):
-        """The whole point: `serve` is the one thing you start.
+        """The whole point: the broker is the one thing you start.
 
         Before this, a log with `wal_replication=True` served by streamcast
         sealed and maintained while NOTHING shipped — the operator believing
         they had continuous RPO protection with none of it.
         """
         stream = streamcast.Stream("trades", log=shipped)
-        async with streamcast.serve(stream, "127.0.0.1", 0, replicate=True):
+        async with serve_streams(stream, "127.0.0.1", 0, replicate=True):
             await stream.send_many(
                 [{"event_ts": i, "price": 1.0 * i} for i in range(2_000)]
             )
@@ -113,6 +114,9 @@ class TestItActuallyReplicates:
         assert any(key.endswith(".ltx") for key in found), found[:5]
 
     @pytest.mark.slow
+    # The broker reports ready only once five maintainers and litestream
+    # have, which is most of a minute on a loaded two-core box.
+    @pytest.mark.timeout(120)
     async def test_one_process_ships_every_log(self, two_shipped, s3, bucket):
         """**The whole of #14's replication half, end to end.**
 
@@ -126,7 +130,7 @@ class TestItActuallyReplicates:
         only the first log's config: `quotes` then ships nothing.
         """
         streams = [streamcast.Stream(h.name, log=h) for h in two_shipped]
-        async with streamcast.serve(streams, "127.0.0.1", 0, replicate=True) as server:
+        async with serve_streams(streams, "127.0.0.1", 0, replicate=True) as server:
             sidecars = [c for c in server._children if isinstance(c, Sidecar)]  # noqa: SLF001
 
             assert len(sidecars) == 1, "one litestream per log is the defect"
@@ -289,7 +293,7 @@ class TestItActuallyReplicates:
         """
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.warns(UserWarning, match="'?trades'?.*replicate=True"):
-            server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=False)
+            server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
 
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
@@ -302,7 +306,7 @@ class TestItActuallyReplicates:
         # line at start, which is cheap next to a log nobody replicates.
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.warns(UserWarning, match="replicate=True"):
-            server = await streamcast.serve(stream, "127.0.0.1", 0, replicate=False)
+            server = await serve_streams(stream, "127.0.0.1", 0, replicate=False)
 
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
@@ -312,7 +316,7 @@ class TestItActuallyReplicates:
 
     async def test_a_log_without_wal_replication_starts_nothing(self, log):
         stream = streamcast.Stream("trades", log=log)
-        server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=False)
+        server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
         finally:
@@ -382,7 +386,7 @@ class TestNeverTwo:
 
 
 class TestItFailsLoudly:
-    async def test_a_missing_binary_raises_at_serve(self, shipped, monkeypatch):
+    async def test_a_missing_binary_raises_at_startup(self, shipped, monkeypatch):
         """Not at the first missed push.
 
         A server that came up and replicated nothing would leave the operator
@@ -395,7 +399,7 @@ class TestItFailsLoudly:
         )
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.raises(SidecarUnavailable, match="litestream was not found"):
-            streamcast.serve(stream, "127.0.0.1", 0, replicate=True)
+            await serve_streams(stream, "127.0.0.1", 0, replicate=True)
 
     async def test_the_message_names_the_way_out(self, shipped, monkeypatch):
         monkeypatch.setattr(
@@ -404,7 +408,7 @@ class TestItFailsLoudly:
         )
         stream = streamcast.Stream("trades", log=shipped)
         with pytest.raises(SidecarUnavailable) as raised:
-            streamcast.serve(stream, "127.0.0.1", 0, replicate=True)
+            await serve_streams(stream, "127.0.0.1", 0, replicate=True)
 
         assert "replicate=False" in str(raised.value)
         assert "'trades'" in str(raised.value)

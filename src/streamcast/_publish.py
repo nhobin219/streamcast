@@ -383,11 +383,12 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
 
     `max_in_flight` (64) is how many frames `submit` keeps unacknowledged
     at once. A server that owes one connection fewer replies than that
-    (`serve(max_in_flight=)`) stops reading it, and the rest wait at the
+    (`BrokerConfig(max_in_flight=)`) stops reading it, and the rest wait at the
     socket.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`
-    defaults to None for the same reason it does in `serve` and `connect`.
+    defaults to None for the same reason it does in `connect` and the broker
+    is run with uvicorn's `ws_per_message_deflate=False`.
     """
 
     __slots__ = (

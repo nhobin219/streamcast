@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import streamcast
+from examples._hosting import Listening
 from examples.keyed_table.orders import gone, order
 from examples.keyed_table.view import ORDER, View
 
@@ -94,7 +95,11 @@ def book(view: View) -> list[int]:
 
 async def main(root: Path) -> dict[str, Any]:
     stream = streamcast.Stream.open("orders", create=True, root=root, schema=SCHEMA)
-    server = await streamcast.serve(stream, "127.0.0.1", 0)
+    server = await Listening(
+        streamcast.create_app(streams=stream, config=streamcast.BrokerConfig()),
+        "127.0.0.1",
+        0,
+    )
     uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"
     following: list[asyncio.Task[None]] = []
 

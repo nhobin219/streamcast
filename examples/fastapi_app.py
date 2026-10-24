@@ -6,15 +6,8 @@ This file is the broker role, and only that: the trades producer publishes to
 `ws://127.0.0.1:8770/streams/trades` and a consumer subscribes there, both as
 clients (`examples/trades/`). Nothing in the app writes rows itself.
 
-**You do not call `serve()`.** `serve` and `asgi` are two transports for the
-same `Stream`, and a mounted app uses one of them:
-
-    serve(stream, host, port)   owns a socket        -> a standalone server
-    asgi(stream)                owns no socket       -> mounted in your app
-
-The `Stream` is the thing either way. It holds the offsets, the log and the
-fan-out; the transport only carries frames. So everything below is ordinary
-FastAPI, with three lines that are not.
+The same canonical broker app can run directly or be mounted. The host enters
+its mounted application's lifespan explicitly; mounting does not start it.
 
 Run it with any ASGI server:
 
@@ -33,7 +26,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 import streamcast
-from streamcast.asgi import asgi
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,19 +46,19 @@ trades = streamcast.Stream.open(
 # 2. The transport. No host, no port: the ASGI server this runs under owns the
 #    socket. Producers are clients: they publish over the socket, to the
 #    same mount subscribers read from.
-streams = asgi(trades)
+streams = streamcast.create_app(streams=trades)
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """3. `async with streams` — and it is not optional.
+    """3. `app.router.lifespan_context(app)` — and it is not optional.
 
     This is what starts the maintainer that seals the log, and what closes the
     log on the way out. Starlette does not run a mounted sub-app's lifespan, so
     nothing else will do it: without this the log grows with nothing sealing
     it, which is the one failure the library says out loud it must never allow.
     """
-    async with streams:
+    async with streams.router.lifespan_context(streams):
         yield
 
 
@@ -75,7 +67,7 @@ app = FastAPI(lifespan=lifespan, title="a service that also serves a stream")
 
 @app.get("/stats")
 async def info() -> dict[str, Any]:
-    """The facts, unprocessed. `serve(stats=True)` serves this same object.
+    """The facts, unprocessed. `BrokerConfig(stats=True)` serves this same object.
 
     The offsets are on the `Stream`, not on the transport, so nothing here
     has to ask the websocket layer anything.

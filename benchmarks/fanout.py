@@ -37,6 +37,7 @@ import litelink
 import pyarrow as pa
 
 import streamcast
+from examples._hosting import Listening
 from streamcast._protocol import encode
 from streamcast._subscriber import Subscriber
 
@@ -167,7 +168,11 @@ async def main() -> None:
 
     # --- end to end, over a real socket -------------------------------------
     stream = streamcast.Stream("bench")
-    server = await streamcast.serve(stream, "127.0.0.1", 0)
+    server = await Listening(
+        streamcast.create_app(streams=stream, config=streamcast.BrokerConfig()),
+        "127.0.0.1",
+        0,
+    )
     port = server.sockets[0].getsockname()[1]
     uri = f"ws://127.0.0.1:{port}/bench"
     count = min(args.subscribers, 50)

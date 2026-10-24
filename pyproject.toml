@@ -78,16 +78,20 @@ dependencies = [
     # 0.386 against 4.989 to decode (12.9x). At stdlib speed the encode would
     # cost more than the Parquet read it rides on.
     "msgspec>=0.18",
+    # The broker is one FastAPI application (`create_app`), for static
+    # streams and managed ones alike, so FastAPI is not optional: there is no
+    # broker without it. 0.141.1 is the release the application was built and
+    # tested against.
+    "fastapi>=0.141.1",
+    # The ASGI server the broker is supported under, with one worker and its
+    # lifespan on (`docs/API.md`). A dependency rather than the deployer's
+    # choice because nothing else in the library binds a socket: without it
+    # `pip install streamcast` could not run a broker at all. The floor is the
+    # release the suite runs against; an older one is untested, not refused.
+    "uvicorn>=0.54",
 ]
 
 [project.optional-dependencies]
-# Starlette ONLY. Not `fastapi`, which is a layer above what this needs, and
-# not `uvicorn`, which is the deployer's choice — mounting works in any ASGI
-# app and the adapter touches nothing above the WebSocket class.
-asgi = ["starlette>=0.40"]
-# The managed application owns both HTTP control and data WebSockets. The
-# static Starlette adapter remains independent of this optional dependency.
-broker = ["fastapi>=0.141.1"]
 # The Postgres adapter for a CALLER's database (`PostgresStore`), where an
 # outbox and an inbox commit with the caller's own state. psycopg 3, for its
 # native asyncio connection; the adapter's tests pass at the 3.1 floor and on
@@ -138,18 +142,12 @@ dev = [
     # contract tests against a throwaway cluster on loopback.
     "psycopg[binary]>=3.1",
     "ruff>=0.15.0",
-    # TEST dependencies for the ASGI transport. `starlette` is the adapter's
-    # own target; `uvicorn` is here because every claim `tests/test_asgi.py`
-    # makes — a refusal's reason surviving, a close landing 1000 not 1006,
-    # `max_backlog` still dropping a slow consumer — is a claim about what
-    # reaches the peer through a real server, and Starlette's own TestClient
-    # would prove none of them.
-    "starlette>=0.40",
-    "uvicorn>=0.30",
+    # A TEST dependency: Starlette's TestClient does not reach a real socket,
+    # and the claims `tests/test_asgi.py` makes — a refusal's reason
+    # surviving, a close landing 1000 not 1006, `max_backlog` still dropping a
+    # slow consumer — are about what reaches the peer, so the suite runs the
+    # app under uvicorn and talks to it over httpx and websockets.
     "httpx>=0.28.1",
-    # The managed broker application and the runnable FastAPI example.
-    # The static `asgi` extra continues to require only Starlette.
-    "fastapi>=0.141.1",
     "ty>=0.0.15",
     # FOR AN EXAMPLE ONLY: `examples/otel/` runs OpenTelemetry logs and
     # traces through two streams and re-exports them as OTLP, and

@@ -2070,25 +2070,20 @@ name = "streamcast"
 version = "0.25.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "litelink" },
     { name = "msgspec" },
+    { name = "uvicorn" },
     { name = "websockets" },
 ]
 
 [package.optional-dependencies]
-asgi = [
-    { name = "starlette" },
-]
-broker = [
-    { name = "fastapi" },
-]
 postgres = [
     { name = "psycopg" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "fastapi" },
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -2101,25 +2096,22 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
     { name = "s3fs" },
-    { name = "starlette" },
     { name = "ty" },
-    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", marker = "extra == 'broker'", specifier = ">=0.141.1" },
+    { name = "fastapi", specifier = ">=0.141.1" },
     { name = "litelink", specifier = ">=0.14.0,<0.15" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.1" },
-    { name = "starlette", marker = "extra == 'asgi'", specifier = ">=0.40" },
+    { name = "uvicorn", specifier = ">=0.54" },
     { name = "websockets", specifier = ">=14,<18" },
 ]
-provides-extras = ["asgi", "broker", "postgres"]
+provides-extras = ["postgres"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45.0" },
@@ -2132,9 +2124,7 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "s3fs", specifier = ">=2024.6.0" },
-    { name = "starlette", specifier = ">=0.40" },
     { name = "ty", specifier = ">=0.0.15" },
-    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]

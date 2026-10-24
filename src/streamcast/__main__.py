@@ -2,7 +2,7 @@
 
 One command today. It exists as a package entry point rather than as
 `python -m streamcast._maintain` because that form re-executes a module the
-parent has already imported — `__init__` reaches `_maintain` through `_server`
+parent has already imported — `__init__` imports `_maintain` for `Maintain`
 — and CPython warns about it:
 
     RuntimeWarning: 'streamcast._maintain' found in sys.modules after import
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         "usage: python -m streamcast maintain --log PATH NAME [--log PATH NAME ...]\n"
         "\n"
         "Sweeps streamcast's litelink logs: seals each buffer into Parquet,\n"
-        "then compacts, evicts and expires. `streamcast.serve(maintain=True)`\n"
+        "then compacts, evicts and expires. `BrokerConfig(maintain=True)`\n"
         "starts ONE of these covering every log it serves and stops it on\n"
         "close, so running it by hand is for a deployment that passed\n"
         "`maintain=False`. Repeat --log to sweep several.",

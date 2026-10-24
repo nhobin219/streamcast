@@ -142,9 +142,9 @@ _BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
 
 @dataclass(frozen=True, slots=True)
 class Maintain:
-    """How often a stream's log is swept. `serve(maintain=Maintain(...))`.
+    """How often a stream's log is swept. `BrokerConfig(maintain=Maintain(...))`.
 
-    Exists so the cadences have a home that is not `serve`'s signature, and so
+    Exists so the cadences have a home that is not `BrokerConfig`'s fields, and so
     that a later need — a memory cap on the subprocess, a niced priority — has
     somewhere to go without another two keyword arguments.
     """
@@ -178,10 +178,10 @@ class Maintain:
     for a very large or very hot log, which is what this names.
 
     By the LOG's name, which need not be the route it is served at. A name
-    this server does not serve with a log is a `ValueError` at `serve` rather
-    than a no-op: ignored, a typo puts the log straight back into the shared
-    loop — the one thing it was named to avoid — and the symptom is a latency
-    problem the caller believes they already fixed.
+    this server does not serve with a log is a `ValueError` when the broker
+    starts rather than a no-op: ignored, a typo puts the log straight back into
+    the shared loop — the one thing it was named to avoid — and the symptom is
+    a latency problem the caller believes they already fixed.
 
     Naming every log starts no shared maintainer at all, rather than five
     interpreters sweeping nothing.

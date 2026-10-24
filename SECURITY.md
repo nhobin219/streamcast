@@ -17,51 +17,55 @@ Expect an acknowledgement within a week.
 
 ## Scope, and what is a known limit instead
 
-**streamcast has no authentication, no authorisation and no transport security
-of its own**, and adding any of them is not on this list because whatever owns
-the socket already has them and passing through is the whole design. A server
-bound to a public interface with no `ssl=` and no `process_request=` is serving
-its stream to anyone who can reach the port — and that is a deployment choice,
-not a defect.
+**streamcast authenticates and authorizes through a policy the host injects,
+and has no transport security of its own.** `create_app` returns a FastAPI
+application; TLS, the bind address, proxy trust and connection limits belong to
+the ASGI server running it, or the proxy in front of that, and passing them
+through is the whole design.
 
-- **TLS** is `serve(..., ssl=context)`.
-- **Authentication** is `serve(..., process_request=...)`, which sees the
-  request before the WebSocket opens and can answer `401`.
-- **Binding** defaults to nothing: `serve(stream)` with no host binds to all
-  interfaces, exactly as `websockets` does. Pass `"127.0.0.1"` for a server that
-  should only serve its own box, which is the case this library is built for.
+- **Authorization** is `BrokerConfig(authorization=...)`, an object with
+  `authenticate(scope)` and `allows(principal, action, resource)`. It runs
+  before an HTTP body is read, a stream is looked up or a WebSocket is
+  upgraded, for WebSocket scopes as well as HTTP ones. The actions are
+  `data.read`, `data.publish` and `stats.read`, plus the management grants in
+  [`docs/API.md`](docs/API.md#host-policy-and-authorization).
+- **A broker of static streams alone is public by default**: its policy allows
+  every read, every publish and `/stats` to anyone who can reach the port, as
+  a server before this one did. That is a deployment choice, not a defect; pass
+  a policy when the port is reachable by anyone who should not have them. A
+  broker with a registry has no default and refuses to start without one.
+- **TLS** is the ASGI server's (`uvicorn --ssl-certfile`) or the proxy's.
+- **Binding** is the ASGI server's. Pass `127.0.0.1` for a broker that should
+  only serve its own box, which is the case this library is built for.
 
 ### Mounted in an ASGI app
 
-`streamcast.asgi` owns no socket, so **none of the three is streamcast's and
-none of them is `websockets`' either** — they belong to the host application
-and the server running it. `ssl=` and `process_request=` do not exist on a
-mount; TLS is the ASGI server's or the proxy in front of it, and
-authentication is the host app's middleware, which sees the request before the
-WebSocket handshake exactly as `process_request` did.
-
-The consequence worth stating: **mounting a stream inside an authenticated app
-does not authenticate the stream.** Middleware that guards your routes guards
-the mount only if it runs for WebSocket scopes too, which is a property of how
-it was written rather than a given.
+A mounted broker is the same application, so its policy still runs for every
+request that reaches the mount. The consequence worth stating is the reverse:
+**mounting a stream inside an authenticated app does not authenticate it with
+the host's middleware.** Middleware that guards your routes guards the mount
+only if it runs for WebSocket scopes too, which is a property of how it was
+written rather than a given; the broker's own `authorization` is the one that
+is certain to run.
 
 ### `/stats`
 
-`serve` answers `GET /stats` by default with each stream's name, offsets,
-subscriber count and last-send time. It discloses strictly less than the
-socket beside it — a wrong-path connect is already answered with the names of
-every stream served, the greeting already carries `end_offset`, and anyone who
-can reach the port can subscribe and read every row in full. A server that
-needs it private needs the port private; `serve(..., stats=False)` turns it
-off.
+The broker answers `GET /stats` by default with each stream's name, offsets,
+subscriber count and last-send time, filtered to the streams the caller's
+`stats.read` grant allows. It discloses strictly less than the socket beside
+it — a wrong-path connect to a broker without a registry is already answered
+with the names of every stream served, the greeting already carries
+`end_offset`, and anyone allowed to subscribe can read every row in full.
+`BrokerConfig(stats=False)` turns it off.
 
 **A subscriber can ask for a replay, and a replay costs the server a scan.**
 `max_replay` bounds how far back one may ask; it does not bound how *often*.
 A server reachable by untrusted clients wants a connection limit in front of it.
 
-**Close reasons carry stream names.** A 4404 lists what the server serves, so a
-client that cannot reach a stream still learns that it exists. If a stream's
-existence is itself sensitive, run it on a separate port.
+**Close reasons carry stream names.** Without a registry, a 4404 lists what
+the broker serves, so a client that cannot reach a stream still learns that it
+exists. If a stream's existence is itself sensitive, run it on a separate port.
+A broker with a registry lists nothing.
 
 **The greeting publishes the stream's metadata location** — the URI of its
 metadata file, and the stream's id. That is deliberate — it is what lets
@@ -75,17 +79,14 @@ policy is what decides who may read them, not this library. There is no
 switch to leave the location out of the greeting; if it is itself sensitive,
 the port should not be reachable by anyone who should not learn it.
 
-**A server accepts writes from anyone who can reach it.** Every served stream
-takes publishers — only a retired one refuses them — so the authentication
-above is not optional on a reachable port: a published row is durable, every
-subscriber sees it, and no consumer cursor undoes it. (Before 0.14.0 this was
-opt-in, `serve(..., publish=True)`; that switch is gone, and an upgraded server
-accepts publishers.) `process_request` is the
-hook — it sees the request before the WebSocket opens, including the
-`?publish` query that distinguishes a publisher from a subscriber, so a policy
-can allow reads and refuse writes on the same port.
+**A public broker accepts writes from anyone who can reach it.** Every served
+stream takes publishers — only a retired one refuses them — so a policy is not
+optional on a reachable port: a published row is durable, every subscriber
+sees it, and no consumer cursor undoes it. Grant `data.publish` separately from
+`data.read` to allow reads and refuse writes on the same port.
 
 What IS in scope: anything that lets a subscriber see messages from a stream it
 did not subscribe to, receive a stream that silently differs from another
 subscriber's, make the server exhaust memory through a path `max_backlog` is
-supposed to bound, or publish into a retired stream.
+supposed to bound, publish into a retired stream, reach a stream or an
+action the injected policy refused, or disclose a storage profile's credentials.

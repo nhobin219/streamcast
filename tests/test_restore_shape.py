@@ -69,7 +69,7 @@ class TestTheMetadataRecordsTheSort:
             assert before is not None
             assert before.live_log.sort_by is None
 
-            stream.ensure_metadata()  # what `serve` does at start
+            stream.ensure_metadata()  # what the broker does at start
         finally:
             await stream.aclose()
 

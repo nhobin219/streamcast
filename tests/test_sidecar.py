@@ -45,7 +45,7 @@ async def closed(sidecar: Sidecar) -> None:
 
 
 def test_the_package_does_not_export_it():
-    """`serve` runs it; nothing outside the package builds one."""
+    """The broker runs it; nothing outside the package builds one."""
     for name in ("Sidecar", "SidecarUnavailable"):
         assert not hasattr(streamcast, name)
         assert name not in streamcast.__all__

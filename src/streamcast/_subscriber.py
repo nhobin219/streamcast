@@ -33,6 +33,7 @@ import asyncio
 from typing import TYPE_CHECKING, Final
 
 from streamcast._errors import Close
+from streamcast._limits import SUBSCRIBER_YIELD_EVERY
 from streamcast._protocol import refusal
 
 if TYPE_CHECKING:
@@ -57,24 +58,29 @@ where `bytes | object` narrows in none of them and needs an `assert` on the
 send path to say what the queue already guarantees.
 """
 
-_YIELD_FRAMES: Final = 64
-"""A writable transport's send may not suspend at all.
-
-Without an explicit checkpoint a subscriber drains its entire ready replay
-or backlog in one turn, delaying acknowledgements and every other connection.
-Batch the checkpoint so fairness does not require a task switch per row.
-"""
-
 
 class Subscriber:
     """A connection, its backlog, and the offset it has actually been sent."""
 
-    __slots__ = ("_backlog", "_connection", "_dropped", "_queue", "_where")
+    __slots__ = (
+        "_backlog",
+        "_connection",
+        "_dropped",
+        "_queue",
+        "_where",
+        "_yield_every",
+    )
 
     def __init__(
-        self, connection: Peer, *, max_backlog: int, where: Predicate | None = None
+        self,
+        connection: Peer,
+        *,
+        max_backlog: int,
+        yield_every: int = SUBSCRIBER_YIELD_EVERY,
+        where: Predicate | None = None,
     ) -> None:
         self._connection = connection
+        self._yield_every = yield_every
         # Compiled at subscribe by `_stream`, not per message. See `_filter`
         # for why the generic form costs more than the encode it rides on.
         self._where = where
@@ -156,7 +162,7 @@ class Subscriber:
                 {pump, gone}, return_when=asyncio.FIRST_COMPLETED
             )
             if pump in done:
-                # Re-raised, not swallowed: `ConnectionClosed` is how `serve`
+                # Re-raised, not swallowed: `ConnectionClosed` is how the broker
                 # tells an ordinary disconnect from a handler that failed.
                 pump.result()
 
@@ -178,13 +184,13 @@ class Subscriber:
         subscriber is dropped the moment it catches up, having done all the
         work. See `Stream` for the arithmetic the defaults are chosen by.
         """
-        remaining = _YIELD_FRAMES
+        remaining = self._yield_every
         if replay is not None:
             async for _offset, frame in replay:
                 await self._connection.send(frame, text=True)
                 remaining -= 1
                 if not remaining:
-                    remaining = _YIELD_FRAMES
+                    remaining = self._yield_every
                     await asyncio.sleep(0)
 
         while True:
@@ -198,7 +204,7 @@ class Subscriber:
             await self._connection.send(frame, text=True)
             remaining -= 1
             if not remaining:
-                remaining = _YIELD_FRAMES
+                remaining = self._yield_every
                 await asyncio.sleep(0)
 
 

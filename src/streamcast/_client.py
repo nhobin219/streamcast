@@ -783,7 +783,8 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     message naming what was tried and what to change. See `_catchup`.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`
-    defaults to None for the same reason it does in `serve`.
+    defaults to None for the same reason the broker is run with uvicorn's
+    `ws_per_message_deflate=False`.
     """
 
     __slots__ = (

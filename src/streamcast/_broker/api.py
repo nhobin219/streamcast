@@ -14,12 +14,12 @@ from starlette.responses import JSONResponse, Response
 from websockets.exceptions import ConnectionClosed
 
 from streamcast import _stats
+from streamcast._asgi import _Peer, _relative
 from streamcast._broker.model import CONTROL, NAME, BrokerConfig, Fault
 from streamcast._broker.runtime import BrokerRuntime
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._protocol import ACCEPTED, VERSION, Publish, parse_subscribe, refusal
 from streamcast._tasks import join
-from streamcast.asgi import _Peer, _relative
 
 
 def error(fault: Fault) -> JSONResponse:
@@ -88,12 +88,12 @@ async def body(request: Request, maximum: int) -> Any:
         raise Fault(400, "invalid_json") from None
 
 
-def application(config: BrokerConfig) -> FastAPI:
+def application(config: BrokerConfig, streams=()) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         # The application owns startup too. ASGI cancellation cannot discard a
         # just-opened registry/handle before its owner has a chance to close it.
-        opening = asyncio.create_task(BrokerRuntime.open(config))
+        opening = asyncio.create_task(BrokerRuntime.open(config, streams=streams))
         cancelled = await join(opening)
         runtime = opening.result()
         if cancelled:
@@ -266,8 +266,11 @@ def application(config: BrokerConfig) -> FastAPI:
     async def migration(name: str, request: Request):
         return await mutation(name, request, "migration")
 
-    @app.get(_stats.STATS_PATH)
+    @app.get(_stats.STATS_PATH if isinstance(config.stats, bool) else config.stats)
     async def stats(request: Request):
+        if config.stats is False:
+            raise Fault(404, "not_found")
+
         principal = await authorize(config, request.scope, "stats.read", "*")
         owner = runtime()
         streams = []
@@ -313,11 +316,16 @@ def application(config: BrokerConfig) -> FastAPI:
         async with _Peer(websocket) as peer:
             try:
                 parsed_name, requested, where = parse_subscribe(target)
-                if NAME.fullmatch(parsed_name) is None:
+                if (
+                    parsed_name not in owner.static
+                    and NAME.fullmatch(parsed_name) is None
+                ):
                     raise ValueError("invalid stream name")
 
-            except ValueError:
-                await peer.close(Close.BAD_REQUEST, refusal("bad_request"))
+            except ValueError as exc:
+                await peer.close(
+                    Close.BAD_REQUEST, refusal("bad_request", detail=str(exc)[:80])
+                )
                 return
 
             # Check the parsed capability as well; malformed/duplicate query
@@ -331,7 +339,17 @@ def application(config: BrokerConfig) -> FastAPI:
 
             generation = owner.generations.get(parsed_name)
             if generation is None or not generation.accepting:
-                await peer.close(Close.NO_SUCH_STREAM, refusal("no_such_stream"))
+                await peer.close(
+                    Close.NO_SUCH_STREAM,
+                    refusal(
+                        "no_such_stream",
+                        **(
+                            {"serves": sorted(owner.static)}
+                            if config.registry is None
+                            else {}
+                        ),
+                    ),
+                )
                 return
 
             async def dispatch():

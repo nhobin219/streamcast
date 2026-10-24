@@ -62,7 +62,7 @@ async def stream_of(
 
 
 async def served_once(stream: streamcast.Stream, serve) -> None:
-    """`serve` writes the metadata file a reader resolves."""
+    """The broker writes the metadata file a reader resolves."""
     async with serve(stream, maintain=False):
         pass
 

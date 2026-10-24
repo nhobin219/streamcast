@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from streamcast._stream import Stream
 
 STATS_PATH: Final = "/stats"
-"""Where `serve(stats=True)` answers.
+"""Where `BrokerConfig(stats=True)` answers.
 
 Not `/health`, because the payload carries no verdict and a name implying one
 would be read as though it did.
@@ -53,9 +53,9 @@ class Stats:
     """One stream, as of now.
 
     Reachable as `Stream.stats` without a socket, which is the point: the
-    facts are the API and HTTP is one way to publish them. A mounted ASGI app
-    writes its own route over this; `serve` exposes `/stats` because a
-    standalone server has no app to add a route to.
+    facts are the API and HTTP is one way to publish them. The broker exposes
+    `/stats` (`BrokerConfig(stats=)`); an application with routes of its own
+    can write another over this.
     """
 
     name: str

@@ -253,7 +253,7 @@ class TestRemotePublishers:
             async with streamcast.publish(uri) as producer:
                 assert await producer.send(wire) == 1
 
-            # Inside the block: `serve` closes a log it owns on the way out.
+            # Inside the block: the broker closes a log it owns on the way out.
             stored = stream.log.scan(columns=["trace_id", "blob", "nested"]).read_all()
 
         found = stored.to_pylist(maps_as_pydicts="strict")[0]
