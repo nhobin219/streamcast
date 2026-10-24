@@ -242,7 +242,7 @@ both said worked. The release notes give the upgrade order the matrix supports.
 
 **Before 1.0, prefer the consistent API.** A breaking change is fine when it leaves one
 standard shape instead of two: say it loudly in the CHANGELOG, ship it in a minor
-release, and add no compatibility shim. Additions and fixes ship as a patch. Under 0.x a
+release, and add no compatibility shim. Fixes ship as a patch. Under 0.x a
 minor is a breaking release, so callers cap the minor, and a pull request says whether
 it breaks and which version it should ship as.
 

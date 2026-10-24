@@ -19,7 +19,7 @@ Report a finding only if **all three** hold:
    memory growth** — I1, I2, I3, I4 or I6 broken, in other words (`docs/SPEC.md` §7).
    Add to that: a leaked task or set entry per connection, which is the same class and
    has already happened once here. **A brief may name more**: the failure its own change
-   could cause that I1-I6 do not cover (deleting rows a reader can still resolve, a
+   could cause that this list does not cover (deleting rows a reader can still resolve, a
    stream that no longer serves after an upgrade, two litestreams on one database).
    What a brief names is critical for that review.
 2. It is **reachable** from a state this system can actually be in: a `Stream`
