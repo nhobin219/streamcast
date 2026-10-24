@@ -235,7 +235,8 @@ per-connection CPU cost is justified for the deployment.
 ```python
 import uvicorn
 app = streamcast.create_app(streams=[trades, quotes])
-# Equivalent CLI: uvicorn module:app --workers 1 --lifespan on --ws-per-message-deflate false
+# Equivalent CLI: uvicorn module:app --workers 1 --lifespan on \
+#     --ws-per-message-deflate false --ws-max-size 1048576
 uvicorn.run(app, host="127.0.0.1", port=8765, workers=1,
             lifespan="on", ws_per_message_deflate=False, ws_max_size=1<<20)
 ```
@@ -244,6 +245,15 @@ The top-level lifespan owns admission, connections, replay tasks, writers and
 children. Static streams and registry-backed streams use that same owner.
 Shutdown fences writes, closes peers, joins replay and writer work, then reaps
 children and closes owned handles. Borrowed log handles remain the caller's.
+
+Startup waits for the children to report ready, up to `readiness_timeout` (30
+seconds), and fails rather than serve without a maintainer: five interpreters
+loading pyarrow and DuckDB can take most of that on a small loaded host. Static
+streams share the maintainer group with managed ones, so a managed stream's
+transition, which replaces the group, also fences a static stream's writes
+until the new group is ready: a local `stream.send` then raises
+`ValueError("stream unavailable")`, and a remote publisher is refused, rather
+than accept rows no maintainer will seal. Retry after a moment.
 
 | setting | default | bounds |
 |---|---|---|

@@ -35,6 +35,10 @@ there was nothing to have changed from. Everything above it is ordinary.
 - Static streams are now fenced like managed ones: the lifespan claims each
   log's ownership lock, refuses writes until the maintainer reports ready,
   and on exit closes connections, drains the writer and closes the stream.
+  Startup fails if the maintainer is not ready within `readiness_timeout`
+  (30 s), and a managed stream's transition fences static writes too while
+  the shared maintainer group is replaced; `stream.send` raises
+  `ValueError("stream unavailable")` meanwhile.
 - FastAPI and uvicorn are dependencies; the `asgi` and `broker` extras are
   gone. `docs/BROKER.md` is folded into `docs/API.md` and `docs/SPEC.md`.
 

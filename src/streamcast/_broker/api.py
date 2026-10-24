@@ -7,7 +7,7 @@ import base64
 import contextlib
 import json
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Final
 
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import JSONResponse, Response
@@ -20,6 +20,15 @@ from streamcast._broker.runtime import BrokerRuntime
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._protocol import ACCEPTED, VERSION, Publish, parse_subscribe, refusal
 from streamcast._tasks import join
+
+DETAIL_CHARS: Final = 80
+"""How much of a parse or filter error travels in a 4400.
+
+`refusal` trims by dropping whole fields, so an untruncated detail would push
+itself off the close frame and the subscriber would get `{"error":
+"bad_request"}` — the one case where saying less loses the entire diagnosis.
+Eighty characters is every message `parse_subscribe` produces.
+"""
 
 
 def error(fault: Fault) -> JSONResponse:
@@ -324,7 +333,8 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
 
             except ValueError as exc:
                 await peer.close(
-                    Close.BAD_REQUEST, refusal("bad_request", detail=str(exc)[:80])
+                    Close.BAD_REQUEST,
+                    refusal("bad_request", detail=str(exc)[:DETAIL_CHARS]),
                 )
                 return
 
@@ -362,7 +372,16 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
                         await generation.stream.serve_subscriber(peer, requested, where)
                 except ConnectionClosed:
                     pass
-                except (ValueError, ProtocolError):
+                except ProtocolError as exc:
+                    # A `where=` this stream cannot serve — a column it does
+                    # not have, a value that is not a scalar. Refused, with the
+                    # reason, rather than served as a subscription that never
+                    # delivers, which looks exactly like a quiet stream.
+                    await peer.close(
+                        Close.BAD_REQUEST,
+                        refusal("bad_request", detail=str(exc)[:DETAIL_CHARS]),
+                    )
+                except ValueError:
                     await peer.close(Close.BAD_REQUEST, refusal("bad_request"))
                 except NotReplayable as exc:
                     await peer.close(
