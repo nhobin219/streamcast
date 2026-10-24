@@ -64,6 +64,7 @@ import asyncio
 import contextlib
 import itertools
 import math
+import os
 import signal
 import subprocess
 import sys
@@ -504,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
 
             return 1
 
+        ready = os.environ.get("STREAMCAST_MAINTAIN_READY")
+        if ready and len(opened) == len(args.logs):
+            Path(ready).write_text(str(os.getpid()))
+
         with contextlib.suppress(KeyboardInterrupt):
             sweep(
                 opened,
@@ -539,6 +544,7 @@ class Supervisor:
     """
 
     __slots__ = (
+        "_ready_file",
         "_env",
         "_names",
         "_plan",
@@ -560,6 +566,7 @@ class Supervisor:
         streams: Sequence[tuple[Path, str]] = (),
         env: Mapping[str, str | None] | None = None,
     ) -> None:
+        self._ready_file: Path | None = None
         self._targets = list(targets)
         # The logs' `S3Options`, as the child's environment (`_process`): it
         # opens the logs itself, by name, and has no other way to get them.
@@ -592,7 +599,12 @@ class Supervisor:
         # A fresh interpreter rather than a fork. A forked child would inherit
         # this process's event loop and its open SQLite connections, and
         # litelink's handles are not built to be used across a fork.
-        return popen(self._spawn_argv(), self._env)
+        env = dict(self._env)
+        if self._ready_file is not None:
+            self._ready_file.unlink(missing_ok=True)
+            env["STREAMCAST_MAINTAIN_READY"] = str(self._ready_file)
+
+        return popen(self._spawn_argv(), env)
 
     def _spawn_argv(self) -> list[str]:
         argv = [sys.executable, "-m", "streamcast", "maintain"]
@@ -610,6 +622,18 @@ class Supervisor:
             argv += ["--flush-every", str(self._plan.flush_every)]
 
         return argv
+
+    @property
+    def ready(self) -> bool:
+        """All requested logs opened in this exact child, not a stale PID."""
+        process = self._process
+        if process is None or process.poll() is not None or self._ready_file is None:
+            return False
+
+        try:
+            return self._ready_file.read_text() == str(process.pid)
+        except OSError:
+            return False
 
     def start(self) -> None:
         self._process = self._spawn()

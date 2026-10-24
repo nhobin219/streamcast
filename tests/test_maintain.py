@@ -555,13 +555,34 @@ class TestFlushing:
         _maintain.on_exit([("trades", wide_log)], "publish", None)
         assert wide_log.published_through() == 0
 
-    async def test_a_served_row_reaches_the_published_table(self, wide_log):
+    @pytest.mark.slow
+    async def test_a_served_row_reaches_the_published_table(
+        self, wide_log, monkeypatch, tmp_path
+    ):
         """End to end: unflushed, litelink publishes only 512 MiB files, so on
         this stream nothing would be published at all."""
+        # Importing five independent interpreters is outside the publication
+        # deadline. Each receipt names the child that actually opened its log;
+        # a listening socket alone says nothing about maintenance readiness.
+        children = []
+        start = Supervisor.start
+
+        def tracked_start(child):
+            child._ready_file = tmp_path / f"{child._role}.ready"  # noqa: SLF001
+            children.append(child)
+            start(child)
+
+        monkeypatch.setattr(Supervisor, "start", tracked_start)
         stream = streamcast.Stream("trades", log=wide_log)
         plan = Maintain(flush_every=1.0, publish_every=0.25, compact_every=60.0)
         server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=plan)
         try:
+            deadline = time.monotonic() + 60
+            while not all(child.ready for child in children):
+                assert time.monotonic() < deadline, "maintainers did not become ready"
+                await asyncio.sleep(0.1)
+
+            assert len(children) == len(ROLES)
             await stream.send_many(rows(0, 50))
             deadline = time.monotonic() + 10
             while wide_log.published_through() < 50 and time.monotonic() < deadline:
