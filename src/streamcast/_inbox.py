@@ -77,7 +77,7 @@ from streamcast._store import sql
 from streamcast._tasks import join
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import TracebackType
 
@@ -125,6 +125,7 @@ class Inbox:
         "_max_bytes",
         "_max_rows",
         "_open",
+        "_on_pause_change",
         "_paused",
         "_poll_every",
         "_resume_at",
@@ -150,6 +151,7 @@ class Inbox:
         inbox_max_rows: int | None,
         inbox_resume_at: float,
         catch_up: bool,
+        on_pause_change: Callable[[bool], None] | None,
         poll_every: float,
         backoff: Sequence[float],
         websockets_kwargs: dict[str, Any],
@@ -184,6 +186,7 @@ class Inbox:
         self._freed = asyncio.Event()  # processing deleted rows
         self._caught_up = False
         self._paused = False
+        self._on_pause_change = on_pause_change
         self._subscription: Subscription | None = None
         self._closed = False
         self._failure: BaseException | None = None
@@ -372,6 +375,11 @@ class Inbox:
                 self._rows, self._bytes = await self._count(tx)
 
             self._paused = self._over(self._rows, self._bytes)
+            # The starting state, once, before `inbox()` returns: inside the
+            # try, so a callback that raises still closes the subscription.
+            if self._on_pause_change is not None:
+                self._on_pause_change(self._paused)
+
             if self._paused:
                 # Validate the saved identity/offset before waiting, but leave
                 # no unread socket holding broker memory during the pause.
@@ -453,7 +461,7 @@ class Inbox:
 
                 sub = self._subscription = None
                 if full:
-                    self._paused = True
+                    self._pause(paused=True)
 
         except Exception as exc:  # noqa: BLE001 — surfaced by `recv`
             self._failure = exc
@@ -552,12 +560,28 @@ class Inbox:
                 self._rows, self._bytes = await self._count(tx)
 
             if self._below_low_water():
-                break
+                # Only here: a close ends the wait still paused, and is not
+                # a resume to report.
+                self._pause(paused=False)
+                return
 
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._freed.wait(), self._poll_every)
 
-        self._paused = False
+    def _pause(self, *, paused: bool) -> None:
+        """Move the receiver between paused and receiving, and say so.
+
+        Called only on a change, synchronously, in the receiver's own task,
+        so the callback sees each transition once and in order. Whatever it
+        raises fails the receiver, as any receiver failure does: `recv`
+        raises it.
+        """
+        if paused == self._paused:
+            return
+
+        self._paused = paused
+        if self._on_pause_change is not None:
+            self._on_pause_change(paused)
 
     async def _insert(self, take: list[tuple[int, int | None, str]]) -> tuple[int, int]:
         """Insert what is above the TABLE's received position, and move it;
@@ -681,11 +705,18 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
     either high bound it closes the validation subscription and starts paused;
     below high it starts active, including between the watermarks. This is a
     fresh decision, not restoration of the previous process's hysteresis.
-    A paused receiver resumes strictly below both low bounds. `Inbox.paused`
-    observes the receiver's actual state; callers supply no pause flag. A clean exit
-    commits the open processing transaction, and an exit by exception rolls
-    it back, so the row it held is handed out again. Unknown keywords go to
-    `websockets.connect`.
+    A paused receiver resumes strictly below both low bounds.
+
+    `on_pause_change(paused)` is called once with the starting state before
+    this returns, then on every transition, synchronously in the receiver's
+    task: keep it quick and non-blocking (set a flag, put on a queue), since
+    the receiver waits for it. What it raises fails the inbox: here at start,
+    afterwards from `recv` once the rows already received are processed. `Inbox.paused` is the same state, read-only;
+    callers supply no pause flag and recompute nothing from counts.
+
+    A clean exit commits the open processing transaction, and an exit by
+    exception rolls it back, so the row it held is handed out again. Unknown
+    keywords go to `websockets.connect`.
     """
 
     __slots__ = ("_inbox", "_offset")
@@ -701,6 +732,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
         inbox_max_rows: int | None = None,
         inbox_resume_at: float = INBOX_RESUME_AT,
         catch_up: bool = False,
+        on_pause_change: Callable[[bool], None] | None = None,
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
         **kwargs: Any,
@@ -714,6 +746,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
             inbox_max_rows=inbox_max_rows,
             inbox_resume_at=inbox_resume_at,
             catch_up=catch_up,
+            on_pause_change=on_pause_change,
             poll_every=poll_every,
             backoff=backoff,
             websockets_kwargs=kwargs,

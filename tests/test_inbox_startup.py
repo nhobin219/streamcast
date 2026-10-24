@@ -208,3 +208,177 @@ async def test_immediate_exit_before_receiver_runs_closes_owned_subscription(
             assert (await asyncio.wait_for(restarted.recv(), 5))[0] == 1
 
     await store.close()
+
+
+class Recorder:
+    """An `on_pause_change` that records each call, and checks that
+    `Inbox.paused` already says the same when it is called."""
+
+    def __init__(self) -> None:
+        self.calls: list[bool] = []
+        self.inbox: Any = None
+
+    def __call__(self, paused: bool) -> None:
+        if self.inbox is not None:
+            assert self.inbox.paused is paused
+
+        self.calls.append(paused)
+
+
+async def calls_are(recorder, expected):
+    return recorder.calls == expected
+
+
+async def fill(serve_uri, stream, store, rows, **limits):
+    """Run an inbox until `rows` are received and it has paused, then leave."""
+    async with streamcast.inbox(
+        serve_uri, subscriber="s", store=store, **limits, **FAST
+    ) as first:
+        await stream.send_many([trade(0)] * rows)
+        await until(lambda: paused(first))
+
+
+@pytest.mark.parametrize(
+    ("held_rows", "max_rows", "starts_paused"),
+    [(4, 2, True), (2, 2, True), (1, 2, False)],
+    ids=["over", "at", "under"],
+)
+async def test_the_starting_state_is_reported_once_before_inbox_returns(
+    serve, log, opener, held_rows, max_rows, starts_paused
+):
+    """Over and at the high bound start paused, under it active; either way
+    the callback has been called exactly once, with that state, by the time
+    `inbox()` hands the object back. "Over" is a restart with a smaller
+    bound than the run that filled it."""
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    async with serve(stream, maintain=False) as uri:
+        # A run bounded at `held_rows` leaves that many unprocessed.
+        await fill(uri, stream, store, held_rows + 1, inbox_max_rows=held_rows)
+
+        recorder = Recorder()
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=max_rows,
+            on_pause_change=recorder,
+            **FAST,
+        ) as sub:
+            assert recorder.calls == [starts_paused]
+            assert sub.paused is starts_paused
+
+    await store.close()
+
+
+async def test_each_transition_is_reported_once_and_in_order(serve, log, opener):
+    """Active at start, paused at the high bound, resumed strictly below
+    `inbox_resume_at` of it, paused again: four calls, no repeats, and
+    `Inbox.paused` agrees at each."""
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    recorder = Recorder()
+    async with serve(stream, maintain=False) as uri:
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=2,
+            on_pause_change=recorder,
+            **FAST,
+        ) as sub:
+            recorder.inbox = sub
+            assert recorder.calls == [False]
+            await stream.send_many([trade(0)] * 4)
+            await until(lambda: calls_are(recorder, [False, True]))
+            # Low water is 1 row (half of 2): one processed leaves 1, which is
+            # not strictly below it; the second leaves 0 and resumes.
+            await sub.recv()
+            await sub.commit()
+            await asyncio.sleep(0.3)
+            assert recorder.calls == [False, True]
+            await sub.recv()
+            await sub.commit()
+            await until(lambda: calls_are(recorder, [False, True, False, True]))
+
+        # Closing while paused is not a resume.
+        assert recorder.calls == [False, True, False, True]
+
+    await store.close()
+
+
+async def test_inbox_resume_at_sets_where_a_startup_pause_ends(serve, log, opener):
+    """Restarted at the high bound of 4 with `inbox_resume_at=0.75`: 3 held
+    rows is exactly low water and stays paused; 2 is below it and resumes."""
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    recorder = Recorder()
+    async with serve(stream, maintain=False) as uri:
+        await fill(uri, stream, store, 6, inbox_max_rows=4)
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=4,
+            inbox_resume_at=0.75,
+            on_pause_change=recorder,
+            **FAST,
+        ) as sub:
+            recorder.inbox = sub
+            assert recorder.calls == [True]
+            await sub.recv()
+            await sub.commit()
+            await asyncio.sleep(0.3)
+            assert recorder.calls == [True], "3 of 4 is not below 0.75 of 4"
+            await sub.recv()
+            await sub.commit()
+            await until(lambda: calls_are(recorder, [True, False]))
+            await until(lambda: received_at(store, 6))
+
+    await store.close()
+
+
+async def test_no_callback_is_the_same_receiver(serve, log, opener):
+    """`on_pause_change=None` — the default — through a startup pause and a
+    resume: nothing is called, and the rows still arrive."""
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    async with serve(stream, maintain=False) as uri:
+        await fill(uri, stream, store, 3, inbox_max_rows=2)
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=2,
+            on_pause_change=None,
+            **FAST,
+        ) as sub:
+            assert sub.paused
+            for expected in (1, 2, 3):
+                assert (await asyncio.wait_for(sub.recv(), 5))[0] == expected
+                await sub.commit()
+
+            assert not sub.paused
+
+    await store.close()
+
+
+async def test_a_callback_that_raises_at_start_fails_inbox_and_closes_the_socket(
+    serve, log, opener
+):
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+
+    def refuse(paused: bool) -> None:
+        raise RuntimeError("callback failed")
+
+    async with serve(stream, maintain=False) as uri:
+        with pytest.raises(RuntimeError, match="callback failed"):
+            async with streamcast.inbox(
+                uri, subscriber="s", store=store, on_pause_change=refuse, **FAST
+            ):
+                pytest.fail("inbox() must not return")
+
+        await until(lambda: no_subscribers(stream))
+
+    await store.close()
