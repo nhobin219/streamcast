@@ -47,8 +47,7 @@ there was nothing to have changed from. Everything above it is ordinary.
   at or over `inbox_max_bytes` or `inbox_max_rows` it starts paused, closes
   the checking subscription, and resumes strictly below `inbox_resume_at`
   of both; under them it starts active, the band between the bounds
-  included. A caller that stored its own pause flag to pass back drops it
-  and reads `Inbox.paused`.
+  included. A caller that stored its own pause flag to pass back drops it.
 
 ### Fixed
 
@@ -67,6 +66,11 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`inbox(..., on_pause_change=None)`**, a `Callable[[bool], None]` called
+  once with the starting state before `inbox()` returns and then on every
+  pause and resume, synchronously in the receiver: keep it quick and
+  non-blocking. What it raises fails the inbox. `Inbox.paused` stays the
+  read-only current value. This is the only way to observe the state.
 - `BrokerConfig(subscriber_yield_every=64)`: the data frames a subscriber
   is sent, across replay and live delivery, before it yields to the event
   loop. 64 was the fixed value; the default is provisional until the

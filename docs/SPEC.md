@@ -1537,6 +1537,21 @@ answered as duplicates of the old stream's.
   sets the pause; `Inbox.paused` reports it. The receiver owns the checking
   socket before its task is scheduled, so an exit before the task first
   runs still closes it.
+- **The pause is the receiver's state, so it is observed through a hook,
+  not delivered as data.** `inbox(on_pause_change=)` is called once with
+  the starting state before `inbox()` returns, then on each transition, in
+  order and never with an unchanged value, synchronously in the receiver's
+  task once `paused` holds the new value. Three alternatives were rejected.
+  A pause event in `recv` would be data: it would occupy a place in the row
+  order and need a transaction it does not have. A revision counter with a
+  wait call is a second, competing way to read one boolean. A caller
+  recomputing the state from counts would miss the crossing row and the
+  oversized first row, which only the receiver sees. The cost of the hook
+  is that the receiver waits for it, so it must be quick and non-blocking.
+  Whatever it raises fails the inbox, at `inbox()` or from `recv`, rather
+  than being swallowed; a status that silently stopped updating would be
+  worse than none. Applications must not persist the value or feed it back:
+  the next process decides again from the durable window.
 
 The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
 consumer without a database: one file, no driver, right for an idempotent
