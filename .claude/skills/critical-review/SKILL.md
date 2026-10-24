@@ -95,7 +95,8 @@ has found something; treat it as a finding, not as flakiness.
 ## What is not this skill's job
 
 The bar is I1-I6 — reordering, a non-contiguous stream, delivery before durability, a
-resume that skips or repeats, unbounded growth, and leaked tasks. Completeness, API
+resume that skips or repeats, unbounded growth, and leaked tasks — widened by whatever
+the brief names as critical for this change (`AGENTS.md`, "Review"). Completeness, API
 shape, docs debt and prose are **not** critical findings. Review those yourself, or with
 a general-purpose agent under their own name.
 

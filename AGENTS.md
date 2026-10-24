@@ -256,8 +256,8 @@ frames; and anything `serve`'s subprocesses do with credentials. Each of these h
 reachable critical defect that its first passing suite did not show. Retention took four
 rounds before one came back clean.
 
-**Widen the reviewer's bar to the change's own failure.** The list above does not name
-every way a change can fail; say in the brief what counts as critical for this change,
+**Widen the reviewer's bar to the change's own failure.** I1-I6 (`docs/SPEC.md` §7) do
+not name every way a change can fail; say in the brief what counts as critical for this change,
 so it is not graded as operability. Bars used so far:
 
 - deleting rows a reader can still resolve;
