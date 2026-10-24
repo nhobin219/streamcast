@@ -147,6 +147,7 @@ class Inbox:
         inbox_max_bytes: int,
         inbox_max_rows: int | None,
         inbox_resume_at: float,
+        initially_paused: bool,
         catch_up: bool,
         poll_every: float,
         backoff: Sequence[float],
@@ -181,7 +182,7 @@ class Inbox:
         self._arrived = asyncio.Event()  # the receiver inserted rows
         self._freed = asyncio.Event()  # processing deleted rows
         self._caught_up = False
-        self._paused = False
+        self._paused = initially_paused
         self._closed = False
         self._failure: BaseException | None = None
         self._task: asyncio.Task[None] | None = None
@@ -205,7 +206,7 @@ class Inbox:
 
     @property
     def paused(self) -> bool:
-        """Whether the receiver is holding at the inbox's bound."""
+        """Whether the receiver is waiting for the inbox's low-water bounds."""
         return self._paused
 
     def caught_up(self) -> bool:
@@ -362,12 +363,18 @@ class Inbox:
                     self._last_received = state[0]
 
             self._stream_id = info.stream_id
+            if self._paused:
+                # Validate the saved identity/offset before waiting, but leave
+                # no unread socket holding broker memory during the pause.
+                await sub.close()
+
         except BaseException:
             await sub.close()
             raise
 
         self._task = asyncio.create_task(
-            self._receive(sub), name=f"streamcast-inbox-{self._stream}"
+            self._receive(None if self._paused else sub),
+            name=f"streamcast-inbox-{self._stream}",
         )
 
     async def close(self, exc: BaseException | None = None) -> None:
@@ -509,14 +516,18 @@ class Inbox:
         return self._max_rows is None or self._rows < self._max_rows * self._resume_at
 
     async def _wait_below_low_water(self) -> None:
-        while not self._closed and not self._below_low_water():
+        while not self._closed:
             self._freed.clear()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._freed.wait(), self._poll_every)
-
-            # Another process's workers may have deleted rows: recount.
+            # Recount before the first decision too: another process may
+            # have ACKed while startup validated the connection's identity.
             async with self._store.transaction() as tx:
                 self._rows, self._bytes = await self._count(tx)
+
+            if self._below_low_water():
+                break
+
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._freed.wait(), self._poll_every)
 
         self._paused = False
 
@@ -637,7 +648,11 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
     refused for one that has some. `catch_up=True` is `connect`'s, for a
     receiver that falls past what the server replays. The receive window is
     `inbox_max_bytes` (`INBOX_MAX_BYTES`), `inbox_max_rows` (None) and
-    `inbox_resume_at` (`INBOX_RESUME_AT`); see the module. A clean exit
+    `inbox_resume_at` (`INBOX_RESUME_AT`); see the module.
+    `initially_paused=True` restores a caller-owned pause: startup validates
+    the stream identity and offset, closes that subscription, then the same
+    receiver recounts durable rows and waits strictly below both low-water
+    bounds before reconnecting. It stores no pause state itself. A clean exit
     commits the open processing transaction, and an exit by exception rolls
     it back, so the row it held is handed out again. Unknown keywords go to
     `websockets.connect`.
@@ -655,6 +670,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
         inbox_max_bytes: int = INBOX_MAX_BYTES,
         inbox_max_rows: int | None = None,
         inbox_resume_at: float = INBOX_RESUME_AT,
+        initially_paused: bool = False,
         catch_up: bool = False,
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
@@ -668,6 +684,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
             inbox_max_bytes=inbox_max_bytes,
             inbox_max_rows=inbox_max_rows,
             inbox_resume_at=inbox_resume_at,
+            initially_paused=initially_paused,
             catch_up=catch_up,
             poll_every=poll_every,
             backoff=backoff,

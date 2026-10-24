@@ -7,6 +7,17 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- `inbox(..., initially_paused=False)` accepts a caller-owned startup pause.
+  True validates the stream identity and resume offset before closing the
+  initial subscription and entering the existing receiver wait/resume path.
+  Durable rows and bytes are recounted before the first low-water decision;
+  both bounds must be strictly below their thresholds. The default preserves
+  ordinary startup, with no wire, table or durable schema change.
+
 ## 0.24.0 — 2026-10-22
 
 ### Breaking — upgrading to 0.24.0

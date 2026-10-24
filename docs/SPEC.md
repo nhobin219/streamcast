@@ -1505,6 +1505,14 @@ answered as duplicates of the old stream's.
   position advances only to the last row inserted, so frames read past the
   bound come again. An empty inbox always takes one row, so a row larger
   than the bound is delivered rather than blocking for ever.
+- **A caller-owned pause can survive restart.** `initially_paused=True`
+  seeds the existing receiver's wait/resume path. Startup validates the
+  saved stream identity and offset, then closes the initial subscription
+  before starting the receiver. The receiver recounts durable rows and
+  bytes before deciding whether both are strictly below their low-water
+  bounds; an ACK during validation is therefore visible. Polling observes
+  ACKs from another process as well. No extra receiver or durable pause
+  schema is created; the default False preserves ordinary startup.
 
 The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
 consumer without a database: one file, no driver, right for an idempotent
