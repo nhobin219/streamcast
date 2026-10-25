@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from typing import TYPE_CHECKING, Any, Self
 
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 
 _ENCODE = msgspec.json.Encoder()
 _DECODE = msgspec.json.Decoder()
+log = logging.getLogger("streamcast")
 
 RECEIVE_BATCH = 500
 """Rows the receiver takes from the subscription per inbox transaction."""
@@ -126,6 +128,7 @@ class Inbox:
         "_max_rows",
         "_open",
         "_on_pause_change",
+        "_on_receiver_error",
         "_paused",
         "_poll_every",
         "_resume_at",
@@ -152,6 +155,7 @@ class Inbox:
         inbox_resume_at: float,
         catch_up: bool,
         on_pause_change: Callable[[bool], None] | None,
+        on_receiver_error: Callable[[Exception], None] | None,
         poll_every: float,
         backoff: Sequence[float],
         websockets_kwargs: dict[str, Any],
@@ -187,6 +191,7 @@ class Inbox:
         self._caught_up = False
         self._paused = False
         self._on_pause_change = on_pause_change
+        self._on_receiver_error = on_receiver_error
         self._subscription: Subscription | None = None
         self._closed = False
         self._failure: BaseException | None = None
@@ -489,6 +494,15 @@ class Inbox:
         except Exception as exc:  # noqa: BLE001 — surfaced by `recv`
             self._failure = exc
             self._arrived.set()
+            if self._on_receiver_error is not None:
+                try:
+                    self._on_receiver_error(exc)
+                except Exception:
+                    log.exception(
+                        "streamcast inbox %r: on_receiver_error callback failed",
+                        self._stream,
+                    )
+
         finally:
             # Every way out, a failure included: a subscription left open
             # and unread holds broker memory until `max_backlog` drops it.
@@ -740,6 +754,11 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
     afterwards from `recv` once the rows already received are processed. `Inbox.paused` is the same state, read-only;
     callers supply no pause flag and recompute nothing from counts.
 
+    `on_receiver_error(error)` is called once when the receiver stores a
+    terminal failure, synchronously in its task. Keep it quick and non-blocking.
+    Recoverable disconnects and normal close do not call it. Callback exceptions
+    are logged; `recv` still raises the original failure after draining received rows.
+
     A clean exit commits the open processing transaction, and an exit by
     exception rolls it back, so the row it held is handed out again. Unknown
     keywords go to `websockets.connect`.
@@ -759,6 +778,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
         inbox_resume_at: float = INBOX_RESUME_AT,
         catch_up: bool = False,
         on_pause_change: Callable[[bool], None] | None = None,
+        on_receiver_error: Callable[[Exception], None] | None = None,
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
         **kwargs: Any,
@@ -773,6 +793,7 @@ class inbox:  # noqa: N801 — a sibling of `connect` and `outbox`
             inbox_resume_at=inbox_resume_at,
             catch_up=catch_up,
             on_pause_change=on_pause_change,
+            on_receiver_error=on_receiver_error,
             poll_every=poll_every,
             backoff=backoff,
             websockets_kwargs=kwargs,

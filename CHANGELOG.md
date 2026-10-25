@@ -17,6 +17,10 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- `inbox(..., on_receiver_error=None)` calls a synchronous callback once with
+  the exception when its receiver stores a terminal failure. Recoverable
+  disconnects keep reconnecting without notification. Callback exceptions are
+  logged without escaping the receiver or replacing its original failure.
 - `Outbox.pending_bytes()` reports the pending encoded row text's UTF-8 size,
   and `oldest_pending_age()` reports seconds since the oldest enqueue, or
   `None` when empty. Both read through the outbox's transaction interface;

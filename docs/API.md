@@ -976,7 +976,8 @@ await out.close() -> None                       # pending rows stay; flush first
 streamcast.inbox(uri, *, subscriber, store, offset=None,
                  inbox_max_bytes=INBOX_MAX_BYTES, inbox_max_rows=None,
                  inbox_resume_at=INBOX_RESUME_AT, catch_up=False,
-                 on_pause_change=None) -> Inbox     # Callable[[bool], None] | None
+                 on_pause_change=None,            # Callable[[bool], None] | None
+                 on_receiver_error=None) -> Inbox  # Callable[[Exception], None] | None
 async for offset, ts, row, tx in sub: ...       # tx holds the row's delete
 await sub.recv() -> (offset, ts, row, tx)
 await sub.recv_many(limit) -> (rows, tx)        # one tx for the batch
@@ -1093,6 +1094,15 @@ polling or recomputing it:
 Never persist it, feed it back, or derive it from counts: the window's rules
 include the crossing row and the oversized first row, which a count of R and B
 cannot replay.
+
+**`on_receiver_error(error)`** reports a terminal receiver failure once, after
+the inbox stores the exception and wakes waiting readers. It runs synchronously
+in the receiver's task; keep it quick and non-blocking. Recoverable disconnects
+continue reconnecting without calling it, and normal close or cancellation calls
+nothing. Exceptions raised by this callback are logged without escaping the
+receiver; `recv` still raises the original failure after received rows are
+processed. The default, `None`, calls nothing. Startup errors raised directly by
+`inbox()` do not call it.
 
 A worked example, with `inbox_max_rows=100, inbox_resume_at=0.5`:
 
