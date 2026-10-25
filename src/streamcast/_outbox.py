@@ -77,6 +77,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from collections import OrderedDict, deque
 from typing import TYPE_CHECKING, Any
@@ -197,6 +198,36 @@ async def count(tx: Transaction, stream: str, publisher: str) -> int:
         (stream, publisher),
     )
     return int(n)
+
+
+async def pending_bytes(tx: Transaction, stream: str, publisher: str) -> int:
+    dialect = tx.store.dialect
+    length = (
+        "length(CAST(streamcast_row AS BLOB))"
+        if dialect == "sqlite"
+        else "octet_length(streamcast_row)"
+    )
+    [(size,)] = await tx.fetch(
+        sql(
+            dialect,
+            f"SELECT coalesce(sum({length}), 0) FROM streamcast_outbox "
+            "WHERE streamcast_stream = ? AND streamcast_publisher_id = ?",
+        ),
+        (stream, publisher),
+    )
+    return int(size)
+
+
+async def oldest_pending(tx: Transaction, stream: str, publisher: str) -> int | None:
+    [(oldest,)] = await tx.fetch(
+        sql(
+            tx.store.dialect,
+            "SELECT min(streamcast_enqueued_at) FROM streamcast_outbox "
+            "WHERE streamcast_stream = ? AND streamcast_publisher_id = ?",
+        ),
+        (stream, publisher),
+    )
+    return int(oldest) if oldest is not None else None
 
 
 async def acked(tx: Transaction, stream: str, publisher: str, through: int) -> None:
@@ -336,6 +367,9 @@ class Outbox:
 
     __slots__ = (
         "_backoff",
+        "_backlog_after_s",
+        "_backlog_task",
+        "_backlogged",
         "_closed",
         "_drained",
         "_failure",
@@ -343,6 +377,7 @@ class Outbox:
         "_max_in_flight",
         "_notice",
         "_outage",
+        "_on_backlog_change",
         "_poll_every",
         "_publisher",
         "_send_batch",
@@ -366,12 +401,24 @@ class Outbox:
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
         notice: Callable[[str], None] = log.warning,
+        backlog_after_s: float | None = None,
+        on_backlog_change: Callable[[bool], None] | None = None,
         websockets_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         if send_batch < 1 or max_in_flight < 1:
             msg = f"send_batch={send_batch}, max_in_flight={max_in_flight}: at least 1"
             raise ValueError(msg)
 
+        if backlog_after_s is not None and (
+            not math.isfinite(backlog_after_s) or backlog_after_s < 0
+        ):
+            msg = "backlog_after_s must be finite and non-negative, or None"
+            raise ValueError(msg)
+
+        self._backlog_after_s = backlog_after_s
+        self._on_backlog_change = on_backlog_change
+        self._backlogged: bool | None = None
+        self._backlog_task: asyncio.Task[None] | None = None
         self._uri = uri
         self._stream = stream_name(uri)
         self._publisher = publisher
@@ -426,10 +473,22 @@ class Outbox:
         tx.on_commit(self._wake.set)
         return first
 
-    async def pending(self) -> int:
+    async def pending_rows(self) -> int:
         """Rows enqueued and not yet acknowledged by the broker."""
         async with self._store.transaction() as tx:
             return await count(tx, self._stream, self._publisher)
+
+    async def pending_bytes(self) -> int:
+        """UTF-8 bytes of the pending rows' encoded `streamcast_row` text."""
+        async with self._store.transaction() as tx:
+            return await pending_bytes(tx, self._stream, self._publisher)
+
+    async def oldest_pending_age(self) -> float | None:
+        """Seconds since the oldest pending row was enqueued, or None if empty."""
+        async with self._store.transaction() as tx:
+            oldest = await oldest_pending(tx, self._stream, self._publisher)
+
+        return None if oldest is None else max(0.0, (_now_us() - oldest) / 1_000_000)
 
     async def landed(self, seq: int) -> int | None:
         """Wait until `seq` is acknowledged; the offset it landed at, or None
@@ -462,7 +521,7 @@ class Outbox:
             while True:
                 self._raise_failure()
                 self._drained.clear()
-                if await self.pending() == 0:
+                if await self.pending_rows() == 0:
                     return
 
                 self._wake.set()
@@ -475,6 +534,15 @@ class Outbox:
                 self._run(), name=f"streamcast-outbox-{self._stream}"
             )
 
+        if (
+            self._backlog_task is None
+            and self._on_backlog_change is not None
+            and self._backlog_after_s is not None
+        ):
+            self._backlog_task = asyncio.create_task(
+                self._watch_backlog(), name=f"streamcast-outbox-backlog-{self._stream}"
+            )
+
     async def close(self) -> None:
         """Stop the sender. What is pending stays in the outbox, for the next
         process to ship; `flush` first to wait for it.
@@ -484,6 +552,11 @@ class Outbox:
         off mid-flight is safe -- if it landed, the next sender's greeting
         says so and the row is deleted unsent."""
         self._closed = True
+        if self._backlog_task is not None:
+            self._backlog_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._backlog_task
+
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(BaseException):
@@ -501,6 +574,38 @@ class Outbox:
     def _raise_failure(self) -> None:
         if self._failure is not None:
             raise self._failure
+
+    async def _observe_backlog(self) -> None:
+        if self._on_backlog_change is None:
+            return
+
+        try:
+            age = (
+                await self.oldest_pending_age()
+                if self._backlog_after_s is not None
+                else None
+            )
+            backlogged = (
+                age is not None
+                and self._backlog_after_s is not None
+                and age >= self._backlog_after_s
+            )
+            if backlogged != self._backlogged:
+                self._backlogged = backlogged
+                self._on_backlog_change(backlogged)
+
+        except Exception:
+            # Visibility cannot stop delivery, including when the observer fails.
+            log.exception(
+                "streamcast outbox %r: backlog observation failed", self._stream
+            )
+
+    async def _watch_backlog(self) -> None:
+        # Independent of the sender's backoff and socket waits: a stalled
+        # acknowledgement is exactly when an age crossing matters.
+        while not self._closed:
+            await self._observe_backlog()
+            await asyncio.sleep(self._poll_every)
 
     # -- the task -----------------------------------------------------------------
 
@@ -696,6 +801,13 @@ class outbox:  # noqa: N801 — a sibling of `publish` and `connect`
     An exit after `flush()` leaves nothing behind. Other keywords configure
     the sender (`max_in_flight`, `send_batch`, `poll_every`, `backoff`,
     `notice`); any unknown keyword goes to `websockets.connect`.
+
+    `backlog_after_s` observes the oldest pending age, never limits writes.
+    `on_backlog_change` is called once before entry returns, then only on
+    transitions (True at or above the age, False below or empty), polled at
+    `poll_every` independently of delivery. None disables the threshold.
+    Keep the synchronous callback quick and non-blocking. Observation errors
+    are logged without failing the sender.
     """
 
     __slots__ = ("_outbox",)
@@ -711,6 +823,8 @@ class outbox:  # noqa: N801 — a sibling of `publish` and `connect`
         poll_every: float = POLL_EVERY,
         backoff: Sequence[float] = BACKOFF,
         notice: Callable[[str], None] = log.warning,
+        backlog_after_s: float | None = None,
+        on_backlog_change: Callable[[bool], None] | None = None,
         **kwargs: Any,
     ) -> None:
         self._outbox = Outbox(
@@ -722,10 +836,13 @@ class outbox:  # noqa: N801 — a sibling of `publish` and `connect`
             poll_every=poll_every,
             backoff=backoff,
             notice=notice,
+            backlog_after_s=backlog_after_s,
+            on_backlog_change=on_backlog_change,
             websockets_kwargs=kwargs,
         )
 
     async def __aenter__(self) -> Outbox:
+        await self._outbox._observe_backlog()  # noqa: SLF001
         self._outbox.start()
         return self._outbox
 
