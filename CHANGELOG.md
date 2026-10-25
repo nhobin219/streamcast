@@ -42,8 +42,26 @@ there was nothing to have changed from. Everything above it is ordinary.
 - FastAPI and uvicorn are dependencies; the `asgi` and `broker` extras are
   gone. `docs/BROKER.md` is folded into `docs/API.md` and `docs/SPEC.md`.
 
+- **`inbox(..., initially_paused=)` is removed** (#194). The receiver
+  decides startup itself from the durable inbox and the existing bounds:
+  at or over `inbox_max_bytes` or `inbox_max_rows` it starts paused, closes
+  the checking subscription, and resumes strictly below `inbox_resume_at`
+  of both; under them it starts active, the band between the bounds
+  included. A caller that stored its own pause flag to pass back drops it.
+
 ### Fixed
 
+- An inbox exited or cancelled before its receiver's first turn now closes
+  the subscription it opened (#191).
+- An inbox whose connection ended while it was receiving waited for low
+  water before reconnecting, a pause `paused` never showed. Only a full
+  window waits now; any other end counts the window again from the store
+  (other workers may have filled it) and reconnects at once, with backoff
+  reset only by a row received, not by a connect.
+- A store transaction cancelled mid-statement — an inbox's receiver at
+  `close` — waits for that statement before letting the next transaction
+  in. Postgres answered the next BEGIN with "another command is already in
+  progress"; SQLite could leave a BEGIN it never rolled back.
 - A publisher sending while the broker fences writes — a stream stopping,
   or its maintainer group being replaced — is closed with 1001 instead of
   each frame being answered `rejected`. An `outbox` treated that answer as a
@@ -53,6 +71,11 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- **`inbox(..., on_pause_change=None)`**, a `Callable[[bool], None]` called
+  once with the starting state before `inbox()` returns and then on every
+  pause and resume, synchronously in the receiver: keep it quick and
+  non-blocking. What it raises fails the inbox. `Inbox.paused` stays the
+  read-only current value. This is the only way to observe the state.
 - `BrokerConfig(subscriber_yield_every=64)`: the data frames a subscriber
   is sent, across replay and live delivery, before it yields to the event
   loop. 64 was the fixed value; the default is provisional until the

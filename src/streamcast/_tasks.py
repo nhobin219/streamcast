@@ -11,7 +11,7 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
-async def join(task: asyncio.Task) -> bool:
+async def join(task: asyncio.Future) -> bool:
     """Join an owned task despite repeated waiter cancellation.
 
     Return whether the waiter was cancelled; the owner can then dispose of

@@ -971,14 +971,14 @@ await out.close() -> None                       # pending rows stay; flush first
 
 streamcast.inbox(uri, *, subscriber, store, offset=None,
                  inbox_max_bytes=INBOX_MAX_BYTES, inbox_max_rows=None,
-                 inbox_resume_at=INBOX_RESUME_AT, initially_paused=False,
-                 catch_up=False) -> Inbox
+                 inbox_resume_at=INBOX_RESUME_AT, catch_up=False,
+                 on_pause_change=None) -> Inbox     # Callable[[bool], None] | None
 async for offset, ts, row, tx in sub: ...       # tx holds the row's delete
 await sub.recv() -> (offset, ts, row, tx)
 await sub.recv_many(limit) -> (rows, tx)        # one tx for the batch
 await sub.commit() -> None                      # end the open tx now
 sub.caught_up() -> bool                         # not "the inbox is empty"
-sub.paused -> bool                              # held at the receive window's bound
+sub.paused -> bool                              # read-only: held at the window's bound
 ```
 
 **One transaction holds the work, its input and its output.** An inbox row's
@@ -994,13 +994,97 @@ subject to its buffer-loss limit. External side effects are outside this transac
 | **the sender** | connects only when it has rows; reconciles with the greeting (landed rows deleted unsent; `AcknowledgedRowsLost`, `StoreBehindBroker`); ordered pipelined batches; a refused row dropped and the rest renumbered; an outage said once |
 | **inbox resume** | from `last_received_offset + 1`; unprocessed rows first. A new subscriber starts at the latest offset or `offset=`; one with state refuses `offset=` |
 | **the receive window** | at `inbox_max_bytes` or `inbox_max_rows` the receiver stops and CLOSES its subscription; it reconnects below `inbox_resume_at` of each bound. An empty inbox always takes one row |
-| **startup pause** | `initially_paused=True` seeds the receiver's existing wait/resume path after identity and offset validation; it closes the initial subscription, recounts durable rows and bytes, then resumes strictly below both low-water bounds. The caller owns persistence of the seed; False preserves ordinary startup |
+| **startup** | decided from the durable inbox and the same bounds; no pause state is stored or accepted. See [the receive window](#the-receive-window-paused-and-on_pause_change) |
 | **one tx per store at a time** | a task asking for a second while it holds one gets `RuntimeError`, not a hang: `sub.commit()` first |
 
 The next `recv` commits the previous processing transaction. A clean inbox context exit
 also commits it; an exit by exception rolls it back. Closing an outbox stops its sender
 without draining it. Schema-rejected rows are logged and deleted; their seqs are removed
 from the pending sequence. `landed` returns an offset only while it is still known.
+
+### The receive window: `paused` and `on_pause_change`
+
+The inbox is a bounded window onto the stream, not a copy of its backlog, and
+streamcast alone decides when it is full. Let R and B be this subscriber's
+unprocessed rows and bytes in `streamcast_inbox`:
+
+| | condition | what the receiver does |
+|---|---|---|
+| **high water** | `B >= inbox_max_bytes`, or `R >= inbox_max_rows` when it is set | stops inserting and **closes its subscription**; `paused` becomes True |
+| **low water** | `B < inbox_max_bytes × inbox_resume_at` **and** (no row bound, or `R < inbox_max_rows × inbox_resume_at`) — both strict | reconnects from `last_received_offset + 1`; `paused` becomes False |
+
+Only a full window pauses. A connection that ends while receiving — the
+broker restarting, a network drop — reconnects at once with backoff, from the
+band too, and `paused` stays False: a reconnect is not a pause, and
+`caught_up()` is what says whether the receiver is connected and current.
+
+Inserting counts each row as it goes, so the row that crosses the byte bound
+is the last one taken, and an empty inbox always takes one row, however large.
+While paused the receiver recounts the store every `poll_every` and whenever
+this inbox processes a row, so rows processed by other workers or processes
+count too.
+
+**Startup.** `inbox()` checks the saved stream identity and offset against the
+first connection, then recounts R and B, so processing during that connect is
+seen:
+
+- **at or over either high bound** — equality included — it starts **paused**,
+  and closes the checking subscription before `inbox()` returns;
+- **under both** it starts **active**, in the band between low and high water
+  too, and exactly at low water;
+- `inbox_resume_at` decides only the way out of a pause, never the start.
+
+Thresholds cannot reconstruct the previous process's hysteresis, and none is
+stored: a receiver that stopped paused inside the band restarts active and
+fills to the high bound, which the window allows anyway. Nothing the caller
+passes sets the pause.
+
+**`on_pause_change(paused)`** is how an application learns the state without
+polling or recomputing it:
+
+- called **once with the starting state before `inbox()` returns**, so an
+  application that only listens never starts out wrong;
+- then on **every transition**, paused to receiving and back, once each and in
+  order, and never with an unchanged value. Closing the inbox reports nothing;
+- **synchronously, in the receiver's own task**, after `paused` already holds
+  the new value. The receiver waits for it, so keep it quick and
+  non-blocking: set a flag, `put_nowait` on a queue, update a gauge. Awaiting,
+  I/O, or taking a lock another task holds stalls receiving. What it raises
+  fails the inbox: from `inbox()` itself at startup, its subscription closed,
+  and afterwards from `recv` once the rows already received are processed;
+- `None`, the default, calls nothing. `paused` is the same state, read-only.
+
+Never persist it, feed it back, or derive it from counts: the window's rules
+include the crossing row and the oversized first row, which a count of R and B
+cannot replay.
+
+A worked example, with `inbox_max_rows=100, inbox_resume_at=0.5`:
+
+```python
+async def billing(store):
+    status = {"paused": None}
+
+    def on_pause_change(paused: bool) -> None:
+        status["paused"] = paused          # quick: no await, no I/O
+
+    async with streamcast.inbox(
+        uri, subscriber="billing", store=store,
+        inbox_max_rows=100, inbox_resume_at=0.5,
+        on_pause_change=on_pause_change,
+    ) as sub:
+        assert status["paused"] is sub.paused   # already reported, once
+        async for offset, ts, row, tx in sub:
+            await tx.execute("INSERT INTO invoices ...", (...))
+```
+
+| held at start, then | calls so far | why |
+|---|---|---|
+| 0, 40 or 50 rows | `False` | under 100: active, low water (50) included |
+| 100 or 120 rows | `True` | at or over 100: paused, subscription closed |
+| processing brings 100 down to 50 | `True` | 50 is not strictly below 50 |
+| one more processed: 49 | `True, False` | below low water: reconnects, receives |
+| the inbox reaches 100 again | `True, False, True` | the high bound, closed again |
+| a restart with 70 held | `False` | the band starts active, whatever the last run's state |
 
 Rows are JSON text in both tables, as on the wire: send a binary column in its
 text encoding. The file `Cursor` (`connect(cursor=)`) stays for a consumer

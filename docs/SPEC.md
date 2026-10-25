@@ -1521,14 +1521,37 @@ answered as duplicates of the old stream's.
   position advances only to the last row inserted, so frames read past the
   bound come again. An empty inbox always takes one row, so a row larger
   than the bound is delivered rather than blocking for ever.
-- **A caller-owned pause can survive restart.** `initially_paused=True`
-  seeds the existing receiver's wait/resume path. Startup validates the
-  saved stream identity and offset, then closes the initial subscription
-  before starting the receiver. The receiver recounts durable rows and
-  bytes before deciding whether both are strictly below their low-water
-  bounds; an ACK during validation is therefore visible. Polling observes
-  ACKs from another process as well. No extra receiver or durable pause
-  schema is created; the default False preserves ordinary startup.
+- **Startup decides from the durable window, by the same bounds.** After
+  the saved identity and offset are checked against the greeting, the
+  receiver counts this subscriber's unprocessed rows and bytes again,
+  so processing during that connect is seen. At or over either high bound it
+  starts paused, closes the checking subscription before `inbox()` returns,
+  and reconnects once both counts are strictly below `inbox_resume_at` of
+  their bound, recounted every `poll_every` because other processes may be
+  the ones processing. Under both high bounds it starts active, in the band
+  between low and high water too, and at the low-water mark exactly.
+  `inbox_resume_at` governs only leaving a pause. The previous process's
+  hysteresis cannot be rebuilt from thresholds, and none is stored: a
+  receiver that stopped paused in the band restarts active and fills to the
+  high bound, which the window allows anyway. Nothing the caller supplies
+  sets the pause; `Inbox.paused` reports it. The receiver owns the checking
+  socket before its task is scheduled, so an exit before the task first
+  runs still closes it.
+- **The pause is the receiver's state, so it is observed through a hook,
+  not delivered as data.** `inbox(on_pause_change=)` is called once with
+  the starting state before `inbox()` returns, then on each transition, in
+  order and never with an unchanged value, synchronously in the receiver's
+  task once `paused` holds the new value. Three alternatives were rejected.
+  A pause event in `recv` would be data: it would occupy a place in the row
+  order and need a transaction it does not have. A revision counter with a
+  wait call is a second, competing way to read one boolean. A caller
+  recomputing the state from counts would miss the crossing row and the
+  oversized first row, which only the receiver sees. The cost of the hook
+  is that the receiver waits for it, so it must be quick and non-blocking.
+  Whatever it raises fails the inbox, at `inbox()` or from `recv`, rather
+  than being swallowed; a status that silently stopped updating would be
+  worse than none. Applications must not persist the value or feed it back:
+  the next process decides again from the durable window.
 
 The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
 consumer without a database: one file, no driver, right for an idempotent
