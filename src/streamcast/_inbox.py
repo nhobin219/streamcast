@@ -439,7 +439,17 @@ class Inbox:
                     # Only a full window waits for low water. A connection
                     # that ended in the band reconnects at once, as a start
                     # in the band does: waiting while `paused` says
-                    # receiving would be a pause nobody was told about.
+                    # receiving would be a pause nobody was told about. The
+                    # window is counted again first, from the store: other
+                    # workers on this subscriber id may have filled it while
+                    # this one was disconnected.
+                    if not self._paused:
+                        async with self._store.transaction() as tx:
+                            self._rows, self._bytes = await self._count(tx)
+
+                        if self._over(self._rows, self._bytes):
+                            self._pause(paused=True)
+
                     if self._paused:
                         await self._wait_below_low_water()
 
@@ -447,13 +457,11 @@ class Inbox:
                         sub = await self._reconnect()
                         self._subscription = sub
                     except (OSError, ConnectionClosed, TimeoutError, TooSlow):
-                        await asyncio.sleep(
-                            self._backoff[min(attempt, len(self._backoff) - 1)]
-                        )
+                        await self._back_off(attempt)
                         attempt += 1
                         continue
 
-                attempt = 0
+                before = self._last_received
                 try:
                     full = await self._fill(sub)
                 except (OSError, ConnectionClosed, TimeoutError, TooSlow):
@@ -469,6 +477,15 @@ class Inbox:
                 if full:
                     self._pause(paused=True)
 
+                # Backoff resets on a row received, not on a connect: a
+                # broker that greets and drops at once is retried at the
+                # backoff's pace, not once per round trip.
+                if full or self._last_received != before:
+                    attempt = 0
+                else:
+                    await self._back_off(attempt)
+                    attempt += 1
+
         except Exception as exc:  # noqa: BLE001 — surfaced by `recv`
             self._failure = exc
             self._arrived.set()
@@ -478,6 +495,9 @@ class Inbox:
             if sub is not None:
                 with contextlib.suppress(Exception):
                     await sub.close()
+
+    async def _back_off(self, attempt: int) -> None:
+        await asyncio.sleep(self._backoff[min(attempt, len(self._backoff) - 1)])
 
     async def _reconnect(self) -> Subscription:
         # From the table, not memory: another worker's receiver on this

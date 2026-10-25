@@ -24,7 +24,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   the subscription it opened (#191).
 - An inbox whose connection ended while it was receiving waited for low
   water before reconnecting, a pause `paused` never showed. Only a full
-  window waits now; any other end reconnects at once.
+  window waits now; any other end counts the window again from the store
+  (other workers may have filled it) and reconnects at once, with backoff
+  reset only by a row received, not by a connect.
 - A store transaction cancelled mid-statement — an inbox's receiver at
   `close` — waits for that statement before letting the next transaction
   in. Postgres answered the next BEGIN with "another command is already in
