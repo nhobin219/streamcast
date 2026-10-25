@@ -1,4 +1,4 @@
-"""The queue bounds: their defaults, and `serve`'s per-stream form of each.
+"""The queue bounds: their defaults, and the runtime's per-stream form of each.
 
 Neither end may be run out of memory by the other, or by a stall — SPEC §4
 lists each queue and what bounds it. The bounds are deployment settings, not
@@ -6,15 +6,15 @@ properties of a stream: they belong to the process that serves or reads, so
 they change on a restart without touching the code that builds the streams.
 So each is a keyword of the call that owns the queue:
 
-    streamcast.serve(streams, host, port, max_backlog=16_384)        # every stream
-    streamcast.serve(streams, host, port,
+    streamcast.BrokerConfig(max_backlog=16_384)        # every stream
+    streamcast.BrokerConfig(
                      max_inbound={"trades": 262_144, "quotes": 65_536})  # per stream
-    streamcast.serve(streams, host, port,
+    streamcast.BrokerConfig(
                      max_message_bytes={"trades": 2**20, "sessions": 8 * 2**20})
     streamcast.publish(uri, max_in_flight=128)
     await streamcast.Stream.live(uri, max_tail=5_000_000)
 
-`serve` and `asgi` take each of theirs as one int for every stream or a map
+`BrokerConfig` take each of theirs as one int for every stream or a map
 from stream name to int. A map must name exactly the streams being served — a
 missing name would serve that stream on a default nobody chose, and an
 unknown one is a typo — so either raises at the call, naming them.
@@ -29,6 +29,17 @@ from litelink import LogConfig
 
 if TYPE_CHECKING:
     from streamcast._stream import Stream
+
+SUBSCRIBER_YIELD_EVERY: Final = 64
+"""Data frames a subscriber is sent before its task yields to the event loop.
+
+A send to a writable transport need not suspend at all, so without an explicit
+checkpoint one subscriber drains its whole ready replay or backlog in one turn,
+and every publisher's acknowledgement and every other connection waits behind
+it. Batched, so fairness does not cost a task switch per row; replay and live
+delivery share one count. `BrokerConfig(subscriber_yield_every=)` sets it per
+broker. 64 is provisional: the measurement that chooses it is not made yet.
+"""
 
 MAX_BACKLOG: Final = 8_192
 """Messages a subscriber may fall behind before it is dropped.
@@ -61,7 +72,7 @@ server's writer fed, so its rows group into one commit rather than one round
 trip each; few enough that a dropped connection leaves a short tail to check
 on reconnect (`docs/SPEC.md` §6b). The server's bound: how many replies it
 will owe one connection before it stops reading it — backpressure at the
-socket, not an error. `serve` and `asgi` take one int or a map choosing the
+socket, not an error. `BrokerConfig` take one int or a map choosing the
 window for connections to each served stream; it is not a stream-wide total.
 The two ends share a default.
 """
@@ -69,7 +80,7 @@ The two ends share a default.
 MAX_MESSAGE_BYTES: Final = 2**20
 """Bytes one publish frame to a stream may carry, as the server receives it.
 
-`serve`'s default, and websockets' own `max_size` default, so a server that
+the runtime's default, and websockets' own `max_size` default, so a server that
 sets neither behaves as it did before the per-stream form existed. The frame,
 not the rows decoded from it: the frame is what the server holds in memory
 before anything is checked, and its UTF-8 length is what a publisher can
@@ -178,33 +189,6 @@ def per_stream(
     return {name: chosen[name] for name in names}
 
 
-def message_bytes(
-    value: int | Mapping[str, int] | None, transport: dict[str, object]
-) -> int | Mapping[str, int] | None:
-    """`serve`'s `max_message_bytes`, reconciled with a `max_size` among the
-    keywords it passes through to websockets (`transport`).
-
-    A `max_size` alone is every stream's limit, as it was before this keyword:
-    a server configured that way keeps behaving the same. Both together are
-    refused rather than one silently winning. Neither is `MAX_MESSAGE_BYTES`.
-    """
-    if "max_size" not in transport:
-        return MAX_MESSAGE_BYTES if value is None else value
-
-    if value is not None:
-        msg = (
-            "max_size= and max_message_bytes= together: max_message_bytes sets "
-            "each stream's limit and the transport's max_size from them, so "
-            "pass that alone"
-        )
-        raise ValueError(msg)
-
-    size = transport["max_size"]
-    # websockets 16 also takes `(message, fragment)`: the message size is the one.
-    size = size[0] if isinstance(size, tuple) else size
-    return size if isinstance(size, int) else None
-
-
 def _bound(
     routes: dict[str, Stream],
     max_backlog: int | Mapping[str, int],
@@ -212,7 +196,7 @@ def _bound(
     max_in_flight: int | Mapping[str, int],
     max_message_bytes: int | Mapping[str, int] | None = None,
 ) -> dict[str, int] | None:
-    """Resolve `serve`'s bounds per stream and set them on each; return each
+    """Resolve the runtime's bounds per stream and set them on each; return each
     stream's `max_message_bytes`, or None when there is none to check.
 
     Every keyword is checked before any stream is touched, so a bad one

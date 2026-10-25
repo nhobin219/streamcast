@@ -40,6 +40,7 @@ pytestmark = pytest.mark.skipif(
 SERVER = """
 import asyncio, sys
 import litelink, pyarrow as pa, streamcast
+from tests.hosting import serve_streams
 
 async def main(root, bucket):
     replicated = bucket != "-"
@@ -51,7 +52,7 @@ async def main(root, bucket):
         **({"published": bucket, "s3_options": litelink.S3Options().resolved()} if replicated else {}),
     )
     stream = streamcast.Stream("trades", log=handle)
-    async with streamcast.serve(stream, "127.0.0.1", 0, replicate=replicated):
+    async with serve_streams(stream, "127.0.0.1", 0, replicate=replicated):
         print("ready", flush=True)
         await asyncio.Event().wait()
 
@@ -150,10 +151,16 @@ def kill_the_server(root: Path, bucket: str = "-") -> tuple[list[Child], list[st
     )
     try:
         assert server.stdout is not None
-        assert server.stdout.readline().strip() == "ready"
-        # The sidecar may start a beat after `serve` returns: it takes its lock
-        # first. Waiting for the count to settle keeps a late child from
-        # being missed rather than tested.
+        # The broker reports ready once its children have, so litestream,
+        # which shares this stdout, may have logged first.
+        line = server.stdout.readline()
+        while line.startswith("time="):
+            line = server.stdout.readline()
+
+        assert line.strip() == "ready"
+        # The sidecar may start a beat after the broker reports ready: it takes
+        # its lock first. Waiting for the count to settle keeps a late child
+        # from being missed rather than tested.
         deadline = time.monotonic() + 10
         spawned = children(server.pid)
         while time.monotonic() < deadline:
@@ -288,8 +295,8 @@ def test_a_child_is_started_with_them(tmp_path, monkeypatch):
 
 
 def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
+    from streamcast._children import _supervisors
     from streamcast._maintain import ROLES, Maintain
-    from streamcast._server import _supervisors
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     logs = [litelink.new(tmp_path / name, name, schema=schema) for name in "abc"]
@@ -324,7 +331,7 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
     """Nothing in the environment: the maintainer, which opens the log itself
     in a process of its own, has only what the stream was given. Without it,
     it publishes to real AWS, or nowhere. The publish role alone, over rows
-    already sealed: what `serve` groups is `_supervisors`' to test."""
+    already sealed: what the broker groups is `_supervisors`' to test."""
     from streamcast._maintain import Maintain, Supervisor
 
     for name in (
@@ -380,7 +387,7 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
 def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
     tmp_path, s3, bucket
 ):
-    from streamcast._server import _sidecars
+    from streamcast._children import _sidecars
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     logs = [
@@ -419,8 +426,8 @@ def test_logs_named_alike_in_two_roots_keep_their_own_options(tmp_path):
     """A log's name is not unique across roots: grouped by it, one stream's
     options would reach both logs, and the other's maintainer would publish
     to an endpoint its log is not on — for good."""
+    from streamcast._children import _supervisors
     from streamcast._maintain import Maintain
-    from streamcast._server import _supervisors
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     plain = litelink.new(tmp_path / "r1", "x", schema=schema)

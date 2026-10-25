@@ -126,7 +126,7 @@ class TestARetiredStreamIsReadOnly:
         assert raised.value.at is not None
 
     async def test_it_is_not_maintained(self, tmp_path, serve, monkeypatch):
-        from streamcast import _server  # noqa: PLC0415
+        from streamcast._broker import runtime as _server  # noqa: PLC0415
 
         await produce(tmp_path)
         streamcast.Stream.retire("t", root=tmp_path)

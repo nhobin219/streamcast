@@ -203,6 +203,7 @@ class TestTheMarks:
         import streamcast
 
         from . import interop_peer
+        from .hosting import serve_streams
 
         version, python = release
         root = tmp_path / "data"
@@ -217,7 +218,7 @@ class TestTheMarks:
                 schema=interop_peer.SCHEMA,
                 exactly_once=True,
             )
-            async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as s:
+            async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as s:
                 uri = f"ws://127.0.0.1:{s.sockets[0].getsockname()[1]}/trades"
                 async with streamcast.publish(uri, publisher="a") as out:
                     assert await out.send_many(ours, seq=1) == [1, 2]

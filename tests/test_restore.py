@@ -473,7 +473,7 @@ class TestTheServerStartsWhatItNeeds:
     async def test_a_restored_stream_keeps_its_replication_settings(
         self, tmp_path, s3, bucket, litestream
     ):
-        """`wal_replication` comes back with the log, so `serve` starts a sidecar.
+        """`wal_replication` comes back with the log, so the broker starts a sidecar.
 
         A restored producer that quietly stopped replicating would be one
         failure away from having nothing to restore FROM next time — the

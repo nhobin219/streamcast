@@ -19,6 +19,7 @@ import streamcast
 from examples import __main__ as demos
 from examples import broker
 from examples.book import producer as book
+from tests.hosting import serve_streams
 
 
 def modules(demo: demos.Demo) -> list[str]:
@@ -104,7 +105,7 @@ class TestTheBroker:
             root=tmp_path,
             schema=broker.schema("examples/book/schema.json"),
         )
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as server:
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=False) as server:
             uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"
             async with streamcast.publish(uri) as publication:
                 await publication.send(

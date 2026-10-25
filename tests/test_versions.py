@@ -32,7 +32,7 @@ WIDER: dict[str, Any] = {
 
 
 async def served(root, serve, **kwargs: object) -> None:
-    """A stream with three rows, served once: `serve` writes its first version."""
+    """A stream with three rows, served once: the broker writes its first version."""
     stream = streamcast.Stream.open(
         "t",
         create=True,

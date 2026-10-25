@@ -6,14 +6,17 @@ order and resume by offset. A stream without a log uses null offsets and
 cannot replay. The log is also an Iceberg table, readable without the broker.
 
 Declare columns in JSON Schema; `Stream.open` creates or reopens the log.
-`serve` runs the maintainer and, with `replicate=True`, the WAL sidecar.
+The broker (`create_app`) runs the maintainer and, with
+`BrokerConfig(replicate=True)`, the WAL sidecar.
 `Stream.send` publishes locally; `publish` does it over a socket. `connect`
-returns a read-only subscription. Both ends pass transport keywords through
-to `websockets`, with compression off by default because encoding is shared
-while permessage-deflate compresses once per connection.
+returns a read-only subscription. Clients pass transport keywords through to
+`websockets`, and the broker is served by uvicorn under one worker; both run
+compression off, because encoding is shared while permessage-deflate
+compresses once per connection.
 
     stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
-    async with streamcast.serve(stream, "localhost", 8765):
+    app = streamcast.create_app(streams=stream)
+    async with app.router.lifespan_context(app):
         async for frame in upstream:
             await stream.send(parse(frame))
 
@@ -39,6 +42,13 @@ from importlib.metadata import PackageNotFoundError, version
 
 from litelink import S3Options
 
+from streamcast._application import create_app, initialize_registry
+from streamcast._broker.model import (
+    Authorization,
+    BrokerConfig,
+    HistoryGuard,
+    StorageProfile,
+)
 from streamcast._catchup import CatchUpUnavailable
 from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
@@ -76,7 +86,6 @@ from streamcast._outbox import Outbox, outbox
 from streamcast._protocol import EARLIEST, Greeting, PublisherMark
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
-from streamcast._server import serve
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
 from streamcast._stats import Stats
 from streamcast._store import PostgresStore, SqliteStore, Store, Transaction, store_ddl
@@ -140,7 +149,12 @@ __all__ = [
     "from_arrow",
     "inbox",
     "outbox",
-    "serve",
+    "Authorization",
+    "BrokerConfig",
+    "HistoryGuard",
+    "StorageProfile",
+    "create_app",
+    "initialize_registry",
     "store_ddl",
     "to_arrow",
 ]

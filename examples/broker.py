@@ -15,7 +15,7 @@ log under `--root` the first time and opens it every time after, so a
 restarted broker carries on from the offset it stopped at. `--no-log` serves
 live-only streams: no durable tier, and `?offset=` is refused.
 
-`serve` starts the maintainer that seals each log, and litestream if a log
+The broker's lifespan starts the maintainer that seals each log, and litestream if a log
 replicates its WAL. There is nothing else to run.
 """
 
@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import streamcast
+from examples._hosting import Listening
 
 
 def schema(source: str) -> dict[str, Any]:
@@ -86,7 +87,11 @@ async def main(
             )
 
     # Producers are clients, and publish over the socket.
-    async with streamcast.serve(streams, host, port):
+    async with Listening(
+        streamcast.create_app(streams=streams, config=streamcast.BrokerConfig()),
+        host,
+        port,
+    ):
         for stream in streams:
             where = "live-only" if live else f"durable, next offset {stream.end_offset}"
             print(f"ws://{host}:{port}/{stream.name}  ({where})", flush=True)

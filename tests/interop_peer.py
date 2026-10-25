@@ -2,7 +2,8 @@
 
 The same file runs under this checkout and under an older streamcast installed
 from PyPI into a virtualenv of its own. The factory dispatches to that version's
-API; `serve`, `publish`, `connect` and `Stream.snapshot` are shared. It imports nothing from `tests`, and is run with `python -I`
+API; `publish`, `connect` and `Stream.snapshot` are shared, and the server
+runs `create_app` under uvicorn or, before it existed, `serve`. It imports nothing from `tests`, and is run with `python -I`
 so the interpreter's own streamcast is the one it imports, never this tree's.
 
     python -I interop_peer.py server ROOT     prints the URI, serves until stdin closes
@@ -59,11 +60,38 @@ async def server(root: str) -> None:
     stream.log.publish(flush=True)
     # No maintainer: nothing here outgrows a seal, and its five subprocesses
     # would cost seconds per pair for nothing the pair is about.
-    async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as served:
-        port = served.sockets[0].getsockname()[1]
-        print(f"ws://127.0.0.1:{port}/trades", flush=True)
-        # Until the test closes our stdin: no signal handling to get wrong.
-        await asyncio.get_running_loop().run_in_executor(None, sys.stdin.read)
+    if not hasattr(streamcast, "create_app"):
+        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False) as served:
+            port = served.sockets[0].getsockname()[1]
+            print(f"ws://127.0.0.1:{port}/trades", flush=True)
+            # Until the test closes our stdin: no signal handling to get wrong.
+            await asyncio.get_running_loop().run_in_executor(None, sys.stdin.read)
+
+        return
+
+    # The canonical application under its supported server: one uvicorn
+    # worker running the lifespan, on a socket bound first so the port is known.
+    import socket
+
+    import uvicorn
+
+    app = streamcast.create_app(
+        streams=stream, config=streamcast.BrokerConfig(maintain=False)
+    )
+    sock = socket.create_server(("127.0.0.1", 0))
+    served = uvicorn.Server(uvicorn.Config(app, lifespan="on", log_level="warning"))
+    task = asyncio.create_task(served.serve(sockets=[sock]))
+    while not served.started:
+        if task.done():
+            await task
+            raise RuntimeError("the broker did not start")
+
+        await asyncio.sleep(0.01)
+
+    print(f"ws://127.0.0.1:{sock.getsockname()[1]}/trades", flush=True)
+    await asyncio.get_running_loop().run_in_executor(None, sys.stdin.read)
+    served.should_exit = True
+    await task
 
 
 async def client(uri: str, n: int) -> dict[str, object]:

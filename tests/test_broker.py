@@ -22,15 +22,15 @@ from websockets.asyncio.client import connect as raw_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 import streamcast
-from streamcast._broker import runtime as implementation
-from streamcast._broker.registry import Registry
-from streamcast.broker import (
+from streamcast import (
     BrokerConfig,
     HistoryGuard,
     StorageProfile,
     create_app,
     initialize_registry,
 )
+from streamcast._broker import runtime as implementation
+from streamcast._broker.registry import Registry
 
 SHAPE: dict[str, Any] = {
     "type": "object",
@@ -753,7 +753,7 @@ async def test_unexpected_data_failure_closes_without_storage_details(
 
 
 async def test_real_children_signal_exact_generation_readiness(config, monkeypatch):
-    from streamcast._server import _supervisors
+    from streamcast._children import _supervisors
 
     # One real role proves the handshake and reap boundary. Running five
     # interpreters proves the same protocol five times and costs office CPUs.
@@ -788,8 +788,8 @@ async def test_managed_replication_and_shared_group_replacement(
 
     import litelink
 
+    from streamcast._children import _supervisors
     from streamcast._replicate import Sidecar
-    from streamcast._server import _supervisors
 
     from .test_replicate import settle
 
@@ -1219,8 +1219,8 @@ async def test_repeated_lifespan_cancellation_joins_owner(config, monkeypatch, p
     original_open = implementation.BrokerRuntime.open
     original_close = implementation.BrokerRuntime.close
 
-    async def opening(cls, supplied):
-        owner = await original_open(supplied)
+    async def opening(cls, supplied, **kwargs):
+        owner = await original_open(supplied, **kwargs)
         owners.append(owner)
         if phase == "startup":
             entered.set()

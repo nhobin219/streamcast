@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import streamcast
+from examples._hosting import Listening
 
 SYMBOLS = ("AAPL", "MSFT", "NVDA")
 
@@ -185,8 +186,13 @@ async def main(
         schema=ENRICHED,
         exactly_once=True,
     )
-    server = await streamcast.serve(
-        [orders_stream, enriched_stream], "127.0.0.1", 0, maintain=False
+    server = await Listening(
+        streamcast.create_app(
+            streams=[orders_stream, enriched_stream],
+            config=streamcast.BrokerConfig(maintain=False),
+        ),
+        "127.0.0.1",
+        0,
     )
     port = server.sockets[0].getsockname()[1]
     orders_uri = f"ws://127.0.0.1:{port}/orders"

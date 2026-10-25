@@ -5,7 +5,7 @@ that is the shape to copy:
 
 - a **producer** is a client that publishes rows (`streamcast.publish`);
 - the **broker** serves the streams: it holds each stream's log and fans
-  rows out (`streamcast.serve`, or `asgi` mounted in an app);
+  rows out (`streamcast.create_app`, directly or mounted);
 - a **subscriber** is a client that reads them (`streamcast.connect`).
 
 The broker has no application code. What a row means is the producer's
@@ -160,7 +160,7 @@ rows it has not published yet.
 ## Mounted in a FastAPI service
 
 `fastapi_app.py` is the broker role played by an app you already have,
-instead of by `serve()` on a port of its own. The trades producer publishes
+instead of by `broker.py` on a port of its own. The trades producer publishes
 to it and a consumer subscribes from it, both at
 `ws://127.0.0.1:8770/streams/trades`; nothing in the app writes rows.
 
@@ -168,25 +168,12 @@ to it and a consumer subscribes from it, both at
 just demo fastapi
 ```
 
-**You do not call `serve()`.** `serve` and `asgi` are two transports for one `Stream`,
-and a mounted app uses one of them:
-
-| | owns a socket | you get |
-|---|---|---|
-| `serve(stream, host, port)` | yes | a standalone server |
-| `asgi(stream)` | no | an app to mount in yours |
-
-The `Stream` is the thing either way — it holds the offsets, the log and the fan-out,
-and the transport only carries frames. Which is why `/health` in that file reads
-`trades.end_offset` directly without asking the websocket layer anything.
-
-Three lines in the file are the whole of it: build the stream with `Stream.open`, wrap it
-with `asgi(...)`, and `app.mount("/streams", streams)`. The fourth thing to know is that
-`async with streams` in the lifespan is **not** optional — Starlette does not run a
-mounted sub-app's lifespan, so that block is what starts the maintainer which seals the
-log, and what closes the log on the way out.
-
-Needs the extra: `pip install 'streamcast[asgi]'`.
+The broker is `streamcast.create_app(streams=...)`, directly or mounted.
+FastAPI is a normal dependency. Run one ASGI worker with lifespan enabled;
+the mounting host explicitly enters `streams.router.lifespan_context(streams)`.
+The host owns TLS, bind address and compression; disable permessage-deflate for
+shared-encode fan-out. `fastapi_app.py` shows this composition. Static streams
+and dynamic registry management share one runtime and shutdown owner.
 
 ## A keyed table log, and branches
 

@@ -106,7 +106,7 @@ def validate(where: Where, columns: tuple[str, ...] | None) -> None:
     **A column the schema does not have is a refusal, not a filter that
     matches nothing.** Silently matching nothing is the worst available
     answer: the subscription succeeds, the socket stays open, and no message
-    ever arrives — which looks exactly like a quiet stream. `serve` turns this
+    ever arrives — which looks exactly like a quiet stream. The broker turns this
     into a 4400 naming the column.
 
     `columns` is None for a live-only stream, which declares no schema, so

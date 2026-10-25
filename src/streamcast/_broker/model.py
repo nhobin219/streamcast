@@ -17,6 +17,7 @@ from streamcast._limits import (
     MAX_IN_FLIGHT,
     MAX_INBOUND,
     MAX_MESSAGE_BYTES,
+    SUBSCRIBER_YIELD_EVERY,
 )
 from streamcast._stream import MAX_REPLAY
 
@@ -80,21 +81,41 @@ class StorageProfile:
         }
 
 
+class PublicAccess:
+    """Default static hosting: data and statistics, no management authority."""
+
+    async def authenticate(self, scope):
+        return "public"
+
+    async def allows(self, principal, action, resource):
+        return action in ("data.read", "data.publish", "stats.read")
+
+
 @dataclass(frozen=True)
 class BrokerConfig:
-    broker_id: str
-    registry: Path
-    profiles: Mapping[str, StorageProfile]
-    authorization: Authorization
+    broker_id: str = "static"
+    registry: Path | None = None
+    profiles: Mapping[str, StorageProfile] = field(default_factory=dict)
+    authorization: Authorization = field(default_factory=PublicAccess)
     history_guards: Mapping[str, HistoryGuard] = field(default_factory=dict)
     transport_max_bytes: int = MAX_MESSAGE_BYTES
     control_max_bytes: int = 256 * 1024
     max_pending: int = 32
     readiness_timeout: float = 30.0
     readiness_every: float = 0.25
+    subscriber_yield_every: int = SUBSCRIBER_YIELD_EVERY
+    maintain: Any = True
+    replicate: bool = False
+    max_backlog: int | Mapping[str, int] = MAX_BACKLOG
+    max_inbound: int | Mapping[str, int] = MAX_INBOUND
+    max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT
+    # None is `transport_max_bytes` for every static stream: a per-stream
+    # limit is only worth naming when it is below the transport's.
+    max_message_bytes: int | Mapping[str, int] | None = None
+    stats: bool | str = True
 
     def __post_init__(self) -> None:
-        if not self.broker_id or not self.profiles:
+        if not self.broker_id or (self.registry is not None and not self.profiles):
             raise ValueError("broker identity and profiles required")
 
         if any(
@@ -117,6 +138,7 @@ class BrokerConfig:
                 self.transport_max_bytes,
                 self.control_max_bytes,
                 self.max_pending,
+                self.subscriber_yield_every,
             )
         ):
             raise ValueError("positive integer bounds required")
@@ -126,6 +148,18 @@ class BrokerConfig:
             for value in (self.readiness_timeout, self.readiness_every)
         ):
             raise ValueError("positive readiness bounds required")
+
+        if self.registry is not None and isinstance(self.authorization, PublicAccess):
+            raise ValueError("registry hosting requires explicit authorization")
+
+        if self.registry is not None and self.maintain is not True:
+            raise ValueError("managed streams require maintenance")
+
+        if not isinstance(self.stats, (bool, str)) or (
+            isinstance(self.stats, str)
+            and (not self.stats.startswith("/") or self.stats == "/")
+        ):
+            raise ValueError("stats must be a bool or an absolute non-root path")
 
         object.__setattr__(self, "profiles", MappingProxyType(dict(self.profiles)))
         object.__setattr__(

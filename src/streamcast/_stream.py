@@ -1,6 +1,6 @@
 """One broadcast: the offsets, the subscribers, and the subscribe handshake.
 
-A `Stream` is the whole of streamcast that is not transport. `serve` puts it
+A `Stream` is the whole of streamcast that is not transport. The broker puts it
 behind a WebSocket port and `connect` reads it from the other end, but the
 ordering guarantee, the offset assignment and the replay partition are all
 decided here — which means they can be tested without a socket, and are.
@@ -69,6 +69,7 @@ from streamcast._errors import (
     ProtocolError,
     SequenceGap,
     StreamRetired,
+    Unavailable,
 )
 from streamcast._limits import (
     DEDUPE_WINDOW,
@@ -79,6 +80,7 @@ from streamcast._limits import (
     MAX_TAIL,
     PAGE_BYTES,
     PAGE_ROWS,
+    SUBSCRIBER_YIELD_EVERY,
 )
 from streamcast._protocol import (
     EARLIEST,
@@ -136,13 +138,15 @@ class Stream:
     """A broadcast, and the offsets that make it resumable.
 
     Constructed before there is a loop and serves any number of subscribers on
-    whichever loop `serve` runs on. It owns no thread and starts nothing —
-    `serve` is what starts the maintainer and, with `replicate=True`, the
-    litestream sidecar, and it stops them again.
+    whichever loop the broker runs on. It owns no thread and starts nothing —
+    the broker's lifespan is what starts the maintainer and, with
+    `BrokerConfig(replicate=True)`, the litestream sidecar, and it stops them
+    again.
 
         stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
 
-        async with streamcast.serve(stream, "localhost", 8765):
+        app = streamcast.create_app(streams=stream)
+        async with app.router.lifespan_context(app):
             async for frame in upstream:
                 await stream.send(parse(frame))      # a row, not a blob
 
@@ -201,6 +205,7 @@ class Stream:
         "_started",
         "_started_ts",
         "_subscribers",
+        "_subscriber_yield_every",
         "_validate",
         "_writer",
         "_group_commit",
@@ -248,7 +253,7 @@ class Stream:
         each retired log still on this disk. Retired logs need no routine
         maintenance; the publish role finishes retirement of legacy logs.
 
-        `s3_options` is what `serve` uploads the stream's metadata file with, when the
+        `s3_options` is what the broker uploads the stream's metadata file with, when the
         log publishes to S3. None resolves from the environment, as litelink
         does. It is kept, not used here: this initialiser does no I/O.
 
@@ -369,7 +374,7 @@ class Stream:
         # in, may not have it, and its shape is not this library's to change.
         self._stamped = log is not None and _log.stamped(log)
         self._floor = floor
-        # Read off the metadata file at `ensure_metadata`, which `serve` calls
+        # Read off the metadata file at `ensure_metadata`, which the broker calls
         # before the first subscribe; the greeting names it so a reader can
         # check the file it opens is this stream's.
         self._stream_id: str | None = None
@@ -383,14 +388,15 @@ class Stream:
         self._owned = log if (owns_log and log is not None) else None
         self._name = name
         self._log = log
-        # The queue bounds, defaults until `serve` sets the deployment's
+        # The queue bounds, defaults until the broker sets the deployment's
         # (`_bound`): they belong to the process serving the stream, not to
         # the stream, so they can change on a restart. See `_limits`.
+        self._subscriber_yield_every = SUBSCRIBER_YIELD_EVERY
         self._max_backlog = MAX_BACKLOG
         self._max_inbound = MAX_INBOUND
         self._max_in_flight = MAX_IN_FLIGHT
         # None checks nothing here: the transport's own frame limit is the
-        # only one, as for a stream no `serve` or `asgi` has bounded.
+        # only one, as for a stream no runtime has bounded.
         self._max_message_bytes: int | None = None
         self._max_replay = max_replay
         # Read ONCE, here, and maintained by `send` thereafter. litelink's
@@ -459,7 +465,7 @@ class Stream:
         is not on this disk and its remote prefix has its metadata, its
         table or its WAL replica, this raises `FileExistsError`: that is a
         box that lost its disk, and an empty stream here would replace the
-        copy at the first `serve`. Pass `restore=True` or use `Stream.restore`
+        copy when a broker first serves it. Pass `restore=True` or use `Stream.restore`
         to bring it back, after stopping the old writer.
 
         `sort_by`, `config`, `published` and `s3_options` configure the log.
@@ -480,7 +486,7 @@ class Stream:
         handle reads is a property of that handle, so it is passed and not
         stored — reopen with it to get it again. With `max_replay=None`,
         the server can replay all retained rows of the current log; size
-        `serve(max_backlog=)` for live traffic arriving during the replay.
+        `BrokerConfig(max_backlog=)` for live traffic arriving during the replay.
 
         **`exactly_once=True` lets a publisher that names itself have its
         rows deduped** (`publish(uri, publisher=...)`, `_dedupe`). Each such
@@ -578,7 +584,8 @@ class Stream:
         """Move a stream onto a new log with a new schema, and return it.
 
             stream = streamcast.Stream.migrate("trades", root="data", schema=V2)
-            async with streamcast.serve(stream, "localhost", 8765):
+            app = streamcast.create_app(streams=stream)
+            async with app.router.lifespan_context(app):
                 ...
 
         **With the server stopped.** Nothing is migrated live: publishers are
@@ -710,7 +717,7 @@ class Stream:
                 and (sort_by is None or tuple(sort_by) == old.sort_by)
             ):
                 # Already this shape: opened, not migrated again. Nothing is
-                # written here — `serve` saves and syncs the metadata of every
+                # written here — the broker saves and syncs the metadata of every
                 # stream it starts, which also finishes a migration that died
                 # between saving it and uploading it.
 
@@ -849,7 +856,7 @@ class Stream:
         the consumer side. `Stream.open` restores it only with `restore=True`;
         this rebuilds it from its replicated WAL when there is one, and
         otherwise from its published table alone (litelink 0.10), then hands
-        back a stream ready to `serve` and `send` to.
+        back a stream ready for the broker to serve and to `send` to.
 
         **Offsets are fenced, not reissued, and that is what makes the move
         invisible to consumers.** litelink skips `replica_reserve` (2**20)
@@ -1040,7 +1047,7 @@ class Stream:
 
         From then on the stream is served READ-ONLY: `open` and `migrate` open
         it for reading — subscribers replay and catch up, a live view simply
-        sees nothing new — every send raises `StreamRetired`, and `serve`
+        sees nothing new — every send raises `StreamRetired`, and the broker
         refuses a publisher with 4410. Its maintainers do not run.
 
         **Undone by `restore(..., revive=True)`**, here or on another box: the
@@ -1165,7 +1172,7 @@ class Stream:
             # From the version's own file, so it matches the name compared.
             read, metadata, _manifest_read = _versions.load(root, name)
             if metadata is None:
-                # Not served yet, so no metadata: what serve would write.
+                # Not served yet, so no metadata: what the broker would write.
                 try:
                     log = litelink.open(
                         root, name, read_only=True, s3_options=_options(s3_options)
@@ -1757,9 +1764,9 @@ class Stream:
     def ensure_metadata(self) -> None:
         """Write this stream's metadata file if it has none, and sync its S3 copy.
 
-        What `serve` calls for every stream before it listens; a failure is a
-        failure to start. See `_metadata.ensure`. A stream with no log has no
-        metadata and this does nothing.
+        What the broker's lifespan calls for every stream before it admits a
+        connection; a failure is a failure to start. See `_metadata.ensure`. A
+        stream with no log has no metadata and this does nothing.
 
         Also where a `Stream(log=…)` learns it is part of a migrated stream:
         its initialiser does no I/O, so the seam and the retired logs are read
@@ -1780,7 +1787,7 @@ class Stream:
 
         The logs a MIGRATION sealed, not whether this stream is retired —
         that is `retirement`. Empty for a stream that has never migrated.
-        `serve` excludes them from the maintainer: retirement has already
+        The broker excludes them from the maintainer: retirement has already
         published, evicted and swept them.
         """
         return self._retired
@@ -1823,7 +1830,7 @@ class Stream:
         the broker waits on this one's disk (`_writer`); the fan-out is a
         queue insert per subscriber, done on the loop once the commit is back.
         Without a log there is nothing to commit, and it does not await at all.
-        With one it may also wait for room: past `serve`'s `max_inbound`
+        With one it may also wait for room: past the broker's `max_inbound`
         rows queued for commit, a send waits for the disk — never for a
         consumer.
 
@@ -1902,7 +1909,7 @@ class Stream:
         max_in_flight: int,
         max_message_bytes: int | None = None,
     ) -> None:
-        """Set the queue bounds `serve` and `asgi` were given for this stream.
+        """Set the queue bounds the runtime was given for this stream.
 
         A new `max_backlog` applies to subscribers that join after it, and a
         new `max_in_flight` to publisher connections that open after it. No await.
@@ -2325,6 +2332,7 @@ class Stream:
         )
         replying = asyncio.create_task(self._reply(connection, replies))
         oversized: str | None = None
+        fenced = False
         try:
             async for frame in connection:
                 seq = 0
@@ -2383,6 +2391,13 @@ class Stream:
                     else:
                         queued = self._submit(batch) if batch else None
 
+                except Unavailable:
+                    # Not this row's fault, and nothing of it was queued: the
+                    # connection ends as an outage, which a publisher retries,
+                    # rather than `rejected`, which an outbox drops for good.
+                    fenced = True
+                    break
+
                 except (ValueError, TypeError) as exc:
                     # litelink names the column and what it found. Passed
                     # through rather than summarised: a publisher debugging a
@@ -2401,6 +2416,8 @@ class Stream:
 
         if oversized is not None:
             await connection.close(CloseCode.MESSAGE_TOO_BIG, oversized)
+        elif fenced:
+            await connection.close(1001, "stream unavailable")
 
     @staticmethod
     async def _reply(
@@ -2443,7 +2460,7 @@ class Stream:
         """Attach one subscriber and serve it until the connection ends.
 
         Raises `NotReplayable` for an offset this stream cannot serve, which
-        `serve` turns into a 4416, and `ValueError` for a `where=` it cannot,
+        the broker turns into a 4416, and `ValueError` for a `where=` it cannot,
         which becomes a 4400. Everything else — the greeting, the replay, the
         live pump — happens here, and the order is load-bearing.
 
@@ -2470,7 +2487,10 @@ class Stream:
         resolved = await self._resolve(requested)
 
         subscriber = Subscriber(
-            connection, max_backlog=self._max_backlog, where=predicate
+            connection,
+            max_backlog=self._max_backlog,
+            yield_every=self._subscriber_yield_every,
+            where=predicate,
         )
         # ── ATOMIC. Do not put an await between these two statements. ──
         # Joining the set first means nothing sent from here on is missed;
@@ -2790,7 +2810,7 @@ def _open_or_create(
         if published is not None:
             # Nothing of it on this disk. A prefix that holds it is a box that
             # lost its disk, and an empty stream made here would be uploaded
-            # over the metadata at the first `serve`, and shipped over the WAL
+            # over the metadata when a broker first serves it, and shipped over the WAL
             # replica as its next transaction: a restore after that returns
             # nothing. Restoring is the caller's choice to make, so refused.
             # Under the prefix itself too, where a stream from before its own

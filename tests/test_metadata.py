@@ -1,7 +1,7 @@
-"""The stream's metadata file: written by `serve` for every durable stream.
+"""The stream's metadata file: written by the broker for every durable stream.
 
 It is what a reader on another machine starts from (#32), so a stream without
-one is a stream only its own server can read — which is why `serve` writes it,
+one is a stream only its own server can read — which is why the broker writes it,
 uploads it, and refuses to start when it cannot.
 """
 
@@ -18,8 +18,8 @@ import pytest
 
 import streamcast
 from streamcast import _log, _metadata, _versions
-from streamcast.asgi import asgi
 from tests.conftest import current_json
+from tests.hosting import application as asgi
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -97,7 +97,7 @@ class TestServeWritesIt:
         assert found["live_log"]["system_schema"]["properties"] == {}
 
     async def test_the_id_is_minted_once(self, tmp_path, serve):
-        # A fresh `Stream.open` per serve, as a restart has: `serve` closes the
+        # A fresh `Stream.open` per serve, as a restart has: the broker closes the
         # log a stream owns when it shuts down.
         async with serve(
             streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA),
@@ -133,7 +133,7 @@ class TestServeWritesIt:
             assert not hint(tmp_path).exists(), (
                 "constructed, often at import: no I/O yet"
             )
-            async with streams:
+            async with streams.router.lifespan_context(streams):
                 assert hint(tmp_path).exists()
         finally:
             await stream.aclose()
@@ -162,11 +162,11 @@ class TestMigrationUpdatesIt:
 
 class TestItNamesTheLiveLog:
     async def test_serving_a_sealed_log_is_refused(self, tmp_path, serve):
-        """A sealed log is never written to again, and serve is what writes.
+        """A sealed log is never written to again, and the broker is what writes.
 
         litelink refuses a writer on a log `migrate` retired. A log sealed by
         a migration under litelink 0.5 was never retired and still opens, so
-        `serve` checks the metadata too: here, a log it does not name as live.
+        the broker checks the metadata too: here, a log it does not name as live.
         """
         stream = streamcast.Stream.open(
             "trades", create=True, root=tmp_path, schema=SCHEMA
@@ -193,7 +193,7 @@ class TestItNamesTheLiveLog:
                     pass
 
     async def test_a_handed_in_live_log_learns_its_seam(self, tmp_path, serve):
-        """`Stream(log=…)` does no I/O, so the seam arrives at `serve`.
+        """`Stream(log=…)` does no I/O, so the seam arrives when the broker starts.
 
         Without it a subscribe below the seam would read the live log, find
         nothing there, and be served an empty replay — a silent hole.

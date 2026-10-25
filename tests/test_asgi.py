@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -29,13 +30,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-uvicorn = pytest.importorskip("uvicorn", reason="the asgi extra is not installed")
-pytest.importorskip("starlette", reason="the asgi extra is not installed")
-
+import uvicorn
 from starlette.applications import Starlette  # noqa: E402
 from starlette.routing import Mount  # noqa: E402
 
-from streamcast.asgi import _Peer, asgi  # noqa: E402
+from streamcast._asgi import _Peer  # noqa: E402
+from tests.hosting import application as asgi  # noqa: E402
 
 # Same reasoning as `tests/test_backpressure.py`: a real overflow needs real
 # backpressure, so the rows are large and the stalled client's own queue is 1.
@@ -96,7 +96,7 @@ async def running(app: Any) -> AsyncIterator[str]:
 
 class TestItServes:
     async def test_a_mounted_stream_delivers_live_rows(self, log):
-        """The headline: `connect` cannot tell it is not talking to `serve`."""
+        """The headline: `connect` cannot tell it is talking to a mounted app."""
         stream = streamcast.Stream("trades", log=log)
         app = asgi(stream, maintain=False, replicate=False)
         async with running(app) as base, streamcast.connect(f"{base}/trades") as sub:
@@ -114,7 +114,13 @@ class TestItServes:
         """
         stream = streamcast.Stream("trades", log=log)
         streams = asgi(stream, maintain=False, replicate=False)
-        app = Starlette(routes=[Mount("/streams", streams)])
+
+        @asynccontextmanager
+        async def lifespan(_app):
+            async with streams.router.lifespan_context(streams):
+                yield
+
+        app = Starlette(routes=[Mount("/streams", streams)], lifespan=lifespan)
         async with running(app) as base:
             async with streamcast.connect(f"{base}/streams/trades") as sub:
                 assert sub.info.stream == "trades"
@@ -226,7 +232,7 @@ class TestWhatItRefuses:
                 await streamcast.connect(f"{base}/trades", offset=9_999)
 
     async def test_every_mounted_stream_takes_publishers(self, log):
-        """No switch, as `serve` has none: a stream that can be written takes
+        """No switch, as `BrokerConfig` has none: a stream that can be written takes
         publishers, and one that cannot (a retired one) refuses them itself."""
         stream = streamcast.Stream("trades", log=log)
         app = asgi(stream, maintain=False, replicate=False)
@@ -409,20 +415,23 @@ class TestTheChildren:
         )
         try:
             streams = asgi(stream, replicate=False)
-            async with streams:
-                assert streams._started is True
+            async with streams.router.lifespan_context(streams):
+                assert not streams.state.broker.closed
                 # Built at start rather than construction: the maintainer is
                 # handed the retired logs, which the metadata written at start
                 # names.
-                assert streams._children, "a stream with a log needs a maintainer"
+                assert streams.state.broker.children, (
+                    "a stream with a log needs a maintainer"
+                )
 
-            assert streams._started is False
+            assert streams.state.broker.closed
 
         finally:
             await stream.aclose()
 
     async def test_leaving_the_block_closes_a_log_it_opened(self, tmp_path):
-        """Symmetry with `serve`, which closes its streams on shutdown.
+        """Symmetry with the broker run on its own, which closes its streams on
+        shutdown.
 
         A stream built by `Stream.open` owns its log, so something has to close
         it; `aclose` is a no-op for a handle the caller passed in. Without this
@@ -432,7 +441,8 @@ class TestTheChildren:
         stream = streamcast.Stream.open(
             "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
         )
-        async with asgi(stream, maintain=False, replicate=False):
+        app = asgi(stream, maintain=False, replicate=False)
+        async with app.router.lifespan_context(app):
             await stream.send({"event_ts": 1.0, "price": 2.0})
 
         # The consequence, not the private attribute: the handle is shut, so
@@ -442,7 +452,8 @@ class TestTheChildren:
 
     async def test_a_live_only_stream_needs_no_children(self):
         streams = asgi(streamcast.Stream("live"))
-        assert streams._children == []
+        async with streams.router.lifespan_context(streams):
+            assert streams.state.broker.children == []
 
     async def test_the_documented_pattern_works_as_written(self, tmp_path):
         """`README.md` and `docs/API.md` both print this. So it is run.
@@ -459,17 +470,19 @@ class TestTheChildren:
 
             @contextlib.asynccontextmanager
             async def lifespan(_app: Any) -> AsyncIterator[None]:
-                async with streams:
+                async with streams.router.lifespan_context(streams):
                     yield
 
             app = Starlette(lifespan=lifespan, routes=[Mount("/streams", streams)])
             async with running(app) as base:
-                assert streams._started is True, "the lifespan did not start them"
+                assert not streams.state.broker.closed, (
+                    "the lifespan did not start them"
+                )
                 async with streamcast.connect(f"{base}/streams/trades") as sub:
                     await stream.send({"event_ts": 1.0, "price": 2.0})
                     assert (await sub.recv())[0] == 1
 
-            assert streams._started is False, "the lifespan did not stop them"
+            assert streams.state.broker.closed, "the lifespan did not stop them"
 
         finally:
             await stream.aclose()

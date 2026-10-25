@@ -7,6 +7,57 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed — breaking
+
+- **One broker: `streamcast.create_app(config=None, *, streams=())`**, a FastAPI
+  application whose lifespan owns every stream it serves — static streams
+  handed to it and, with a registry, streams managed over HTTP — with one
+  admission, connection, drain and child lifecycle for both (#194).
+  `streamcast.serve`, `streamcast.asgi.asgi` and the `streamcast.broker`
+  module are removed, with no compatibility shim. Their settings are
+  `streamcast.BrokerConfig` fields: `maintain`, `replicate`, `max_backlog`,
+  `max_inbound`, `max_in_flight`, `max_message_bytes`, `stats`, and
+  `transport_max_bytes` in place of websockets' `max_size`. `BrokerConfig`,
+  `StorageProfile`, `Authorization`, `HistoryGuard` and
+  `initialize_registry` are exported from `streamcast`.
+  Migrating: `async with streamcast.serve(streams, host, port, **bounds)`
+  becomes `app = streamcast.create_app(streams=streams,
+  config=streamcast.BrokerConfig(**bounds))` run under uvicorn with one
+  worker and lifespan on; a mount enters `app.router.lifespan_context(app)`
+  in the host's lifespan, as `async with asgi(...)` did. Transport keywords
+  (`ssl`, `ping_interval`, `process_request`, `compression`) become the ASGI
+  server's settings and the injected `authorization` policy.
+- A broker without a registry is public by default, as `serve` was: its
+  policy allows reads, publishes and `/stats`. A registry still requires an
+  explicit `authorization`.
+- Static streams are now fenced like managed ones: the lifespan claims each
+  log's ownership lock, refuses writes until the maintainer reports ready,
+  and on exit closes connections, drains the writer and closes the stream.
+  Startup fails if the maintainer is not ready within `readiness_timeout`
+  (30 s), and a managed stream's transition fences static writes too while
+  the shared maintainer group is replaced; `stream.send` raises
+  `ValueError("stream unavailable")` meanwhile.
+- FastAPI and uvicorn are dependencies; the `asgi` and `broker` extras are
+  gone. `docs/BROKER.md` is folded into `docs/API.md` and `docs/SPEC.md`.
+
+### Fixed
+
+- A publisher sending while the broker fences writes — a stream stopping,
+  or its maintainer group being replaced — is closed with 1001 instead of
+  each frame being answered `rejected`. An `outbox` treated that answer as a
+  poison row and deleted it from the caller's database; it now reconnects
+  and resends. Managed streams had this before; static streams gained the
+  fence in this release.
+
+### Added
+
+- `BrokerConfig(subscriber_yield_every=64)`: the data frames a subscriber
+  is sent, across replay and live delivery, before it yields to the event
+  loop. 64 was the fixed value; the default is provisional until the
+  fairness measurement in #194 chooses one.
+
 ## 0.25.0 — 2026-10-24
 
 ### Added

@@ -42,7 +42,7 @@ V2: dict[str, Any] = {
 
 async def _served(root: Path, bucket: str, s3: object, *, rows: int = 20) -> str:
     """A stream with rows published and its metadata written and uploaded, as
-    its first `serve` leaves it. Its `stream_id`."""
+    the broker's first start leaves it. Its `stream_id`."""
     stream = streamcast.Stream.open(
         "t", create=True, root=root, schema=SCHEMA, published=bucket, s3_options=s3
     )
@@ -93,7 +93,7 @@ class TestLostMetadataIsAdopted:
             s3_options=s3,
         )
         try:
-            stream.ensure_metadata()  # what `serve` does before it listens
+            stream.ensure_metadata()  # what the broker does before it admits a connection
         finally:
             await stream.aclose()
 

@@ -1,20 +1,16 @@
 """The connection surface the stream layer actually uses.
 
-`_stream` and `_subscriber` were written against `websockets`' own
-`ServerConnection`, but they never used more than four things from it. Naming
-those four is what lets a second transport — `streamcast.asgi`, mounted in
-someone else's ASGI app — hand rows to the same `Stream` without `_stream`
-learning that more than one kind of connection exists.
+The canonical FastAPI adapter hands rows to framework-independent stream and
+subscriber algorithms through four operations. Neither algorithm owns routing,
+authentication, ASGI scopes or lifecycle.
 
-**A Protocol rather than a base class**, because neither implementation is
-ours to subclass: one is `websockets`', the other wraps Starlette's. Structural
+**A Protocol rather than a base class**, because the adapter wraps Starlette rather than inheriting its socket. Structural
 typing is the only kind available here, and it buys the thing that matters —
 the type checker, not a test, is what says an adapter is complete.
 
 The surface is deliberately the smallest that compiles. Everything else a
 transport offers (`ping`, `request`, addresses, TLS details) is reached by the
-code that knows which transport it has: `_server` narrows to `ServerConnection`
-for `connection.request`, and `asgi` reads the ASGI scope for the same thing.
+ASGI routing layer reading the scope.
 """
 
 from __future__ import annotations
@@ -52,7 +48,7 @@ class Peer(Protocol):
         would keep every decode-and-compare test passing.
 
         Raises `ConnectionClosed` once the peer is gone, because that is the
-        signal `Subscriber.pump` unwinds on and `_server` treats as an
+        signal `Subscriber.pump` unwinds on and the broker treats as an
         ordinary disconnect rather than a handler failure.
         """
         ...

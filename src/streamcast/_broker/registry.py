@@ -51,10 +51,33 @@ class Lock:
 
 
 class Registry:
-    def __init__(self, db: sqlite3.Connection, lock: Lock) -> None:
+    def __init__(self, db: sqlite3.Connection, lock: Lock | None) -> None:
         self.db = db
         self.lock = lock
         self.mutex = threading.RLock()
+
+    @classmethod
+    def memory(cls, broker_id: str) -> Registry:
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        cls.initialize(db, broker_id)
+        return cls(db, None)
+
+    @staticmethod
+    def initialize(db, broker_id):
+        with db:
+            db.execute("CREATE TABLE identity (version INTEGER, broker TEXT)")
+            db.execute("INSERT INTO identity VALUES (1, ?)", (broker_id,))
+            db.execute(
+                "CREATE TABLE streams (name TEXT PRIMARY KEY, body TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE operations (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE receipts (principal TEXT, key TEXT, digest TEXT, body TEXT, PRIMARY KEY(principal,key))"
+            )
+            db.execute("CREATE TABLE collection (revision INTEGER)")
+            db.execute("INSERT INTO collection VALUES (0)")
 
     @classmethod
     def open(cls, path: Path, broker_id: str, *, initialize: bool = False) -> Registry:
@@ -74,20 +97,7 @@ class Registry:
             db = sqlite3.connect(path, check_same_thread=False)
             db.execute("PRAGMA synchronous=FULL")
             if initialize:
-                with db:
-                    db.execute("CREATE TABLE identity (version INTEGER, broker TEXT)")
-                    db.execute("INSERT INTO identity VALUES (1, ?)", (broker_id,))
-                    db.execute(
-                        "CREATE TABLE streams (name TEXT PRIMARY KEY, body TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE operations (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE receipts (principal TEXT, key TEXT, digest TEXT, body TEXT, PRIMARY KEY(principal,key))"
-                    )
-                    db.execute("CREATE TABLE collection (revision INTEGER)")
-                    db.execute("INSERT INTO collection VALUES (0)")
+                cls.initialize(db, broker_id)
 
                 directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
                 try:
@@ -178,4 +188,5 @@ class Registry:
     @serialized
     def close(self) -> None:
         self.db.close()
-        self.lock.close()
+        if self.lock is not None:
+            self.lock.close()

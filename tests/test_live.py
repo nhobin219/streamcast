@@ -19,6 +19,7 @@ import pytest
 
 import streamcast
 from streamcast import _live, _log
+from tests.hosting import serve_streams
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -42,7 +43,7 @@ def publish(stream: streamcast.Stream) -> None:
 
 @contextlib.asynccontextmanager
 async def served(stream: streamcast.Stream) -> AsyncIterator[tuple[Any, str]]:
-    server = await streamcast.serve(stream, "127.0.0.1", 0, maintain=False)
+    server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
     try:
         port = server.sockets[0].getsockname()[1]
         yield server, f"ws://127.0.0.1:{port}/{stream.name}"
@@ -414,7 +415,7 @@ class TestAMigrationUnderAnOpenView:
                 "trades", create=True, root=tmp_path, schema=SCHEMA
             )
             await old.send_many([row(i) for i in range(3)])
-            first = await streamcast.serve(old, sock=listening.dup(), maintain=False)
+            first = await serve_streams(old, sock=listening.dup(), maintain=False)
             async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
                 await live.wait_for(3)
 
@@ -424,9 +425,7 @@ class TestAMigrationUnderAnOpenView:
 
                 new = streamcast.Stream.migrate("trades", root=tmp_path, schema=v2)
                 await new.send_many([row(i) | {"venue": "x"} for i in range(3, 5)])
-                second = await streamcast.serve(
-                    new, sock=listening.dup(), maintain=False
-                )
+                second = await serve_streams(new, sock=listening.dup(), maintain=False)
                 try:
                     await asyncio.wait_for(live.wait_for(5), timeout=10)
                     table = await live.scan().read_all()

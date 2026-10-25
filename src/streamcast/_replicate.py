@@ -5,7 +5,7 @@ object storage, and that is what makes the log survive losing its machine. It
 is a separate process on purpose — that is what keeps the network out of the
 write path — but "separate process" is not the same as "your problem", and an
 earlier version of this library made it the operator's by refusing to serve
-such a log at all. `serve` starts everything the stream needs.
+such a log at all. The broker starts everything the stream needs.
 
 **One process for every log this server replicates**, not one per log.
 litestream takes a `dbs` list, so N logs is N entries in one config rather
@@ -97,7 +97,7 @@ _BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
 class SidecarUnavailable(RuntimeError):
     """`wal_replication` is on and litestream cannot be run.
 
-    Raised at `serve`, not at the first missed push. A server that came up and
+    Raised when the broker starts, not at the first missed push. A server that came up and
     quietly replicated nothing would leave an operator believing they had
     continuous RPO protection when they had none, which is the failure this
     whole module exists to prevent.
@@ -239,8 +239,8 @@ class Sidecar:
 
         **Both ordering guarantees the initialiser used to carry are kept
         here, and they are the reason this is a factory rather than a
-        lazily-initialised field.** Every config is written NOW, at `serve`
-        time, while this process indisputably owns the logs and before any
+        lazily-initialised field.** Every config is written NOW, when the
+        broker starts, while this process indisputably owns the logs and before any
         maintainer is spawned against them. And a missing binary raises HERE,
         which `_sidecars` reaches before the listener binds — so a server that
         cannot replicate never starts accepting subscribers who would believe

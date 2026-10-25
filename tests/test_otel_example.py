@@ -30,6 +30,7 @@ from examples.otel import (  # noqa: E402
     spans,
 )
 from streamcast import _metadata  # noqa: E402
+from tests.hosting import serve_streams
 
 
 class TestTheDemo:
@@ -153,7 +154,7 @@ class TestThePublisher:
             stream = streamcast.Stream.open(
                 "t", create=True, root=tmp_path, schema=schema
             )
-            return await streamcast.serve(stream, "127.0.0.1", port, maintain=False)
+            return await serve_streams(stream, "127.0.0.1", port, maintain=False)
 
         server = await broker()
         port = server.sockets[0].getsockname()[1]

@@ -8,13 +8,17 @@ import hashlib
 import time
 import uuid
 from collections.abc import Coroutine
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from streamcast import _log, _metadata
 from streamcast._broker.model import NAME, BrokerConfig, Fault, declaration
 from streamcast._broker.registry import Lock, Registry, dumps
-from streamcast._maintain import Maintain, stop
-from streamcast._server import _sidecars, _supervisors
+from streamcast._children import _sidecars, _supervisors
+from streamcast._errors import Unavailable
+from streamcast._limits import _bound
+from streamcast._maintain import stop
 from streamcast._stream import Stream
 from streamcast._tasks import thread
 
@@ -29,7 +33,7 @@ class Generation:
 
     def check(self) -> None:
         if not self.accepting or not self.writable:
-            raise ValueError("stream unavailable")
+            raise Unavailable("stream unavailable")
 
 
 class BrokerRuntime:
@@ -56,13 +60,31 @@ class BrokerRuntime:
         self.changing_children = False
         self.closed = False
         self.controls: set[asyncio.Task] = set()
+        self.static: dict[str, Stream] = {}
+        self.ready_directory = None
 
     @classmethod
-    async def open(cls, config: BrokerConfig) -> BrokerRuntime:
-        registry = await thread(Registry.open, config.registry, config.broker_id)
+    async def open(cls, config: BrokerConfig, *, streams=()) -> BrokerRuntime:
+        registry = (
+            await thread(Registry.memory, config.broker_id)
+            if config.registry is None
+            else await thread(Registry.open, config.registry, config.broker_id)
+        )
         self = cls(config, registry)
         try:
+            self.static = {stream.name: stream for stream in streams}
+            _bound(
+                self.static,
+                config.max_backlog,
+                config.max_inbound,
+                config.max_in_flight,
+                config.max_message_bytes,
+            )
+            self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.operations, self.collection = await thread(registry.load)
+            if self.static.keys() & self.records.keys():
+                raise ValueError("static and managed stream names overlap")
+
             # Hold canonical ownership even for stopped definitions. An
             # offline transition and a second registry must not share a log.
             for record in self.records.values():
@@ -81,6 +103,23 @@ class BrokerRuntime:
                         await self.reconcile(record)
                     except Exception:
                         self.observe(record["name"], "error", error="recovery_failed")
+
+            # Injected streams share every connection/admission/child lifetime.
+            # Only their construction remains the host's responsibility.
+            for name, stream in self.static.items():
+                if stream.log is not None:
+                    await thread(self.claim_log, Path(stream.log.root), stream.log.name)
+
+                await thread(stream.ensure_metadata)
+                stream._subscriber_yield_every = config.subscriber_yield_every
+                self.generation += 1
+                generation = Generation(stream, self.generation)
+                stream._admission = generation.check
+                self.generations[name] = generation
+
+            await self.replace_children()
+            for name in self.static:
+                self.generations[name].accepting = True
 
             self.worker = asyncio.create_task(self.work())
             self.worker.add_done_callback(self.worker_done)
@@ -182,6 +221,12 @@ class BrokerRuntime:
         match: str | None,
         none: str | None,
     ) -> dict:
+        if name in self.static:
+            raise Fault(409, "static_stream")
+
+        if self.config.registry is None:
+            raise Fault(403, "management_disabled")
+
         digest = hashlib.sha256(
             dumps([method, name, kind, body, match, none]).encode()
         ).hexdigest()
@@ -533,6 +578,7 @@ class BrokerRuntime:
                 raise ValueError("sort mismatch")
 
             opened._bound(**definition["limits"])
+            opened._subscriber_yield_every = self.config.subscriber_yield_every
             if log.config.wal_replication and not profile.replicate:
                 raise ValueError("replication required")
 
@@ -597,7 +643,9 @@ class BrokerRuntime:
             return
 
         generation.accepting = generation.writable = False
-        self.observe(name, "stopping")
+        if name not in self.static:
+            self.observe(name, "stopping")
+
         connections = list(generation.connections.items())
         await asyncio.gather(
             *(peer.close(1001, "stream stopping") for _, peer in connections),
@@ -613,10 +661,18 @@ class BrokerRuntime:
         await self.stop_children()
         # Final publication errors are visible to the operation. Maintainers'
         # best-effort exit hooks alone cannot establish a successful stop.
-        await self.finalize(stream, record)
+        if name not in self.static:
+            await self.finalize(stream, record)
+
         await stream.aclose()
+        # A host may still hold a static stream: once shut it says closed,
+        # rather than naming a generation that no longer exists.
+        stream._admission = None
         del self.generations[name]
-        await self.replace_children()
+        # Closing takes every stream offline in turn, writes already fenced:
+        # a group restarted for the ones left would be reaped again at once.
+        if not self.closing:
+            await self.replace_children()
 
     async def finalize(self, stream: Stream, record: dict) -> None:
         if stream.retirement is not None:
@@ -683,22 +739,32 @@ class BrokerRuntime:
             self.children_complete = self.child_ready = True
             return
 
-        children: list[Any] = list(_supervisors(routes, Maintain()))
+        children: list[Any] = list(_supervisors(routes, self.config.maintain))
+        assert self.ready_directory is not None
         for index, child in enumerate(children):
             child._ready_file = (
-                self.config.registry.parent / f".ready-{self.boot_id}-{index}"
+                Path(self.ready_directory.name) / f".ready-{self.boot_id}-{index}"
             )
 
         # Group replication separately by host profile, retaining the existing
         # credentials grouping and per-log litestream lock within each group.
-        by_profile: dict[str, dict] = {}
+        by_profile: dict[str | None, dict] = {}
         for name, stream in routes.items():
-            profile_id = self.records[name]["definition"]["storage_profile"]
+            profile_id = (
+                None
+                if name in self.static
+                else self.records[name]["definition"]["storage_profile"]
+            )
             by_profile.setdefault(profile_id, {})[name] = stream
 
         for profile_id, members in by_profile.items():
             children.extend(
-                _sidecars(members, self.config.profiles[profile_id].replicate)
+                _sidecars(
+                    members,
+                    self.config.replicate
+                    if profile_id is None
+                    else self.config.profiles[profile_id].replicate,
+                )
             )
 
         self.children = children
@@ -713,8 +779,8 @@ class BrokerRuntime:
 
         self.child_ready = True
         for name, generation in self.generations.items():
-            generation.writable = (
-                not self.closing and self.records[name]["desired"] == "serving"
+            generation.writable = not self.closing and (
+                name in self.static or self.records[name]["desired"] == "serving"
             )
 
     def children_ready(self) -> bool:
@@ -737,13 +803,18 @@ class BrokerRuntime:
             if not ready and time.monotonic() >= self.ready_at:
                 for name, generation in self.generations.items():
                     generation.writable = False
-                    self.observe(name, "error", error="children_unavailable")
+                    if name not in self.static:
+                        self.observe(name, "error", error="children_unavailable")
 
             elif ready:
                 for name, generation in self.generations.items():
                     if generation.accepting:
-                        generation.writable = self.records[name]["desired"] == "serving"
-                        self.observe(name, self.records[name]["desired"])
+                        generation.writable = (
+                            name in self.static
+                            or self.records[name]["desired"] == "serving"
+                        )
+                        if name not in self.static:
+                            self.observe(name, self.records[name]["desired"])
 
     async def close(self) -> None:
         if self.closed:
@@ -768,8 +839,8 @@ class BrokerRuntime:
 
         # Release no ownership lock if a worker/finalization fails. The process
         # must exit/recover rather than hand live handles to a new owner.
-        for record in list(self.records.values()):
-            await self.offline(record)
+        for name in list(self.generations):
+            await self.offline(self.records.get(name, {"name": name}))
 
         await self.stop_children()
         for lock in self.locks.values():
@@ -777,4 +848,7 @@ class BrokerRuntime:
 
         self.locks.clear()
         await thread(self.registry.close)
+        if self.ready_directory is not None:
+            await thread(self.ready_directory.cleanup)
+
         self.closed = True

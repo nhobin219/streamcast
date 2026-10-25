@@ -8,22 +8,10 @@ import streamcast
 from streamcast import Cursor, EARLIEST, Maintain, Stream, Subscription, to_arrow
 ```
 
-**A durable stream needs no other import.** Declare the columns in JSON Schema and
-`Stream` creates the log, while `serve` maintains and replicates it:
-
-```python
-stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
-
-async with streamcast.serve(stream, "localhost", 8765):
-    await stream.send({"event_ts": ..., "price": ...})
-```
-
-## The API is `websockets`, with three deviations
-
-`serve` and `connect` are `websockets`' own: same names, same shapes, every keyword passed
-through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the rest behave
-exactly as they do there — and `serve` returns an object that proxies `websockets.Server`
-(`sockets`, `serve_forever`, `connections`, `is_serving`). Three things differ:
+Declare columns in JSON Schema and open a `Stream`; the canonical FastAPI
+application owns serving, maintenance and shutdown. Clients use `connect` and
+`publish`, with `websockets` transport keywords. Server transport settings belong
+to the ASGI host, rather than the stream runtime.
 
 **Iterating a subscription yields `(offset, ts, msg)`**, not `message`. The offset is the
 only thing that makes a reconnect a resume rather than a restart, and a subscriber that
@@ -145,7 +133,7 @@ wrote down.
 so nothing is ever refused as `too_old`. With `replay_published=True` that makes the
 server a complete gateway to the log — any language can replay the retained history over
 a plain WebSocket, with no litelink and no credentials of its own. A long replay
-accumulates live messages behind it; size `serve`'s `max_backlog` against that backlog.
+accumulates live messages behind it; size `create_app`'s `max_backlog` against that backlog.
 The defaults are exported as `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a
 caller that wants to scale from them rather than restate them.
 
@@ -215,66 +203,102 @@ await stream.aclose(reason="server shutting down") -> None
 Drops every subscriber with a 1001, concurrently, drains the writer and closes a log the
 stream owns. A handle passed with `owns_log=False` stays open.
 
-## `serve`
+## `create_app` and `BrokerConfig`
 
 ```python
-streamcast.serve(streams, host=None, port=None, *, maintain=True,
-                 replicate=False, max_backlog=8192,
-                 max_inbound=65_536, max_in_flight=64,
-                 **websockets_kwargs) -> Server
+streamcast.create_app(config=None, *, streams=()) -> fastapi.FastAPI
+streamcast.BrokerConfig(
+    maintain=True, replicate=False, max_backlog=8192, max_inbound=65_536,
+    max_in_flight=64, max_message_bytes=None, transport_max_bytes=1<<20,
+    subscriber_yield_every=64, stats=True, ...)
 ```
 
-Runs a **log-backed pub/sub broker**: publishers on one side, subscribers on the other,
-neither owning the process. It owns the log, assigns every offset, and is litelink's
-single writer.
+This is the sole broker application and runtime. `streams` is a static `Stream`
+or iterable; a registry configuration adds dynamic management to the same
+runtime. Construction opens no files or sockets. Static streams cannot be
+changed through HTTP, and their names must not overlap registered definitions.
+Names route exactly: no wildcard subscription or hierarchy. Duplicate static
+names are rejected. Existing logs are preserved; startup does not reset offsets.
 
-Routing is exact-match on `Stream.name`. There is no topic hierarchy and no wildcard
-subscription, and that is a consequence rather than an omission: a subscriber resumes by
-offset, an offset belongs to one log, so a subscription spanning streams would need a
-cursor per stream.
-
-`streams` is a `Stream` or an iterable of them. Returns a `Server` proxy over
-`websockets.Server`; use it as an async context manager or await it:
+FastAPI and uvicorn are dependencies, and uvicorn is the supported server. Run
+**one worker**, lifespan enabled, without reload or pre-fork workers: the
+lifespan owns each stream's writer and storage locks, so a second worker would
+be a second writer. A second worker over the same logs fails to start on
+their ownership locks (`BlockingIOError`); one over live-only streams, which
+have nothing to lock, would start and split publishers from subscribers.
+Multiple workers are not supported. Set the server's
+frame ceiling to `transport_max_bytes` too: application validation happens after
+ASGI transport allocation. TLS, bind address, keepalive and compression belong
+to that server. Disable permessage-deflate for shared-encode fan-out unless its
+per-connection CPU cost is justified for the deployment.
 
 ```python
-async with streamcast.serve(stream, "127.0.0.1", 8765):
-    ...
-
-server = await streamcast.serve([trades, quotes], "0.0.0.0", 8765)
-await server.serve_forever()
+import uvicorn
+app = streamcast.create_app(streams=[trades, quotes])
+# Equivalent CLI: uvicorn module:app --workers 1 --lifespan on \
+#     --ws-per-message-deflate false --ws-max-size 1048576
+uvicorn.run(app, host="127.0.0.1", port=8765, workers=1,
+            lifespan="on", ws_per_message_deflate=False, ws_max_size=1<<20)
 ```
 
-Routing is by `Stream.name`. Two streams with one name raise `ValueError` at `serve`
-rather than resolving: whichever lost would be unreachable, and the subscriber that
-wanted it would get somebody else's messages — which looks like working software.
+The top-level lifespan owns admission, connections, replay tasks, writers and
+children. Static streams and registry-backed streams use that same owner.
+Shutdown fences writes, closes peers, joins replay and writer work, then reaps
+children and closes owned handles. Borrowed log handles remain the caller's.
 
-**Three keywords bound the subscriber, commit and reply queues.** The bounds count frames
-or rows, rather than bytes; size them for the messages and connections served. They are the serving process's
-settings, not the streams', so a restart may change them:
+Startup waits for the children to report ready, up to `readiness_timeout` (30
+seconds), and fails rather than serve without a maintainer: five interpreters
+loading pyarrow and DuckDB can take most of that on a small loaded host. Static
+streams share the maintainer group with managed ones, so a managed stream's
+transition, which replaces the group, also fences a static stream's writes
+until the new group is ready, rather than accept rows no maintainer will seal.
+A local `stream.send` then raises `ValueError("stream unavailable")`; retry
+after a moment. A publisher connection is closed with 1001, as at a stop, with
+nothing of the refused frame queued: `publish` raises `ConnectionClosed` and an
+`outbox` reconnects and resends. It is never answered `rejected`, which an
+outbox would drop from the caller's database.
 
-| keyword | bounds | at the bound |
+| setting | default | bounds |
 |---|---|---|
-| `max_backlog` (8,192) | frames a subscriber may fall behind | it is dropped with `TooSlow` |
-| `max_inbound` (65,536) | rows a durable stream may have queued for commit, across every publisher | a local `send` waits; a remote publisher's connection stops being read, so TCP holds it back |
-| `max_in_flight` (64) | replies owed one publisher connection | the connection stops being read |
+| `max_backlog` | 8,192 | queued frames per subscriber; overflow drops that subscriber |
+| `max_inbound` | 65,536 | rows queued for commit; producers wait at capacity |
+| `max_in_flight` | 64 | outstanding replies per publisher connection |
+| `max_message_bytes` | `transport_max_bytes` | each incoming publisher frame |
+| `subscriber_yield_every` | 64 | positive number of outbound data frames between scheduling checkpoints |
 
-Each takes one int for every stream, or a map from stream name to int that names exactly
-the streams served — a missing name or one not served raises `ValueError` at `serve`, as
-does a bound below 1:
+The four per-stream bounds take a positive integer or an exact name-to-integer
+map for static streams. Managed definitions carry their own bounds below.
+`transport_max_bytes` is a positive application-wide ceiling; per-stream frame
+limits must fit beneath it. A batch larger than `max_inbound` enters alone.
+
+`subscriber_yield_every` is how many data frames a subscriber is sent before
+its task yields to the event loop. A send to a writable socket need not
+suspend, so without the checkpoint one subscriber's ready replay would run
+every other task on the loop — publishers included — out until it finished.
+Replay and live delivery share one counter; 1 yields after every frame, and
+there is no setting that never yields. The checkpoint is outside the atomic
+commit, delivery and subscribe partition, so it changes neither frame order nor
+durability. 64 is provisional: the measurement that chooses the default is not
+made yet. Static streams take it from `BrokerConfig`; managed streams too.
+
+### Mounting
+
+A mount does not start a child lifespan. The host enters it explicitly:
 
 ```python
-streamcast.serve([trades, quotes], host, port,
-                 max_inbound={"trades": 262_144, "quotes": 65_536},
-                 max_in_flight={"trades": 128, "quotes": 32}, max_backlog=16_384)
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+streams = streamcast.create_app(streams=[trades, quotes])
+@asynccontextmanager
+async def lifespan(app):
+    async with streams.router.lifespan_context(streams):
+        yield
+app = FastAPI(lifespan=lifespan)
+app.mount("/streams", streams)
 ```
 
-`max_backlog` is messages, not bytes (see [`SPEC.md`](SPEC.md) §4). Nothing at
-`max_inbound` is refused, and a batch larger than it is let in alone, when nothing else is
-queued.
-
-`host=None` binds every interface, exactly as `websockets` does. Pass `"127.0.0.1"` for
-a server that should only serve its own machine. TLS is `ssl=`; authentication is
-`process_request=`. See [`SECURITY.md`](../SECURITY.md).
+The child owns the same runtime whether direct or mounted. Never start another
+application over those streams. See `examples/fastapi_app.py`.
 
 ### Where a stream's files live
 
@@ -308,11 +332,11 @@ with [`Stream.ingest`](#loading-rows-in-bulk-streamingest).
 
 ### The metadata file
 
-Before it listens, `serve` writes the first version of the metadata, in
+Before it listens, `create_app` writes the first version of the metadata, in
 `root/<stream>/<stream>.metadata/`, for every stream with a log that doesn't have one yet,
 and, when the log publishes to S3, makes sure the current version under
 `<published>/<stream>/<stream>.metadata/` matches it. That costs one GET, plus a PUT only when
-something changed. **If either fails, `serve` raises instead of starting.** The file is
+something changed. **If either fails, `create_app` raises instead of starting.** The file is
 what lets anything other than this server read the stream (#32), so a broken one is found
 at deploy. The ASGI app does the same when its lifespan starts.
 
@@ -344,7 +368,7 @@ by CI are listed in [`tests/test_interop.py`](../tests/test_interop.py); the 0.2
 
 The upload uses the `s3_options=` the stream was created with (`Stream.open`, `Stream.migrate`,
 `Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
-an earlier release gets its file on its first `serve`, and a version-1 file is rewritten
+an earlier release gets its file on its first `create_app`, and a version-1 file is rewritten
 as version 2. A `Stream(log=…)` handed a log the
 file says is sealed is refused.
 
@@ -370,17 +394,17 @@ costs five of those, shared by every log.
 
 `Maintain(dedicated=("trades",))` gives a named log a set of its own, for one busy enough
 that its compaction would hold up the others'. Names are the **log's**, not the
-route; a name this server does not serve with a log raises at `serve` rather than being
+route; a name this server does not serve with a log raises at `create_app` rather than being
 ignored, and naming every log starts no shared maintainer at all. Without it, nothing in this library ever calls litelink's
 `seal()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
 held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
 growing. litelink says it plainly: *"A maintainer is not optional."*
 
 ```python
-streamcast.serve(streams, host, port)                          # one set of five, all logs
-streamcast.serve(stream, host, port, maintain=False)           # you run your own
-streamcast.serve(stream, host, port,
-                 maintain=streamcast.Maintain(seal_every=0.1, publish_every=30))
+streamcast.create_app(streams=streams)                          # one set of five, all logs
+streamcast.create_app(streams=stream, config=streamcast.BrokerConfig(maintain=False))           # you run your own
+streamcast.create_app(streams=stream, config=streamcast.BrokerConfig(
+    maintain=streamcast.Maintain(seal_every=0.1, publish_every=30)))
 ```
 
 `Maintain` is a frozen dataclass of one cadence per role — `seal_every`, `compact_every`,
@@ -411,19 +435,16 @@ their freshness: a `Live` view holds every row not yet published in memory, up t
 `max_tail`.
 
 ```python
-streamcast.serve(stream, host, port, maintain=streamcast.Maintain(flush_every=900))  # 15 min
+streamcast.create_app(streams=stream, config=streamcast.BrokerConfig(
+    maintain=streamcast.Maintain(flush_every=900)))  # 15 min
 ```
 
-**A graceful stop flushes too**, because one is often followed by losing the disk: a pod's
-ephemeral volume, a spot instance. `close()` stops the seal role first, which seals with
-`flush=True` on the way out, then the publish role, which publishes with `flush=True`, then
-the rest. The publish role gets 20 s before it is killed, and the others 5 s each, which
-fits the 30 s Kubernetes gives a stopping pod by default. **The server keeps taking
-writes until they are done** and only then stops listening. Making the broker unavailable for the
-length of a flush would be worse than the rows written meanwhile missing it; they stay on
-disk for the next server. Mounted with `asgi`, the host stops taking connections before
-the app's lifespan shutdown runs, so there the flushes come after the last write.
-`flush_every=None` skips the publish flush.
+**A graceful stop fences writes before draining**, then stops the seal role,
+which seals with `flush=True`, and the publish role, which publishes with
+`flush=True`, then the remaining children. The publish role gets 20 seconds
+before it is killed; other roles get 5 seconds each. The host owns the overall
+shutdown budget. `flush_every=None` skips the publish flush. Managed transitions
+also verify final publication before relinquishing ownership.
 
 **It is always a subprocess, and there is deliberately no thread option.** A seal is
 CPU-bound pure Python, so it starves a thread sharing its interpreter even holding no
@@ -443,7 +464,7 @@ silently returns the server to never sealing.
 one container per role — or when the log is shared with something else that sweeps it.
 `python -m streamcast maintain --role ROLE --every SECONDS --log PATH NAME` is one role's
 loop, runnable by hand; repeat `--log` to sweep several from one process, which is what
-`serve` does for each role.
+`create_app` does for each role.
 
 A migrated stream's retired logs are not maintained: `retire()` published, evicted and
 swept them completely, and litelink refuses them a writer.
@@ -451,7 +472,7 @@ swept them completely, and litelink refuses them a writer.
 ### `replicate`
 
 **`replicate=True` runs litestream** for any stream whose log has `wal_replication` on,
-which is what makes that log survive losing its machine. `serve` is the one thing you
+which is what makes that log survive losing its machine. `create_app` is the one thing you
 start; there is no second process to remember.
 
 ```python
@@ -459,10 +480,11 @@ log = litelink.new(root, "trades", schema=SCHEMA,
                    config=litelink.LogConfig(wal_replication=True),
                    published="s3://bucket/prefix")
 
-async with streamcast.serve(
-    streamcast.Stream("trades", log=log), host, port, replicate=True
-):
-    ...        # sealing, compaction, publishing, and WAL shipping all running
+app = streamcast.create_app(
+    streams=streamcast.Stream("trades", log=log),
+    config=streamcast.BrokerConfig(replicate=True),
+)
+# Serve app with one ASGI worker and lifespan enabled.
 ```
 
 **It is off by default** — opt in with `replicate=True`. `wal_replication` is opt-in on the
@@ -488,7 +510,7 @@ cannot offer — it hangs the sidecar off the maintainer, and notes that a write
 one has `wal_replication=True` and no replication. That is also why `replicate` is its own
 argument rather than part of `maintain`.
 
-A missing litestream binary raises `SidecarUnavailable` at `serve`, not at the first
+A missing litestream binary raises `SidecarUnavailable` when the app's lifespan starts, not at the first
 missed push: a server that came up and replicated nothing would leave you believing you
 had protection you did not have. The wheel bundles one, so this is only reachable on a
 platform litelink ships no binary for.
@@ -497,7 +519,7 @@ platform litelink ships no binary for.
 
 **Both subprocesses get the stream's `S3Options`, through their environment.** litelink
 never persists credentials, so a child that opens a log by name has no other way to learn
-them. `serve` starts each child with the variables below set from the `S3Options` the
+them. `create_app` starts each child with the variables below set from the `S3Options` the
 `Stream` was given (`Stream.open(..., create=True, s3_options=)`), laid over the server's own
 environment. Explicit keys also remove an inherited `AWS_SESSION_TOKEN`, which belongs to
 other keys. A field you leave unset is left to that environment, so a profile, instance
@@ -557,114 +579,271 @@ someone while looking authoritative. Classification belongs to the application.
 **No `rows_1m`.** Read `end_offset` twice and you have the rate over the window you
 actually care about. A window chosen here is the same mistake as a threshold.
 
-**No `maintain` / `replicate`.** A `Stream` does not own its children — `serve` does, and
+**No `maintain` / `replicate`.** A `Stream` does not own its children — `create_app` does, and
 a mounted app's object does — so it would be answering for something it cannot see.
 
-### `serve(stats=True)`
+### Statistics
 
-Serves the same payload for every stream on the port `serve` already listens on, at
-`/stats`, or at a path of your own: `stats="/_internal/streams"`. `served_at` is included so
-a caller can measure its own clock skew.
+`BrokerConfig(stats=True)` serves `/stats` on the same listener; a string
+selects another absolute path and False disables it. `stats.read` grants filter
+individual streams. `served_at` permits clock-skew measurement. `Stream.stats`
+is the same per-stream object for application-specific health decisions.
 
-**On by default.** This discloses less than the
-socket beside it: a wrong-path connect is answered with `serves=` naming every stream,
-the greeting carries `end_offset`, and anyone who can reach the port can subscribe and
-read every row in full. Everything here but the subscriber count is derivable by
-subscribing, so gating it would protect nothing while leaving a quiet stream
-undiagnosable by default — the failure it exists to fix.
+## Dynamic management
 
-A server that needs this private needs the port private; one that needs the port public
-has already published the names. `stats=False` turns it off.
-
-A `process_request` of your own composes rather than being overwritten: yours is called
-for every path but this one, sync or async.
-
-A mounted ASGI app gets no equivalent and needs none — it has routes already, and
-`stream.stats` is the object to write one over.
-
-## Managed broker application
-
-`streamcast.broker.create_app(config)` serves data WebSockets and the HTTP
-management API through one lifespan-owned FastAPI application. Its registry,
-host policy, authentication, controller contract and shutdown model are in
-[`BROKER.md`](BROKER.md). Install `streamcast[broker]`. The static APIs below
-remain available; a managed log has only one server owner.
-
-## `asgi`
+Use root exports `BrokerConfig`, `StorageProfile`, `Authorization`,
+`HistoryGuard`, `initialize_registry` and `create_app`. Provision a registry
+once, explicitly, then start the application; startup never creates one:
 
 ```python
-from streamcast.asgi import asgi
-
-asgi(streams, *, maintain=True, replicate=False,
-     max_backlog=8192, max_inbound=65_536, max_in_flight=64)
+config = streamcast.BrokerConfig(
+    broker_id="primary", registry=Path("state/broker.db"),
+    profiles={"local": streamcast.StorageProfile("1", Path("data"))},
+    authorization=authorization,
+)
+streamcast.initialize_registry(config)  # once; existing files are refused
+app = streamcast.create_app(config)     # optionally streams=[static_stream]
 ```
 
-The same streams behind an ASGI app, for a service that already has one. Needs the extra:
-`pip install 'streamcast[asgi]'`, which adds Starlette and nothing else — not FastAPI,
-which is a layer above what this uses, and not uvicorn, which is the deployer's choice.
+### Ownership and recovery
+
+The top-level lifespan owns one runtime: registry, operation worker, readiness
+monitor, stream generations, connections, writer threads, maintenance roles,
+and replication sidecars. It acquires an exclusive registry lock and holds
+canonical logical-stream and physical-log locks even for stopped definitions.
+Profile/layout/symlink aliases cannot create a second managed owner. These
+are local cooperative locks, **not a distributed writer lease**; writers outside this runtime and other hosts must be stopped by the deployment owner first.
+Hard-link aliases, lock-file deletion, and external mutation of managed logs
+are unsupported. Keep the registry and log directories on durable local
+storage that supports SQLite fsync and advisory locks.
+
+Startup requires the explicitly provisioned registry with the configured
+broker identity. It replays pending intent before reconciling other desired
+states. It never initializes a missing registry or recreates a bound missing
+log. A new definition starts stopped and creates no log. First serving may
+create only an unbound `create_if_absent` declaration. Once a stream identity
+is bound, disk and authoritative version-hint metadata must match it.
+
+Each accepted mutation atomically commits the declaration/desired state,
+operation and idempotency receipt before returning 202. HTTP disconnect or
+cancellation does not cancel accepted work. Operations are serialized; reads
+and data traffic do not wait on the control serialization lock. Blocking
+storage work runs off the event loop. Subprocess creation runs on the
+lifespan thread so its parent-death relationship survives worker completion.
+
+Stop fences new reads and writes, closes connections, joins replay workers
+including cancelled scans, drains the writer, stops and reaps children,
+seals/publishes, closes handles, then releases ownership. A failed final
+publication is an operation failure; handles and locks are retained rather
+than handed to another owner. The process must exit and recover. Repeated
+ASGI cancellation joins owned startup/shutdown tasks before returning.
+
+Maintenance roles have fixed group membership. A stream transition replaces
+the shared group: all writes are fenced while old children are reaped and
+new children become ready. Neighbor stream objects and connections stay in
+place; their write admission resumes after readiness. A maintainer reports
+its PID only after opening its whole group. A replication sidecar must own
+its logs and accept a connection on its control socket. This establishes
+local readiness, **not remote object-store durability**. Startup/replacement
+has a bounded readiness timeout (30 seconds); later child unavailability
+fences writes after that deadline. Reads may continue. There is no promise
+of uninterrupted writes during membership changes.
+
+The host owns shutdown deadlines. Killing a process before draining may
+leave accepted intent to recover on the next boot. An unavailable or failed
+operation never proves a destructive transition had no effect.
+
+### Host policy and authorization
+
+`StorageProfile(revision, root, published=None, config=None, s3_options=None,
+replicate=False)` holds host-only locations, litelink configuration and
+credentials. Its immutable revision is bound into each declaration; changing
+a profile revision requires a reviewed host handoff. HTTP never supplies
+paths, URLs, credentials, WAL settings, or maintenance policy. Public profile
+data contains revision, replication/maintenance flags and replay scope only.
+WAL-replicated logs require a replication-enabled profile.
+
+`BrokerConfig` also accepts `history_guards={}`, `transport_max_bytes=1<<20`,
+`control_max_bytes=256*1024`, `max_pending=32`, `readiness_timeout=30.0` and
+`readiness_every=0.25`. Bounds must be positive; a per-stream frame limit
+cannot exceed the transport ceiling. The runtime bounds pending operations
+and in-flight control tasks. It returns 429 with `Retry-After: 1` rather than
+growing an unbounded queue. Durable operation and receipt history is retained;
+there is no automatic eviction.
+
+The injected `Authorization` protocol has two asynchronous methods:
 
 ```python
-streams = asgi([trades, quotes])
-
-@asynccontextmanager
-async def lifespan(app):
-    async with streams:
-        yield
-
-app = FastAPI(lifespan=lifespan)
-app.mount("/streams", streams)
+async def authenticate(scope) -> str | None: ...
+async def allows(principal: str, action: str, resource: str) -> bool: ...
 ```
 
-`serve` and `asgi` are two transports for the same `Stream`; a mounted app calls one of
-them and never both. [`examples/fastapi_app.py`](../examples/fastapi_app.py) is a
-complete service that runs.
+The principal is a stable nonsecret identity. Actions are `data.read`,
+`data.publish`, `stats.read`, `control.read`, `control.mutate` and
+`control.migrate`. Resources are exact stream names, with `"*"` for collection
+and operation discovery. Discovery also filters each returned stream by its
+individual grant. Operation lookup requires both the discovery grant and
+the target stream grant.
 
-Returns an object that is both an ASGI application and an async context manager. It takes
-the `serve` keywords that are about the streams, and none of the ones about a socket: no
-`host`, `port`, `ssl`, `compression` or `ping_interval`, because those belong to the server
-the host app is running and restating them here would be two places to set one thing.
+Authentication and the applicable grant precede body parsing, stream lookup
+and WebSocket upgrade. Unauthenticated requests receive 401 with a Basic
+challenge; authenticated denials receive 403. A URI's percent-escaped user
+information supplies ordinary Basic authorization to WebSocket clients and
+to HTTP stats clients; credentials in query parameters are not interpreted.
+The host validates Basic credentials or any other authentication mechanism,
+trusted ingress, Origin and proxy headers. Registry hosting requires an explicit authorization policy. Static-only hosting defaults to public data and stats access; supply an authorization policy to restrict it. Do not log credential-bearing URIs.
 
-**`async with` is what starts the maintainers and closes the streams, and it is
-required.** It is the mounted twin of what `serve`'s `wait_closed` does: children
-stopped, then `aclose` on each stream, which closes a log `Stream.open` opened and leaves
-a handed-in handle alone. Starlette does not run
-a mounted sub-app's lifespan — documented behaviour, not a bug — so an app relying on
-lifespan events alone starts no maintainer once mounted, and a log with nothing sealing it
-buffers every row it ever receives. The app handles `lifespan` too, for the case where it is
-run directly rather than mounted; both routes are idempotent.
+### HTTP contract, version 1
 
-Routing, refusals and close codes are identical to `serve`'s, including the 4400/4404/4410/
-4416/4429 reasons, with one difference ASGI forces: the handshake is **accepted** before a
-refusal can be sent, because a close code only exists on an accepted connection.
-`websockets` refuses after its handshake too, so what a client sees is the same; rejecting
-the upgrade instead would turn every refusal into an HTTP 403 with the reason discarded.
+All paths below are relative to the application mount. Requests and
+responses are JSON. Mutations require `Content-Type: application/json` and
+`Idempotency-Key` (1–128 printable ASCII characters, no spaces).
+Missing keys receive 428; malformed keys receive 400. Duplicate
+JSON keys, nonfinite numbers and malformed JSON receive 400. Bodies over the
+configured control limit receive 413 before the application accumulates them.
+Framework validation is supplemented by the existing schema compiler;
+body reading is explicit so authorization and byte limits precede parsing.
+The application exposes no Swagger, ReDoc or unauthenticated OpenAPI route.
 
-### What moves to the ASGI server
+Declarations describe the physical schema supported by `to_arrow`, rather
+than a general JSON Schema validator. Unknown keywords, including `enum`,
+`minimum` and `maximum`, are rejected with 422. A controller adopting an
+existing application schema can explicitly declare
+`streamcast.from_arrow(streamcast.to_arrow(application_schema))`. This
+preserves column order, widths, nullability and nested encoding; it does not
+enforce discarded application constraints. The application remains responsible
+for those constraints, as with the static stream API. Review that conversion
+before adoption rather than silently stripping keywords in the broker.
 
-| | `serve` | mounted |
-|---|---|---|
-| keepalive | `ping_interval=20` — a dead peer surfaces as a close in ~40s | uvicorn's `--ws-ping-interval` |
-| compression | off; the encode is shared across subscribers, deflate is per connection | the host app's setting |
-| TLS, binding, HTTP/2 | `serve`'s keywords | the host app's |
+| Method and path | Result |
+| --- | --- |
+| `GET /control/v1` | Contract version, broker/boot identities, bounds, public profiles, protected names, wire versions. |
+| `GET /control/v1/streams?limit=100&cursor=...` | Name-ordered page: `revision`, `streams`, nullable `next_cursor`. Limit is 1–1000. |
+| `GET /control/v1/streams/{name}` | Definition, desired/observed state, revision, identity, pending operation and public profile; `ETag`. |
+| `PUT /control/v1/streams/{name}` | Create or replace the full declaration. Create requires `If-None-Match: *`; replace requires `If-Match`. |
+| `PUT /control/v1/streams/{name}/desired` | `{"state":"serving"}`, `"stopped"`, or terminal `"retired"`; requires `If-Match`. |
+| `POST /control/v1/streams/{name}/migrations` | `stream_id`, target `schema` and target `sort_by`; requires `If-Match` and `control.migrate`. |
+| `GET /control/v1/operations/{id}` | Operation `id`, `name`, `kind`, `revision`, `target`, `status`, nullable `error`. |
+| `GET /stats` | The existing stats payload, filtered by `stats.read`. |
 
-Compression is the one that bites. `serve` turns permessage-deflate off because a frame is
-encoded once and handed to every subscriber, while deflate then compresses those identical
-bytes once per connection: 4 µs of CPU per message at one subscriber against 691 µs at 200.
-A host app that enables it globally pays that, and the symptom is a CPU-bound server
-dropping subscribers for falling behind — an outage that reads like a bug.
+Names match `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. The ETag is the exact quoted
+decimal revision, for example `"3"`. Missing preconditions receive 428; a
+stale or malformed precondition receives 412. Both precondition headers
+together are refused. Collection cursors bind the collection revision and
+last name; a mutation invalidates an older cursor with 409. Restart from the
+first page. A no-op does not change collection or stream revision.
 
-### The transport boundary
+A declaration is a JSON object with no unknown keys:
 
-`_transport.Peer` names what the stream layer uses from a connection — `send`, `close`,
-`wait_closed`, and `async for` — and nothing else. `_stream` and `_subscriber` are written
-against that Protocol, so both transports are ordinary callers and neither knows the other
-exists.
+```json
+{
+  "schema": {
+    "type": "object",
+    "properties": {"value": {"type": "integer"}},
+    "required": ["value"]
+  },
+  "sort_by": [],
+  "storage_profile": "local",
+  "initialization": "open_existing",
+  "exactly_once": false,
+  "replay_published": false,
+  "max_replay": 100000,
+  "group_commit": true,
+  "limits": {
+    "max_backlog": 8192,
+    "max_inbound": 65536,
+    "max_in_flight": 64,
+    "max_message_bytes": 1048576
+  }
+}
+```
 
-The adapter runs one reader task per connection, which `serve` does not need: `websockets`
-reads in the background, while ASGI delivers a disconnect as a message nobody sees until
-`receive()` is called. A subscription never reads, so without that task a subscriber who
-walked away from a quiet stream would never be noticed — the pump parks in `queue.get()`
-and the `Subscriber` stays in the fan-out set for ever.
+`schema` and `storage_profile` are required. Other keys default as shown
+except `limits`, whose authoritative defaults are `_limits` and the host's
+transport ceiling. `initialization` may also be `create_if_absent`;
+`max_replay` may be null (unbounded) or a nonnegative integer. Limits are
+positive integers. Boolean fields accept JSON booleans only.
+
+Schema property order is significant. The schema compiler in
+[`API.md`](API.md#stream) defines supported types, nullability, integer and
+float formats, binary, arrays, structs and maps. The control API rejects
+unsupported constraints and unknown keywords instead of accepting ignored
+validation. `title` and `description` are annotations. Explicit
+`additionalProperties: true` is refused. Reserved `streamcast_ts` and
+`litelink_offset` columns are refused. Sort columns must be distinct declared
+column names. Row validation and protocol framing remain the existing core's.
+
+Non-schema definition changes require observed `stopped`. A bound stream's
+storage profile cannot change. Schema/order/sort changes require an explicit
+migration, with the current stream identity and both desired and observed
+stopped (or a failed stopped transition). Migration keeps the active
+definition separate from the durable target until metadata and target
+schema are verified. Failed irreversible intent cannot be overwritten with
+a different target. Retrying that exact intent uses a new idempotency key
+and current ETag; reusing the original key returns its original receipt.
+Retirement is terminal and leaves replay available without writes.
+
+A mutation returns 202 with `status`, `operation_id`, `revision`, an ETag and
+`Location: /control/v1/operations/{id}`. Poll the operation: `accepted` →
+`running` → `succeeded` or `failed`. A satisfied no-op returns 200 and a
+succeeded operation without a new generation. A receipt is scoped to the
+principal and broker registry and hashes method, resource, ordered JSON body
+and preconditions. An identical retry returns the original status/body/
+Location **before checking today's ETag**. Different intent under that key
+receives 409. The controller persists keys across network retries and polls
+to completion; 202 alone does not establish readiness.
+
+Observed state carries `state`, `boot_id`, `generation`, `revision`, `at`
+(Unix seconds), `read_admission`, `write_admission`, and `children_ready`.
+These are observations of this boot, not durable proof of current health.
+Errors use `{"error":{"code":...,"message":...,"retryable":false,
+"operation_id":null}}`; messages contain no storage paths, credentials or
+rows. Statuses include 400 malformed input, 401 authentication, 403 grants
+or history guard, 404 unknown resources, 409 conflict, 412 preconditions,
+413 size, 415 media type, 422 unsupported declaration, 428 preconditions
+required, 429 capacity, and 503 unavailable. 429/503 are retryable and include
+`Retry-After: 1`. A failed operation reports `transition_failed`; inspect
+host-side evidence before retrying an irreversible operation.
+
+### Data consumer contract and protected history
+
+Data remains `ws[s]://host/{name}`; publishing uses `?publish` and, for
+exactly-once streams, `&publisher={stable_id}`. Subscriptions support the
+existing `offset`, projection and filtering query semantics. Wire readers
+accept versions 4 and 5; greetings still write 4. Rows are text JSON
+`[offset, timestamp_us, application_row]`. Existing publisher sequence,
+duplicate ACK, refusal, retirement, replay and per-subscriber backpressure
+rules are unchanged. There is no new client database or archive dependency.
+Unknown/inactive streams close 4404 after authorized upgrade, malformed data
+requests 4400, and oversized frames 1009. A stop closes connections with
+1001; clients reconnect with their durable cursor and publisher identity.
+
+For an application whose thread/history reader starts at `offset=0`, current
+log replay is insufficient after migration or retention. Such a deployment
+**must inject** `history_guards={name: HistoryGuard(stream_id, known_offset,
+known_row)}` from a handoff audit. Before data admission the broker verifies
+the authoritative identity, no migration/retention/pending metadata, live
+origin at offset one, exactly-once publishing, published replay, unbounded
+replay, a dense complete prefix through the current tail, and the captured
+old row. It scans history through the same broker replay machinery; this can
+make startup expensive for large histories. No latency claim is made for
+that audit. Protected migration and retirement are rejected **before
+journaling** even with control grants. An already migrated/trimmed stream fails admission;
+it needs a separately reviewed multi-log history design. Removing a host
+guard or mutating storage outside this owner invalidates that assurance.
+
+### Integration responsibilities
+
+The library owns runtime, protocol, durable intent and local lifecycle
+invariants. A deployment controller owns declaration reconciliation,
+idempotency keys, ETags and operation polling. The host operator owns storage
+profiles, authentication, ingress, shutdown budgets, retained-state handoff,
+and stopping previous writers. Each consuming application owns its stream
+bindings, stable producer identities, durable cursors, frame sizing and
+reconnect behavior. Release and adoption require those owners' acceptance,
+supported-version interoperability, real replication checks and a reviewed
+consumer change. The canonical application replaces the standalone and static ASGI hosting APIs. This is a breaking API change; release and adoption require separate review.
+
 
 ## `publish`
 
@@ -684,7 +863,7 @@ await producer.close(code=1000, reason="") -> None
 Publishing from a process that is not the server's.
 
 **This one is not a `websockets` function.** WebSocket has no publish — RFC 6455 defines
-frames, not verbs, and `websockets` exposes `serve`, `connect` and `broadcast`. Pub/sub
+frames, not verbs, and `websockets` exposes `create_app`, `connect` and `broadcast`. Pub/sub
 protocols layered over WebSocket do define one (WAMP's `PUBLISH`, MQTT's), but streamcast
 implements none of them: this is shaped like `connect` — awaitable, async context manager,
 keywords passed through — so it reads the same way, and the request is a query parameter
@@ -721,7 +900,7 @@ queues each as it reads it, so rows that arrive while a commit is in flight shar
 future that resolves to the offset once the row is durable or raises what `send` would.
 Acknowledgements come back in the order rows were sent, and `close()` waits for the ones
 still owed. The server bounds what it will owe one connection with
-`serve(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
+`BrokerConfig(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
 
 ```python
 async with streamcast.publish("ws://localhost:8765/trades") as producer:
@@ -1384,7 +1563,8 @@ server stopped:
 
 ```python
 stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
-async with streamcast.serve(stream, "localhost", 8765):
+app = streamcast.create_app(streams=stream)
+async with app.router.lifespan_context(app):
     ...
 ```
 

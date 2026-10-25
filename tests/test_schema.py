@@ -16,6 +16,7 @@ import pytest
 import streamcast
 from streamcast import _metadata
 from streamcast._schema import from_arrow, to_arrow
+from tests.hosting import serve_streams
 
 
 def properties(schema: dict) -> dict:
@@ -304,7 +305,7 @@ class TestTheStreamOwnsItsLog:
         stream = streamcast.Stream.open(
             "trades", create=True, root=tmp_path, schema=TRADES
         )
-        async with streamcast.serve(stream, "127.0.0.1", 0, maintain=False):
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=False):
             await stream.send({"event_ts": 1, "price": 1.0, "side": 0, "live": True})
 
         # Closed on the way out, after the connections were done.

@@ -760,7 +760,7 @@ def stream_name(stream: str) -> str:
     The scheme is compared case-insensitively, as `websockets` reads it, so
     `WS://host/trades` is `trades` too.
 
-    A server mounted under a path prefix (`asgi` in an app at `/streams`)
+    A server mounted under a path prefix (the broker's app mounted at `/streams`)
     serves `trades` at `/streams/trades`, which this reads as
     `streams/trades`: the greeting's `stream` is the server's own name for it.
     """

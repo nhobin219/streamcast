@@ -135,7 +135,7 @@ class TestConcurrentPublishers:
 
 class TestWhatItRefuses:
     async def test_every_served_stream_takes_publishers(self, serve, log):
-        """No switch on `serve`: whether a stream can be written is the
+        """No switch on `BrokerConfig`: whether a stream can be written is the
         stream's to say — a retired one refuses publishers (`test_retire`) —
         and the same port serves its readers."""
         stream = streamcast.Stream("trades", log=log)

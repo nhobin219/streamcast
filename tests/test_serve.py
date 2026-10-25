@@ -15,6 +15,7 @@ import websockets
 import streamcast
 import streamcast._protocol
 from tests.conftest import trade
+from tests.hosting import serve_streams
 
 
 async def drain(subscription, count):
@@ -140,12 +141,12 @@ class TestRouting:
         # No correct resolution exists: whichever loses is unreachable, and
         # the subscriber that wanted it gets somebody else's messages — which
         # looks like working software.
-        with pytest.raises(ValueError, match="both named 'trades'"):
-            streamcast.serve([streamcast.Stream("trades"), streamcast.Stream("trades")])
+        with pytest.raises(ValueError, match="both named"):
+            serve_streams([streamcast.Stream("trades"), streamcast.Stream("trades")])
 
     def test_serving_nothing_is_refused(self):
-        with pytest.raises(ValueError, match="at least one Stream"):
-            streamcast.serve([])
+        with pytest.raises(ValueError, match="needs streams"):
+            serve_streams([])
 
 
 class TestWebsocketsCompatibility:
@@ -164,7 +165,7 @@ class TestWebsocketsCompatibility:
                 assert (await sub.recv())[0] == 2
 
     async def test_keywords_reach_websockets(self, serve, log):
-        # The claim the README makes: `serve` and `connect` pass everything
+        # The claim the README makes: the broker and `connect` pass everything
         # through. `compression` is the one with a different default, so it is
         # the one worth proving still reaches the other side.
         stream = streamcast.Stream("trades", log=log)

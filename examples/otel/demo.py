@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import streamcast
+from examples._hosting import Listening
 from examples.otel import logs, metrics, spans
 from examples.otel.services import exporting, traffic
 
@@ -87,12 +88,14 @@ async def main(root: Path) -> dict[str, Any]:
     # No maintainer, as in the migration demo: a run this short never fills a
     # log enough to seal it. Its five processes were still opening the logs
     # when the run ended, and cost the run several seconds. `just demo otel`'s
-    # broker keeps `serve`'s default, which starts them.
-    server = await streamcast.serve(
-        [log_stream, span_stream, metric_stream],
+    # broker keeps `BrokerConfig`'s default, which starts them.
+    server = await Listening(
+        streamcast.create_app(
+            streams=[log_stream, span_stream, metric_stream],
+            config=streamcast.BrokerConfig(maintain=False),
+        ),
         "127.0.0.1",
         0,
-        maintain=False,
     )
     base = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
     try:

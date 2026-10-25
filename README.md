@@ -88,10 +88,11 @@ uv add streamcast
 
 ## API
 
-**`serve` and `connect` are the `websockets` API.** Same names, same shapes, and every
-keyword passed through — `ssl`, `ping_interval`, `process_request`, `max_queue` and the
-rest behave exactly as they do there, and `serve` returns an object that proxies
-`websockets.Server` (`sockets`, `serve_forever`, `connections`, `is_serving`).
+**`connect` and `publish` are the `websockets` client API.** Same shapes, and every
+keyword passed through — `ssl`, `ping_interval`, `max_queue` and the rest behave exactly
+as they do there. **The broker is a FastAPI application**: `create_app` builds it, and
+an ASGI server runs it — uvicorn, a dependency, with one worker and its lifespan on.
+TLS, the bind address and keepalive are that server's settings.
 
 `Stream.open` requires an existing local log by default. Servers pass `create=True`
 to create a stream only when it exists nowhere. A published replica with no local log
@@ -121,10 +122,10 @@ streamcast.Stream.scan(metadata_uri, ...) · streamcast.Stream.sql(uri, query) -
 await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
     live.scan(...) · live.sql(query) -> Reader · await live.wait_for(offset | ts=)
 
-streamcast.serve(streams, host, port, *, maintain=True, replicate=False,
-                 max_backlog=8192,                       # frames per subscriber
-                 max_inbound=65_536,                     # rows queued to commit
-                 max_in_flight=64, ...) -> Server        # an int, or {stream: int}
+streamcast.create_app(config=None, *, streams=()) -> fastapi.FastAPI
+streamcast.BrokerConfig(maintain=True, replicate=False, max_backlog=8192,
+                       max_inbound=65_536, max_in_flight=64,
+                       subscriber_yield_every=64, ...)  # positive frame interval
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
     await sub.recv() · async for offset, ts, row in sub
@@ -145,7 +146,8 @@ Three deliberate exceptions:
   separately will forget to. `ts` is when the server took the row.
 - **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
   Publishing uses `Stream.send` locally or `publish` remotely.
-- **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`.
+- **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`; run
+  the broker with it off too (uvicorn's `ws_per_message_deflate=False`, whose default is on).
   permessage-deflate is per connection while the encode is shared: `send` encodes a frame
   once and hands the same bytes to every subscriber, and deflate compresses those identical
   bytes once per subscriber. Measured on a six-column trade row — 0.564 µs to encode once,
@@ -158,7 +160,7 @@ Three deliberate exceptions:
   result is not available.
 
 Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
-`serve([trades, quotes])` serves both on one port.
+`create_app(streams=[trades, quotes])` serves both on one port.
 
 Full reference in [`docs/API.md`](docs/API.md).
 
@@ -198,7 +200,7 @@ counter would look like a resume cursor until the server restarted.
 
 ## Server
 
-`serve` runs the broker. It accepts publishers, fans messages out to subscribers, and with
+The broker accepts publishers, fans messages out to subscribers, and with
 a log attached replays what a subscriber missed — so neither end owns the process, and
 either can restart without the other noticing.
 
@@ -210,7 +212,7 @@ The schema is yours, declared in JSON Schema. `streamcast` is the only import a 
 stream needs.
 
 ```python
-import asyncio, json, streamcast, websockets
+import asyncio, json, streamcast, uvicorn, websockets
 
 SCHEMA = {
     "type": "object",
@@ -228,27 +230,37 @@ async def main():
     stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
                                    sort_by=("event_ts",))
 
-    # Fan-out, sealing and compaction; replicate=True also starts WAL shipping.
-    async with streamcast.serve(stream, "localhost", 8765):
-        async with websockets.connect("wss://ws.bitstamp.net") as feed:
-            await feed.send(SUBSCRIBE)
-            async for message in feed:
-                trade = json.loads(message)["data"]
-                await stream.send({                  # a row, durable, then fanned out
-                    "event_ts": int(trade["microtimestamp"]),
-                    "price": float(trade["price"]),
-                    "amount": float(trade["amount"]),
-                    "side": int(trade["type"]),
-                })
+    # Fan-out, sealing and compaction, started and stopped by the app's lifespan;
+    # BrokerConfig(replicate=True) also starts WAL shipping.
+    app = streamcast.create_app(streams=stream)
+    server = uvicorn.Server(uvicorn.Config(app, host="localhost", port=8765,
+                                           ws_per_message_deflate=False))
+    serving = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+
+    async with websockets.connect("wss://ws.bitstamp.net") as feed:
+        await feed.send(SUBSCRIBE)
+        async for message in feed:
+            trade = json.loads(message)["data"]
+            await stream.send({                  # a row, durable, then fanned out
+                "event_ts": int(trade["microtimestamp"]),
+                "price": float(trade["price"]),
+                "amount": float(trade["amount"]),
+                "side": int(trade["type"]),
+            })
+
+    server.should_exit = True
+    await serving
 
 asyncio.run(main())
 ```
 
-`serve` starts everything the streams need: one maintainer covering every log it serves
+The app's lifespan starts everything the streams need: one maintainer covering every log it serves
 — a set of five subprocesses, one per storage role (seal, compact, publish, clean, clean
 published) — and, with `replicate=True`, one litestream for the logs with
-`wal_replication` on. The maintainer is opt-out (`maintain=False`); litestream is
-opt-in. Streams with different `S3Options` get separate child processes;
+`wal_replication` on. The maintainer is opt-out (`BrokerConfig(maintain=False)`);
+litestream is opt-in. Streams with different `S3Options` get separate child processes;
 `Maintain(dedicated=("trades",))` also gives a log its own maintainer. Without a
 maintainer nothing ever seals — litelink is explicit that *"a maintainer is not
 optional"*.
@@ -307,7 +319,7 @@ them:
 | checked | on every send, per subscriber | once, when the subscriber attaches |
 | exceeded | that subscriber is **dropped** — `TooSlow`, 4429 | the subscribe is **refused** — `too_old`, 4416 |
 | protects | the server's memory | the worker thread a replay scan holds |
-| set on | `serve`, per process | `Stream`, per stream |
+| set on | `BrokerConfig`, per process | `Stream`, per stream |
 
 **They interact, which is why sizing one without the other goes wrong.** A replay is
 served *before* the live queue, and live messages pile up behind it — so a subscriber
@@ -400,7 +412,7 @@ arithmetic does not bite. Each replay also holds a worker from the `to_thread` p
 ### Knowing a stream is alive
 
 A subscriber cannot tell a quiet stream from a dead one — both are a socket with nothing
-arriving. `serve(stats=True)` answers `GET /stats` on the port it already has:
+arriving. The broker answers `GET /stats` on the port it already has:
 
 ```json
 {"served_at": 1758708123.9,
@@ -429,26 +441,26 @@ is not.
 On by default. It discloses less than the socket beside it — a wrong-path connect is
 already answered with the names of every stream it serves, the greeting already carries
 `end_offset`, and anyone who can reach the port can subscribe and read every row in
-full. A server that needs this private needs the port private. `stats=False` turns it
-off, `stats="/_internal/streams"` moves it, and a `process_request` of your own still
-runs for every other path.
+full. `BrokerConfig(stats=False)` turns it off, `stats="/_internal/streams"` moves it,
+and the injected `authorization` decides who may read it (`stats.read`), stream by
+stream ([`SECURITY.md`](SECURITY.md)).
 
 ### Mounting in an existing app
 
 A service that is already an ASGI app — FastAPI, Starlette, anything — can serve a stream
-on the port it already has, instead of running `serve()` on a second one.
+on the port it already has, by mounting the broker app instead of running it on a
+second one.
 
 ```python
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from streamcast.asgi import asgi
 
-streams = asgi([trades, quotes])
+streams = streamcast.create_app(streams=[trades, quotes])
 
 @asynccontextmanager
 async def lifespan(app):
-    async with streams:            # starts the maintainers, stops them on exit
+    async with streams.router.lifespan_context(streams):  # starts the maintainers
         yield
 
 app = FastAPI(lifespan=lifespan)
@@ -456,30 +468,27 @@ app.mount("/streams", streams)
 ```
 
 Subscribers then connect to `ws://host/streams/trades`, and nothing about the client
-changes — same URL shape, same frames, same refusals. `pip install 'streamcast[asgi]'`
-adds Starlette and nothing else.
-
-`serve` and `asgi` are two transports for one `Stream` and you call **one** of them — the
-`Stream` holds the offsets, the log and the fan-out either way.
-[`examples/fastapi_app.py`](examples/fastapi_app.py) is the whole thing as a running
-service: `just demo fastapi`, then point a consumer at
+changes — same URL shape, same frames, same refusals. It is the same application, with
+the same runtime, whether it runs on its own or mounted: there is one broker, not a
+second transport. [`examples/fastapi_app.py`](examples/fastapi_app.py) is the whole thing
+as a running service: `just demo fastapi`, then point a consumer at
 `ws://127.0.0.1:8770/streams/trades`.
 
-**`async with streams` is not optional.** Starlette does not run a mounted sub-app's
-lifespan, so an app that left the maintainers to `lifespan` events would start none of them
-once mounted — and a log with nothing sealing it buffers every row it ever receives.
+**Entering the mounted app's lifespan is not optional.** Starlette does not run a mounted
+sub-app's lifespan, so a host that left it out would start no maintainer — and a log with
+nothing sealing it buffers every row it ever receives. Until the lifespan has started,
+the app refuses every connection.
 
-Two settings stop being this library's and become the ASGI server's, and their defaults
-differ from `serve`'s:
+**One worker.** The lifespan owns each stream's writer, its maintainers and its storage
+locks, so two workers would be two writers to one log: run the app under one ASGI worker,
+lifespan on, with no reload. Compression is the server's setting, and uvicorn's default
+is on: a host that enables permessage-deflate pays 4 µs of CPU per message at one
+subscriber and 691 µs at 200, and the symptom is a CPU-bound server dropping subscribers
+for falling behind.
 
-| | `serve` | mounted |
-|---|---|---|
-| keepalive | `ping_interval=20`, so a dead peer surfaces in ~40s | uvicorn's `--ws-ping-interval` |
-| compression | off, because the encode is shared and deflate is per connection | the host app's |
-
-Compression is the one to watch: a host app that enables permessage-deflate globally pays
-4 µs of CPU per message at one subscriber and 691 µs at 200, and the symptom is a
-CPU-bound server dropping subscribers for falling behind.
+The same application also manages streams at runtime — define, serve, stop, migrate and
+retire over HTTP, behind an injected authorization policy — when it is given a registry;
+[`docs/API.md`](docs/API.md#dynamic-management) is that contract.
 
 ## Client
 
@@ -742,7 +751,6 @@ Offsets are per server and are not translated between hops.
 ## Documentation
 
 - [`docs/API.md`](docs/API.md) — every public call, on one page
-- [`docs/BROKER.md`](docs/BROKER.md) — one managed FastAPI application for data and control
 - [`docs/SPEC.md`](docs/SPEC.md) — the design, the protocol, and the invariants
 - [`examples/`](examples/) — a live public feed through a server, and a resuming consumer
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, the gates, and what a good PR looks like

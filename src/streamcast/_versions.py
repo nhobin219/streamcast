@@ -18,7 +18,7 @@ yet. The same layout sits in the stream's home and, when it publishes to S3, und
 its published prefix, with the same file names in both.
 
 **A version is a commit, and commits are rare**: a migration, a retirement, a
-revival, a restore, or a `serve` that fills in what an older file left out.
+revival, a restore, or a broker start that fills in what an older file left out.
 So listing the directory to keep the last `KEEP` versions is cheap.
 
 **The plain copies** — `<stream>.metadata.json` and `<stream>.manifest.parquet`
@@ -363,7 +363,7 @@ def occupied(
     try:
         found = fetch(published, stream, s3_options)
     except FileNotFoundError:
-        # A missing bucket holds nothing to replace. Refusing it is `serve`'s,
+        # A missing bucket holds nothing to replace. Refusing it is the broker's,
         # at the first upload (`_metadata.ensure`), as it was: a stream may
         # be created and written before its bucket exists.
         return None
