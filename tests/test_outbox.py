@@ -210,6 +210,42 @@ class TestRecovery:
         assert landed(log) == [0.0, 1.0, 2.0], "a transient failure loses no row"
         await store.close()
 
+    async def test_a_failed_commit_is_an_outage_under_backoff(
+        self, serve, log, opener, monkeypatch
+    ):
+        """One failed commit sends nothing again row by row: the batch waits
+        out the backoff as an outage, said once, and then lands whole."""
+        failures = 1
+        plan = _dedupe.Publishers.plan
+
+        def transient(self, tx, jobs):
+            nonlocal failures
+            if failures:
+                failures -= 1
+                raise OSError("disk I/O error")
+
+            plan(self, tx, jobs)
+
+        monkeypatch.setattr(_dedupe.Publishers, "plan", transient)
+        said: list[str] = []
+        store = await opener()
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.outbox(
+                uri, publisher="p", store=store, notice=said.append, **FAST
+            ) as out:
+                async with store.transaction() as tx:
+                    await out.send_many([trade(0), trade(1), trade(2)], tx=tx)
+
+                await out.flush(timeout=10)
+
+        assert failures == 0
+        assert len(said) == 2, said
+        assert "CommitFailed" in said[0]
+        assert "publishing again" in said[1]
+        assert landed(log) == [0.0, 1.0, 2.0]
+        await store.close()
+
     async def test_a_broker_that_lost_acknowledged_rows_stops_the_sender(
         self, serve, log, opener
     ):

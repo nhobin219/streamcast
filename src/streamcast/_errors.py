@@ -303,6 +303,18 @@ class Rejected(StreamcastError):
     """
 
 
+class CommitFailed(StreamcastError):
+    """The broker took a published frame and could not commit it: its disk or
+    its SQLite failed, not the row.
+
+    **Not a `Rejected`**, deliberately, for the reason `SequenceGap` is not
+    one. A sender that drops a refused row and carries on must not drop this
+    one: nothing of the frame was appended, no mark moved, and the same rows
+    can be sent again unchanged once the broker's storage recovers. Retry it
+    as an outage, under backoff.
+    """
+
+
 class SequenceGap(StreamcastError):
     """An exactly-once publisher sent a seq above the next one the broker
     expects: rows between were never sent, or were lost on the way.
@@ -442,6 +454,7 @@ class TooSlow(StreamcastError):
 __all__ = [
     "AcknowledgedRowsLost",
     "Close",
+    "CommitFailed",
     "ExactlyOnceUnavailable",
     "IngestFailed",
     "NotReplayable",

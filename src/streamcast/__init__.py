@@ -55,6 +55,7 @@ from streamcast._cursor import Cursor
 from streamcast._errors import (
     AcknowledgedRowsLost,
     Close,
+    CommitFailed,
     ExactlyOnceUnavailable,
     IngestFailed,
     NotReplayable,
@@ -115,6 +116,7 @@ __all__ = [
     "Snapshot",
     "SnapshotUnavailable",
     "Close",
+    "CommitFailed",
     "Cursor",
     "ExactlyOnceUnavailable",
     "Greeting",

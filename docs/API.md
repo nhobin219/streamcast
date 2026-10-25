@@ -888,6 +888,7 @@ client, so one address in a config file serves both ends.
 |---|---|
 | **one writer** | any number of publishers, one `WriteHandle`, held by the server. Offsets stay contiguous and a batch stays one commit with publishers racing — I1 is what makes that free |
 | **`Rejected`** | a row the schema refuses, with litelink's message naming the column. Nothing committed; the connection stays open and the next row works |
+| **`CommitFailed`** | the broker could not commit the frame: its disk or SQLite, not the row. Nothing committed and no mark moved; the same rows can be sent again unchanged. Not a `Rejected`, so a loop that drops refused rows does not drop these |
 | **all or nothing** | a rejected row in a `send_many` commits none of the group, because it is one transaction |
 | **pipelined** | up to `max_in_flight` (64) frames unanswered per connection, answered in the order sent, so a reply needs no correlation id. `send` waits for its own; `submit` does not |
 
@@ -1453,6 +1454,7 @@ StreamcastError
 ├── NotReplayable      that offset cannot be served; `.why` says which of four
 ├── CatchUpUnavailable `catch_up=True` could not read the gap; says what to change
 ├── Rejected           a published row the schema refuses; nothing committed
+├── CommitFailed       the broker could not commit a published frame; send it again
 ├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
 ├── IngestFailed       `Stream.ingest` stopped partway; `.rows_loaded` is where to resume
 ├── Superseded         another connection claimed this publisher id

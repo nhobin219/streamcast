@@ -69,6 +69,22 @@ there was nothing to have changed from. Everything above it is ordinary.
   and resends. Managed streams had this before; static streams gained the
   fence in this release.
 
+- **An outbox no longer drops a row when the broker's commit fails** (#200).
+  The broker answers a commit its storage could not make with
+  `{"error": "commit_failed"}`, and the client raised it as `Rejected`, so the
+  outbox sent the batch again row by row and dropped and renumbered away the
+  first row whose resend met the failure as well, as if the schema had refused
+  it. The client now raises `CommitFailed`, which is not a `Rejected`, and
+  the outbox treats it as an outage: the rows stay pending and are sent again
+  under `BACKOFF`.
+
+  **A `publish()` caller sees a new exception type** for this reply:
+  `CommitFailed` where it saw `Rejected`. One that catches `Rejected` to drop a
+  row and carry on now lets a failed commit propagate instead of losing the
+  row; one that retries on a connection error should retry on `CommitFailed`
+  too. The wire is unchanged, so servers and clients of any version still
+  talk to each other.
+
 ### Added
 
 - **`inbox(..., on_pause_change=None)`**, a `Callable[[bool], None]` called
