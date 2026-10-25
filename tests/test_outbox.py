@@ -14,7 +14,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _outbox
+from streamcast import _dedupe, _outbox
 from streamcast._errors import Unavailable
 from tests.hosting import serve_streams
 
@@ -175,6 +175,39 @@ class TestRecovery:
                 assert direct.info.publisher.last_seq == 3, "seqs 1..3, gapless"
 
         assert landed(log) == [0.0, 2.0, 3.0]
+        await store.close()
+
+    async def test_a_failed_commit_keeps_the_row_for_retry(
+        self, serve, log, opener, monkeypatch
+    ):
+        """A `commit_failed` reply is the broker's disk or SQLite, not the row:
+        nothing landed, and the row is as good as it was. The sender must keep
+        it and send it again, never drop it as it drops a schema refusal."""
+        failures = 2  # the batch, then the first row sent on its own
+        plan = _dedupe.Publishers.plan
+
+        def transient(self, tx, jobs):
+            nonlocal failures
+            if failures:
+                failures -= 1
+                raise OSError("disk I/O error")
+
+            plan(self, tx, jobs)
+
+        monkeypatch.setattr(_dedupe.Publishers, "plan", transient)
+        store = await opener()
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.outbox(
+                uri, publisher="p", store=store, **FAST
+            ) as out:
+                async with store.transaction() as tx:
+                    await out.send_many([trade(0), trade(1), trade(2)], tx=tx)
+
+                await out.flush(timeout=10)
+
+        assert failures == 0, "both commits were attempted and failed"
+        assert landed(log) == [0.0, 1.0, 2.0], "a transient failure loses no row"
         await store.close()
 
     async def test_a_broker_that_lost_acknowledged_rows_stops_the_sender(
