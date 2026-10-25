@@ -53,7 +53,7 @@ import msgspec
 
 from streamcast import _filter
 from streamcast._dedupe import check_publisher_id
-from streamcast._errors import ProtocolError, Rejected, SequenceGap
+from streamcast._errors import CommitFailed, ProtocolError, Rejected, SequenceGap
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -587,6 +587,10 @@ def parse_publish_reply(frame: str | bytes) -> list[int | None]:
             raise SequenceGap(int(payload["expected"]), int(payload["got"]))
 
         detail = payload.get("detail")
+        if payload["error"] == "commit_failed":
+            # The broker's storage, not the row: never a refusal to drop.
+            raise CommitFailed(str(detail) if detail else "commit_failed")
+
         raise Rejected(str(detail) if detail else str(payload["error"]))
 
     offsets = payload.get("ok")

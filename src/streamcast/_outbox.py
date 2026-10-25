@@ -49,6 +49,9 @@ the lowest pending seq already says it, and a second copy could disagree.
   so only the refused row is dropped: it is logged at ERROR and **renumbered
   away** -- deleted, every pending row above it moved down one, `next_seq`
   down one -- so the log's seqs stay 1..n;
+* a commit the broker could not make (`CommitFailed`: its disk or SQLite,
+  not the row) is an outage: the rows stay pending and are sent again under
+  the backoff, never dropped;
 * an outage is said once, when the connection first fails and when rows are
   being published again, never per attempt, since a process's logs may be a
   stream this sender ships to;
@@ -84,6 +87,7 @@ from websockets.exceptions import ConnectionClosed
 from streamcast._dedupe import check_publisher_id
 from streamcast._errors import (
     AcknowledgedRowsLost,
+    CommitFailed,
     Rejected,
     StoreBehindBroker,
     StreamMismatch,
@@ -511,7 +515,7 @@ class Outbox:
 
                 try:
                     await self._session()
-                except (OSError, ConnectionClosed, TimeoutError) as exc:
+                except (OSError, ConnectionClosed, TimeoutError, CommitFailed) as exc:
                     if not self._outage:
                         self._outage = True
                         self._notice(
@@ -617,14 +621,19 @@ class Outbox:
             first, batch, future = flight.popleft()
             try:
                 offsets = await future
-            except Rejected:
+            except (Rejected, CommitFailed) as exc:
                 # Every frame behind this one is now a gap and lands nothing;
-                # let them come back before sending the batch row by row.
+                # let them come back before going on.
                 for _, _, behind in flight:
                     with contextlib.suppress(Exception):
                         await behind
 
                 flight.clear()
+                if isinstance(exc, CommitFailed):
+                    # The broker's storage, not the rows: they stay pending,
+                    # and `_run` retries them as an outage, under backoff.
+                    raise
+
                 await self._sift(out, batch)
                 sent = 0  # re-read from the lowest pending seq
                 continue

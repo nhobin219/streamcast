@@ -1329,7 +1329,9 @@ against it:
 holes, a gap can only mean rows that were never sent or were lost on the way,
 or a sender bug. `SequenceGap` is deliberately not a `Rejected`: a sender that
 drops a refused row and carries on must never treat a gap the same way, or
-the rows in it are lost silently.
+the rows in it are lost silently. `CommitFailed` (`{"error": "commit_failed"}`,
+the broker's storage failing) is not one for the same reason: nothing landed,
+and the rows are sent again, not dropped.
 
 **The mark is committed with the rows.** It is a table of streamcast's own in
 the log's buffer, `streamcast_publishers(streamcast_publisher_id,
@@ -1494,7 +1496,9 @@ answered as duplicates of the old stream's.
   the lowest pending seq already says it.
 - **The sender** connects only when it has rows, ships ordered batches
   (`SEND_BATCH`) pipelined to `max_in_flight`, sends a refused batch again row
-  by row and renumbers the refused row away so seqs stay 1..n, says an outage
+  by row and renumbers the refused row away so seqs stay 1..n, treats a
+  commit the broker could not make (`CommitFailed`) as an outage and keeps its
+  rows, says an outage
   once and its end once, backs off (`BACKOFF`), and polls (`POLL_EVERY`) for
   rows another process committed. A refusal of the connection itself is
   raised from the next `send` and the block's exit.

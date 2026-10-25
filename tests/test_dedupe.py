@@ -522,6 +522,16 @@ class TestTheWire:
         with pytest.raises(streamcast.SequenceGap):
             parse_publish_reply('{"error":"gap","expected":2,"got":5}')
 
+    def test_a_failed_commit_is_not_a_refusal(self):
+        """`commit_failed` is the broker's storage: a sender that drops a
+        `Rejected` row must not catch it, or the row is lost."""
+        with pytest.raises(streamcast.CommitFailed, match="disk I/O") as caught:
+            parse_publish_reply('{"error":"commit_failed","detail":"disk I/O error"}')
+
+        assert not isinstance(caught.value, streamcast.Rejected)
+        with pytest.raises(streamcast.Rejected, match="no column"):
+            parse_publish_reply('{"error":"rejected","detail":"no column x"}')
+
     def test_exactly_once_needs_a_log(self):
         with pytest.raises(ValueError, match="needs a log"):
             streamcast.Stream("trades", exactly_once=True)

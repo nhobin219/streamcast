@@ -161,7 +161,9 @@ class Publication:
         Raises `Rejected` if the server would not take the row — a column the
         schema does not have, a value of the wrong type — with litelink's own
         message naming the column. Nothing was committed, and the connection
-        stays open, so a corrected row can be sent next.
+        stays open, so a corrected row can be sent next. Raises `CommitFailed`
+        if the broker took the row and its storage could not commit it: not
+        the row's fault, so the same row can be sent again.
 
         **`seq` is required on an exactly-once publication** (`publisher=`)
         and refused on any other: the row's place in the publisher's sequence.
