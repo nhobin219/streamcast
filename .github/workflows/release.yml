@@ -110,7 +110,7 @@ jobs:
           cd /tmp && "$GITHUB_WORKSPACE/cold/bin/python" - <<'PY'
           import asyncio, tempfile
           from pathlib import Path
-          import streamcast
+          import streamcast, uvicorn
 
           assert (Path(streamcast.__file__).parent / "py.typed").exists()
 
@@ -128,9 +128,20 @@ jobs:
               stream = streamcast.Stream.open("trades", create=True, root=root, schema=SCHEMA,
                                              sort_by=("event_ts",))
               try:
-                  server = await streamcast.serve(stream, "127.0.0.1", 0,
-                                                  maintain=False)
-                  port = server.sockets[0].getsockname()[1]
+                  app = streamcast.create_app(streams=stream,
+                      config=streamcast.BrokerConfig(maintain=False))
+                  lifespan = app.router.lifespan_context(app)
+                  await lifespan.__aenter__()
+                  server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0,
+                      lifespan="off", ws_per_message_deflate=False))
+                  task = asyncio.create_task(server.serve())
+                  async with asyncio.timeout(10):
+                      while not server.started:
+                          if task.done():
+                              await task
+                              raise RuntimeError("listener failed")
+                          await asyncio.sleep(0.001)
+                  port = server.servers[0].sockets[0].getsockname()[1]
                   uri = f"ws://127.0.0.1:{port}/trades"
                   await stream.send_many(
                       [{"event_ts": i, "price": 1.0 * i} for i in range(50)]
@@ -153,8 +164,9 @@ jobs:
                   ).read_all().to_pylist()[0]
                   assert (rows["n"], rows["high"]) == (50, 49.0), rows
 
-                  server.close()
-                  await server.wait_closed()
+                  await lifespan.__aexit__(None, None, None)
+                  server.should_exit = True
+                  await task
 
               finally:
                   await stream.aclose()
