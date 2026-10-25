@@ -962,12 +962,15 @@ async with store.transaction() as tx:           # BEGIN ... COMMIT; ROLLBACK on 
 streamcast.store_ddl(dialect) -> list[str]      # for a role without DDL rights
 
 streamcast.outbox(uri, *, publisher, store, max_in_flight=64, send_batch=100,
-                  poll_every=1.0, backoff=BACKOFF, notice=log.warning) -> Outbox
+                  poll_every=1.0, backoff=BACKOFF, notice=log.warning,
+                  backlog_after_s=None, on_backlog_change=None) -> Outbox
 await out.send(row, *, tx) -> int               # its seq; shipped once tx commits
 await out.send_many(rows, *, tx) -> int         # the first seq
 await out.landed(seq) -> int | None             # the broker's offset
 await out.flush(timeout=None) -> None           # until nothing is pending
-await out.pending() -> int
+await out.pending_rows() -> int                # committed, unacknowledged rows
+await out.pending_bytes() -> int               # encoded streamcast_row UTF-8 bytes
+await out.oldest_pending_age() -> float | None  # seconds since oldest enqueue
 await out.close() -> None                       # pending rows stay; flush first to drain
 
 streamcast.inbox(uri, *, subscriber, store, offset=None,
@@ -1002,6 +1005,38 @@ The next `recv` commits the previous processing transaction. A clean inbox conte
 also commits it; an exit by exception rolls it back. Closing an outbox stops its sender
 without draining it. Schema-rejected rows are logged and deleted; their seqs are removed
 from the pending sequence. `landed` returns an offset only while it is still known.
+
+### Outbox backlog visibility
+
+`pending_rows()`, `pending_bytes()` and `oldest_pending_age()` read this
+stream and publisher's committed, unacknowledged rows through the outbox's
+transaction interface. They work while the broker is unreachable. Bytes are
+the sum of the encoded `streamcast_row` text's UTF-8 lengths, excluding
+sequence numbers, timestamps, framing and database overhead. Empty means
+zero rows, zero bytes and age `None`. Age is wall-clock seconds since the
+minimum `streamcast_enqueued_at`, clamped to zero if the clock moves behind
+that timestamp. Each call is a fresh read, rather than a shared snapshot;
+call these outside an open transaction on the same store.
+
+`backlog_after_s` is a finite, non-negative age in seconds, or `None` (the
+default, observation disabled). `on_backlog_change` is a synchronous
+`Callable[[bool], None]`, or `None`. With a callback, it is called once with
+the starting state before `outbox()` returns, then only when that state
+changes. The state is True when a pending row's oldest age is **at least**
+the threshold, and False below it or when empty. With no threshold it is
+always False. A separate observer checks every `poll_every` seconds, including
+during reconnect backoff or a stalled acknowledgement; a transaction holding
+the store can delay the next check. It stops on close.
+
+Keep the callback quick and non-blocking: set a flag or put on a queue. It
+runs synchronously in the observer's task (at startup, in the entering task),
+so blocking it blocks the event loop. Callback and observation errors are
+logged and do not fail the sender; observation is retried at the next poll.
+If the startup read fails, the first successful poll supplies the initial
+state. A failed callback is not repeated for the same state. These stats never
+pause, refuse, throttle or drop an enqueue or delivery. The outbox holds the
+application's committed obligations and has no fill limit; alerting and
+storage provisioning are the application's choices.
 
 ### The receive window: `paused` and `on_pause_change`
 

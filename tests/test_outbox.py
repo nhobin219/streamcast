@@ -62,7 +62,7 @@ class TestEnqueueing:
 
                 assert await out.landed(3) == 3
                 await out.flush(timeout=10)
-                assert await out.pending() == 0
+                assert await out.pending_rows() == 0
 
         assert landed(log) == [0.0, 1.0, 2.0]
         await store.close()
@@ -475,5 +475,249 @@ class TestLandedWaiters:
 
         with pytest.raises(RuntimeError, match="is closed"):
             await out.landed(1)  # after close: raised, not left waiting
+
+        await store.close()
+
+
+class TestBacklogVisibility:
+    async def test_stats_are_scoped_utf8_bytes_and_oldest_enqueue_time(
+        self, opener, monkeypatch
+    ):
+        store = await opener()
+        now = [10_000_000]
+        monkeypatch.setattr(_outbox, "_now_us", lambda: now[0])
+        out = _outbox.Outbox("ws://127.0.0.1:1/trades", "p", store)
+        assert not hasattr(out, "pending"), "the old API has no compatibility alias"
+        async with store.transaction() as tx:
+            await _outbox.enqueue(tx, "other", "p", [{"tag": "foreign"}])
+            await _outbox.enqueue(tx, "trades", "other", [{"tag": "foreign"}])
+
+        assert await out.pending_rows() == 0
+        assert await out.pending_bytes() == 0
+        assert await out.oldest_pending_age() is None
+        rows = [{"tag": "café ☃"}, {"tag": "newer"}]
+        now[0] = 40_000_000
+        async with store.transaction() as tx:
+            await out.send(rows[0], tx=tx)
+
+        # Enqueue timestamps need not follow seq order if the wall clock moves.
+        now[0] = 20_000_000
+        async with store.transaction() as tx:
+            await out.send(rows[1], tx=tx)
+
+        now[0] = 50_500_000
+        assert await out.pending_rows() == 2
+        assert await out.pending_bytes() == sum(
+            len(_outbox._text(row).encode()) for row in rows
+        )
+        assert await out.oldest_pending_age() == 30.5
+        now[0] = 1_000_000
+        assert await out.oldest_pending_age() == 0.0
+        await out.close()
+        await store.close()
+
+    async def test_outage_crossing_recovery_and_exactly_once(
+        self, log, opener, monkeypatch
+    ):
+        store = await opener()
+        now = [10_000_000]
+        monkeypatch.setattr(_outbox, "_now_us", lambda: now[0])
+        states: asyncio.Queue[bool] = asyncio.Queue()
+        checked: asyncio.Queue[float | None] = asyncio.Queue()
+        read_age = streamcast.Outbox.oldest_pending_age
+
+        async def recording_age(self):
+            age = await read_age(self)
+            checked.put_nowait(age)
+            return age
+
+        monkeypatch.setattr(streamcast.Outbox, "oldest_pending_age", recording_age)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        uri = f"ws://127.0.0.1:{port}/trades"
+        outage = asyncio.Event()
+        rows = [dict(trade(0), tag="café ☃"), trade(1), trade(2)]
+        async with streamcast.outbox(
+            uri,
+            publisher="p",
+            store=store,
+            backlog_after_s=5,
+            on_backlog_change=states.put_nowait,
+            notice=lambda _: outage.set(),
+            poll_every=0.01,
+            backoff=(3600,),
+        ) as out:
+            assert states.get_nowait() is False, "starting state before entry returns"
+            observer = out._backlog_task
+            assert observer is not None and not observer.done()
+            async with store.transaction() as tx:
+                assert await out.send_many(rows[:2], tx=tx) == 1
+
+            await asyncio.wait_for(outage.wait(), 10)
+            assert await out.pending_rows() == 2
+            assert await out.pending_bytes() == sum(
+                len(_outbox._text(row).encode()) for row in rows[:2]
+            )
+            assert await out.oldest_pending_age() == 0
+            # Cross at equality while the sender is in its hour-long backoff.
+            now[0] = 15_000_000
+            assert await asyncio.wait_for(states.get(), 10) is True
+            while not checked.empty():
+                checked.get_nowait()
+
+            await asyncio.wait_for(checked.get(), 10)
+            await asyncio.wait_for(checked.get(), 10)
+            assert states.empty(), "unchanged state is never repeated"
+            with pytest.raises(RuntimeError, match="rollback"):
+                async with store.transaction() as tx:
+                    assert await out.send(trade(9), tx=tx) == 3
+                    raise RuntimeError("rollback")
+
+            assert await out.pending_rows() == 2
+            assert landed(log) == []
+            stream = streamcast.Stream("trades", log=log, exactly_once=True)
+            server = await serve_streams([stream], "127.0.0.1", port, maintain=False)
+            try:
+                # One row landed but its ack was lost. Reconciliation must
+                # remove it unsent; the visibility reads must not change that.
+                async with streamcast.publish(uri, publisher="p") as direct:
+                    assert await direct.send(rows[0], seq=1) == 1
+
+                async with store.transaction() as tx:
+                    assert await out.send(rows[2], tx=tx) == 3
+
+                await out.flush(timeout=10)
+                assert await out.pending_rows() == 0
+                assert await out.pending_bytes() == 0
+                assert await out.oldest_pending_age() is None
+                assert await asyncio.wait_for(states.get(), 10) is False
+                assert states.empty()
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        assert observer.done(), "close also stops backlog observation"
+        assert landed(log) == [0.0, 1.0, 2.0]
+        await store.close()
+
+    async def test_existing_backlog_startup_and_clearing_below_threshold(
+        self, opener, monkeypatch
+    ):
+        store = await opener()
+        now = [10_000_000]
+        monkeypatch.setattr(_outbox, "_now_us", lambda: now[0])
+        async with store.transaction() as tx:
+            await _outbox.enqueue(tx, "trades", "p", [trade(0)])
+
+        now[0] = 20_000_000
+        states: list[bool] = []
+        # Hold the sender away from the network; drive observations explicitly.
+        monkeypatch.setattr(streamcast.Outbox, "start", lambda self: None)
+        async with streamcast.outbox(
+            "ws://127.0.0.1:1/trades",
+            publisher="p",
+            store=store,
+            backlog_after_s=5,
+            on_backlog_change=states.append,
+        ) as out:
+            assert states == [True]
+            await out._observe_backlog()
+            assert states == [True]
+            async with store.transaction() as tx:
+                await out.send(trade(1), tx=tx)
+                await _outbox.acked(tx, "trades", "p", 1)
+
+            await out._observe_backlog()
+            assert states == [True, False], "a young pending row clears the backlog"
+            assert await out.pending_rows() == 1
+            await out._observe_backlog()
+            assert states == [True, False]
+
+        await store.close()
+
+    @pytest.mark.parametrize("threshold", [None, 0])
+    async def test_empty_start_and_disabled_threshold(
+        self, opener, monkeypatch, threshold
+    ):
+        store = await opener()
+        monkeypatch.setattr(_outbox, "_now_us", lambda: 10_000_000)
+        states: list[bool] = []
+        monkeypatch.setattr(streamcast.Outbox, "start", lambda self: None)
+        async with streamcast.outbox(
+            "ws://127.0.0.1:1/trades",
+            publisher="p",
+            store=store,
+            backlog_after_s=threshold,
+            on_backlog_change=states.append,
+        ) as out:
+            assert states == [False]
+            async with store.transaction() as tx:
+                await out.send(trade(0), tx=tx)
+
+            await out._observe_backlog()
+            assert states == ([False] if threshold is None else [False, True])
+
+        await store.close()
+
+    async def test_observer_failures_do_not_stop_delivery(
+        self, serve, log, opener, monkeypatch, caplog
+    ):
+        store = await opener()
+        states: list[bool] = []
+
+        def broken_callback(state):
+            states.append(state)
+            raise RuntimeError("callback failed")
+
+        read_age = streamcast.Outbox.oldest_pending_age
+        failed_read = False
+
+        async def transient_read(self):
+            nonlocal failed_read
+            if not failed_read:
+                failed_read = True
+                raise OSError("observation failed")
+
+            return await read_age(self)
+
+        monkeypatch.setattr(streamcast.Outbox, "oldest_pending_age", transient_read)
+        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        async with serve(stream, maintain=False) as uri:
+            async with streamcast.outbox(
+                uri,
+                publisher="p",
+                store=store,
+                backlog_after_s=0,
+                on_backlog_change=broken_callback,
+                **FAST,
+            ) as out:
+                assert failed_read
+                await out._observe_backlog()
+                assert states == [False], "callback failure is isolated too"
+                async with store.transaction() as tx:
+                    assert await out.send(trade(0), tx=tx) == 1
+
+                assert await out.landed(1) == 1
+                await out.flush(timeout=10)
+
+        assert "observation failed" in caplog.text
+        assert "callback failed" in caplog.text
+        assert landed(log) == [0.0]
+        await store.close()
+
+    @pytest.mark.parametrize("threshold", [-1, float("nan"), float("inf")])
+    async def test_invalid_threshold_is_refused_at_construction(
+        self, opener, threshold
+    ):
+        store = await opener()
+        with pytest.raises(ValueError, match="backlog_after_s"):
+            streamcast.outbox(
+                "ws://127.0.0.1:1/trades",
+                publisher="p",
+                store=store,
+                backlog_after_s=threshold,
+            )
 
         await store.close()

@@ -1482,6 +1482,23 @@ answered as duplicates of the old stream's.
 
 ### The outbox
 
+- **The outbox is observed, never bounded.** Its rows are the publisher's
+  own committed obligations, written atomically with application state.
+  Refusing an enqueue would turn a broker outage into an application outage;
+  dropping one would break exactly-once delivery. Unlike the inbox, it has
+  no upstream log from which to refill a bounded window. `pending_rows()`,
+  `pending_bytes()` (encoded row text's UTF-8 size) and
+  `oldest_pending_age()` read the committed rows through the outbox's
+  transaction interface, with no schema change or stored counters.
+  `outbox(backlog_after_s=, on_backlog_change=)` observes the oldest age:
+  True at or above the threshold, False below it or when empty, once at
+  startup before entry returns and then only on transitions. `None` disables
+  the threshold. Age distinguishes stalled delivery from a healthy sender
+  briefly holding many rows. Observation polls at `poll_every`, independently
+  of sender retries and socket waits, and stops on close. The synchronous
+  callback must be quick and non-blocking; observer and callback errors are
+  logged without failing the sender. No statistic or callback state controls
+  enqueue, commit, delivery or deletion.
 - **Seqs are assigned at enqueue, inside the caller's transaction, gapless.**
   The counter moves with the rows that take it, so a rollback returns its
   seqs. The UPDATE takes the publisher's row lock (Postgres) or the database's

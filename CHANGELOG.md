@@ -7,6 +7,25 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed — breaking
+
+- Replace `Outbox.pending()` with `pending_rows()`; no compatibility alias
+  (#195). Callers rename their count query. This API change requires a minor
+  release.
+
+### Added
+
+- `Outbox.pending_bytes()` reports the pending encoded row text's UTF-8 size,
+  and `oldest_pending_age()` reports seconds since the oldest enqueue, or
+  `None` when empty. Both read through the outbox's transaction interface;
+  the stored rows and schema are unchanged.
+- `outbox(backlog_after_s=None, on_backlog_change=None)` reports its starting
+  backlog state and age-threshold transitions. Observation continues during
+  reconnect backoff and stalled acknowledgements. It never limits, pauses,
+  throttles or drops rows; observer errors are logged without failing delivery.
+
 ## 0.26.0 — 2026-10-25
 
 ### Changed — breaking
