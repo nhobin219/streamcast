@@ -10,6 +10,7 @@ import pytest
 
 import streamcast
 from streamcast import _inbox
+from streamcast._store import sql
 
 from .conftest import SCHEMA, trade
 from .hosting import serve_streams
@@ -335,7 +336,7 @@ async def test_inbox_resume_at_sets_where_a_startup_pause_ends(serve, log, opene
             await sub.commit()
             await until(lambda: received_at(store, 6))
             # Resumed, then rows 5 and 6 bring it back to the high bound.
-            assert recorder.calls == [True, False, True]
+            await until(lambda: calls_are(recorder, [True, False, True]))
 
     await store.close()
 
@@ -449,4 +450,96 @@ async def test_a_callback_that_raises_in_the_receiver_fails_recv(serve, log, ope
             with pytest.raises(RuntimeError, match="callback failed"):
                 await asyncio.wait_for(sub.recv(), 5)
 
+    await store.close()
+
+
+async def test_a_reconnect_counts_rows_other_workers_received(log, opener):
+    """Receiving with 1 of 3 rows held, another worker on the same
+    subscriber id fills the window while this one is cut off: the drop is
+    followed by a recount, and the window is full, so it pauses — reported —
+    rather than reconnecting and inserting past the bound.
+
+    Falsify by reconnecting from the band without counting again: it
+    reconnects, `paused` stays False, and nothing is reported.
+    """
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    recorder = Recorder()
+    async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as server:
+        uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=3,
+            on_pause_change=recorder,
+            **FAST,
+        ) as sub:
+            recorder.inbox = sub
+            await stream.send(trade(0))
+            await until(lambda: received_at(store, 1))
+            # The other worker's rows, as its receiver would have inserted.
+            async with store.transaction() as tx:
+                for offset in (1_000, 1_001):
+                    await tx.execute(
+                        sql(
+                            store.dialect,
+                            "INSERT INTO streamcast_inbox (streamcast_stream, "
+                            "streamcast_subscriber_id, litelink_offset, "
+                            "streamcast_ts, streamcast_row, "
+                            "streamcast_received_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        ),
+                        ("trades", "s", offset, None, "{}", 0.0),
+                    )
+
+            dropped = set(server.connections)
+            for peer in dropped:
+                await peer.close(1001, "going away")
+
+            await until(lambda: paused(sub))
+            assert recorder.calls == [False, True]
+            await asyncio.sleep(0.3)
+            assert not set(server.connections) - dropped, "reconnected while full"
+
+    await store.close()
+
+
+async def test_a_broker_that_drops_at_once_is_retried_at_the_backoffs_pace(
+    serve, log, opener, monkeypatch
+):
+    """Every connection ends before a row arrives: the receiver backs off
+    between them, rather than reconnecting once per round trip.
+
+    Falsify by resetting the backoff on each connect: it reconnects as fast
+    as the broker answers.
+    """
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    connects = 0
+
+    class Greeted:
+        """A connection the broker accepted, and will drop at once."""
+
+        async def close(self) -> None:
+            pass
+
+    async def counted(inbox):
+        nonlocal connects
+        connects += 1
+        return Greeted()
+
+    async def dropped(inbox, sub):
+        raise OSError("dropped before any row")
+
+    monkeypatch.setattr(_inbox.Inbox, "_fill", dropped)
+    async with serve(stream, maintain=False) as uri:
+        async with streamcast.inbox(
+            uri, subscriber="s", store=store, poll_every=0.05, backoff=(0.2,)
+        ):
+            # Every connection after the first is the stub's.
+            monkeypatch.setattr(_inbox.Inbox, "_reconnect", counted)
+            await asyncio.sleep(1.0)
+
+    assert connects >= 2, "the drops must actually be retried"
+    assert connects <= 7, f"{connects} reconnects in a second at a 0.2 s backoff"
     await store.close()
