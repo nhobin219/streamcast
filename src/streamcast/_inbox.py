@@ -436,7 +436,13 @@ class Inbox:
         try:
             while not self._closed:
                 if sub is None:
-                    await self._wait_below_low_water()
+                    # Only a full window waits for low water. A connection
+                    # that ended in the band reconnects at once, as a start
+                    # in the band does: waiting while `paused` says
+                    # receiving would be a pause nobody was told about.
+                    if self._paused:
+                        await self._wait_below_low_water()
+
                     try:
                         sub = await self._reconnect()
                         self._subscription = sub

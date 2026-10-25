@@ -12,6 +12,7 @@ import streamcast
 from streamcast import _inbox
 
 from .conftest import SCHEMA, trade
+from .hosting import serve_streams
 from .test_inbox import FAST, held, received, until
 
 
@@ -332,8 +333,9 @@ async def test_inbox_resume_at_sets_where_a_startup_pause_ends(serve, log, opene
             assert recorder.calls == [True], "3 of 4 is not below 0.75 of 4"
             await sub.recv()
             await sub.commit()
-            await until(lambda: calls_are(recorder, [True, False]))
             await until(lambda: received_at(store, 6))
+            # Resumed, then rows 5 and 6 bring it back to the high bound.
+            assert recorder.calls == [True, False, True]
 
     await store.close()
 
@@ -380,5 +382,71 @@ async def test_a_callback_that_raises_at_start_fails_inbox_and_closes_the_socket
                 pytest.fail("inbox() must not return")
 
         await until(lambda: no_subscribers(stream))
+
+    await store.close()
+
+
+async def test_a_dropped_connection_in_the_band_reconnects_at_once(log, opener):
+    """Receiving with 3 of 4 rows held, the broker drops the connection: the
+    inbox is not paused, so it reconnects and receives at once rather than
+    waiting for low water while saying it is receiving.
+
+    Falsify by waiting for low water after every drop: row 4 never arrives.
+    """
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+    recorder = Recorder()
+    async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as server:
+        uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=4,
+            on_pause_change=recorder,
+            **FAST,
+        ) as sub:
+            recorder.inbox = sub
+            await stream.send_many([trade(0)] * 3)
+            await until(lambda: received_at(store, 3))
+            dropped = set(server.connections)
+            for peer in dropped:
+                await peer.close(1001, "going away")
+
+            async def reconnected() -> bool:
+                return bool(set(server.connections) - dropped)
+
+            await until(reconnected)
+            await stream.send(trade(0))
+            await until(lambda: received_at(store, 4))
+            assert recorder.calls == [False, True]
+
+    await store.close()
+
+
+async def test_a_callback_that_raises_in_the_receiver_fails_recv(serve, log, opener):
+    """The receiver's own call raising: rows already received are still
+    handed out, then `recv` raises it rather than waiting for ever."""
+    store = await opener()
+    stream = streamcast.Stream("trades", log=log)
+
+    def refuse_pause(paused: bool) -> None:
+        if paused:
+            raise RuntimeError("callback failed")
+
+    async with serve(stream, maintain=False) as uri:
+        async with streamcast.inbox(
+            uri,
+            subscriber="s",
+            store=store,
+            inbox_max_rows=1,
+            on_pause_change=refuse_pause,
+            **FAST,
+        ) as sub:
+            await stream.send_many([trade(0)] * 2)
+            assert (await asyncio.wait_for(sub.recv(), 5))[0] == 1
+            await sub.commit()
+            with pytest.raises(RuntimeError, match="callback failed"):
+                await asyncio.wait_for(sub.recv(), 5)
 
     await store.close()
