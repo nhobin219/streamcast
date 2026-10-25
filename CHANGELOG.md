@@ -22,6 +22,9 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 - An inbox exited or cancelled before its receiver's first turn now closes
   the subscription it opened (#191).
+- An inbox whose connection ended while it was receiving waited for low
+  water before reconnecting, a pause `paused` never showed. Only a full
+  window waits now; any other end reconnects at once.
 - A store transaction cancelled mid-statement — an inbox's receiver at
   `close` — waits for that statement before letting the next transaction
   in. Postgres answered the next BEGIN with "another command is already in

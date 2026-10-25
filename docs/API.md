@@ -834,6 +834,11 @@ unprocessed rows and bytes in `streamcast_inbox`:
 | **high water** | `B >= inbox_max_bytes`, or `R >= inbox_max_rows` when it is set | stops inserting and **closes its subscription**; `paused` becomes True |
 | **low water** | `B < inbox_max_bytes × inbox_resume_at` **and** (no row bound, or `R < inbox_max_rows × inbox_resume_at`) — both strict | reconnects from `last_received_offset + 1`; `paused` becomes False |
 
+Only a full window pauses. A connection that ends while receiving — the
+broker restarting, a network drop — reconnects at once with backoff, from the
+band too, and `paused` stays False: a reconnect is not a pause, and
+`caught_up()` is what says whether the receiver is connected and current.
+
 Inserting counts each row as it goes, so the row that crosses the byte bound
 is the last one taken, and an empty inbox always takes one row, however large.
 While paused the receiver recounts the store every `poll_every` and whenever
