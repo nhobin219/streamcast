@@ -12,6 +12,7 @@ import base64
 import copy
 import json
 import os
+import shutil
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -19,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import litelink
 import pytest
 import uvicorn
+from fastapi import FastAPI
 from websockets.asyncio.client import connect as raw_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
@@ -28,13 +31,20 @@ import streamcast
 from streamcast import (
     BrokerConfig,
     HistoryGuard,
-    StorageProfile,
+    Storage,
+    Stream,
+    StreamSpec,
+    _metadata,
     create_app,
     initialize_registry,
 )
 from streamcast._broker import runtime as implementation
 from streamcast._broker.registry import Registry
-from streamcast._tasks import thread
+from streamcast._children import _supervisors
+from streamcast._replicate import Sidecar
+from streamcast._tasks import reader, thread
+
+from .test_replicate import settle
 
 SHAPE: dict[str, Any] = {
     "type": "object",
@@ -106,7 +116,7 @@ def config(tmp_path, monkeypatch):
     config = BrokerConfig(
         "test",
         tmp_path / "registry.db",
-        {"local": StorageProfile("1", tmp_path / "logs")},
+        {"local": Storage(root=tmp_path / "logs")},
         Grants(),
         readiness_every=0.01,
         readiness_timeout=2,
@@ -118,8 +128,7 @@ def config(tmp_path, monkeypatch):
 def definition(**changes):
     return {
         "schema": copy.deepcopy(SHAPE),
-        "storage_profile": "local",
-        "initialization": "create_if_absent",
+        "name": "events",
         **changes,
     }
 
@@ -136,14 +145,36 @@ async def managed(config):
             yield app.state.broker, client, app
 
 
-async def put(owner, client, name, value, *, suffix="", revision=None, key=None):
+async def put(
+    owner,
+    client,
+    name,
+    value,
+    *,
+    suffix="",
+    revision=None,
+    key=None,
+    storage_profile="local",
+    initialization="create_if_absent",
+):
     headers = {"Idempotency-Key": key or f"{name}-{suffix}-{revision}"}
     headers["If-None-Match" if revision is None else "If-Match"] = (
         "*" if revision is None else f'"{revision}"'
     )
     method = client.post if suffix == "/migrations" else client.put
+    params = (
+        {}
+        if suffix
+        else {"storage_profile": storage_profile, "initialization": initialization}
+    )
+    if not suffix:
+        value = value | {"name": name}
+
     answer = await method(
-        f"/control/v1/streams/{name}{suffix}", json=value, headers=headers
+        f"/control/v1/streams/{name}{suffix}",
+        json=value,
+        headers=headers,
+        params=params,
     )
     if answer.status_code in (200, 202):
         await owner.queue.join()
@@ -151,8 +182,12 @@ async def put(owner, client, name, value, *, suffix="", revision=None, key=None)
     return answer
 
 
-async def serving(owner, client, name="events", **changes):
-    created = await put(owner, client, name, definition(**changes))
+async def serving(
+    owner, client, name="events", initialization="create_if_absent", **changes
+):
+    created = await put(
+        owner, client, name, definition(**changes), initialization=initialization
+    )
     assert created.status_code == 202, created.text
     started = await put(
         owner, client, name, {"state": "serving"}, suffix="/desired", revision=1
@@ -167,7 +202,7 @@ async def test_create_stopped_identity_and_restart(config):
         answer = await put(owner, client, "events", definition())
         assert answer.status_code == 202
         assert owner.view("events")["observed"]["state"] == "stopped"
-        assert not (config.profiles["local"].root / "events").exists()
+        assert not (config.storage_profiles["local"].root / "events").exists()
         await put(
             owner, client, "events", {"state": "serving"}, suffix="/desired", revision=1
         )
@@ -190,18 +225,14 @@ async def test_create_stopped_identity_and_restart(config):
         assert await stream.send({"value": 10}) == 2
 
 
-@pytest.mark.parametrize("relative_root", [False, True], ids=["absolute", "relative"])
-@pytest.mark.parametrize(
-    "replicate", [False, True], ids=["no-replication", "replicate"]
-)
-async def test_managed_profile_without_published_survives_restart(
-    config, tmp_path, monkeypatch, relative_root, replicate
-):
-    monkeypatch.chdir(tmp_path)
-    profile = StorageProfile(
-        "1", Path("logs") if relative_root else tmp_path / "logs", replicate=replicate
+@pytest.mark.parametrize("replicate", [False, True])
+async def test_managed_profile_survives_restart(config, tmp_path, replicate):
+    profile = Storage(
+        root=tmp_path / "logs",
+        replicate=replicate,
+        published=(tmp_path / "published").as_uri() if replicate else None,
     )
-    config = replace(config, profiles={"local": profile})
+    config = replace(config, storage_profiles={"local": profile})
     async with managed(config) as (owner, client, _):
         stream = await serving(owner, client)
         assert stream.replicate is replicate
@@ -288,6 +319,7 @@ async def test_schema_validation_preconditions_and_order(config):
         missing = await client.put(
             "/control/v1/streams/events",
             json=definition(),
+            params={"storage_profile": "local", "initialization": "create_if_absent"},
             headers={"If-None-Match": "*"},
         )
         assert missing.status_code == 428
@@ -295,6 +327,7 @@ async def test_schema_validation_preconditions_and_order(config):
         response = await client.put(
             "/control/v1/streams/events",
             json=definition(),
+            params={"storage_profile": "local", "initialization": "create_if_absent"},
             headers={"Idempotency-Key": "missing-precondition"},
         )
         assert response.status_code == 428
@@ -488,7 +521,10 @@ async def test_registry_and_stream_ownership_are_exclusive(config, tmp_path):
             await implementation.BrokerRuntime.open(config)
 
         other = BrokerConfig(
-            "other", tmp_path / "other.db", config.profiles, config.authorization
+            "other",
+            tmp_path / "other.db",
+            config.storage_profiles,
+            config.authorization,
         )
         initialize_registry(other)
         async with managed(other) as (second, http, _):
@@ -505,8 +541,6 @@ async def serving_without_assertion(owner, client):
 
 
 async def test_missing_bound_disk_is_not_recreated(config):
-    import shutil
-
     async with managed(config) as (owner, client, _):
         stream = await serving(owner, client)
         identity = stream._stream_id
@@ -514,7 +548,7 @@ async def test_missing_bound_disk_is_not_recreated(config):
             owner, client, "events", {"state": "stopped"}, suffix="/desired", revision=2
         )
 
-    shutil.rmtree(config.profiles["local"].root)
+    shutil.rmtree(config.storage_profiles["local"].root)
     async with managed(config) as (owner, client, _):
         response = await put(
             owner, client, "events", {"state": "serving"}, suffix="/desired", revision=3
@@ -523,19 +557,17 @@ async def test_missing_bound_disk_is_not_recreated(config):
         assert operation["status"] == "failed"
         assert owner.view("events")["stream_id"] == identity
         assert "events" not in owner.generations
-        assert not (config.profiles["local"].root / "events").exists()
+        assert not (config.storage_profiles["local"].root / "events").exists()
 
 
 async def test_guard_admits_complete_history_and_rejects_migration_before_journal(
     config,
 ):
-    from dataclasses import replace
-
     old = streamcast.StreamHandle.open(
         streamcast.Stream(
             spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
             storage=streamcast.Storage(
-                root=Path(config.profiles["local"].root).absolute()
+                root=Path(config.storage_profiles["local"].root).absolute()
             ),
         ),
         initialization="create_if_absent",
@@ -602,13 +634,11 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
     "wrong", ["identity", "witness", "migration", "empty_migration", "flags"]
 )
 async def test_guard_rejects_incompatible_history(config, wrong):
-    from dataclasses import replace
-
     old = streamcast.StreamHandle.open(
         streamcast.Stream(
             spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
             storage=streamcast.Storage(
-                root=Path(config.profiles["local"].root).absolute()
+                root=Path(config.storage_profiles["local"].root).absolute()
             ),
         ),
         initialization="create_if_absent",
@@ -630,7 +660,7 @@ async def test_guard_rejects_incompatible_history(config, wrong):
             },
         }
         migrated = streamcast.StreamHandle.migrate(
-            "messages", root=config.profiles["local"].root, schema=shape
+            "messages", root=config.storage_profiles["local"].root, schema=shape
         )
         if wrong == "empty_migration":
             await migrated.send({"value": 7, "extra": None})
@@ -656,11 +686,11 @@ async def test_guard_rejects_incompatible_history(config, wrong):
             "messages",
             definition(
                 schema=shape,
-                initialization="open_existing",
                 exactly_once=wrong != "flags",
                 replay_published=True,
                 max_replay=None,
             ),
+            initialization="open_existing",
         )
         result = await put(
             owner,
@@ -675,8 +705,6 @@ async def test_guard_rejects_incompatible_history(config, wrong):
 
 
 async def test_body_and_transport_limits(config):
-    from dataclasses import replace
-
     limited = replace(config, transport_max_bytes=1024, control_max_bytes=512)
     async with managed(limited) as (owner, client, app):
         response = await client.put(
@@ -742,10 +770,6 @@ async def test_body_and_transport_limits(config):
 
 
 async def test_mounted_controller_receipts_and_data_share_owner(config):
-    from contextlib import asynccontextmanager
-
-    from fastapi import FastAPI
-
     child = create_app(config)
 
     @asynccontextmanager
@@ -764,6 +788,10 @@ async def test_mounted_controller_receipts_and_data_share_owner(config):
             response = await client.put(
                 "/broker/control/v1/streams/events",
                 json=definition(),
+                params={
+                    "storage_profile": "local",
+                    "initialization": "create_if_absent",
+                },
                 headers={"Idempotency-Key": "mounted", "If-None-Match": "*"},
             )
             assert response.status_code == 202
@@ -797,14 +825,11 @@ async def test_unexpected_data_failure_closes_without_storage_details(
 
 
 async def test_real_children_signal_exact_generation_readiness(config, monkeypatch):
-    from streamcast._children import _supervisors
-
     # One real role proves the handshake and reap boundary. Running five
     # interpreters proves the same protocol five times and costs office CPUs.
     monkeypatch.setattr(
         implementation, "_supervisors", lambda *args: _supervisors(*args)[:1]
     )
-    from dataclasses import replace
 
     async with managed(replace(config, readiness_timeout=15)) as (owner, client, _):
         await serving(owner, client)
@@ -827,31 +852,23 @@ async def test_real_children_signal_exact_generation_readiness(config, monkeypat
 async def test_managed_replication_and_shared_group_replacement(
     config, monkeypatch, s3, bucket
 ):
-    from dataclasses import replace
-
-    import litelink
-
-    from streamcast._children import _supervisors
-    from streamcast._replicate import Sidecar
-
-    from .test_replicate import settle
-
     # One real role exercises replacement/readiness/reaping. Replication is
     # real as well; duplicating the role handshake in five interpreters makes
     # this lifecycle test a CPU/import benchmark on small CI workers.
     monkeypatch.setattr(
         implementation, "_supervisors", lambda *args: _supervisors(*args)[:1]
     )
-    profile = replace(
-        config.profiles["local"],
-        config=litelink.LogConfig(wal_replication=True),
-        published=bucket,
-        s3_options=s3,
-        replicate=True,
+    profile = config.storage_profiles["local"].model_copy(
+        update={
+            "config": litelink.LogConfig(wal_replication=True),
+            "published": bucket,
+            "s3_options": s3,
+            "replicate": True,
+        }
     )
     replicated = replace(
         config,
-        profiles={"local": profile},
+        storage_profiles={"local": profile},
         readiness_timeout=40,
         readiness_every=0.05,
     )
@@ -905,19 +922,19 @@ async def test_managed_replication_and_shared_group_replacement(
 
 
 async def test_pending_journal_recovers_without_http_resubmission(config):
-    from streamcast._broker.model import declaration
-
     registry = Registry.open(config.registry, config.broker_id)
     record = {
         "name": "events",
-        "definition": declaration(
-            definition(), config.profiles, config.transport_max_bytes
-        ),
+        "stream": Stream(
+            spec=StreamSpec.model_validate(definition()),
+            storage=config.storage_profiles["local"],
+        ).model_dump(mode="json"),
+        "storage_profile": "local",
+        "initialization": "create_if_absent",
         "desired": "serving",
         "revision": 1,
         "stream_id": None,
         "pending": "pending",
-        "profile_revision": "1",
     }
     operation = {
         "id": "pending",
@@ -952,7 +969,7 @@ async def test_storage_profile_alias_cannot_open_same_physical_log(config, tmp_p
         other = BrokerConfig(
             "alias",
             tmp_path / "alias.db",
-            {"local": StorageProfile("1", stream.log.root)},
+            {"local": Storage(root=Path(stream.log.root))},
             config.authorization,
         )
         initialize_registry(other)
@@ -964,8 +981,6 @@ async def test_storage_profile_alias_cannot_open_same_physical_log(config, tmp_p
 
 
 async def test_cancelled_reader_acquisition_closes_before_returning():
-    from streamcast._tasks import reader
-
     entered = threading.Event()
     release = threading.Event()
     closed = threading.Event()
@@ -997,8 +1012,6 @@ async def test_cancelled_reader_acquisition_closes_before_returning():
 
 
 async def test_control_queue_bound_preserves_data_admission(config, monkeypatch):
-    from dataclasses import replace
-
     async with managed(replace(config, max_pending=1)) as (owner, client, _):
         stream = await serving(owner, client)
         entered = asyncio.Event()
@@ -1013,14 +1026,16 @@ async def test_control_queue_bound_preserves_data_admission(config, monkeypatch)
         monkeypatch.setattr(owner, "execute", paused)
         accepted = await client.put(
             "/control/v1/streams/other",
-            json=definition(),
+            json=definition(name="other"),
+            params={"storage_profile": "local", "initialization": "create_if_absent"},
             headers={"Idempotency-Key": "queued", "If-None-Match": "*"},
         )
         assert accepted.status_code == 202
         await entered.wait()
         refused = await client.put(
             "/control/v1/streams/third",
-            json=definition(),
+            json=definition(name="third"),
+            params={"storage_profile": "local", "initialization": "create_if_absent"},
             headers={"Idempotency-Key": "overflow", "If-None-Match": "*"},
         )
         try:
@@ -1034,8 +1049,6 @@ async def test_control_queue_bound_preserves_data_admission(config, monkeypatch)
 
 
 async def test_failed_intent_can_reuse_its_bounded_queue_slot(config, monkeypatch):
-    from dataclasses import replace
-
     async with managed(replace(config, max_pending=1)) as (owner, client, _):
         await put(owner, client, "events", definition())
         reconcile = owner.reconcile
@@ -1076,8 +1089,6 @@ async def test_failed_intent_can_reuse_its_bounded_queue_slot(config, monkeypatc
 
 
 async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypatch):
-    from streamcast import _metadata
-
     target_shape = {
         **SHAPE,
         "properties": {**SHAPE["properties"], "extra": {"type": ["string", "null"]}},
@@ -1108,9 +1119,9 @@ async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypa
         )
         operation_id = response.json()["operation_id"]
         assert owner.operations[operation_id]["status"] == "failed"
-        assert owner.view("events")["definition"]["schema"] == SHAPE
+        assert owner.view("events")["stream"]["spec"]["schema"] == SHAPE
         metadata = _metadata.load(
-            _metadata.home(config.profiles["local"].root, "events"), "events"
+            _metadata.home(config.storage_profiles["local"].root, "events"), "events"
         )
         assert metadata is not None
         assert len(metadata.sealed_logs) == 1
@@ -1118,7 +1129,7 @@ async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypa
 
     async with managed(config) as (owner, client, _):
         assert owner.operations[operation_id]["status"] == "succeeded"
-        assert owner.view("events")["definition"]["schema"] == target_shape
+        assert owner.view("events")["stream"]["spec"]["schema"] == target_shape
         repeated = await put(
             owner,
             client,
@@ -1245,8 +1256,6 @@ async def serving_without_assertion_named(owner, client, name):
 
 
 async def test_registry_symlink_alias_cannot_acquire_second_owner(config, tmp_path):
-    from dataclasses import replace
-
     alias = tmp_path / "alias.db"
     alias.symlink_to(config.registry)
     async with managed(config):

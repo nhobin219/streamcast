@@ -13,6 +13,8 @@ from typing import Any
 
 from streamcast._broker.model import Fault
 
+VERSION = 2
+
 
 def dumps(value: Any) -> str:
     # Property order matters to schema/wire order and request identity.
@@ -66,7 +68,7 @@ class Registry:
     def initialize(db, broker_id):
         with db:
             db.execute("CREATE TABLE identity (version INTEGER, broker TEXT)")
-            db.execute("INSERT INTO identity VALUES (1, ?)", (broker_id,))
+            db.execute("INSERT INTO identity VALUES (?, ?)", (VERSION, broker_id))
             db.execute(
                 "CREATE TABLE streams (name TEXT PRIMARY KEY, body TEXT NOT NULL)"
             )
@@ -105,9 +107,11 @@ class Registry:
                 finally:
                     os.close(directory)
 
-            if db.execute("SELECT version, broker FROM identity").fetchall() != [
-                (1, broker_id)
-            ]:
+            identity = db.execute("SELECT version, broker FROM identity").fetchall()
+            if identity == [(1, broker_id)]:
+                raise ValueError("registry version 1: run upgrade_registry")
+
+            if identity != [(VERSION, broker_id)]:
                 raise ValueError("registry identity mismatch")
 
             return cls(db, lock)
