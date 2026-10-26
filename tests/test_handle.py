@@ -57,9 +57,14 @@ async def test_factory_observes_every_field_under_every_initialization(
 ):
     published = request.getfixturevalue("bucket") if storage_kind == "s3" else None
     options = request.getfixturevalue("s3") if storage_kind == "s3" else None
-    if storage_kind == "s3":
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "wrong-store")
-        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wrong-store-secret")
+    restore_calls = []
+    restore_log = litelink.restore
+
+    def restoring(*args, **kwargs):
+        restore_calls.append(kwargs)
+        return restore_log(*args, **kwargs)
+
+    monkeypatch.setattr(litelink, "restore", restoring)
 
     declared = definition(tmp_path / "data", published, options)
     if initialization != "create_if_absent":
@@ -79,12 +84,21 @@ async def test_factory_observes_every_field_under_every_initialization(
 
     handle = streamcast.StreamHandle.open(declared, initialization=initialization)
     try:
+        if initialization == "restore_published":
+            (restored,) = restore_calls
+            assert restored["s3_options"] is declared.storage.s3_options
+            assert restored["config"] == declared.storage.config
+            assert restored["sort_by"] == declared.spec.sort_by
+
+        else:
+            assert restore_calls == []
+
         assert handle.definition is declared
         assert handle.name == declared.spec.name
         assert handle.log is not None
         assert handle.log.root == declared.storage.root / "rows"
         if published is not None:
-            assert handle.log.published == published + "/rows/rows"
+            assert handle.log.published == published + "/rows"
 
         assert handle.log.config == declared.storage.config
         assert handle.log.sort_by == declared.spec.sort_by

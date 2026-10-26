@@ -112,7 +112,7 @@ async def test_empty_prefix_is_missing_unless_create(tmp_path, bucket, s3):
             spec=StreamSpec(name="t", schema=SCHEMA),
             storage=Storage(root=tmp_path.absolute(), published=bucket, s3_options=s3),
         ),
-        initialization="restore_published",
+        initialization="create_if_absent",
     )
     await made.aclose()
 

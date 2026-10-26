@@ -68,7 +68,9 @@ def _install(version: str, venv: Path) -> str | None:
         check=True,
         capture_output=True,
     )
-    pins = [f"streamcast=={version}"]
+    # The version-dispatched peer imports its hosting tool at module scope;
+    # releases predating create_app do not depend on that tool themselves.
+    pins = [f"streamcast=={version}", "uvicorn>=0.54"]
     offline = not os.environ.get("STREAMCAST_REQUIRE_INTEROP")
     done = subprocess.run(
         [uv, "pip", "install", "-q", "--python", str(python), *pins]

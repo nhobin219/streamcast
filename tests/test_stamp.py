@@ -190,7 +190,7 @@ class TestItIsTheServersToFill:
             },
             "required": [*SCHEMA_JSON.get("required", []), _log.STAMP],
         }
-        with pytest.raises(ValueError, match="another name"):
+        with pytest.raises(ValueError, match="reserved stream column"):
             streamcast.StreamHandle.open(
                 streamcast.Stream(
                     spec=streamcast.StreamSpec(name="trades", schema=schema),

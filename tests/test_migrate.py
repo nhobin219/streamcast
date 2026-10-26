@@ -267,7 +267,7 @@ class TestSystemColumns:
             await upgraded.aclose()
 
     async def test_no_system_column_can_be_declared(self, tmp_path):
-        with pytest.raises(ValueError, match="streamcast owns"):
+        with pytest.raises(ValueError, match="reserved stream column"):
             streamcast.StreamHandle.open(
                 streamcast.Stream(
                     spec=streamcast.StreamSpec(
