@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import math
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,9 +18,9 @@ from streamcast._limits import (
     MAX_MESSAGE_BYTES,
     SUBSCRIBER_YIELD_EVERY,
 )
+from streamcast._spec import NAME, _schema_keys
 from streamcast._stream import MAX_REPLAY
 
-NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 CONTROL = "/control/v1"
 
 
@@ -262,38 +261,3 @@ def declaration(
         "max_replay": replay,
         "limits": resolved,
     }
-
-
-def _schema_keys(spec: Any, *, root: bool = False) -> None:
-    if not isinstance(spec, dict):
-        raise ValueError
-
-    declared = spec.get("type")
-    if isinstance(declared, list):
-        declared = next((kind for kind in declared if kind != "null"), None)
-
-    allowed = {"type", "description", "title"}
-    if root or declared == "object":
-        allowed |= {"properties", "required", "additionalProperties"}
-    elif declared == "array":
-        allowed.add("items")
-    elif declared in ("integer", "number", "string"):
-        allowed.add("format")
-        if declared == "string":
-            allowed.add("contentEncoding")
-
-    if set(spec) - allowed:
-        raise ValueError
-
-    additional = spec.get("additionalProperties", False)
-    if additional is not False and (root or not isinstance(additional, dict)):
-        raise ValueError
-
-    for child in spec.get("properties", {}).values():
-        _schema_keys(child)
-
-    if "items" in spec:
-        _schema_keys(spec["items"])
-
-    if isinstance(additional, dict):
-        _schema_keys(additional)

@@ -17,6 +17,13 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- `StreamSpec` validates portable schema, sort and stream policy settings;
+  `Storage` validates absolute roots and replication requirements. Both are
+  frozen models that reject unknown fields. Storage credentials are omitted
+  from serialization, representation, validation errors and equality. Requires
+  pydantic >= 2.11.
+  These models prepare the stream definition API for 0.27.0 (#205).
+
 - `inbox(..., on_receiver_error=None)` calls a synchronous callback once with
   the exception when its receiver stores a terminal failure. Recoverable
   disconnects keep reconnecting without notification. Callback exceptions are
