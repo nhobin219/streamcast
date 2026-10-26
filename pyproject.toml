@@ -83,6 +83,9 @@ dependencies = [
     # broker without it. 0.141.1 is the release the application was built and
     # tested against.
     "fastapi>=0.141.1",
+    # StreamSpec validates both field names and aliases and serializes aliases;
+    # those ConfigDict settings require 2.11, above FastAPI's own floor.
+    "pydantic>=2.11",
     # The ASGI server the broker is supported under, with one worker and its
     # lifespan on (`docs/API.md`). A dependency rather than the deployer's
     # choice because nothing else in the library binds a socket: without it
