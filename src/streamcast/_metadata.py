@@ -1,6 +1,6 @@
 """The logs a stream is made of, in order, and which one is being written.
 
-A stream is one litelink log until it is migrated. `Stream.migrate` seals the
+A stream is one litelink log until it is migrated. `StreamHandle.migrate` seals the
 live log for good, creates the next one with the new schema starting at
 exactly the offset the last one ended at, and records both here — so a stream
 becomes a SEQUENCE of logs whose offsets are one dense, monotonic space.
@@ -42,7 +42,7 @@ directory per log — `root/trades/trades/`, `root/trades/trades-v2/` — so a
 root serving many streams lists one entry per stream. When the logs publish
 to S3 the same shape sits under the prefix — `<published>/trades/
 trades.metadata/` beside `<published>/trades/trades/` — because
-`Stream.restore` and a remote reader have the bucket and not this disk.
+`StreamHandle.restore` and a remote reader have the bucket and not this disk.
 
 **A stream never changes layout.** One created before its own directory
 existed keeps the root itself as its home — `root/trades.metadata/` beside
@@ -84,7 +84,7 @@ from typing import TYPE_CHECKING, Final
 
 import litelink
 
-from streamcast import _log, _schema
+from streamcast import _log, _schema, _versions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -110,7 +110,7 @@ class Entry:
     end_offset: int | None
     """Exclusive, and None for the log being written — its end is still moving."""
     schema: dict[str, object]
-    """The APPLICATION's columns as JSON Schema, as `Stream.schema` publishes
+    """The APPLICATION's columns as JSON Schema, as `StreamHandle.schema` publishes
     them. Without the system columns, which are owned rather than declared."""
     system_schema: dict[str, object]
     """The SYSTEM columns this log has, as JSON Schema (`_log.SYSTEM`).
@@ -135,7 +135,7 @@ class Entry:
 
 @dataclass(frozen=True, slots=True)
 class Retirement:
-    """That the stream is finished (`Stream.retire`), and what reviving it needs.
+    """That the stream is finished (`StreamHandle.retire`), and what reviving it needs.
 
     Everything a successor log has to agree with, kept here because the
     retired log may be on a machine that no longer exists: where it ended,
@@ -190,12 +190,12 @@ class Metadata:
     manifest: str | None = None
     """Where the sealed logs' statistics are (#27), or None until there are any."""
     retirement: Retirement | None = None
-    """Set by `Stream.retire`: the live log is finished and takes no rows.
+    """Set by `StreamHandle.retire`: the live log is finished and takes no rows.
 
     Not `retired`, which names the logs a migration sealed."""
     retention: int | None = None
     """How long the stream keeps a row, in microseconds of `streamcast_ts`; None
-    keeps everything, which is the default (`Stream.retain`)."""
+    keeps everything, which is the default (`StreamHandle.retain`)."""
     pending: Pending | None = None
     """A retention pass whose files are not deleted yet (`_retention`)."""
 
@@ -502,7 +502,6 @@ def recovered(stream: str, log: LogHandle, s3_options: S3Options | None) -> Meta
     — and the copy says it is sealed. Opened again, the home names the live
     log itself.
     """
-    from streamcast import _versions  # noqa: PLC0415 — it imports this module
 
     adopted = (
         _versions.adopt(log.root, log.published, stream, s3_options)
@@ -639,7 +638,6 @@ def load(root: str | os.PathLike[str], stream: str) -> Metadata | None:
     at the next broker start would publish it, taking a retention floor back off
     the copy readers elsewhere resolve while the home still deletes below it.
     """
-    from streamcast import _versions  # noqa: PLC0415 — it imports this module
 
     return _versions.load(root, stream)[1]
 
@@ -681,10 +679,9 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
     out too late.
 
     `log` must be the stream's LIVE log. A handle to any other — a retired log
-    passed as `Stream(log=…)` — is refused, because serving it would append to
+    passed as `StreamHandle(log=…)` — is refused, because serving it would append to
     a log the metadata says is sealed.
     """
-    from streamcast import _versions  # noqa: PLC0415 — it imports this module
 
     root = log.root
     found = load(root, stream)
@@ -727,7 +724,7 @@ def ensure(stream: str, log: LogHandle, s3_options: S3Options | None) -> Metadat
             f"metadata in {Path(root) / _versions.directory(stream)} says the "
             f"live log is "
             f"{found.live_log.name!r}. A sealed log is never written to again; "
-            f"open the live one, or use Stream.open, which does."
+            f"open the live one, or use StreamHandle.open, which does."
         )
         raise ValueError(msg)
 
@@ -756,7 +753,7 @@ def check_types(history: tuple[Entry, ...], declared: dict[str, object]) -> None
     Removed columns are in the history as well, so re-adding a name takes the
     type it had. Adding and removing are otherwise free. There is no rename
     at this layer: a new name is a removal and an addition, and a read across
-    the seam returns both columns. See `Stream.migrate`.
+    the seam returns both columns. See `StreamHandle.migrate`.
     """
     wanted = _schema.to_arrow(declared)
     for entry in history:

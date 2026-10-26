@@ -12,13 +12,14 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import litelink
 import pytest
 
 import streamcast
-from streamcast import _metadata, _retention, _stream, _versions
+from streamcast import _maintain, _metadata, _retention, _stream, _versions
 from streamcast._maintain import Maintain, Supervisor
 
 SCHEMA: dict[str, Any] = {
@@ -40,7 +41,7 @@ GRACE = int(_retention.GRACE.total_seconds() * 1_000_000)
 
 
 async def write(
-    stream: streamcast.Stream, monkeypatch, at: int, values: list[int]
+    stream: streamcast.StreamHandle, monkeypatch, at: int, values: list[int]
 ) -> None:
     """Rows stamped at `at`, in a file of their own, published."""
     with monkeypatch.context() as patched:
@@ -72,19 +73,25 @@ def home(root) -> Any:
 
 async def offsets(root) -> list[int]:
     uri = (home(root) / "t.metadata" / "version-hint.text").resolve().as_uri()
-    async with await streamcast.Stream.snapshot(uri) as snap:
+    async with await streamcast.StreamHandle.snapshot(uri) as snap:
         read = await snap.scan(columns=["litelink_offset"]).read_all()
 
     return read.column("litelink_offset").to_pylist()
 
 
-async def one_log(tmp_path, monkeypatch) -> streamcast.Stream:
+async def one_log(tmp_path, monkeypatch) -> streamcast.StreamHandle:
     """Three rows two days old, three rows new; a window of a day."""
-    stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     await write(stream, monkeypatch, T0, [0, 1, 2])
     await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
     stream.ensure_metadata()
-    streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+    streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
     return stream
 
 
@@ -94,7 +101,13 @@ NOW = T0 + 2 * DAY + 60_000_000
 
 class TestTheSetting:
     async def test_it_is_off_unless_set(self, tmp_path, monkeypatch):
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             stream.ensure_metadata()
@@ -109,22 +122,28 @@ class TestTheSetting:
         assert await offsets(tmp_path) == [1, 2, 3]
 
     async def test_it_is_recorded_and_can_be_cleared(self, tmp_path):
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         await stream.aclose()
 
-        streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+        streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
         metadata = _metadata.load(home(tmp_path), "t")
         assert metadata is not None
         assert metadata.retention == DAY
 
-        streamcast.Stream.retain("t", root=tmp_path, max_age=None)
+        streamcast.StreamHandle.retain("t", root=tmp_path, max_age=None)
         cleared = _metadata.load(home(tmp_path), "t")
         assert cleared is not None
         assert cleared.retention is None
 
     def test_a_window_is_positive(self, tmp_path):
         with pytest.raises(ValueError, match="positive"):
-            streamcast.Stream.retain("t", root=tmp_path, max_age=timedelta(0))
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=timedelta(0))
 
 
 class TestTheLiveLog:
@@ -159,13 +178,19 @@ class TestTheLiveLog:
     ):
         """The floor is the first row newer than the cutoff, not the last
         older one: an old stamp after a new one is kept."""
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             await write(stream, monkeypatch, T0, [0])
             await write(stream, monkeypatch, T0 + 2 * DAY, [1])
             await write(stream, monkeypatch, T0, [2])  # the clock stepped back
             stream.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
             assert stream.log is not None
             begun = _retention.run(home(tmp_path), "t", stream.log, now=NOW)
             assert begun is not None
@@ -207,15 +232,21 @@ class TestRetiredLogs:
     async def test_one_wholly_older_is_dropped_then_deleted(
         self, tmp_path, monkeypatch
     ):
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         await write(stream, monkeypatch, T0, [0, 1, 2])
         stream.ensure_metadata()
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
         try:
             await write(migrated, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
             migrated.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
             assert migrated.log is not None
 
             begun = _retention.run(home(tmp_path), "t", migrated.log, now=NOW)
@@ -233,22 +264,25 @@ class TestRetiredLogs:
     async def test_one_the_floor_cuts_through_is_truncated(self, tmp_path, monkeypatch):
         """Whole files only: `retire` folds unfinished files into one, so the
         target is small enough that each sealed file is a finished one."""
-        stream = streamcast.Stream.open(
-            "t",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            config=litelink.LogConfig(target_compact_size=256),
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(),
+                    config=litelink.LogConfig(target_compact_size=256),
+                ),
+            ),
+            initialization="create_if_absent",
         )
         await write(stream, monkeypatch, T0, [0, 1, 2])
         await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
         stream.ensure_metadata()
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
         try:
             await write(migrated, monkeypatch, T0 + 2 * DAY, [6])
             migrated.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
             assert migrated.log is not None
 
             begun = _retention.run(home(tmp_path), "t", migrated.log, now=NOW)
@@ -299,7 +333,6 @@ class TestReaders:
 
 
 def test_one_stream_failing_does_not_stop_the_others(tmp_path, monkeypatch, capsys):
-    from streamcast import _maintain  # noqa: PLC0415
 
     ran: list[str] = []
 
@@ -329,11 +362,17 @@ class TestRaces:
     ):
         """Nothing newer than the cutoff, and a row lands between the query
         and the end it reads: that row must not be under the floor."""
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             stream.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
             log = stream.log
             assert log is not None
             now = T0 + 2 * DAY
@@ -380,7 +419,7 @@ class TestRaces:
     async def test_a_pass_never_writes_over_a_newer_setting(
         self, tmp_path, monkeypatch
     ):
-        """`Stream.retain` committing while a pass is in flight: the pass is
+        """`StreamHandle.retain` committing while a pass is in flight: the pass is
         refused, rather than putting the old window back."""
         stream = await one_log(tmp_path, monkeypatch)
         try:
@@ -388,7 +427,7 @@ class TestRaces:
             real = _retention._newest  # noqa: SLF001
 
             def widened(live, s3_options):  # noqa: ANN001, ANN202
-                streamcast.Stream.retain("t", root=tmp_path, max_age=None)
+                streamcast.StreamHandle.retain("t", root=tmp_path, max_age=None)
                 return real(live, s3_options)
 
             monkeypatch.setattr(_retention, "_newest", widened)
@@ -412,7 +451,9 @@ class TestRaces:
         try:
             before = _metadata.load(home(tmp_path), "t")
             assert before is not None
-            streamcast.Stream.retain("t", root=tmp_path, max_age=timedelta(days=30))
+            streamcast.StreamHandle.retain(
+                "t", root=tmp_path, max_age=timedelta(days=30)
+            )
             (home(tmp_path) / "t.metadata.json").write_text(before.to_json())
 
             assert stream.log is not None
@@ -431,22 +472,25 @@ class TestAFailedSecondHalf:
     ):
         """Between `finish`'s truncate and its commit — a conflict, a crash —
         the log is short; it must not read as published short meanwhile."""
-        stream = streamcast.Stream.open(
-            "t",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            config=litelink.LogConfig(target_compact_size=256),
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(),
+                    config=litelink.LogConfig(target_compact_size=256),
+                ),
+            ),
+            initialization="create_if_absent",
         )
         await write(stream, monkeypatch, T0, [0, 1, 2])
         await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
         stream.ensure_metadata()
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
         try:
             await write(migrated, monkeypatch, T0 + 2 * DAY, [6])
             migrated.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW)
+            streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
             assert migrated.log is not None
             _retention.run(home(tmp_path), "t", migrated.log, now=NOW)
 
@@ -473,19 +517,22 @@ class TestThePublishedCopy:
         prefix, so the floor reaches it before the home: if it cannot, the
         home does not record a grace those readers never had — not even once
         a later commit carries the same state there."""
-        stream = streamcast.Stream.open(
-            "t",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
             stream.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
+            streamcast.StreamHandle.retain(
+                "t", root=tmp_path, max_age=WINDOW, s3_options=s3
+            )
             assert stream.log is not None
 
             def unreachable(*_args, **_kwargs):  # noqa: ANN202
@@ -504,7 +551,9 @@ class TestThePublishedCopy:
             assert metadata.pending is None, "no floor the published copy lacks"
 
             # A commit that reaches both copies meanwhile, as an operator's is.
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
+            streamcast.StreamHandle.retain(
+                "t", root=tmp_path, max_age=WINDOW, s3_options=s3
+            )
 
             begun = _retention.run(
                 home(tmp_path), "t", stream.log, s3_options=s3, now=NOW + GRACE
@@ -530,19 +579,22 @@ class TestThePublishedCopy:
         was. The broker syncs the published copy at start; built on that, it
         would publish the stream without its floor while the home still
         deletes below it, with no grace for those readers."""
-        stream = streamcast.Stream.open(
-            "t",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             await write(stream, monkeypatch, T0, [0, 1, 2])
             await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
             stream.ensure_metadata()
-            streamcast.Stream.retain("t", root=tmp_path, max_age=WINDOW, s3_options=s3)
+            streamcast.StreamHandle.retain(
+                "t", root=tmp_path, max_age=WINDOW, s3_options=s3
+            )
             assert stream.log is not None
             before = _metadata.load(home(tmp_path), "t")
             assert before is not None
@@ -552,7 +604,9 @@ class TestThePublishedCopy:
             stream.ensure_metadata()  # what the broker does at the restart
 
             hint = _versions.hint_uri(home(tmp_path), "t", stream.log.published)
-            async with await streamcast.Stream.snapshot(hint, s3_options=s3) as snap:
+            async with await streamcast.StreamHandle.snapshot(
+                hint, s3_options=s3
+            ) as snap:
                 assert snap.metadata.pending is not None, "the floor is still there"
                 read = await snap.scan(columns=["litelink_offset"]).read_all()
 

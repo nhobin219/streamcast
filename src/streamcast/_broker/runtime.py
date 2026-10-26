@@ -15,16 +15,17 @@ from typing import Any
 from streamcast import _log, _metadata
 from streamcast._broker.model import NAME, BrokerConfig, Fault, declaration
 from streamcast._broker.registry import Lock, Registry, dumps
+from streamcast._broker.transitions import storage, with_replica
 from streamcast._children import _sidecars, _supervisors
 from streamcast._errors import Unavailable
-from streamcast._limits import _bound
 from streamcast._maintain import stop
-from streamcast._stream import Stream
+from streamcast._spec import Storage, Stream, StreamSpec
+from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
 
 
 class Generation:
-    def __init__(self, stream: Stream, number: int) -> None:
+    def __init__(self, stream: StreamHandle, number: int) -> None:
         self.stream = stream
         self.number = number
         self.accepting = False
@@ -60,7 +61,7 @@ class BrokerRuntime:
         self.changing_children = False
         self.closed = False
         self.controls: set[asyncio.Task] = set()
-        self.static: dict[str, Stream] = {}
+        self.static: dict[str, StreamHandle] = {}
         self.ready_directory = None
 
     @classmethod
@@ -73,13 +74,6 @@ class BrokerRuntime:
         self = cls(config, registry)
         try:
             self.static = {stream.name: stream for stream in streams}
-            _bound(
-                self.static,
-                config.max_backlog,
-                config.max_inbound,
-                config.max_in_flight,
-                config.max_message_bytes,
-            )
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.operations, self.collection = await thread(registry.load)
             if self.static.keys() & self.records.keys():
@@ -539,23 +533,17 @@ class BrokerRuntime:
 
         return metadata
 
-    def open_stream(self, record: dict) -> Stream:
+    def open_stream(self, record: dict) -> StreamHandle:
         profile = self.profile(record)
         definition = record["definition"]
         if record["stream_id"]:
             self.check_identity(record)
 
         self.claim_storage(record, opening=True)
-        opened = Stream.open(
-            record["name"],
-            root=profile.root,
+        spec = StreamSpec(
+            name=record["name"],
             schema=definition["schema"],
             sort_by=definition["sort_by"],
-            create=record["stream_id"] is None
-            and definition["initialization"] == "create_if_absent",
-            config=profile.config,
-            published=profile.published,
-            s3_options=profile.s3_options,
             **{
                 k: definition[k]
                 for k in (
@@ -565,6 +553,20 @@ class BrokerRuntime:
                     "group_commit",
                 )
             },
+            **definition["limits"],
+        )
+        storage = Storage(
+            root=profile.root,
+            published=profile.published,
+            replicate=profile.replicate,
+            config=profile.config,
+            s3_options=profile.s3_options,
+        )
+        opened = StreamHandle.open(
+            Stream(spec=spec, storage=storage),
+            initialization=definition["initialization"]
+            if record["stream_id"] is None
+            else "open_existing",
         )
         log = opened.log
         assert log is not None
@@ -577,7 +579,6 @@ class BrokerRuntime:
             if list(log.sort_by) != definition["sort_by"]:
                 raise ValueError("sort mismatch")
 
-            opened._bound(**definition["limits"])
             opened._subscriber_yield_every = self.config.subscriber_yield_every
             if log.config.wal_replication and not profile.replicate:
                 raise ValueError("replication required")
@@ -587,7 +588,7 @@ class BrokerRuntime:
             log.close()
             raise
 
-    async def verify_history(self, record: dict, stream: Stream) -> None:
+    async def verify_history(self, record: dict, stream: StreamHandle) -> None:
         guard = self.config.history_guards.get(record["name"])
         if guard is None:
             return
@@ -613,7 +614,7 @@ class BrokerRuntime:
         if expected != stream.end_offset or not known:
             raise ValueError("history witness missing")
 
-    def check_identity_for_guard(self, record: dict, stream: Stream):
+    def check_identity_for_guard(self, record: dict, stream: StreamHandle):
         log = stream.log
         assert log is not None
         metadata = _metadata.load(log.root, record["name"])
@@ -674,7 +675,7 @@ class BrokerRuntime:
         if not self.closing:
             await self.replace_children()
 
-    async def finalize(self, stream: Stream, record: dict) -> None:
+    async def finalize(self, stream: StreamHandle, record: dict) -> None:
         if stream.retirement is not None:
             return
 
@@ -689,12 +690,10 @@ class BrokerRuntime:
 
         # A replicated log's seal/publish may flush its WAL through its own
         # control socket. Spawn the offline sidecar on the lifespan thread.
-        from streamcast._broker.transitions import with_replica
 
         await with_replica(log, self.profile(record).s3_options, finish)
 
     async def storage_transition(self, record: dict, kind: str, target: dict) -> None:
-        from streamcast._broker.transitions import storage
 
         def reserve() -> None:
             self.claim_storage(record, opening=True)
@@ -746,26 +745,14 @@ class BrokerRuntime:
                 Path(self.ready_directory.name) / f".ready-{self.boot_id}-{index}"
             )
 
-        # Group replication separately by host profile, retaining the existing
-        # credentials grouping and per-log litestream lock within each group.
-        by_profile: dict[str | None, dict] = {}
+        # A handle carries its replication policy, whether static or managed.
+        # The child factory groups each set further by its credentials.
+        by_replication: dict[bool, dict] = {}
         for name, stream in routes.items():
-            profile_id = (
-                None
-                if name in self.static
-                else self.records[name]["definition"]["storage_profile"]
-            )
-            by_profile.setdefault(profile_id, {})[name] = stream
+            by_replication.setdefault(stream.replicate, {})[name] = stream
 
-        for profile_id, members in by_profile.items():
-            children.extend(
-                _sidecars(
-                    members,
-                    self.config.replicate
-                    if profile_id is None
-                    else self.config.profiles[profile_id].replicate,
-                )
-            )
+        for replicate, members in by_replication.items():
+            children.extend(_sidecars(members, replicate))
 
         self.children = children
         for child in children:

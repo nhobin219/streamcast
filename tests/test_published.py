@@ -7,11 +7,14 @@ of its but the extensions it provisions.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import duckdb
 import litelink
 import pyarrow as pa
 import pytest
 
+import streamcast
 from streamcast import _published
 
 SCHEMA = pa.schema([pa.field("i", pa.int64(), nullable=False)])
@@ -337,9 +340,8 @@ class TestTheReadCache:
     async def test_the_settings_reach_every_read_of_a_stream(
         self, tmp_path, serve, monkeypatch
     ):
-        """`Stream.snapshot`, `live` — its base and every rebase — pass the
+        """`StreamHandle.snapshot`, `live` — its base and every rebase — pass the
         caller's settings to the connection every published read goes through."""
-        import streamcast  # noqa: PLC0415
 
         asked: list[_published.ReadCache] = []
         real = _published.connection
@@ -354,7 +356,13 @@ class TestTheReadCache:
             "properties": {"i": {"type": "integer"}},
             "required": ["i"],
         }
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=schema)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=schema),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         await stream.send_many([{"i": i} for i in range(3)])
         assert stream.log is not None
         while stream.log.seal(flush=True) is not None:
@@ -366,7 +374,7 @@ class TestTheReadCache:
         try:
             async with serve(stream, maintain=False) as uri:
                 assert stream.metadata_uri is not None
-                async with await streamcast.Stream.snapshot(
+                async with await streamcast.StreamHandle.snapshot(
                     stream.metadata_uri,
                     memory_cache=False,
                     disk_cache=True,
@@ -375,7 +383,7 @@ class TestTheReadCache:
                 ):
                     pass
 
-                async with await streamcast.Stream.live(
+                async with await streamcast.StreamHandle.live(
                     uri,
                     memory_cache=False,
                     disk_cache=True,

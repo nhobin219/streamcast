@@ -1,4 +1,4 @@
-"""`Stream.live`: the published tables plus the broker's rows, kept current.
+"""`StreamHandle.live`: the published tables plus the broker's rows, kept current.
 
 Served directly rather than through the `serve` fixture where a test needs the
 server itself — to drop its connections and watch the view come back.
@@ -11,6 +11,7 @@ import contextlib
 import socket
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -32,7 +33,7 @@ def row(i: int) -> dict[str, object]:
     return {"event_ts": i, "price": 100.0 + i}
 
 
-def publish(stream: streamcast.Stream) -> None:
+def publish(stream: streamcast.StreamHandle) -> None:
     log = stream.log
     assert log is not None
     while log.seal(flush=True) is not None:
@@ -42,7 +43,7 @@ def publish(stream: streamcast.Stream) -> None:
 
 
 @contextlib.asynccontextmanager
-async def served(stream: streamcast.Stream) -> AsyncIterator[tuple[Any, str]]:
+async def served(stream: streamcast.StreamHandle) -> AsyncIterator[tuple[Any, str]]:
     server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
     try:
         port = server.sockets[0].getsockname()[1]
@@ -63,9 +64,15 @@ def held(live: _live.Live) -> int:
 
 
 @pytest.fixture
-async def stream(tmp_path) -> AsyncIterator[streamcast.Stream]:
+async def stream(tmp_path) -> AsyncIterator[streamcast.StreamHandle]:
     """Three rows published, two more only on the broker."""
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     await made.send_many([row(i) for i in range(3)])
     publish(made)
     await made.send_many([row(i) for i in range(3, 5)])
@@ -78,7 +85,7 @@ async def stream(tmp_path) -> AsyncIterator[streamcast.Stream]:
 class TestItIsCurrent:
     async def test_published_and_broker_rows_read_as_one_table(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 assert await offsets(live) == [1, 2, 3, 4, 5]
 
@@ -89,7 +96,7 @@ class TestItIsCurrent:
 
     async def test_sql_sees_what_scan_sees(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 result = await live.sql(
                     "SELECT count(*) AS n, max(price) AS top FROM log"
@@ -98,17 +105,17 @@ class TestItIsCurrent:
 
     async def test_broker_rows_carry_their_stamps(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 table = await live.scan(columns=[_log.COLUMN, _log.STAMP]).read_all()
 
         assert all(ts is not None for ts in table.column(_log.STAMP).to_pylist())
 
     async def test_a_stream_with_no_log_has_no_history_to_keep(self):
-        live_only = streamcast.Stream("trades", schema=SCHEMA)
+        live_only = streamcast.StreamHandle("trades", schema=SCHEMA)
         async with served(live_only) as (_server, broker):
             with pytest.raises(ValueError, match="no log"):
-                await streamcast.Stream.live(broker)
+                await streamcast.StreamHandle.live(broker)
 
 
 class TestItsDatabase:
@@ -123,7 +130,7 @@ class TestItsDatabase:
         reference.close()
         query = "SELECT current_setting('memory_limit') AS m FROM log LIMIT 1"
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
+            async with await streamcast.StreamHandle.live(
                 broker, rebase_every=3600, memory_limit="64MB"
             ) as live:
                 await live.wait_for(5)
@@ -135,7 +142,9 @@ class TestItsDatabase:
 class TestMemory:
     async def test_a_rebase_drops_what_is_now_published(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
                 await live.wait_for(5)
                 before = await offsets(live)
                 assert held(live) == 2  # offsets 4 and 5: not yet published
@@ -152,7 +161,9 @@ class TestMemory:
         Such a row then arrives late, and the base already has it.
         """
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
                 await live.wait_for(5)
                 publish(stream)
                 await live.rebase()
@@ -167,7 +178,9 @@ class TestMemory:
         """Not yet published, so only the receive guard stands between it and a
         duplicate in the tail."""
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
                 await live.wait_for(5)
                 await live._append(5, 1, row(4))  # noqa: SLF001 — a repeat
 
@@ -180,7 +193,7 @@ class TestAReaderUnderTheView:
 
     async def test_rows_received_while_it_is_read_are_not_in_it(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 reader = live.scan(columns=[_log.COLUMN])
                 await stream.send_many([row(i) for i in range(5, 8)])
@@ -195,7 +208,7 @@ class TestAReaderUnderTheView:
         """The base a rebase replaces stays open for the readers begun on it,
         and closes when the last of them finishes."""
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 old = live._base  # noqa: SLF001
                 async with live.scan(columns=[_log.COLUMN], batch_size=1) as reader:
@@ -212,7 +225,9 @@ class TestAReaderUnderTheView:
 class TestReconnecting:
     async def test_a_dropped_connection_comes_back_without_a_gap(self, stream):
         async with served(stream) as (server, broker):
-            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
                 await live.wait_for(5)
                 original = live._base  # noqa: SLF001
                 for connection in list(server.connections):
@@ -232,7 +247,7 @@ class TestReconnecting:
         self, stream, monkeypatch
     ):
         async with served(stream) as (server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
 
                 async def refused() -> None:
@@ -261,7 +276,7 @@ class TestWaitingForATime:
 
     async def test_it_returns_once_a_later_row_arrives(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
                 now = time.time_ns() // 1_000
                 waiting = asyncio.create_task(live.wait_for(ts=now))
@@ -277,21 +292,25 @@ class TestWaitingForATime:
     async def test_published_rows_past_it_need_no_new_row(self, tmp_path):
         # Everything published, nothing more sent: an idle stream asked about
         # a time its published rows have already passed.
-        idle = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        idle = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await idle.send_many([row(i) for i in range(3)])
         publish(idle)
         try:
             async with served(idle) as (_server, broker):
-                async with await streamcast.Stream.live(broker) as live:
+                async with await streamcast.StreamHandle.live(broker) as live:
                     await asyncio.wait_for(live.wait_for(ts=0), timeout=5)
         finally:
             await idle.aclose()
 
     async def test_one_point_or_the_other(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker) as live:
+            async with await streamcast.StreamHandle.live(broker) as live:
                 with pytest.raises(ValueError, match="not both"):
                     await live.wait_for(5, ts=1)
 
@@ -300,7 +319,7 @@ class TestWaitingForATime:
 
     async def test_a_log_without_stamps_has_no_time_to_wait_for(self, tmp_path):
         legacy = litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(SCHEMA))
-        unstamped = streamcast.Stream("trades", log=legacy)
+        unstamped = streamcast.StreamHandle("trades", log=legacy)
         await unstamped.send_many([row(i) for i in range(3)])
         while legacy.seal(flush=True) is not None:
             pass
@@ -308,7 +327,7 @@ class TestWaitingForATime:
         legacy.publish(flush=True)
         try:
             async with served(unstamped) as (_server, broker):
-                async with await streamcast.Stream.live(broker) as live:
+                async with await streamcast.StreamHandle.live(broker) as live:
                     with pytest.raises(ValueError, match="without streamcast_ts"):
                         await asyncio.wait_for(live.wait_for(ts=1), timeout=5)
         finally:
@@ -319,7 +338,7 @@ class TestNarrowing:
     async def test_where_narrows_the_view_on_both_sides(self, stream):
         """Published rows by `filters=`, broker rows by the subscription."""
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
+            async with await streamcast.StreamHandle.live(
                 broker, where={"price": [101.0, 103.0, 106.0]}, rebase_every=3600
             ) as live:
                 await live.wait_for(4)
@@ -333,10 +352,10 @@ class TestNarrowing:
     async def test_where_refuses_what_the_two_sides_read_differently(self, stream):
         async with served(stream) as (_server, broker):
             with pytest.raises(ValueError, match="non-null scalars"):
-                await streamcast.Stream.live(broker, where={"price": None})
+                await streamcast.StreamHandle.live(broker, where={"price": None})
 
             with pytest.raises(ValueError, match="does not declare"):
-                await streamcast.Stream.live(broker, where={"venue": "x"})
+                await streamcast.StreamHandle.live(broker, where={"venue": "x"})
 
     async def test_where_refuses_a_binary_column(self, tmp_path):
         schema = {
@@ -347,13 +366,17 @@ class TestNarrowing:
             },
             "required": SCHEMA["required"],
         }
-        binary = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=schema
+        binary = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=schema),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with served(binary) as (_server, broker):
                 with pytest.raises(ValueError, match="binary column"):
-                    await streamcast.Stream.live(broker, where={"trace": "00ff"})
+                    await streamcast.StreamHandle.live(broker, where={"trace": "00ff"})
         finally:
             await binary.aclose()
 
@@ -361,14 +384,16 @@ class TestNarrowing:
 class TestStartingPoint:
     async def test_from_an_offset(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(broker, start_offset=3) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, start_offset=3
+            ) as live:
                 await live.wait_for(5)
                 assert await offsets(live) == [3, 4, 5]
                 assert await offsets_where(live, start_offset=1) == [3, 4, 5]
 
     async def test_latest_is_from_now_and_stays_so_after_a_rebase(self, stream):
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
+            async with await streamcast.StreamHandle.live(
                 broker, start_offset=streamcast.LATEST, rebase_every=3600
             ) as live:
                 assert await offsets(live) == []
@@ -411,19 +436,27 @@ class TestAMigrationUnderAnOpenView:
         port = listening.getsockname()[1]
         broker = f"ws://127.0.0.1:{port}/trades"
         try:
-            old = streamcast.Stream.open(
-                "trades", create=True, root=tmp_path, schema=SCHEMA
+            old = streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
             )
             await old.send_many([row(i) for i in range(3)])
             first = await serve_streams(old, sock=listening.dup(), maintain=False)
-            async with await streamcast.Stream.live(broker, rebase_every=3600) as live:
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
                 await live.wait_for(3)
 
                 first.close()
                 await first.wait_closed()
                 await old.aclose()
 
-                new = streamcast.Stream.migrate("trades", root=tmp_path, schema=v2)
+                new = streamcast.StreamHandle.migrate(
+                    "trades", root=tmp_path, schema=v2
+                )
                 await new.send_many([row(i) | {"venue": "x"} for i in range(3, 5)])
                 second = await serve_streams(new, sock=listening.dup(), maintain=False)
                 try:
@@ -445,7 +478,7 @@ class TestTheTailBound:
         """Five unpublished rows, a bound of three: the view stops rather than
         holding whatever a stalled publisher leaves it."""
         async with served(stream) as (_server, broker):
-            async with await streamcast.Stream.live(
+            async with await streamcast.StreamHandle.live(
                 broker, rebase_every=3600, max_tail=3
             ) as live:
                 await stream.send_many([row(i) for i in range(5, 9)])

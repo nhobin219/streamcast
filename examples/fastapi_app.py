@@ -32,15 +32,15 @@ if TYPE_CHECKING:
 
 SCHEMA = json.loads((Path(__file__).parent / "trades" / "schema.json").read_text())
 
-# 1. The stream, created once at import. `new` opens the log at this root, or
+# 1. The stream, created once at import. `open` opens the log at this root, or
 #    opens what is already there — the same call `examples/broker.py` makes.
 #    Module level because both the lifespan and the mount need the same object.
-trades = streamcast.Stream.open(
-    "trades",
-    create=True,
-    root=Path("streamcast-data"),
-    schema=SCHEMA,
-    sort_by=("event_ts",),
+trades = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, sort_by=("event_ts",)),
+        storage=streamcast.Storage(root=Path(Path("streamcast-data")).absolute()),
+    ),
+    initialization="create_if_absent",
 )
 
 # 2. The transport. No host, no port: the ASGI server this runs under owns the
@@ -69,7 +69,7 @@ app = FastAPI(lifespan=lifespan, title="a service that also serves a stream")
 async def info() -> dict[str, Any]:
     """The facts, unprocessed. `BrokerConfig(stats=True)` serves this same object.
 
-    The offsets are on the `Stream`, not on the transport, so nothing here
+    The offsets are on the `StreamHandle`, not on the transport, so nothing here
     has to ask the websocket layer anything.
     """
     return asdict(trades.stats)

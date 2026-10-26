@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from pathlib import Path
 from typing import Any
 
 import litelink
@@ -18,6 +19,7 @@ import pytest
 
 import streamcast
 from streamcast import _metadata
+from streamcast._protocol import VERSION, parse_greeting
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -28,7 +30,13 @@ SCHEMA: dict[str, Any] = {
 
 @pytest.fixture
 async def stream(tmp_path):
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     try:
         yield made
     finally:
@@ -88,7 +96,7 @@ class TestOrder:
         timing — one loop turn — so asserted at every fan-out instead.
         """
         behind: list[tuple[int, int | None]] = []
-        real = streamcast.Stream._fan_out  # noqa: SLF001
+        real = streamcast.StreamHandle._fan_out  # noqa: SLF001
 
         def checking(self, row, frame):
             offset = json.loads(frame)[0]
@@ -98,8 +106,8 @@ class TestOrder:
 
             real(self, row, frame)
 
-        # On the class: `Stream` has `__slots__`, so not on the instance.
-        monkeypatch.setattr(streamcast.Stream, "_fan_out", checking)
+        # On the class: `StreamHandle` has `__slots__`, so not on the instance.
+        monkeypatch.setattr(streamcast.StreamHandle, "_fan_out", checking)
         await asyncio.gather(*(stream.send({"i": n}) for n in range(50)))
         await stream.send_many([{"i": n} for n in range(10)])
 
@@ -117,8 +125,12 @@ class TestFailure:
         assert stream.log.end_offset() == 6
 
     async def test_aclose_commits_what_is_queued(self, tmp_path):
-        made = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        made = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         pending = [asyncio.ensure_future(made.send({"i": n})) for n in range(50)]
         await asyncio.sleep(0)  # queued, not all committed
@@ -160,17 +172,24 @@ class TestOffTheLoop:
         send is promised a commit of its own, so they are twenty.
         """
         extra = {} if group_commit is None else {"group_commit": group_commit}
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA, **extra
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", **extra, schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         assert stream.log is not None
         held = threading.Event()
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
         commits: list[int] = []
         real = stream.log.extend
 
         def gated(rows):
             if not commits:
-                held.wait(5)
+                loop.call_soon_threadsafe(entered.set)
+                assert held.wait(20)
 
             commits.append(len(rows))
             return real(rows)
@@ -178,7 +197,7 @@ class TestOffTheLoop:
         monkeypatch.setattr(stream.log, "extend", gated)
         try:
             first = asyncio.ensure_future(stream.send({"i": 0}))
-            await asyncio.sleep(0.05)  # the writer has taken it and is held
+            await asyncio.wait_for(entered.wait(), 5)
             rest = [asyncio.ensure_future(stream.send({"i": n})) for n in range(1, 21)]
             await asyncio.sleep(0)
             held.set()
@@ -194,12 +213,14 @@ class TestTheGreeting:
     async def test_it_says_which_commit_guarantee_the_stream_makes(
         self, tmp_path, serve, group_commit
     ):
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            group_commit=group_commit,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades", schema=SCHEMA, group_commit=group_commit
+                ),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False) as uri:
@@ -214,7 +235,6 @@ class TestTheGreeting:
                 assert sub.info.group_commit is True
 
     def test_a_greeting_without_it_means_each_send_commits_alone(self):
-        from streamcast._protocol import VERSION, parse_greeting
 
         info = parse_greeting(
             f'{{"streamcast":{VERSION},"stream":"t","end_offset":1,'
@@ -223,7 +243,7 @@ class TestTheGreeting:
         assert info.group_commit is False
 
     async def test_a_stream_with_no_log_groups_nothing(self, serve):
-        live = streamcast.Stream("t", group_commit=True)
+        live = streamcast.StreamHandle("t", group_commit=True)
         async with serve(live) as uri, streamcast.connect(uri) as sub:
             assert sub.info.group_commit is False
 
@@ -234,12 +254,19 @@ class TestTheInboundCap:
     falls behind."""
 
     async def test_a_send_waits_at_the_cap(self, tmp_path, serve, monkeypatch):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, max_inbound=3),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         held, _commits = hold(stream, monkeypatch)
         try:
-            async with serve(stream, maintain=False, max_inbound=3):
+            async with serve(
+                stream,
+                maintain=False,
+            ):
                 sends = [asyncio.ensure_future(stream.send({"i": n})) for n in range(6)]
                 await asyncio.sleep(0.05)  # the first commit is held; the rest queue
                 assert stream._queued <= 3  # noqa: SLF001 — never past the cap
@@ -253,12 +280,19 @@ class TestTheInboundCap:
     async def test_a_remote_publisher_is_held_at_the_socket(
         self, tmp_path, serve, monkeypatch
     ):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, max_inbound=2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         held, _commits = hold(stream, monkeypatch)
         try:
-            async with serve(stream, maintain=False, max_inbound=2) as uri:
+            async with serve(
+                stream,
+                maintain=False,
+            ) as uri:
                 async with streamcast.publish(uri) as producer:
                     futures = [await producer.submit({"i": n}) for n in range(20)]
                     await asyncio.sleep(0.1)
@@ -270,11 +304,18 @@ class TestTheInboundCap:
             await stream.aclose()
 
     async def test_a_batch_larger_than_the_cap_gets_in_alone(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, max_inbound=2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
-            async with serve(stream, maintain=False, max_inbound=2):
+            async with serve(
+                stream,
+                maintain=False,
+            ):
                 offsets = await asyncio.wait_for(
                     stream.send_many([{"i": n} for n in range(5)]), timeout=5
                 )
@@ -283,8 +324,12 @@ class TestTheInboundCap:
             await stream.aclose()
 
     async def test_a_failed_commit_frees_its_room(self, tmp_path, serve, monkeypatch):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, max_inbound=1),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         assert stream.log is not None
         real = stream.log.extend
@@ -299,7 +344,10 @@ class TestTheInboundCap:
 
         monkeypatch.setattr(stream.log, "extend", flaky)
         try:
-            async with serve(stream, maintain=False, max_inbound=1):
+            async with serve(
+                stream,
+                maintain=False,
+            ):
                 with pytest.raises(OSError, match="disk full"):
                     await stream.send({"i": 0})
 
@@ -309,8 +357,10 @@ class TestTheInboundCap:
             await stream.aclose()
 
     async def test_a_stream_with_no_log_never_waits(self, serve):
-        live = streamcast.Stream("t")
-        async with serve(live, max_inbound=1):
+        live = streamcast.StreamHandle("t", max_inbound=1)
+        async with serve(
+            live,
+        ):
             for n in range(10):
                 assert await asyncio.wait_for(live.send({"i": n}), timeout=1) is None
 

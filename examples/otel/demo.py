@@ -48,12 +48,28 @@ if TYPE_CHECKING:
 
 def streams(
     root: Path,
-) -> tuple[streamcast.Stream, streamcast.Stream, streamcast.Stream]:
+) -> tuple[streamcast.StreamHandle, streamcast.StreamHandle, streamcast.StreamHandle]:
     return (
-        streamcast.Stream.open("logs", create=True, root=root, schema=logs.SCHEMA),
-        streamcast.Stream.open("spans", create=True, root=root, schema=spans.SCHEMA),
-        streamcast.Stream.open(
-            "metrics", create=True, root=root, schema=metrics.SCHEMA
+        streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="logs", schema=logs.SCHEMA),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
+        ),
+        streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="spans", schema=spans.SCHEMA),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
+        ),
+        streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="metrics", schema=metrics.SCHEMA),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
     )
 
@@ -61,13 +77,13 @@ def streams(
 # -- the one-shot demo ------------------------------------------------------------
 
 
-def query(stream: streamcast.Stream, sql: str) -> list[dict[str, Any]]:
+def query(stream: streamcast.StreamHandle, sql: str) -> list[dict[str, Any]]:
     assert stream.log is not None
     return stream.log.sql(sql).read_all().to_pylist()
 
 
 async def one_trace(
-    uri: str, stream: streamcast.Stream, trace: str
+    uri: str, stream: streamcast.StreamHandle, trace: str
 ) -> list[dict[str, Any]]:
     """Every row of one trace, replayed by its id — hex text, as a tracing tool
     would hand it to you. A filtered replay's window is an upper bound, not a

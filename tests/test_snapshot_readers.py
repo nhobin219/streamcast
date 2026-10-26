@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -35,12 +36,14 @@ def small_batches(monkeypatch):
 
 async def published(root, count: int = ROWS) -> str:
     """A stream of `count` rows, every one published, and its metadata URI."""
-    stream = streamcast.Stream.open(
-        "t",
-        create=True,
-        root=root,
-        schema=SCHEMA,
-        published=(root / "published").as_uri(),
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=Path(root).absolute(), published=(root / "published").as_uri()
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i, "side": i % 2} for i in range(count)])
@@ -65,7 +68,7 @@ class TestRows:
         """On the shared connection this stopped at the first batch boundary,
         50 rows of 600, and reported success."""
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             got = []
             async for offset, _ts, _row in snap.rows(1):
                 got.append(offset)
@@ -85,7 +88,7 @@ class TestAReader:
         self, tmp_path
     ):
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             batches = [batch async for batch in snap.scan(batch_size=50)]
 
         assert len(batches) == ROWS // 50
@@ -94,7 +97,7 @@ class TestAReader:
     async def test_read_all_is_the_batches_put_together(self, tmp_path):
         uri = await published(tmp_path)
         query = "SELECT side, count(*) AS n FROM log GROUP BY side ORDER BY side"
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             whole = await snap.sql(query).read_all()
             batches = [batch async for batch in snap.sql(query, batch_size=1)]
 
@@ -106,7 +109,7 @@ class TestAReader:
         query ended the first at its first batch, and `log`, a view on that
         connection, was the second's."""
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             evens = snap.sql(
                 "SELECT litelink_offset FROM log WHERE side = 0 ORDER BY 1",
                 batch_size=50,
@@ -131,7 +134,7 @@ class TestAReader:
 
     async def test_its_schema_is_there_once_the_query_has_run(self, tmp_path):
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             reader = snap.scan(columns=["litelink_offset", "i"])
             with pytest.raises(RuntimeError, match="not run yet"):
                 _ = reader.schema
@@ -149,7 +152,7 @@ class TestAReader:
                 await asyncio.sleep(0.005)
                 ticks += 1
 
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             ticker = asyncio.create_task(tick())
             started = time.perf_counter()
             # A cross join, to give DuckDB a few hundred milliseconds of work.
@@ -164,7 +167,7 @@ class TestAReader:
 class TestItsLifetime:
     async def test_leaving_it_early_releases_its_cursor(self, tmp_path):
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             async with snap.scan(batch_size=50) as reader:
                 await anext(reader)
 
@@ -175,7 +178,7 @@ class TestItsLifetime:
     async def test_a_batch_after_the_snapshot_closed_raises(self, tmp_path):
         """Never an early, quiet end: that is a short answer."""
         uri = await published(tmp_path)
-        snap = await streamcast.Stream.snapshot(uri)
+        snap = await streamcast.StreamHandle.snapshot(uri)
         reader = snap.scan(batch_size=50)
         await anext(reader)
         await snap.close()
@@ -186,7 +189,7 @@ class TestItsLifetime:
 
     async def test_one_made_after_the_snapshot_closed_raises(self, tmp_path):
         uri = await published(tmp_path)
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             pass
 
         with pytest.raises(RuntimeError, match="closed"):
@@ -194,7 +197,7 @@ class TestItsLifetime:
 
     async def test_rows_after_the_snapshot_closed_raises(self, tmp_path, small_batches):
         uri = await published(tmp_path)
-        snap = await streamcast.Stream.snapshot(uri)
+        snap = await streamcast.StreamHandle.snapshot(uri)
         rows = snap.rows(1)
         await anext(rows)
         await snap.close()
@@ -203,11 +206,13 @@ class TestItsLifetime:
 
 
 class TestTheOneShotForms:
-    """`Stream.sql` and `Stream.scan`: a reader with a snapshot of its own."""
+    """`StreamHandle.sql` and `StreamHandle.scan`: a reader with a snapshot of its own."""
 
     async def test_it_streams_and_closes_its_snapshot_once_done(self, tmp_path):
         uri = await published(tmp_path)
-        reader = streamcast.Stream.scan(uri, columns=["litelink_offset"], batch_size=50)
+        reader = streamcast.StreamHandle.scan(
+            uri, columns=["litelink_offset"], batch_size=50
+        )
         batches = [batch async for batch in reader]
 
         assert offsets(batches) == list(range(1, ROWS + 1))
@@ -216,28 +221,28 @@ class TestTheOneShotForms:
 
     async def test_read_all_is_the_whole_answer(self, tmp_path):
         uri = await published(tmp_path)
-        table = await streamcast.Stream.sql(
+        table = await streamcast.StreamHandle.sql(
             uri, "SELECT count(*) AS n FROM log WHERE side = 1"
         ).read_all()
         assert table.to_pylist() == [{"n": ROWS // 2}]
 
     async def test_a_refusal_is_raised_at_the_first_read(self, tmp_path):
         uri = await published(tmp_path)
-        reader = streamcast.Stream.scan(uri, as_of_offset=ROWS + 10)
+        reader = streamcast.StreamHandle.scan(uri, as_of_offset=ROWS + 10)
         with pytest.raises(streamcast.SnapshotUnavailable, match="broker="):
             await reader.read_all()
 
     async def test_one_closed_unread_opens_nothing(self, tmp_path, monkeypatch):
         uri = await published(tmp_path)
         opened = []
-        real = streamcast.Stream.snapshot
+        real = streamcast.StreamHandle.snapshot
 
         async def recording(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
             opened.append(args)
             return await real(*args, **kwargs)
 
-        monkeypatch.setattr(streamcast.Stream, "snapshot", recording)
-        reader = streamcast.Stream.sql(uri, "SELECT 1")
+        monkeypatch.setattr(streamcast.StreamHandle, "snapshot", recording)
+        reader = streamcast.StreamHandle.sql(uri, "SELECT 1")
         await reader.aclose()
         assert opened == []
 
@@ -251,9 +256,13 @@ class TestTheOneShotForms:
         uri = await published(tmp_path)
         query = "SELECT current_setting('memory_limit') AS m FROM log LIMIT 1"
 
-        table = await streamcast.Stream.sql(uri, query, memory_limit="64MB").read_all()
+        table = await streamcast.StreamHandle.sql(
+            uri, query, memory_limit="64MB"
+        ).read_all()
         assert table["m"].to_pylist() == [want]
-        async with await streamcast.Stream.snapshot(uri, memory_limit="64MB") as snap:
+        async with await streamcast.StreamHandle.snapshot(
+            uri, memory_limit="64MB"
+        ) as snap:
             table = await snap.sql(query).read_all()
 
         assert table["m"].to_pylist() == [want]

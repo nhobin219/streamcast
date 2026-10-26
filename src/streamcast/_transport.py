@@ -37,7 +37,7 @@ class Peer(Protocol):
         `websockets`' own signature, so its `ServerConnection` is a `Peer` as
         it stands: a `str` is a text frame, and `bytes` are one too when
         `text=True` — sent as they are, because they are already UTF-8 JSON.
-        That is how a data frame goes out: `Stream.send` encodes it ONCE as
+        That is how a data frame goes out: `StreamHandle.send` encodes it ONCE as
         bytes, every subscriber shares them, and none re-encodes a `str`.
 
         **Text, because the payload is JSON.** A text frame is what a browser's
@@ -57,7 +57,7 @@ class Peer(Protocol):
         """End the connection, carrying a refusal if there is one.
 
         Must be idempotent: `Subscriber.pump` closes on overflow and
-        `Stream.aclose` closes every subscriber, and a shutdown that races a
+        `StreamHandle.aclose` closes every subscriber, and a shutdown that races a
         drop reaches both.
         """
         ...

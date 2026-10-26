@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,7 +37,13 @@ SCHEMA: dict[str, Any] = {
 
 @pytest.fixture
 async def stream(tmp_path):
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     try:
         yield made
     finally:

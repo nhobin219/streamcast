@@ -5,16 +5,23 @@ litelink log before broadcasting. Subscribers receive `[offset, ts, row]` in
 order and resume by offset. A stream without a log uses null offsets and
 cannot replay. The log is also an Iceberg table, readable without the broker.
 
-Declare columns in JSON Schema; `Stream.open` creates or reopens the log.
+`Stream` composes a portable `StreamSpec` and host `Storage`. Declare columns
+in JSON Schema; `StreamHandle.open` creates or reopens the log and retains the
+original definition as `handle.definition`. Direct construction takes a lent
+log or builds a live-only handle, with `definition=None`.
 The broker (`create_app`) runs the maintainer and, with
-`BrokerConfig(replicate=True)`, the WAL sidecar.
-`Stream.send` publishes locally; `publish` does it over a socket. `connect`
+`StreamHandle(..., replicate=True)`, the WAL sidecar.
+`StreamHandle.send` publishes locally; `publish` does it over a socket. `connect`
 returns a read-only subscription. Clients pass transport keywords through to
 `websockets`, and the broker is served by uvicorn under one worker; both run
 compression off, because encoding is shared while permessage-deflate
 compresses once per connection.
 
-    stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
+    definition = streamcast.Stream(
+        spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+        storage=streamcast.Storage(root=Path("data").absolute()),
+    )
+    stream = streamcast.StreamHandle.open(definition, initialization="create_if_absent")
     app = streamcast.create_app(streams=stream)
     async with app.router.lifespan_context(app):
         async for frame in upstream:
@@ -33,8 +40,8 @@ in a database, `inbox` and `outbox` commit receipt, state changes and outgoing
 rows in the caller's transaction. Output deduplication needs a stream opened
 with `exactly_once=True` and retains the buffer-loss limits in `docs/SPEC.md` §6b.
 
-`Stream.snapshot` reads a fixed published point, optionally completed from
-the broker; `Stream.live` keeps a view current. `docs/API.md` is the call
+`StreamHandle.snapshot` reads a fixed published point, optionally completed from
+the broker; `StreamHandle.live` keeps a view current. `docs/API.md` is the call
 reference; `docs/SPEC.md` records the wire and ordering invariants.
 """
 
@@ -77,6 +84,7 @@ from streamcast._limits import (
     INBOX_RESUME_AT,
     MAX_BACKLOG,
     MAX_PUBLISHERS,
+    MAX_REPLAY,
     PAGE_BYTES,
     PAGE_ROWS,
     SEND_BATCH,
@@ -88,10 +96,10 @@ from streamcast._protocol import EARLIEST, Greeting, PublisherMark
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
-from streamcast._spec import Storage, StreamSpec
+from streamcast._spec import Storage, Stream, StreamSpec
 from streamcast._stats import Stats
 from streamcast._store import PostgresStore, SqliteStore, Store, Transaction, store_ddl
-from streamcast._stream import MAX_REPLAY, Stream
+from streamcast._stream import StreamHandle
 
 try:
     __version__ = version("streamcast")
@@ -139,6 +147,7 @@ __all__ = [
     "Store",
     "StoreBehindBroker",
     "Stream",
+    "StreamHandle",
     "StreamMismatch",
     "StreamNotFound",
     "StreamRetired",

@@ -5,10 +5,10 @@ this says what you can call.
 
 ```python
 import streamcast
-from streamcast import Cursor, EARLIEST, Maintain, Stream, Subscription, to_arrow
+from streamcast import Cursor, EARLIEST, Maintain, StreamHandle, Subscription, to_arrow
 ```
 
-Declare columns in JSON Schema and open a `Stream`; the canonical FastAPI
+Declare columns in JSON Schema and open a `StreamHandle`; the canonical FastAPI
 application owns serving, maintenance and shutdown. Clients use `connect` and
 `publish`, with `websockets` transport keywords. Server transport settings belong
 to the ASGI host, rather than the stream runtime.
@@ -20,7 +20,7 @@ the row. `msg` is a `dict` over your declared columns **and nothing else** — t
 and the stamp are framing, not data, and never appear inside it.
 
 **A subscription is read-only.** It has no `send` — rather than a `send` that raises —
-because publishing uses `Stream.send` locally or `publish` remotely. Nothing inherits a
+because publishing uses `StreamHandle.send` locally or `publish` remotely. Nothing inherits a
 method it has to refuse.
 
 **`compression` is `None` here and `"deflate"` there.** permessage-deflate is per
@@ -45,47 +45,55 @@ subscribers. There is no middle setting: without context takeover — the varian
 would let one compressed frame be shared across connections — the same frames compress
 1.1×.
 
-## `Stream`
+## `StreamHandle`
 
 ```python
-streamcast.Stream(name="", *, log=None, owns_log=False, schema=None,
-                  max_replay=100_000, group_commit=True, exactly_once=False,
-                  max_publishers=4096)
+streamcast.Stream(spec=streamcast.StreamSpec(...), storage=streamcast.Storage(...))
+streamcast.StreamHandle(name="", *, log=None, owns_log=False, schema=None,
+    max_replay=100_000, floor=None, retired=(), s3_options=None,
+    replay_published=False, group_commit=True, retirement=None,
+    exactly_once=False, max_publishers=4096, max_backlog=8192,
+    max_inbound=65_536, max_in_flight=64, max_message_bytes=None, replicate=False)
+streamcast.StreamHandle.open(stream, *, initialization="open_existing") -> StreamHandle
 
-streamcast.Stream.open(name="", *, root, schema, create=False, restore=False,
-                      sort_by=None, config=None, published=None, s3_options=None,
-                      replay_published=False, group_commit=True,
-                      max_replay=100_000, exactly_once=False)
-
-streamcast.Stream.migrate(name="", *, root, schema, ...)  # a new log, a new schema
-streamcast.Stream.restore(name="", *, root, published,    # on a box without the log
+streamcast.StreamHandle.migrate(name="", *, root, schema, ...)  # a new log, a new schema
+streamcast.StreamHandle.restore(name="", *, root, published,    # on a box without the log
                           s3_options=None, schema=None, sort_by=None, config=None,
                           replica_reserve=None, published_reserve=None,
                           revive=False, ...)
-streamcast.Stream.retire(name="", *, root, s3_options=None)  # for good; returns the
+streamcast.StreamHandle.retire(name="", *, root, s3_options=None)  # for good; returns the
                                                             # record: .at, .end_offset
-streamcast.Stream.retain(name="", *, root, max_age, s3_options=None)  # timedelta or None
-streamcast.Stream.ingest(name="", source, *, root, s3_options=None,  # Arrow, in bulk;
+streamcast.StreamHandle.retain(name="", *, root, max_age, s3_options=None)  # timedelta or None
+streamcast.StreamHandle.ingest(name="", source, *, root, s3_options=None,  # Arrow, in bulk;
                          publish=True, flush=None)                    # -> (start, end)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
 home — routing and the greeting both read it, so they cannot disagree.
 
-**`Stream.open` opens an existing log and checks its declaration.** With
-`create=True` it creates only when neither disk nor published prefix holds the stream,
-passing `sort_by`, `config`, `published` and `s3_options` to litelink on creation.
-A missing local log with a published replica raises `FileExistsError` unless
-`restore=True` is passed; it then restores before opening. An absent stream raises
-`FileNotFoundError` unless `create=True`. An unreachable store propagates its error.
-`Stream.restore` on an empty prefix raises `FileNotFoundError`.
-Stop the old writer before restoring on another machine.
- An existing log keeps its stored configuration
-and published location. The plain
-initialiser takes a handle you already opened and reads its frontier. `s3_options` is
-passed to litelink on creation and reopening, and retained for metadata uploads and child
-processes. Credentials are not persisted: pass the options again on each open, or use the
-environment.
+**`Stream` is a frozen definition** composed of `spec: StreamSpec` and
+`storage: Storage`. Both reject unknown fields. `StreamSpec` validates the JSON
+Schema whitelist, sort columns and stream policy. `Storage.root` must be absolute
+after expanding `~`; `s3_options` is excluded from serialization, repr and equality.
+
+**`StreamHandle.open` owns the log it opens.** `initialization="open_existing"`
+is the default and refuses an absent local log. `"create_if_absent"` creates only
+when neither disk nor the published prefix holds the stream. `"restore_published"`
+restores a published replica when the local log is absent; it never creates an
+empty stream. All three preserve an existing log, check its declaration and
+forward every policy and storage field. A failed store lookup propagates.
+Restoring uses litelink's default reserve settings; `StreamHandle.restore` keeps
+its explicit reserve overrides. Stop the old writer before restoring elsewhere.
+A factory failure closes the acquired log.
+
+`handle.definition` is the original `Stream`; direct construction has no definition
+and returns `None`. The constructor opens no storage. It takes a lent log or builds
+a live-only handle and validates its limits by the `StreamSpec` rules. Every limit
+is a strict positive integer, except `max_replay` permits zero and `None`, and
+`max_message_bytes` permits `None`. `handle.replicate` holds its replication policy.
+An existing log keeps its stored configuration and published location. Credentials
+are passed on creation and reopening and retained for metadata uploads and child
+processes. Credentials are not persisted; supply them on each open or use the environment.
 
 **`log` is what makes an offset a resume cursor**, and it is optional — a
 [tickerplant](https://code.kx.com/q/architecture/)'s log is optional too, and some kdb
@@ -98,7 +106,7 @@ it, every row is durable *before* any subscriber sees it.
 stream with a log would:
 
 ```python
-stream = streamcast.Stream("trades", schema=SCHEMA)   # no log, still checked
+stream = streamcast.StreamHandle("trades", schema=SCHEMA)   # no log, still checked
 ```
 
 Every row goes through litelink's own `validate_row` — the same checks `append` makes — so a
@@ -114,15 +122,22 @@ consequence: JSON has no NaN or infinity, so a non-finite float sent on such a s
 subscribers as `null`. Declare a schema to have it refused instead.
 
 ```python
-stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
-                               sort_by=("event_ts",))
+from pathlib import Path
+
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name='trades', schema=SCHEMA, sort_by=('event_ts',)),
+        storage=streamcast.Storage(root=Path('data').absolute()),
+    ),
+    initialization="create_if_absent",
+)
 ```
 
-**Any shape of log works** — the schema is yours, and `Stream` reads its column order once
+**Any shape of log works** — the schema is yours, and `StreamHandle` reads its column order once
 at construction to fix the key order on the wire.
 
-**Who closes it depends on who opened it.** `aclose` closes a log the `Stream` owns —
-which `Stream.open` sets — and never one passed to the initialiser, since that one stays
+**Who closes it depends on who opened it.** `aclose` closes a log the `StreamHandle` owns —
+which `StreamHandle.open` sets — and never one passed to the initialiser, since that one stays
 yours, for a process that also reads or writes it through litelink. Pass `owns_log=True`
 alongside `log=` to hand over the lifetime of a handle you opened. An existing log is checked against
 a declared `schema=` rather than adopted, because a declaration that disagreed with the
@@ -133,7 +148,7 @@ wrote down.
 so nothing is ever refused as `too_old`. With `replay_published=True` that makes the
 server a complete gateway to the log — any language can replay the retained history over
 a plain WebSocket, with no litelink and no credentials of its own. A long replay
-accumulates live messages behind it; size `create_app`'s `max_backlog` against that backlog.
+accumulates live messages behind it; size the handle's `max_backlog` against that backlog.
 The defaults are exported as `streamcast.MAX_BACKLOG` and `streamcast.MAX_REPLAY`, for a
 caller that wants to scale from them rather than restate them.
 
@@ -208,12 +223,11 @@ stream owns. A handle passed with `owns_log=False` stays open.
 ```python
 streamcast.create_app(config=None, *, streams=()) -> fastapi.FastAPI
 streamcast.BrokerConfig(
-    maintain=True, replicate=False, max_backlog=8192, max_inbound=65_536,
-    max_in_flight=64, max_message_bytes=None, transport_max_bytes=1<<20,
+    maintain=True, transport_max_bytes=1<<20,
     subscriber_yield_every=64, stats=True, ...)
 ```
 
-This is the sole broker application and runtime. `streams` is a static `Stream`
+This is the sole broker application and runtime. `streams` is a static `StreamHandle`
 or iterable; a registry configuration adds dynamic management to the same
 runtime. Construction opens no files or sockets. Static streams cannot be
 changed through HTTP, and their names must not overlap registered definitions.
@@ -266,8 +280,9 @@ outbox would drop from the caller's database.
 | `max_message_bytes` | `transport_max_bytes` | each incoming publisher frame |
 | `subscriber_yield_every` | 64 | positive number of outbound data frames between scheduling checkpoints |
 
-The four per-stream bounds take a positive integer or an exact name-to-integer
-map for static streams. Managed definitions carry their own bounds below.
+The four per-stream bounds are handle settings, also present in `StreamSpec`.
+Each takes a strict positive integer; `max_message_bytes=None` uses the transport
+ceiling. `subscriber_yield_every` remains a broker setting.
 `transport_max_bytes` is a positive application-wide ceiling; per-stream frame
 limits must fit beneath it. A batch larger than `max_inbound` enters alone.
 
@@ -328,7 +343,7 @@ Which layout a stream has is read from what's on disk, or from where `restore` f
 metadata, and both layouts are served alike.
 
 To move a stream to the new layout, create a new stream and load the old one's rows into it
-with [`Stream.ingest`](#loading-rows-in-bulk-streamingest).
+with [`StreamHandle.ingest`](#loading-rows-in-bulk-streamingest).
 
 ### The metadata file
 
@@ -358,7 +373,7 @@ caches each file per process, per set of credentials, up to 16 MiB in all.
 **A plain copy of the current version** is written beside the versions after each commit,
 `<stream>.metadata.json` and `<stream>.manifest.parquet`, for clients from before the hint,
 which open the greeting's `metadata`. A stream from before 0.18 has only those, read until
-its first version is written. `Stream.snapshot` and `connect(metadata=)` take a
+its first version is written. `StreamHandle.snapshot` and `connect(metadata=)` take a
 `<stream>.metadata.json` URI too, and read it through the hint beside it.
 
 Clients accept protocol 4 or 5; the server sends 4. `info.metadata` is the best URI
@@ -366,10 +381,10 @@ in the greeting: the hint when one is present. The rolling-upgrade pairs exercis
 by CI are listed in [`tests/test_interop.py`](../tests/test_interop.py); the 0.20.1
 [CHANGELOG](../CHANGELOG.md) entry describes the upgrade order around 0.20.0.
 
-The upload uses the `s3_options=` the stream was created with (`Stream.open`, `Stream.migrate`,
-`Stream.restore`, or `Stream(log=…, s3_options=…)`), and otherwise the environment. A stream from
+The upload uses the `s3_options=` the stream was created with (`StreamHandle.open`, `StreamHandle.migrate`,
+`StreamHandle.restore`, or `StreamHandle(log=…, s3_options=…)`), and otherwise the environment. A stream from
 an earlier release gets its file on its first `create_app`, and a version-1 file is rewritten
-as version 2. A `Stream(log=…)` handed a log the
+as version 2. A `StreamHandle(log=…)` handed a log the
 file says is sealed is refused.
 
 ### `maintain`
@@ -471,7 +486,7 @@ swept them completely, and litelink refuses them a writer.
 
 ### `replicate`
 
-**`replicate=True` runs litestream** for any stream whose log has `wal_replication` on,
+**`replicate=True` on a handle runs litestream** for any stream whose log has `wal_replication` on,
 which is what makes that log survive losing its machine. `create_app` is the one thing you
 start; there is no second process to remember.
 
@@ -481,13 +496,14 @@ log = litelink.new(root, "trades", schema=SCHEMA,
                    published="s3://bucket/prefix")
 
 app = streamcast.create_app(
-    streams=streamcast.Stream("trades", log=log),
-    config=streamcast.BrokerConfig(replicate=True),
+    streams=streamcast.StreamHandle("trades", log=log, replicate=True),
+    config=streamcast.BrokerConfig(),
 )
 # Serve app with one ASGI worker and lifespan enabled.
 ```
 
-**It is off by default** — opt in with `replicate=True`. `wal_replication` is opt-in on the
+**It is off by default** — opt in with `Storage(replicate=True)` for a factory definition,
+or `StreamHandle(..., replicate=True)` for an already-open log. `wal_replication` is opt-in on the
 log too, so for almost every deployment there is nothing to replicate anyway. A log that
 has `wal_replication` on, served without `replicate=True`, gets a `UserWarning` naming it
 at every start — one line — because silence would leave you believing the log is
@@ -520,7 +536,7 @@ platform litelink ships no binary for.
 **Both subprocesses get the stream's `S3Options`, through their environment.** litelink
 never persists credentials, so a child that opens a log by name has no other way to learn
 them. `create_app` starts each child with the variables below set from the `S3Options` the
-`Stream` was given (`Stream.open(..., create=True, s3_options=)`), laid over the server's own
+`StreamHandle` was given (`StreamHandle.open(Stream(..., storage=Storage(s3_options=…)))`), laid over the server's own
 environment. Explicit keys also remove an inherited `AWS_SESSION_TOKEN`, which belongs to
 other keys. A field you leave unset is left to that environment, so a profile, instance
 metadata or SSO all work untouched, and a stream with no `S3Options` resolves in its
@@ -543,7 +559,7 @@ this needs setting.
 The server never calls `recv` on a subscription. A client that sends anyway fills its own
 receive buffer, stops being able to send, and is closed by the keepalive.
 
-## `Stream.stats`
+## `StreamHandle.stats`
 
 ```python
 stream.stats        # -> Stats
@@ -557,7 +573,7 @@ fail. Poll it as often as you like.
 | `name`, `durable` | which stream, and whether it has a log |
 | `end_offset` | the offset the next message gets, or None with no log |
 | `subscribers` | attached right now |
-| `started_ts`, `uptime_s` | when this `Stream` was constructed, and how long ago |
+| `started_ts`, `uptime_s` | when this `StreamHandle` was constructed, and how long ago |
 | `last_send_ts`, `last_send_age_s` | the most recent `send`, or **None** |
 
 **Ages come from `time.monotonic`; timestamps are wall clock.** An age is therefore
@@ -579,14 +595,14 @@ someone while looking authoritative. Classification belongs to the application.
 **No `rows_1m`.** Read `end_offset` twice and you have the rate over the window you
 actually care about. A window chosen here is the same mistake as a threshold.
 
-**No `maintain` / `replicate`.** A `Stream` does not own its children — `create_app` does, and
+**No `maintain`.** A `StreamHandle` carries its replication setting but does not own its children — `create_app` does, and
 a mounted app's object does — so it would be answering for something it cannot see.
 
 ### Statistics
 
 `BrokerConfig(stats=True)` serves `/stats` on the same listener; a string
 selects another absolute path and False disables it. `stats.read` grants filter
-individual streams. `served_at` permits clock-skew measurement. `Stream.stats`
+individual streams. `served_at` permits clock-skew measurement. `StreamHandle.stats`
 is the same per-stream object for application-specific health decisions.
 
 ## Dynamic management
@@ -596,6 +612,8 @@ Use root exports `BrokerConfig`, `StorageProfile`, `Authorization`,
 once, explicitly, then start the application; startup never creates one:
 
 ```python
+from pathlib import Path
+
 config = streamcast.BrokerConfig(
     broker_id="primary", registry=Path("state/broker.db"),
     profiles={"local": streamcast.StorageProfile("1", Path("data"))},
@@ -868,7 +886,7 @@ protocols layered over WebSocket do define one (WAMP's `PUBLISH`, MQTT's), but s
 implements none of them: this is shaped like `connect` — awaitable, async context manager,
 keywords passed through — so it reads the same way, and the request is a query parameter
 rather than a message type, exactly as `?offset=` is for a subscribe. The server appends
-with the same `Stream.send` / `send_many` a local publisher calls, so `send` returns once the row is
+with the same `StreamHandle.send` / `send_many` a local publisher calls, so `send` returns once the row is
 durable and `send_many` is the same throughput lever it is locally.
 
 ```python
@@ -901,7 +919,7 @@ queues each as it reads it, so rows that arrive while a commit is in flight shar
 future that resolves to the offset once the row is durable or raises what `send` would.
 Acknowledgements come back in the order rows were sent, and `close()` waits for the ones
 still owed. The server bounds what it will owe one connection with
-`BrokerConfig(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
+`StreamHandle(max_in_flight=)`, 64 by default; a client allowed more is held at the socket.
 
 ```python
 async with streamcast.publish("ws://localhost:8765/trades") as producer:
@@ -918,7 +936,15 @@ once** — see below and [`SPEC.md`](SPEC.md) §6b.
 ### Exactly-once: `publisher=`
 
 ```python
-stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA, exactly_once=True)
+from pathlib import Path
+
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name='orders', schema=SCHEMA, exactly_once=True),
+        storage=streamcast.Storage(root=Path('data').absolute()),
+    ),
+    initialization="create_if_absent",
+)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
     out.info.publisher -> PublisherMark(id, last_seq, last_offset)   # where the broker has us
@@ -944,7 +970,7 @@ the rows in a table of its own in the log's buffer, and judges every frame again
 one. After a reconnect, drop what you hold at or below `info.publisher.last_seq` (it
 landed) and send from the next.
 
-**Best effort across a lost buffer.** The marks survive a restart and `Stream.migrate`,
+**Best effort across a lost buffer.** The marks survive a restart and `StreamHandle.migrate`,
 and come back with a WAL-replica restore (minus the replication lag, rows and marks
 together). A restore from the published table alone, or a revive, starts with none. The broker caches `MAX_PUBLISHERS` (4,096)
 publishers per stream and `DEDUPE_WINDOW` (64) committed ranges for each; the table holds
@@ -1228,11 +1254,11 @@ send is its own), `schema` (the stream's columns as JSON Schema), `metadata`,
 
 **`info.metadata` is enough to read the stream's history yourself.** It is the URI of the
 hint naming the stream's current metadata, which is what
-[`Stream.snapshot`](#reading-a-streams-history) takes, and `stream_id` is the id that
+[`StreamHandle.snapshot`](#reading-a-streams-history) takes, and `stream_id` is the id that
 metadata records:
 
 ```python
-table = await streamcast.Stream.scan(
+table = await streamcast.StreamHandle.scan(
     sub.info.metadata
 ).read_all()
 ```
@@ -1374,7 +1400,7 @@ async with streamcast.connect(uri, cursor=".trades.offset", catch_up=True) as st
 The consumer sees one stream. Underneath, rows below the server's window come from object
 storage and the rest from the socket.
 
-It is built on [`Stream.snapshot`](#reading-a-streams-history): each round takes a
+It is built on [`StreamHandle.snapshot`](#reading-a-streams-history): each round takes a
 snapshot of everything published above the consumer's offset, streams its rows, and
 connects at the offset the snapshot ended at.
 
@@ -1501,7 +1527,7 @@ StreamcastError
 ├── Rejected           a published row the schema refuses; nothing committed
 ├── CommitFailed       the broker could not commit a published frame; send it again
 ├── StreamRetired      the stream is retired and takes no rows; `.at`, `.end_offset`
-├── IngestFailed       `Stream.ingest` stopped partway; `.rows_loaded` is where to resume
+├── IngestFailed       `StreamHandle.ingest` stopped partway; `.rows_loaded` is where to resume
 ├── Superseded         another connection claimed this publisher id
 ├── SequenceGap        publisher seq is above the next expected seq
 ├── ExactlyOnceUnavailable the stream or broker cannot dedupe publishers
@@ -1540,6 +1566,8 @@ You declare the columns, in **JSON Schema**, because the wire is JSON and this i
 library about JSON websockets:
 
 ```python
+from pathlib import Path
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -1552,10 +1580,16 @@ SCHEMA = {
     "required": ["event_ts", "price", "amount", "side"],
 }
 
-stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA, sort_by=("event_ts",))
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name='trades', schema=SCHEMA, sort_by=('event_ts',)),
+        storage=streamcast.Storage(root=Path('data').absolute()),
+    ),
+    initialization="create_if_absent",
+)
 ```
 
-`Stream` creates the log at `root/name` if it is not there and opens it if it is — the
+`StreamHandle` creates the log at `root/name` if it is not there and opens it if it is — the
 create-or-open choice every server makes — and **closes it on `aclose`, because it opened
 it.** A log you open yourself and pass as `log=` stays yours, closed by you. Passing both
 is refused.
@@ -1687,13 +1721,13 @@ column actually is.
 msgspec carry int64 exactly; a JavaScript subscriber silently rounds. A nanosecond
 `event_ts` is past it — microseconds, which the examples use, are not.
 
-### Changing the schema: `Stream.migrate`
+### Changing the schema: `StreamHandle.migrate`
 
 A log's shape is fixed when it is created, so a new schema means a new log. With the
 server stopped:
 
 ```python
-stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
+stream = streamcast.StreamHandle.migrate("trades", root="data", schema=SCHEMA_V2)
 app = streamcast.create_app(streams=stream)
 async with app.router.lifespan_context(app):
     ...
@@ -1704,7 +1738,7 @@ from then on. Then `trades-v2` is created with the new schema, starting at exact
 offset the old log ended at. A new version of the metadata in
 `root/trades/trades.metadata/` (and one beside the published tables, when they are on
 S3) records the sequence. A migration that dies partway finishes on the rerun. Migration
-introduces no gap at the seam. `Stream.open` and `Stream.restore` open whichever log the
+introduces no gap at the seam. `StreamHandle.open` and `StreamHandle.restore` open whichever log the
 metadata names as current.
 
 It is **idempotent**: a stream whose current log already has that schema and every
@@ -1720,18 +1754,18 @@ it had. A stream's logs are read together with `UNION ALL BY NAME`, where a chan
 coerces silently (`int64` beside `string` becomes a string column) rather than failing.
 Widening is refused too. A rename removes one column and adds another; historical rows
 are not backfilled. The server replays only the current log. `catch_up=True` reads older
-logs through `Stream.snapshot` when a consumer resumes below the migration seam.
+logs through `StreamHandle.snapshot` when a consumer resumes below the migration seam.
 
-### Loading rows in bulk: `Stream.ingest`
+### Loading rows in bulk: `StreamHandle.ingest`
 
 Rows sent one at a time are made durable one group commit at a time. A load you already
-have as Parquet or Arrow doesn't need that, and `Stream.ingest` writes it straight to the
+have as Parquet or Arrow doesn't need that, and `StreamHandle.ingest` writes it straight to the
 log's files with litelink's `ingest`: 5.1 million rows a second measured there, against
 183 thousand through the buffer. With the server stopped:
 
 ```python
 table = pq.read_table("trades-2025.parquet")                        # or a RecordBatchReader
-start, end = streamcast.Stream.ingest("trades", table, root="data")  # offsets [start, end)
+start, end = streamcast.StreamHandle.ingest("trades", table, root="data")  # offsets [start, end)
 ```
 
 Measured end to end on a 2-vCPU VM: 50 million trade-like rows (five columns, about 18
@@ -1762,12 +1796,12 @@ source's order, so what landed is exactly the source's first `rows_loaded` rows:
 
 ```python
 try:
-    streamcast.Stream.ingest("trades", table, root="data")
+    streamcast.StreamHandle.ingest("trades", table, root="data")
 except streamcast.IngestFailed as failed:
     failed.loaded, failed.gap          # [start, end) of each, or None
     failed.batch, failed.row           # where the data was refused, or None
     # fix the data, then load the rest, before the server starts again
-    streamcast.Stream.ingest("trades", fixed.slice(failed.rows_loaded), root="data")
+    streamcast.StreamHandle.ingest("trades", fixed.slice(failed.rows_loaded), root="data")
 ```
 
 When litelink refuses a value (a null in a required column, a NaN, an integer too wide
@@ -1776,15 +1810,15 @@ the extra work a failure costs, and names the batch and row. litelink's own exce
 `__cause__`. A failure that isn't the data's, such as a full disk, keeps litelink's message,
 with `batch` and `row` None.
 
-### Keeping a window: `Stream.retain`
+### Keeping a window: `StreamHandle.retain`
 
 **Nothing leaves a stream unless it is told to.** Given a window, the maintainer drops the
 rows older than it, by `streamcast_ts`, from every log of the stream: the live one and
 every retired one, including a retired log that now exists only as its published table.
 
 ```python
-streamcast.Stream.retain("trades", root="data", max_age=timedelta(days=30))
-streamcast.Stream.retain("trades", root="data", max_age=None)   # keep everything again
+streamcast.StreamHandle.retain("trades", root="data", max_age=timedelta(days=30))
+streamcast.StreamHandle.retain("trades", root="data", max_age=None)   # keep everything again
 ```
 
 The setting is recorded in the stream's metadata, so it holds wherever the stream is
@@ -1814,15 +1848,15 @@ loses nothing. Logs are truncated in whole files, so a log can keep rows just be
 floor until the file holding them goes, though no reader sees them. The maintainer writes
 the metadata with the stream's `S3Options` (see [Credentials](#credentials)).
 
-### Finishing a stream: `Stream.retire`
+### Finishing a stream: `StreamHandle.retire`
 
 A stream that just stops being written isn't finished: its last rows stay on the box,
 because `publish` holds back the trailing run for compaction, and nothing refuses a late
 write. With the server stopped:
 
 ```python
-streamcast.Stream.retire("trades", root="data")                 # finished
-stream = streamcast.Stream.restore(
+streamcast.StreamHandle.retire("trades", root="data")                 # finished
+stream = streamcast.StreamHandle.restore(
     "trades", root="data", published="s3://market-data/prod", revive=True,
 )                                                                # and undone
 ```
@@ -1852,7 +1886,7 @@ quietly starting the next one. Reviving writes version 2 again.
 ```python
 log = litelink.new("data", "trades", schema=streamcast.to_arrow(SCHEMA),
                    sort_by=("event_ts",))
-stream = streamcast.Stream("trades", log=log)
+stream = streamcast.StreamHandle("trades", log=log, replicate=True)
 ```
 
 Which is what you want for `litelink.restore`, or a log shared with something else.
@@ -1873,7 +1907,7 @@ That is what puts litelink underneath this rather than an append-only file:
 A log written by streamcast is an ordinary litelink log, so everything litelink offers
 applies unchanged: `scan`, `sql`, publishing to S3 and WAL replication. A whole stream —
 every log a migration left behind — reads from another machine with
-[`Stream.snapshot`](#reading-a-streams-history).
+[`StreamHandle.snapshot`](#reading-a-streams-history).
 
 ```python
 with litelink.open("data", "trades", read_only=True) as reader:
@@ -1890,14 +1924,14 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 ## Reading a stream's history
 
 ```python
-await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
+await streamcast.StreamHandle.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3_options=None,
                                  max_tail=1_000_000, memory_cache=True,
                                  disk_cache=False, cache_key=None,
                                  disk_cache_volume_limit=0.8) -> Snapshot
-streamcast.Stream.scan(metadata_uri, *, <the same>, columns=None, where=None, filters=(),
+streamcast.StreamHandle.scan(metadata_uri, *, <the same>, columns=None, where=None, filters=(),
                        start_offset=None, end_offset=None, batch_size=1_000_000) -> Reader
-streamcast.Stream.sql(metadata_uri, query, *, <the same>, filters=(), start_offset=None,
+streamcast.StreamHandle.sql(metadata_uri, query, *, <the same>, filters=(), start_offset=None,
                       end_offset=None, batch_size=1_000_000) -> Reader
 
 stream.metadata_uri -> str | None     # on the server
@@ -1909,7 +1943,7 @@ aggregate, a join, a scan of last Tuesday — read it as a table. There are two 
 both present every log the stream has been through (migrations included) as one table,
 `log`, with the same `scan` and `sql`:
 
-| | `Stream.snapshot` | `Stream.live` |
+| | `StreamHandle.snapshot` | `StreamHandle.live` |
 |---|---|---|
 | **answers as of** | one fixed point, chosen when it opens | the newest row, at every query |
 | **reads** | the published tables | the published tables, plus the broker's rows as they arrive |
@@ -1917,16 +1951,16 @@ both present every log the stream has been through (migrations included) as one 
 | **holds in memory** | a query's result, or one batch of it (and the broker's rows, if asked for them) | the rows not yet published |
 | **addressed by** | the stream's metadata file | the broker's URI |
 
-A stream is a sequence of logs — one per schema, after `Stream.migrate` — and its
+A stream is a sequence of logs — one per schema, after `StreamHandle.migrate` — and its
 metadata file says which, in order, where each is published, and the offsets and
-`streamcast_ts` range each holds. `Stream.snapshot` reads that file and then the published
+`streamcast_ts` range each holds. `StreamHandle.snapshot` reads that file and then the published
 tables, on the reader's own machine with its own credentials. **Given the S3 metadata file,
 it never touches the server**:
 
 ```python
 s3 = streamcast.S3Options(region="us-east-1")    # or the environment / AWS profile
 
-async with await streamcast.Stream.snapshot(
+async with await streamcast.StreamHandle.snapshot(
     "s3://market-data/prod/trades/trades.metadata/version-hint.text", s3_options=s3
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
@@ -1937,14 +1971,14 @@ past the published end needs `broker=`, and is refused without it. Every other r
 read of files.
 
 ```python
-async with await streamcast.Stream.snapshot(sub.info.metadata) as snapshot:
+async with await streamcast.StreamHandle.snapshot(sub.info.metadata) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
     await snapshot.scan(columns=["price"], filters=[("price", ">", 500.0)]).read_all()
     async for offset, ts, row in snapshot.rows(1):
         ...
 ```
 
-`Stream.scan` and `Stream.sql` are the one-shot forms: open, read once, close. They
+`StreamHandle.scan` and `StreamHandle.sql` are the one-shot forms: open, read once, close. They
 return a `Reader`, as litelink's `scan` and `sql` return a reader, on a snapshot of its
 own: opened at the reader's first read — which is where a refusal is raised — and closed
 once the reader is done.
@@ -2063,15 +2097,15 @@ tables, which reads from anywhere. Without one, every log publishes under its ow
 directory and the URI is the local `file://` file, which reads only on the server's
 machine. On another machine the read says so and suggests an `s3://` location.
 
-### Keeping it current: `Stream.live`
+### Keeping it current: `StreamHandle.live`
 
 ```python
-await streamcast.Stream.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
+await streamcast.StreamHandle.live(broker, *, s3_options=None, rebase_every=10.0, where=None,
                              start_offset=None, max_tail=1_000_000, memory_cache=True,
                              disk_cache=False, cache_key=None,
                              disk_cache_volume_limit=0.8) -> Live
 
-async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
+async with await streamcast.StreamHandle.live("ws://localhost:8765/trades") as live:
     await live.wait_for(offset)                  # until that row is visible
     await live.wait_for(ts=t)                    # until every row stamped by t is
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()

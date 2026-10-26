@@ -1,6 +1,6 @@
-"""`Stream.snapshot`: a stream's history as of a fixed point, from any machine.
+"""`StreamHandle.snapshot`: a stream's history as of a fixed point, from any machine.
 
-Written with a server's own calls — `Stream.open`, `send`, `migrate` — and read
+Written with a server's own calls — `StreamHandle.open`, `send`, `migrate` — and read
 back with nothing but the metadata file's URI, as another machine would.
 """
 
@@ -16,7 +16,15 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import LATEST, SnapshotUnavailable, _manifest, _metadata, _versions
+from streamcast import (
+    LATEST,
+    SnapshotUnavailable,
+    _manifest,
+    _metadata,
+    _published,
+    _snapshot,
+    _versions,
+)
 
 V1: dict[str, Any] = {
     "type": "object",
@@ -48,20 +56,21 @@ async def stream_of(
     *,
     published: str | None = None,
     s3_options: litelink.S3Options | None = None,
-) -> streamcast.Stream:
-    stream = streamcast.Stream.open(
-        "trades",
-        create=True,
-        root=root,
-        schema=V1,
-        published=published,
-        s3_options=s3_options,
+) -> streamcast.StreamHandle:
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=V1),
+            storage=streamcast.Storage(
+                root=Path(root).absolute(), published=published, s3_options=s3_options
+            ),
+        ),
+        initialization="create_if_absent",
     )
     await stream.send_many([row(i) for i in range(rows)])
     return stream
 
 
-async def served_once(stream: streamcast.Stream, serve) -> None:
+async def served_once(stream: streamcast.StreamHandle, serve) -> None:
     """The broker writes the metadata file a reader resolves."""
     async with serve(stream, maintain=False):
         pass
@@ -81,7 +90,7 @@ class TestOneLog:
 
         home = _metadata.home(tmp_path, "trades")
         uri = (home / _versions.directory("trades") / _versions.HINT).resolve().as_uri()
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             assert snap.end_offset == 6
             table = await snap.scan().read_all()
 
@@ -96,7 +105,7 @@ class TestOneLog:
         assert uri is not None
         await served_once(stream, serve)
 
-        table = await streamcast.Stream.scan(uri, as_of_offset=3).read_all()
+        table = await streamcast.StreamHandle.scan(uri, as_of_offset=3).read_all()
         assert offsets(table) == [1, 2, 3]
 
     async def test_past_the_published_end_it_needs_the_broker(self, tmp_path, serve):
@@ -108,7 +117,7 @@ class TestOneLog:
         await served_once(stream, serve)
 
         with pytest.raises(SnapshotUnavailable, match="broker="):
-            await streamcast.Stream.snapshot(uri, as_of_offset=10)
+            await streamcast.StreamHandle.snapshot(uri, as_of_offset=10)
 
 
 class TestTheBroker:
@@ -121,7 +130,7 @@ class TestTheBroker:
         assert uri is not None
 
         async with serve(stream, maintain=False) as broker:
-            async with await streamcast.Stream.snapshot(
+            async with await streamcast.StreamHandle.snapshot(
                 uri, as_of_offset=LATEST, broker=broker
             ) as snap:
                 assert snap.end_offset == 8
@@ -143,7 +152,7 @@ class TestTheBroker:
         await served_once(stream, serve)
 
         # Nothing listens here: reaching for the broker would fail.
-        table = await streamcast.Stream.scan(
+        table = await streamcast.StreamHandle.scan(
             uri, as_of_offset=2, broker="ws://127.0.0.1:9/trades"
         ).read_all()
         assert offsets(table) == [1, 2]
@@ -151,8 +160,12 @@ class TestTheBroker:
     async def test_a_gap_neither_side_holds_is_refused_with_both_numbers(
         self, tmp_path, serve
     ):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=V1, max_replay=2
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V1, max_replay=2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(3)])
         assert stream.log is not None
@@ -163,7 +176,7 @@ class TestTheBroker:
 
         async with serve(stream, maintain=False) as broker:
             with pytest.raises(SnapshotUnavailable) as raised:
-                await streamcast.Stream.snapshot(
+                await streamcast.StreamHandle.snapshot(
                     uri, as_of_offset=LATEST, broker=broker
                 )
 
@@ -176,7 +189,7 @@ class TestAMigratedStream:
     async def test_its_logs_read_as_one_table(self, tmp_path, serve):
         stream = await stream_of(tmp_path, 5)
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.send_many([row(i, venue="x") for i in range(5, 8)])
         assert migrated.log is not None
         publish(migrated.log)
@@ -184,7 +197,7 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(migrated, serve)
 
-        table = await streamcast.Stream.scan(uri).read_all()
+        table = await streamcast.StreamHandle.scan(uri).read_all()
 
         # Dense across the seam, and the column the first log lacked is NULL there.
         assert offsets(table) == list(range(1, 9))
@@ -195,7 +208,7 @@ class TestAMigratedStream:
     ):
         stream = await stream_of(tmp_path, 5)  # prices 100 .. 104
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.send_many([row(i, venue="x") for i in range(500, 503)])
         assert migrated.log is not None
         publish(migrated.log)
@@ -209,7 +222,7 @@ class TestAMigratedStream:
         ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             table = await snap.scan(filters=[("price", ">", 500.0)]).read_all()
             assert offsets(table) == [6, 7, 8]
 
@@ -221,7 +234,13 @@ class TestAMigratedStream:
     ):
         # One send each, a millisecond apart: `send_many` stamps its whole
         # group with one `streamcast_ts`, which would leave nothing to divide.
-        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V1),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         for i in range(5):
             await stream.send(row(i))
             await asyncio.sleep(0.001)
@@ -232,23 +251,23 @@ class TestAMigratedStream:
         assert uri is not None
         await served_once(stream, serve)
 
-        everything = await streamcast.Stream.scan(uri).read_all()
+        everything = await streamcast.StreamHandle.scan(uri).read_all()
         stamps = everything.column("streamcast_ts").to_pylist()
         middle = sorted(stamps)[2]
 
         assert len(set(stamps)) == 5, "the stamps must differ for this to test anything"
 
-        table = await streamcast.Stream.scan(uri, as_of_ts=middle).read_all()
+        table = await streamcast.StreamHandle.scan(uri, as_of_ts=middle).read_all()
         assert all(ts <= middle for ts in table.column("streamcast_ts").to_pylist())
         assert table.num_rows == 3
 
         with pytest.raises(SnapshotUnavailable, match="published rows up to"):
-            await streamcast.Stream.snapshot(uri, as_of_ts=max(stamps) + 1)
+            await streamcast.StreamHandle.snapshot(uri, as_of_ts=max(stamps) + 1)
 
     async def test_a_retired_log_published_short_is_refused(self, tmp_path, serve):
         stream = await stream_of(tmp_path, 5)
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         uri = migrated.metadata_uri
         assert uri is not None
         await served_once(migrated, serve)
@@ -269,7 +288,7 @@ class TestAMigratedStream:
         )
 
         with pytest.raises(SnapshotUnavailable, match="holds 5 of the 6 rows"):
-            await streamcast.Stream.scan(uri).read_all()
+            await streamcast.StreamHandle.scan(uri).read_all()
 
 
 class TestConditionsAcrossTheSeam:
@@ -283,7 +302,7 @@ class TestConditionsAcrossTheSeam:
     async def migrated(self, tmp_path, serve) -> str:
         stream = await stream_of(tmp_path, 3)  # prices 100 .. 102, no venue
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.send_many(
             [row(500, venue="x"), row(501, venue="y"), row(502, venue="x")]
         )
@@ -297,11 +316,13 @@ class TestConditionsAcrossTheSeam:
     async def test_a_column_the_earlier_log_lacks_reads_as_null(self, tmp_path, serve):
         uri = await self.migrated(tmp_path, serve)
 
-        where = await streamcast.Stream.scan(uri, where="venue = 'x'").read_all()
-        filtered = await streamcast.Stream.scan(
+        where = await streamcast.StreamHandle.scan(uri, where="venue = 'x'").read_all()
+        filtered = await streamcast.StreamHandle.scan(
             uri, filters=[("venue", "==", "x")]
         ).read_all()
-        missing = await streamcast.Stream.scan(uri, where="venue IS NULL").read_all()
+        missing = await streamcast.StreamHandle.scan(
+            uri, where="venue IS NULL"
+        ).read_all()
 
         assert offsets(where) == offsets(filtered) == [4, 6]
         assert offsets(missing) == [1, 2, 3]
@@ -313,7 +334,7 @@ class TestConditionsAcrossTheSeam:
         ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             # The first log is ruled out on the manifest and never opened, and
             # the term filters the rows of the log it keeps.
             table = await snap.sql(
@@ -332,12 +353,12 @@ class TestConditionsAcrossTheSeam:
         ) as old:
             shutil.rmtree(_published_dir(old.published, "trades"))
 
-        table = await streamcast.Stream.sql(
+        table = await streamcast.StreamHandle.sql(
             uri, "SELECT litelink_offset FROM log ORDER BY 1", start_offset=5
         ).read_all()
         assert offsets(table) == [5, 6]
 
-        bounded = await streamcast.Stream.sql(
+        bounded = await streamcast.StreamHandle.sql(
             uri,
             "SELECT litelink_offset FROM log ORDER BY 1",
             start_offset=4,
@@ -352,7 +373,7 @@ class TestConditionsAcrossTheSeam:
         with legacy:
             legacy.extend([row(i) for i in range(3)])
 
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
         for i in range(3, 6):
             await migrated.send(row(i))
             await asyncio.sleep(0.001)
@@ -363,12 +384,12 @@ class TestConditionsAcrossTheSeam:
         assert uri is not None
         await served_once(migrated, serve)
 
-        stamps = (await streamcast.Stream.scan(uri, start_offset=4).read_all()).column(
-            "streamcast_ts"
-        )
+        stamps = (
+            await streamcast.StreamHandle.scan(uri, start_offset=4).read_all()
+        ).column("streamcast_ts")
         middle = sorted(stamps.to_pylist())[1]
 
-        table = await streamcast.Stream.scan(uri, as_of_ts=middle).read_all()
+        table = await streamcast.StreamHandle.scan(uri, as_of_ts=middle).read_all()
         assert offsets(table) == [1, 2, 3, 4, 5]
 
 
@@ -377,17 +398,23 @@ class TestAnEmptyStream:
         self, tmp_path, serve
     ):
         """Not a binder error on the first column the query names."""
-        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V1),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         uri = stream.metadata_uri
         assert uri is not None
         await served_once(stream, serve)
 
-        result = await streamcast.Stream.sql(
+        result = await streamcast.StreamHandle.sql(
             uri, "SELECT count(*) AS n, max(price) AS top FROM log WHERE price > 1"
         ).read_all()
         assert result.to_pylist() == [{"n": 0, "top": None}]
 
-        table = await streamcast.Stream.scan(uri, where="price > 1").read_all()
+        table = await streamcast.StreamHandle.scan(uri, where="price > 1").read_all()
         assert table.num_rows == 0
         assert {"litelink_offset", "streamcast_ts", "price"} <= set(table.column_names)
 
@@ -402,16 +429,16 @@ class TestALiveLogThatHasPublishedNothing:
         """
         stream = await stream_of(tmp_path, 3)
         await stream.aclose()
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.send(row(3, venue="x"))  # unpublished
         uri = migrated.metadata_uri
         assert uri is not None
         await served_once(migrated, serve)
 
-        table = await streamcast.Stream.scan(uri).read_all()
+        table = await streamcast.StreamHandle.scan(uri).read_all()
         assert table.column("litelink_offset").to_pylist() == [1, 2, 3]
         assert table.column("venue").to_pylist() == [None, None, None]
-        result = await streamcast.Stream.sql(
+        result = await streamcast.StreamHandle.sql(
             uri, "SELECT count(venue) AS n FROM log"
         ).read_all()
         assert result.to_pylist() == [{"n": 0}]
@@ -428,24 +455,23 @@ class TestTheMetadata:
         assert uri is not None
         await served_once(stream, serve)
 
-        from streamcast import _snapshot
-
         with pytest.raises(SnapshotUnavailable, match="another stream's file"):
             await _snapshot.snapshot(uri, stream_id="not-this-one")
 
     async def test_a_missing_file_says_the_history_is_local(self, tmp_path):
         with pytest.raises(SnapshotUnavailable, match="local to the server's machine"):
-            await streamcast.Stream.snapshot((tmp_path / "nope.metadata.json").as_uri())
+            await streamcast.StreamHandle.snapshot(
+                (tmp_path / "nope.metadata.json").as_uri()
+            )
 
     async def test_both_points_at_once_are_refused(self, tmp_path):
         with pytest.raises(ValueError, match="not both"):
-            await streamcast.Stream.snapshot(
+            await streamcast.StreamHandle.snapshot(
                 (tmp_path / "x.metadata.json").as_uri(), as_of_offset=1, as_of_ts=1
             )
 
 
 def _published_dir(published: str, name: str) -> Path:
-    from streamcast import _published
 
     return Path(_published.path(f"{published}/{name}"))
 
@@ -460,7 +486,7 @@ async def test_a_stream_published_to_s3_reads_from_there(tmp_path, s3, bucket, s
     assert uri.startswith(bucket)
     await served_once(stream, serve)
 
-    table = await streamcast.Stream.scan(uri, s3_options=s3).read_all()
+    table = await streamcast.StreamHandle.scan(uri, s3_options=s3).read_all()
     assert offsets(table) == [1, 2, 3, 4]
 
 
@@ -475,12 +501,12 @@ class TestTheTailBound:
         assert uri is not None
         async with serve(stream, maintain=False) as broker:
             with pytest.raises(SnapshotUnavailable, match="max_tail=3"):
-                await streamcast.Stream.snapshot(
+                await streamcast.StreamHandle.snapshot(
                     uri, as_of_offset=LATEST, broker=broker, max_tail=3
                 )
 
             # Within the bound, the same read works.
-            table = await streamcast.Stream.scan(
+            table = await streamcast.StreamHandle.scan(
                 uri, as_of_offset=LATEST, broker=broker, max_tail=5
             ).read_all()
             assert offsets(table) == [1, 2, 3, 4, 5, 6, 7]

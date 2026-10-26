@@ -97,7 +97,7 @@ def test_the_interval_is_a_positive_integer(value):
 
 
 async def test_a_static_stream_takes_the_brokers_interval():
-    stream = streamcast.Stream("trades")
+    stream = streamcast.StreamHandle("trades")
     app = streamcast.create_app(
         streams=stream,
         config=streamcast.BrokerConfig(subscriber_yield_every=3, maintain=False),

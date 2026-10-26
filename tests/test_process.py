@@ -30,6 +30,8 @@ import pytest
 
 import streamcast
 from streamcast import _process
+from streamcast._children import _sidecars, _supervisors
+from streamcast._maintain import ROLES, Maintain, Supervisor
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux only"
@@ -51,8 +53,8 @@ async def main(root, bucket):
         config=litelink.LogConfig(wal_replication=replicated),
         **({"published": bucket, "s3_options": litelink.S3Options().resolved()} if replicated else {}),
     )
-    stream = streamcast.Stream("trades", log=handle)
-    async with serve_streams(stream, "127.0.0.1", 0, replicate=replicated):
+    stream = streamcast.StreamHandle("trades", log=handle, replicate=replicated)
+    async with serve_streams(stream, "127.0.0.1", 0):
         print("ready", flush=True)
         await asyncio.Event().wait()
 
@@ -295,17 +297,15 @@ def test_a_child_is_started_with_them(tmp_path, monkeypatch):
 
 
 def test_each_set_of_options_is_maintained_by_processes_of_its_own(tmp_path):
-    from streamcast._children import _supervisors
-    from streamcast._maintain import ROLES, Maintain
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     logs = [litelink.new(tmp_path / name, name, schema=schema) for name in "abc"]
     try:
         other = litelink.S3Options(endpoint="http://other:9000", access_key="ok")
         routes = {
-            "a": streamcast.Stream("a", log=logs[0], s3_options=KEYS),
-            "b": streamcast.Stream("b", log=logs[1], s3_options=KEYS),
-            "c": streamcast.Stream("c", log=logs[2], s3_options=other),
+            "a": streamcast.StreamHandle("a", log=logs[0], s3_options=KEYS),
+            "b": streamcast.StreamHandle("b", log=logs[1], s3_options=KEYS),
+            "c": streamcast.StreamHandle("c", log=logs[2], s3_options=other),
         }
         made = _supervisors(routes, Maintain())
 
@@ -332,7 +332,6 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
     in a process of its own, has only what the stream was given. Without it,
     it publishes to real AWS, or nowhere. The publish role alone, over rows
     already sealed: what the broker groups is `_supervisors`' to test."""
-    from streamcast._maintain import Maintain, Supervisor
 
     for name in (
         "AWS_ENDPOINT_URL",
@@ -387,7 +386,6 @@ async def test_the_maintainer_publishes_with_the_streams_own_options(
 def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
     tmp_path, s3, bucket
 ):
-    from streamcast._children import _sidecars
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     logs = [
@@ -404,9 +402,9 @@ def test_each_set_of_options_is_replicated_by_a_litestream_of_its_own(
     other = litelink.S3Options(endpoint=s3.endpoint, access_key="ok", secret_key="os")
     try:
         routes = {
-            "a": streamcast.Stream("a", log=logs[0], s3_options=s3),
-            "b": streamcast.Stream("b", log=logs[1], s3_options=s3),
-            "c": streamcast.Stream("c", log=logs[2], s3_options=other),
+            "a": streamcast.StreamHandle("a", log=logs[0], s3_options=s3),
+            "b": streamcast.StreamHandle("b", log=logs[1], s3_options=s3),
+            "c": streamcast.StreamHandle("c", log=logs[2], s3_options=other),
         }
         made = _sidecars(routes, replicate=True)
 
@@ -426,16 +424,14 @@ def test_logs_named_alike_in_two_roots_keep_their_own_options(tmp_path):
     """A log's name is not unique across roots: grouped by it, one stream's
     options would reach both logs, and the other's maintainer would publish
     to an endpoint its log is not on — for good."""
-    from streamcast._children import _supervisors
-    from streamcast._maintain import Maintain
 
     schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
     plain = litelink.new(tmp_path / "r1", "x", schema=schema)
     keyed = litelink.new(tmp_path / "r2", "x", schema=schema)
     try:
         routes = {
-            "a": streamcast.Stream("a", log=plain),
-            "b": streamcast.Stream("b", log=keyed, s3_options=KEYS),
+            "a": streamcast.StreamHandle("a", log=plain),
+            "b": streamcast.StreamHandle("b", log=keyed, s3_options=KEYS),
         }
         made = _supervisors(routes, Maintain())
 

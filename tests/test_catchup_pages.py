@@ -10,6 +10,7 @@ read an Arrow table through DuckDB, so rows a megabyte wide cost no Parquet.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -17,7 +18,7 @@ import pyarrow as pa
 import pytest
 
 import streamcast
-from streamcast import _log, _published, _snapshot
+from streamcast import _client, _log, _published, _snapshot
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -31,13 +32,15 @@ MAX_REPLAY = 50
 @pytest.fixture
 async def published(tmp_path):
     """A stream whose every row is published, and that replays only `MAX_REPLAY`."""
-    stream = streamcast.Stream.open(
-        "t",
-        create=True,
-        root=tmp_path,
-        schema=SCHEMA,
-        published=(tmp_path / "published").as_uri(),
-        max_replay=MAX_REPLAY,
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA, max_replay=MAX_REPLAY),
+            storage=streamcast.Storage(
+                root=Path(tmp_path).absolute(),
+                published=(tmp_path / "published").as_uri(),
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i} for i in range(ROWS)])
@@ -138,7 +141,7 @@ class TestEveryCallThatPagesTakesTheBudgets:
 
     async def test_snapshot_rows(self, published, scans):
         uri = published.metadata_uri
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             rows = snap.rows(5, 260, page_bytes=None, page_rows=100)
             offsets = [offset async for offset, _ts, _row in rows]
 
@@ -149,7 +152,6 @@ class TestEveryCallThatPagesTakesTheBudgets:
         self, serve, published, monkeypatch
     ):
         """A live view catches up when it reconnects, through `connect`."""
-        from streamcast import _client  # noqa: PLC0415 — patched where `_live` finds it
 
         asked = []
         connect = _client.connect
@@ -163,7 +165,7 @@ class TestEveryCallThatPagesTakesTheBudgets:
         monkeypatch.setattr(_client, "connect", recording)
         async with (
             serve(published, maintain=False) as uri,
-            await streamcast.Stream.live(uri, page_bytes=12_345, page_rows=67),
+            await streamcast.StreamHandle.live(uri, page_bytes=12_345, page_rows=67),
         ):
             pass
 
@@ -178,7 +180,7 @@ class TestEveryCallThatPagesTakesTheBudgets:
 
     async def test_and_at_the_first_row_of_snapshot_rows(self, published):
         uri = published.metadata_uri
-        async with await streamcast.Stream.snapshot(uri) as snap:
+        async with await streamcast.StreamHandle.snapshot(uri) as snap:
             with pytest.raises(ValueError, match="page_rows=0"):
                 await anext(snap.rows(1, page_rows=0))
 

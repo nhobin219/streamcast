@@ -22,11 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from streamcast import _log, _stream, _subscriber
+from streamcast import _log, _protocol, _stream, _subscriber
+from streamcast import _log as log_module
 
 
 def function(module, *path: str) -> ast.AsyncFunctionDef | ast.FunctionDef:
-    """The definition named by `path`, e.g. ("Stream", "send")."""
+    """The definition named by `path`, e.g. ("StreamHandle", "send")."""
     source = inspect.getsourcefile(module)
     assert source is not None, f"{module} has no source file"
     tree = ast.parse(Path(source).read_text())
@@ -75,9 +76,9 @@ def test_publishing_never_awaits(name):
     then receives offsets out of order — or a frontier that disagrees with
     its queue.
     """
-    found = awaits(function(_stream, "Stream", name))
+    found = awaits(function(_stream, "StreamHandle", name))
     assert found == [], (
-        f"Stream.{name} awaits at line(s) {found} — see the module docstring"
+        f"StreamHandle.{name} awaits at line(s) {found} — see the module docstring"
     )
 
 
@@ -89,7 +90,7 @@ def test_attaching_reads_the_frontier_with_nothing_in_between():
     could grow to contain one — is a message that is in neither the replay
     range nor the queue, or in both.
     """
-    body = function(_stream, "Stream", "serve_subscriber").body
+    body = function(_stream, "StreamHandle", "serve_subscriber").body
     joins = [
         index
         for index, statement in enumerate(body)
@@ -105,7 +106,7 @@ def test_attaching_reads_the_frontier_with_nothing_in_between():
 
 
 def test_offering_a_frame_never_awaits_and_never_raises_queue_full():
-    """`Stream.send` depends on all of it: `offer` is called in a loop over
+    """`StreamHandle.send` depends on all of it: `offer` is called in a loop over
     every subscriber, and one that blocked or raised would break the loop
     partway — leaving some subscribers with the message and some without."""
     assert awaits(function(_subscriber, "Subscriber", "offer")) == []
@@ -170,11 +171,10 @@ def test_a_replay_is_read_in_a_thread():
 def test_the_wire_key_order_comes_from_one_place():
     """A replayed message must encode to the same bytes as the live one.
 
-    The live path projects the caller's dict through `Stream._columns`; the
+    The live path projects the caller's dict through `StreamHandle._columns`; the
     replay path gets its order from the scan's projection and pops the offset
     and the stamp off the front. Both must resolve to the log's declared column order.
     """
-    from streamcast import _protocol
 
     encode_src = inspect.getsource(_protocol.encode)
     # The frame is `[offset, ts, msg]`, so neither the offset nor the stamp
@@ -182,7 +182,7 @@ def test_the_wire_key_order_comes_from_one_place():
     assert "_ENCODER.encode((offset, ts, message))" in encode_src
     assert "{name: row.get(name) for name in columns}" in encode_src
 
-    stream_src = inspect.getsource(_stream.Stream.__init__)
+    stream_src = inspect.getsource(_stream.StreamHandle.__init__)
     assert "_log.columns(log)" in stream_src
 
     replay_src = inspect.getsource(_log.rows)
@@ -202,8 +202,6 @@ def test_the_offset_is_never_a_key_in_the_message():
     object" — would be an easy change to make and a silent contract break for
     every consumer that iterates the message's keys.
     """
-    from streamcast import _log as log_module
-    from streamcast import _protocol
 
     for source in (
         inspect.getsource(_protocol.encode),
@@ -233,11 +231,11 @@ _REACHES_THE_WORLD = frozenset(
     }
 )
 
-# `Stream.__init__` reads the offset counter off the log it was handed. That
+# `StreamHandle.__init__` reads the offset counter off the log it was handed. That
 # is a read on an INJECTED collaborator, not the construction of one — a fake
 # log with an `end_offset()` substitutes cleanly, which is the property the
 # rule exists to protect. Written down here rather than left as a silent gap.
-_ALLOWED = {("Stream", "end_offset")}
+_ALLOWED = {("StreamHandle", "end_offset")}
 
 
 def test_no_initialiser_builds_its_own_collaborators():
@@ -245,12 +243,12 @@ def test_no_initialiser_builds_its_own_collaborators():
 
     *"The initialiser takes already built collaborators and does no I/O, so a
     test can substitute any of them."* Three classes here were breaking it —
-    `Stream` called `litelink.new`/`open`, `connect` read a cursor file and
+    `StreamHandle` called `litelink.new`/`open`, `connect` read a cursor file and
     fetched one from S3, and `Sidecar` wrote a config file and probed PATH —
     so construction touched the disk and, in one case, the network before
     anything had been awaited.
 
-    Each of those moved to a factory (`Stream.open`, `Sidecar.new`,
+    Each of those moved to a factory (`StreamHandle.open`, `Sidecar.new`,
     `connect._resolve`). This is the audit that found them, kept as a test,
     because the pull back the other way is constant: doing the work in
     `__init__` always looks like one less call at the call site.
@@ -276,7 +274,7 @@ def test_no_initialiser_builds_its_own_collaborators():
 
     assert not offenders, (
         "an initialiser builds a collaborator or does I/O; move it to a "
-        f"factory (see `Stream.open`): {offenders}"
+        f"factory (see `StreamHandle.open`): {offenders}"
     )
 
 
@@ -288,7 +286,7 @@ def test_room_is_taken_by_the_next_statement(name):
     sender take the same room, and the queue grows past the bound.
     """
     found = 0
-    for node in ast.walk(function(_stream, "Stream", name)):
+    for node in ast.walk(function(_stream, "StreamHandle", name)):
         body = getattr(node, "body", None)
         if not isinstance(body, list):
             continue
@@ -303,9 +301,9 @@ def test_room_is_taken_by_the_next_statement(name):
                 following = body[index + 1] if index + 1 < len(body) else None
                 assert following is not None and "self._submit(" in ast.unparse(
                     following
-                ), f"Stream.{name}: the statement after `_room` must queue"
+                ), f"StreamHandle.{name}: the statement after `_room` must queue"
 
-    assert found == 1, f"Stream.{name} takes room {found} times"
+    assert found == 1, f"StreamHandle.{name} takes room {found} times"
 
 
 def test_a_claim_is_checked_by_the_statement_before_it_is_used():
@@ -318,7 +316,7 @@ def test_a_claim_is_checked_by_the_statement_before_it_is_used():
     rows the newer one's sender would resend as if they had never landed.
     """
     found = 0
-    for node in ast.walk(function(_stream, "Stream", "_serve_publisher")):
+    for node in ast.walk(function(_stream, "StreamHandle", "_serve_publisher")):
         body = getattr(node, "body", None)
         if not isinstance(body, list):
             continue

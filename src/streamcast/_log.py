@@ -117,7 +117,7 @@ not. It is monotonic in offset only while the server's clock is.
 **One value per send.** A `send_many` shares one stamp across its rows.
 Group commit may combine several sends, each with its own queue-time stamp.
 
-Stamped only on a log that has the column. `Stream.open` creates every log with
+Stamped only on a log that has the column. `StreamHandle.open` creates every log with
 it, but a log from before it existed, or a handle a caller opened and passed in,
 may not — and that log's shape is not this library's to change.
 """
@@ -131,11 +131,11 @@ SYSTEM: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
 Everything that needs to know which columns are the server's reads this: what
 a new log is created with (`with_system`), which names a declaration may not
 use, which columns the wire and the greeting leave out, whether a log is
-current enough that `Stream.migrate` can leave it alone (`is_current`), and
+current enough that `StreamHandle.migrate` can leave it alone (`is_current`), and
 what the stream's metadata file records per log.
 
 **Adding a column here is an upgrade**: logs created afterwards have it, and
-`Stream.migrate` with an unchanged schema moves an older stream onto a log
+`StreamHandle.migrate` with an unchanged schema moves an older stream onto a log
 that does. Every entry is required — the server fills it on every row.
 
 **A type here never changes.** A stream's logs are read together with `UNION
@@ -157,7 +157,7 @@ _SYSTEM_ARROW: Final = _schema.to_arrow(
 def columns(log: Readable) -> tuple[str, ...]:
     """The stream's declared columns, in the order the wire uses.
 
-    Read once at `Stream` construction and held, because it fixes the key
+    Read once at `StreamHandle` construction and held, because it fixes the key
     order of every frame — and a replayed row must serialise to the same bytes
     as the live one it repeats (I6). litelink's own column is NOT among them:
     the offset is element 0 of the triple `encode` writes, never a key in the
@@ -174,7 +174,7 @@ def columns(log: Readable) -> tuple[str, ...]:
 def declared(schema: pa.Schema) -> pa.Schema:
     """The application's columns: `schema` without the ones streamcast owns.
 
-    What a subscriber is told in the greeting, and what `Stream.open` compares a
+    What a subscriber is told in the greeting, and what `StreamHandle.open` compares a
     declaration against. Filtered here as well as in `columns` because the two
     are read from the same `log.schema` by different expressions, and filtering
     only one tells a subscriber about a column no frame will ever carry.
@@ -224,7 +224,7 @@ def is_current(log: LogHandle) -> bool:
     """Whether `log` has exactly today's `SYSTEM` columns.
 
     False for a log created before one of them existed, which is what makes
-    `Stream.migrate` with an unchanged schema an upgrade rather than a no-op.
+    `StreamHandle.migrate` with an unchanged schema an upgrade rather than a no-op.
     """
     return list(system(log.schema)) == list(_SYSTEM_ARROW)
 
@@ -277,7 +277,7 @@ async def rows(
     stamped = STAMP in log.schema.names
     names = (COLUMN, STAMP, *declared) if stamped else (COLUMN, *declared)
     # **Local tiers only, unless the stream says otherwise** (`published`,
-    # which is `Stream`'s `replay_published`). litelink's own default is to
+    # which is `StreamHandle`'s `replay_published`). litelink's own default is to
     # read the published table too, so this is passed on every read rather
     # than left to it.
     #

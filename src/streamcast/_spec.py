@@ -26,8 +26,13 @@ from pydantic import (
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from streamcast import _schema
-from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_PUBLISHERS
-from streamcast._stream import MAX_REPLAY
+from streamcast._limits import (
+    MAX_BACKLOG,
+    MAX_IN_FLIGHT,
+    MAX_INBOUND,
+    MAX_PUBLISHERS,
+    MAX_REPLAY,
+)
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 Initialization = Literal["open_existing", "create_if_absent", "restore_published"]
@@ -216,3 +221,12 @@ def _schema_keys(spec: Any, *, root: bool = False) -> None:
 
     if isinstance(additional, dict):
         _schema_keys(additional)
+
+
+class Stream(BaseModel):
+    """A durable stream's portable policy and host storage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    spec: StreamSpec
+    storage: Storage

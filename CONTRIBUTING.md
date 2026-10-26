@@ -101,7 +101,7 @@ does not — so CI runs it. `test-fast` skips it for an inner loop, not for a PR
 
 ### The invariant tests
 
-`tests/test_invariants.py` reads the source's AST and asserts that `Stream.send` contains
+`tests/test_invariants.py` reads the source's AST and asserts that `StreamHandle.send` contains
 no `await`, and that joining the fan-out set and reading the frontier are adjacent
 statements. Those look like strange tests until you have chased the bug they prevent:
 both claims compile fine when broken and produce a reordering or a duplicate only under a

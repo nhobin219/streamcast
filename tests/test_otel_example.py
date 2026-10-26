@@ -10,12 +10,54 @@ case, because they are what a reader copies.
 from __future__ import annotations
 
 import asyncio
+import http.server
+import logging
 import math
 import re
+import threading
+from pathlib import Path
 from typing import Any
 
 import litelink
 import pytest
+from opentelemetry.exporter.otlp.proto.common.metrics_encoder import encode_metrics
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.logging.handler import LoggingHandler
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
+    ExportLogsServiceRequest,
+)
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+    ExportMetricsServiceRequest,
+)
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+)
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import (
+    BatchLogRecordProcessor,
+    InMemoryLogRecordExporter,
+    SimpleLogRecordProcessor,
+)
+from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider, UpDownCounter
+from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
+    Gauge,
+    InMemoryMetricReader,
+    Metric,
+    MetricsData,
+    NumberDataPoint,
+    ResourceMetrics,
+    ScopeMetrics,
+)
+from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+from opentelemetry.trace import Link, SpanKind, Status, StatusCode
 
 pytest.importorskip("opentelemetry.sdk", reason="the OTel example's dev dependency")
 
@@ -151,8 +193,12 @@ class TestThePublisher:
         }
 
         async def broker(port: int = 0):  # noqa: ANN202
-            stream = streamcast.Stream.open(
-                "t", create=True, root=tmp_path, schema=schema
+            stream = streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="t", schema=schema),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
             )
             return await serve_streams(stream, "127.0.0.1", port, maintain=False)
 
@@ -191,16 +237,6 @@ class TestThePublisher:
 
 def emitted() -> list:
     """Real SDK log records: `logging` through OTel's handler, captured in memory."""
-    import logging
-
-    from opentelemetry.instrumentation.logging.handler import LoggingHandler
-    from opentelemetry.sdk._logs import LoggerProvider
-    from opentelemetry.sdk._logs.export import (
-        InMemoryLogRecordExporter,
-        SimpleLogRecordProcessor,
-    )
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
 
     captured = InMemoryLogRecordExporter()
     provider = LoggerProvider(resource=Resource({"service.name": "payments"}))
@@ -224,13 +260,6 @@ def emitted() -> list:
 
 def finished() -> list:
     """A real finished SDK span, child of another, with an event and a link."""
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-        InMemorySpanExporter,
-    )
-    from opentelemetry.trace import Link, SpanKind, Status, StatusCode
 
     captured = InMemorySpanExporter()
     provider = TracerProvider(resource=Resource({"service.name": "payments"}))
@@ -307,27 +336,6 @@ class TestTheExporter:
         The receiver decodes the protobuf with OTel's own message type, so this
         reads what otel-gui or a Collector would.
         """
-        import http.server
-        import threading
-
-        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
-            OTLPMetricExporter,
-        )
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter,
-        )
-        from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
-            ExportLogsServiceRequest,
-        )
-        from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
-            ExportMetricsServiceRequest,
-        )
-        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
-            ExportTraceServiceRequest,
-        )
-        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         received: dict[str, bytes] = {}
 
@@ -408,14 +416,6 @@ def collected():
     A counter measured inside a sampled span, so it carries an exemplar; an
     up-down counter, a gauge, an explicit-bucket and an exponential histogram.
     """
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-    from opentelemetry.sdk.metrics.view import (
-        ExponentialBucketHistogramAggregation,
-        View,
-    )
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
 
     reader = InMemoryMetricReader(preferred_temporality=metrics.PREFERRED_TEMPORALITY)
     provider = MeterProvider(
@@ -457,9 +457,6 @@ class TestTheMetrics:
 
     def test_every_kind_survives_the_round_trip_as_otlp_encodes_it(self):
         """Compared as OTLP, encoded by OTel's own encoder: what a receiver gets."""
-        from opentelemetry.exporter.otlp.proto.common.metrics_encoder import (
-            encode_metrics,
-        )
 
         original, _trace = collected()
         again = export.metrics_data(metrics.rows(original))
@@ -503,16 +500,6 @@ class TestTheMetrics:
 
     def test_a_non_finite_double_is_stored_as_null(self):
         """A stream refuses NaN and ±inf; the point is kept, the value is not."""
-        from opentelemetry.sdk.metrics.export import (
-            Gauge,
-            Metric,
-            MetricsData,
-            NumberDataPoint,
-            ResourceMetrics,
-            ScopeMetrics,
-        )
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 
         point = NumberDataPoint({}, None, 1, math.inf)  # ty: ignore[invalid-argument-type]
         data = MetricsData(
@@ -534,8 +521,6 @@ class TestTheMetrics:
         assert (row["value_int"], row["value_double"]) == (None, None)
 
     def test_the_exporter_asks_for_delta_counters_and_histograms(self):
-        from opentelemetry.sdk.metrics import Counter, Histogram, UpDownCounter
-        from opentelemetry.sdk.metrics.export import AggregationTemporality
 
         exporter = metrics.StreamMetricExporter(None)  # ty: ignore[invalid-argument-type]
         preferred = exporter._preferred_temporality  # noqa: SLF001
@@ -563,9 +548,13 @@ class TestTheAnalytics:
     async def test_the_query_counts_each_services_requests_and_errors(
         self, tmp_path, serve
     ):
-        """Through `Stream.live`, as the demo runs it: server spans only."""
-        stream = streamcast.Stream.open(
-            "spans", create=True, root=tmp_path, schema=spans.SCHEMA
+        """Through `StreamHandle.live`, as the demo runs it: server spans only."""
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="spans", schema=spans.SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         rows = [
             *(span_row(i, "checkout", failed=i == 0) for i in range(4)),
@@ -577,7 +566,7 @@ class TestTheAnalytics:
         await stream.send_many(rows)
         try:
             async with serve(stream, maintain=False) as uri:
-                async with await streamcast.Stream.live(uri) as live:
+                async with await streamcast.StreamHandle.live(uri) as live:
                     await live.wait_for(len(rows))
                     table = await live.sql(
                         analytics.query(3_600 * 1_000_000)

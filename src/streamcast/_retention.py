@@ -1,6 +1,6 @@
 """Time-based retention: a stream's rows older than its window leave it (#118).
 
-    streamcast.Stream.retain("trades", root="data", max_age=timedelta(days=30))
+    streamcast.StreamHandle.retain("trades", root="data", max_age=timedelta(days=30))
 
 Off unless set, and then applied by the maintainer to the whole stream, oldest
 first — the live log and every retired log, including one that is now only a
@@ -85,7 +85,7 @@ def run(
     """One pass: the second half if one is due, else the first if there is
     anything to drop. Returns the metadata it committed, or None."""
     # The version read, from its own file, so each half commits only over it:
-    # a `Stream.retain` or a migration that committed meanwhile makes this
+    # a `StreamHandle.retain` or a migration that committed meanwhile makes this
     # pass a `Conflict`, retried on the next, rather than undone by it.
     read, metadata, manifest = _versions.load(home, stream)
     if metadata is None:

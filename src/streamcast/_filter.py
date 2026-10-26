@@ -3,7 +3,7 @@
     connect(uri, where={"ticker": "AAPL"})          # equality
     connect(uri, where={"ticker": ["AAPL", "MSFT"]})  # membership
 
-**The row is already a dict at the only point this can run.** `Stream.send`
+**The row is already a dict at the only point this can run.** `StreamHandle.send`
 encodes once and hands the same bytes to every subscriber, so a filter decides
 whether to ENQUEUE that frame rather than what to build — it sees the mapping
 the caller passed to `send`, and nothing is deserialised because nothing has
