@@ -555,8 +555,11 @@ class BrokerRuntime:
             },
             **definition["limits"],
         )
-        storage = Storage(
-            root=profile.root,
+        # Profiles retain their v1 contract: relative roots and replication
+        # without a published prefix are legal. This host-only bridge must
+        # not apply the static definition's stricter admission rules.
+        storage = Storage.model_construct(
+            root=Path(profile.root).absolute(),
             published=profile.published,
             replicate=profile.replicate,
             config=profile.config,

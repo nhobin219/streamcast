@@ -21,6 +21,8 @@ there was nothing to have changed from. Everything above it is ordinary.
 - The static factory requires an absolute storage root and applies the portable
   schema whitelist. Existing paths and data are preserved; callers resolve roots
   before constructing `Storage`. Factory-created handles expose their definition.
+  Managed `StorageProfile` settings retain relative-root support and allow
+  `replicate=True` without a published prefix, including on restart.
 
 - Replace `Outbox.pending()` with `pending_rows()`; no compatibility alias
   (#195). Callers rename their count query. This API change requires a minor

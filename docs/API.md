@@ -623,6 +623,12 @@ streamcast.initialize_registry(config)  # once; existing files are refused
 app = streamcast.create_app(config)     # optionally streams=[static_stream]
 ```
 
+Managed `StorageProfile` roots may be relative to the broker's working directory.
+Profiles also allow `replicate=True` without `published`; replication starts a
+sidecar only for logs with `wal_replication` enabled. These profile settings retain
+their existing contract; static `Storage` definitions require absolute roots and
+a published prefix when replication is enabled.
+
 ### Ownership and recovery
 
 The top-level lifespan owns one runtime: registry, operation worker, readiness

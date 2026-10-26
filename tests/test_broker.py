@@ -14,6 +14,7 @@ import json
 import os
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,35 @@ async def test_create_stopped_identity_and_restart(config):
         )
         stream = owner.generations["events"].stream
         assert stream._stream_id == identity
+        assert stream.end_offset == 2
+        assert await stream.send({"value": 10}) == 2
+
+
+@pytest.mark.parametrize("relative_root", [False, True], ids=["absolute", "relative"])
+@pytest.mark.parametrize(
+    "replicate", [False, True], ids=["no-replication", "replicate"]
+)
+async def test_managed_profile_without_published_survives_restart(
+    config, tmp_path, monkeypatch, relative_root, replicate
+):
+    monkeypatch.chdir(tmp_path)
+    profile = StorageProfile(
+        "1", Path("logs") if relative_root else tmp_path / "logs", replicate=replicate
+    )
+    config = replace(config, profiles={"local": profile})
+    async with managed(config) as (owner, client, _):
+        stream = await serving(owner, client)
+        assert stream.replicate is replicate
+        assert stream.log is not None
+        assert Path(stream.log.root).is_relative_to(tmp_path / "logs")
+        assert await stream.send({"value": 9}) == 1
+        identity = stream._stream_id
+
+    async with managed(config) as (owner, _, _):
+        assert owner.view("events")["observed"]["state"] == "serving"
+        stream = owner.generations["events"].stream
+        assert stream._stream_id == identity
+        assert stream.replicate is replicate
         assert stream.end_offset == 2
         assert await stream.send({"value": 10}) == 2
 
