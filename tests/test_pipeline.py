@@ -24,8 +24,16 @@ SCHEMA: dict[str, Any] = {
 
 
 @pytest.fixture
-async def stream(tmp_path):
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+async def stream(tmp_path, request):
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(
+                name="trades", schema=SCHEMA, **getattr(request, "param", {})
+            ),
+            storage=streamcast.Storage(root=tmp_path.absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     try:
         yield made
     finally:
@@ -96,12 +104,13 @@ class TestTheWindow:
 
         assert offsets == [1, 2, 3, 4, 5]
 
+    @pytest.mark.parametrize("stream", [{"max_in_flight": 2}], indirect=True)
     async def test_the_servers_bound_holds_a_client_allowed_more(
         self, stream, serve, monkeypatch
     ):
         """The server's `max_in_flight`: past it, the server stops reading."""
         held, commits = hold_commits(stream, monkeypatch)
-        async with serve(stream, maintain=False, max_in_flight=2) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, max_in_flight=10) as producer:
                 futures = [await producer.submit({"i": n}) for n in range(10)]
                 await asyncio.sleep(0.1)

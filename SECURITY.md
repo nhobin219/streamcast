@@ -69,7 +69,7 @@ A broker with a registry lists nothing.
 
 **The greeting publishes the stream's metadata location** — the URI of its
 metadata file, and the stream's id. That is deliberate — it is what lets
-`catch_up=True`, `Stream.live` and anyone holding a greeting find the
+`catch_up=True`, `StreamHandle.live` and anyone holding a greeting find the
 published tables without being told where to look — but it means a subscriber
 learns the bucket and prefix the log publishes to, or, for a log that
 publishes locally, a path on the server's disk. Refusals carry no location.

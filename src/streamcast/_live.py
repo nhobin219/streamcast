@@ -1,6 +1,6 @@
-"""A stream's history, kept current in memory: `Stream.live` (#59).
+"""A stream's history, kept current in memory: `StreamHandle.live` (#59).
 
-    async with await streamcast.Stream.live("ws://broker:8765/trades") as live:
+    async with await streamcast.StreamHandle.live("ws://broker:8765/trades") as live:
         await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 A `Snapshot` is a fixed point. A `Live` is the same reader kept moving: the
@@ -74,7 +74,7 @@ _TRANSIENT: Final = (ConnectionClosed, OSError, TooSlow)
 class Live:
     """A stream as of its latest row: the published tables plus the broker's tail.
 
-    Made by `Stream.live`. `end_offset` is exclusive, as on `Snapshot`: every
+    Made by `StreamHandle.live`. `end_offset` is exclusive, as on `Snapshot`: every
     row a query can see is below it.
     """
 
@@ -95,7 +95,7 @@ class Live:
     ) -> None:
         self._broker = broker
         # How the base and every rebase read the published tables, as
-        # `Stream.live` was asked. A catch-up, at open or after a dropped
+        # `StreamHandle.live` was asked. A catch-up, at open or after a dropped
         # connection, reads its gap once and is left to litelink's defaults.
         self._cache = cache
         # What the view will hold from the broker, unpublished, before it
@@ -525,7 +525,7 @@ async def live(
     page_bytes: int | None = PAGE_BYTES,
     page_rows: int | None = PAGE_ROWS,
 ) -> Live:
-    """See `Stream.live`."""
+    """See `StreamHandle.live`."""
     pages(page_bytes, page_rows)
     from streamcast import _client  # noqa: PLC0415 — the client imports `_snapshot`
 

@@ -89,7 +89,13 @@ async def stopped_after(view: View, uri: str, offset: int) -> None:
 
 
 async def main(root: Path) -> dict[str, Any]:
-    stream = streamcast.Stream.open("orders", create=True, root=root, schema=SCHEMA)
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="orders", schema=SCHEMA),
+            storage=streamcast.Storage(root=root.absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     server = await Listening(
         streamcast.create_app(streams=stream, config=streamcast.BrokerConfig()),
         "127.0.0.1",

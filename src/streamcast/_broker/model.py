@@ -104,13 +104,6 @@ class BrokerConfig:
     readiness_every: float = 0.25
     subscriber_yield_every: int = SUBSCRIBER_YIELD_EVERY
     maintain: Any = True
-    replicate: bool = False
-    max_backlog: int | Mapping[str, int] = MAX_BACKLOG
-    max_inbound: int | Mapping[str, int] = MAX_INBOUND
-    max_in_flight: int | Mapping[str, int] = MAX_IN_FLIGHT
-    # None is `transport_max_bytes` for every static stream: a per-stream
-    # limit is only worth naming when it is below the transport's.
-    max_message_bytes: int | Mapping[str, int] | None = None
     stats: bool | str = True
 
     def __post_init__(self) -> None:

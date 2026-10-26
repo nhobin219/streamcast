@@ -1,4 +1,4 @@
-"""`Stream.retire`: a stream finished for good, served read-only, and revived.
+"""`StreamHandle.retire`: a stream finished for good, served read-only, and revived.
 
 A stream that merely stops being written leaves its end on the box — the
 trailing run `publish` holds back for compaction — and nothing refuses a late
@@ -17,6 +17,7 @@ import pytest
 
 import streamcast
 from streamcast import _metadata, _versions
+from streamcast._broker import runtime as _server
 from tests.conftest import current_json
 
 SCHEMA = {
@@ -28,12 +29,15 @@ SCHEMA = {
 
 async def produce(root: Path, count: int = 7, **kwargs: object) -> None:
     """A stream with `count` rows, written and then left: the server stopped."""
-    stream = streamcast.Stream.open(
-        "t",
-        create=True,
-        root=root,
-        schema=SCHEMA,
-        **kwargs,  # ty: ignore[invalid-argument-type]
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=(root).absolute(),
+                **kwargs,  # ty: ignore[invalid-argument-type]
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i} for i in range(count)])
@@ -48,7 +52,7 @@ class TestRetiring:
             # A plain stop: the rows are on this disk, none of them published.
             assert log.published_through() == 0
 
-        retirement = streamcast.Stream.retire("t", root=tmp_path)
+        retirement = streamcast.StreamHandle.retire("t", root=tmp_path)
 
         assert retirement.end_offset == 8
         with litelink.open(_metadata.home(tmp_path, "t"), "t", read_only=True) as log:
@@ -56,7 +60,7 @@ class TestRetiring:
 
     async def test_the_metadata_records_it_and_old_builds_refuse_it(self, tmp_path):
         await produce(tmp_path)
-        retirement = streamcast.Stream.retire("t", root=tmp_path)
+        retirement = streamcast.StreamHandle.retire("t", root=tmp_path)
 
         metadata = _metadata.load(_metadata.home(tmp_path, "t"), "t")
         assert metadata is not None
@@ -71,8 +75,8 @@ class TestRetiring:
 
     async def test_it_is_safe_to_run_again(self, tmp_path):
         await produce(tmp_path)
-        first = streamcast.Stream.retire("t", root=tmp_path)
-        assert streamcast.Stream.retire("t", root=tmp_path) == first
+        first = streamcast.StreamHandle.retire("t", root=tmp_path)
+        assert streamcast.StreamHandle.retire("t", root=tmp_path) == first
 
     async def test_a_retire_that_died_after_litelinks_step_finishes(self, tmp_path):
         """litelink retired the log, then the metadata was never written."""
@@ -80,22 +84,28 @@ class TestRetiring:
         with litelink.open(_metadata.home(tmp_path, "t"), "t") as log:
             log.retire()
 
-        retirement = streamcast.Stream.retire("t", root=tmp_path)
+        retirement = streamcast.StreamHandle.retire("t", root=tmp_path)
         assert retirement.end_offset == 8
 
     def test_a_stream_that_is_not_there_is_refused(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="no stream 't'"):
-            streamcast.Stream.retire("t", root=tmp_path)
+            streamcast.StreamHandle.retire("t", root=tmp_path)
 
 
 class TestARetiredStreamIsReadOnly:
     async def test_it_opens_read_only_and_refuses_a_send(self, tmp_path):
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
 
         for opened in (
-            streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA),
-            streamcast.Stream.migrate("t", root=tmp_path, schema=SCHEMA),
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                    storage=streamcast.Storage(root=tmp_path.absolute()),
+                ),
+                initialization="create_if_absent",
+            ),
+            streamcast.StreamHandle.migrate("t", root=tmp_path, schema=SCHEMA),
         ):
             try:
                 assert opened.retirement is not None
@@ -109,8 +119,14 @@ class TestARetiredStreamIsReadOnly:
         self, tmp_path, serve
     ):
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
 
         async with serve(stream) as uri:
             # The history replays — from the published table, the only copy.
@@ -126,11 +142,16 @@ class TestARetiredStreamIsReadOnly:
         assert raised.value.at is not None
 
     async def test_it_is_not_maintained(self, tmp_path, serve, monkeypatch):
-        from streamcast._broker import runtime as _server  # noqa: PLC0415
 
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         planned: list[list[str]] = []
         real = _server._supervisors  # noqa: SLF001
 
@@ -149,17 +170,19 @@ class TestARetiredStreamIsReadOnly:
 class TestReviving:
     async def test_restore_refuses_a_retired_stream_without_it(self, tmp_path):
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
         with pytest.raises(streamcast.StreamRetired, match="revive=True"):
-            streamcast.Stream.restore("t", root=tmp_path, published=tmp_path.as_uri())
+            streamcast.StreamHandle.restore(
+                "t", root=tmp_path, published=tmp_path.as_uri()
+            )
 
     async def test_it_continues_on_a_new_log_where_the_old_one_ended(
         self, tmp_path, serve
     ):
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "t", root=tmp_path, published=tmp_path.as_uri(), revive=True
         )
         assert revived.retirement is None
@@ -189,7 +212,7 @@ class TestReviving:
         self, tmp_path, monkeypatch
     ):
         await produce(tmp_path)
-        streamcast.Stream.retire("t", root=tmp_path)
+        streamcast.StreamHandle.retire("t", root=tmp_path)
         real = _versions.commit
 
         def failing(*_: object, **__: object) -> None:
@@ -198,12 +221,12 @@ class TestReviving:
 
         monkeypatch.setattr(_versions, "commit", failing)
         with pytest.raises(OSError, match="mid-revive"):
-            streamcast.Stream.restore(
+            streamcast.StreamHandle.restore(
                 "t", root=tmp_path, published=tmp_path.as_uri(), revive=True
             )
 
         monkeypatch.setattr(_versions, "commit", real)
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "t", root=tmp_path, published=tmp_path.as_uri(), revive=True
         )
         try:
@@ -219,13 +242,13 @@ class TestOnAnotherBox:
         """The planned move: nothing published is lost, and nothing is left."""
         box_a, box_b = tmp_path / "a", tmp_path / "b"
         await produce(box_a, published=bucket, s3_options=s3)
-        streamcast.Stream.retire("t", root=box_a, s3_options=s3)
+        streamcast.StreamHandle.retire("t", root=box_a, s3_options=s3)
         published_copy = _versions.fetch(f"{bucket}/t", "t", s3)
         assert published_copy is not None
         assert published_copy.retirement is not None
         shutil.rmtree(box_a)  # the old box is gone
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "t", root=box_b, published=bucket, s3_options=s3, revive=True
         )
         assert await revived.send_many([{"i": 7}]) == [8]
@@ -246,8 +269,14 @@ class TestOnAnotherBox:
         """litelink rebuilds a log from its published table when there is no
         replica: fenced above anything the old log may have issued."""
         box_a, box_b = tmp_path / "a", tmp_path / "b"
-        stream = streamcast.Stream.open(
-            "t", create=True, root=box_a, schema=SCHEMA, published=bucket, s3_options=s3
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=(box_a).absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             await stream.send_many([{"i": i} for i in range(5)])
@@ -262,7 +291,7 @@ class TestOnAnotherBox:
 
         shutil.rmtree(box_a)
 
-        restored = streamcast.Stream.restore(
+        restored = streamcast.StreamHandle.restore(
             "t", root=box_b, published=bucket, s3_options=s3, published_reserve=1000
         )
         try:

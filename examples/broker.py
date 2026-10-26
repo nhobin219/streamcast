@@ -43,7 +43,7 @@ def schema(source: str) -> dict[str, Any]:
     return getattr(importlib.import_module(module), attribute)
 
 
-async def report(streams: list[streamcast.Stream]) -> None:
+async def report(streams: list[streamcast.StreamHandle]) -> None:
     """A line every five seconds per stream that moved, and nothing otherwise."""
     last = {stream.name: stream.end_offset for stream in streams}
     while True:
@@ -75,14 +75,20 @@ async def main(
     for declaration in declared:
         name, _, source = declaration.partition("=")
         if live:
-            streams.append(streamcast.Stream(name, schema=schema(source)))
+            streams.append(streamcast.StreamHandle(name, schema=schema(source)))
         else:
             # `sort_by` on a leading time column is what lets a bounded query
             # on it prune whole files.
             order = (sort_by[name],) if name in sort_by else None
             streams.append(
-                streamcast.Stream.open(
-                    name, create=True, root=root, schema=schema(source), sort_by=order
+                streamcast.StreamHandle.open(
+                    streamcast.Stream(
+                        spec=streamcast.StreamSpec(
+                            name=name, schema=schema(source), sort_by=(order or ())
+                        ),
+                        storage=streamcast.Storage(root=root.absolute()),
+                    ),
+                    initialization="create_if_absent",
                 )
             )
 

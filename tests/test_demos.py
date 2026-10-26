@@ -99,11 +99,14 @@ class TestTheBroker:
         assert broker.schema("examples.book.producer:EVENTS") == book.EVENTS
 
     async def test_a_producer_publishes_through_it_to_a_subscriber(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "orders",
-            create=True,
-            root=tmp_path,
-            schema=broker.schema("examples/book/schema.json"),
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="orders", schema=broker.schema("examples/book/schema.json")
+                ),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         async with serve_streams(stream, "127.0.0.1", 0, maintain=False) as server:
             uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/orders"

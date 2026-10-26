@@ -26,8 +26,14 @@ from pydantic import (
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from streamcast import _schema
-from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_PUBLISHERS
-from streamcast._stream import MAX_REPLAY
+from streamcast._limits import (
+    MAX_BACKLOG,
+    MAX_IN_FLIGHT,
+    MAX_INBOUND,
+    MAX_PUBLISHERS,
+    MAX_REPLAY,
+    PositiveBound,
+)
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 Initialization = Literal["open_existing", "create_if_absent", "restore_published"]
@@ -61,11 +67,11 @@ class StreamSpec(BaseModel):
     replay_published: StrictBool = False
     group_commit: StrictBool = True
     max_replay: Annotated[StrictInt, Field(ge=0)] | None = MAX_REPLAY
-    max_publishers: Annotated[StrictInt, Field(ge=1)] = MAX_PUBLISHERS
-    max_backlog: Annotated[StrictInt, Field(ge=1)] = MAX_BACKLOG
-    max_inbound: Annotated[StrictInt, Field(ge=1)] = MAX_INBOUND
-    max_in_flight: Annotated[StrictInt, Field(ge=1)] = MAX_IN_FLIGHT
-    max_message_bytes: Annotated[StrictInt, Field(ge=1)] | None = None
+    max_publishers: PositiveBound = MAX_PUBLISHERS
+    max_backlog: PositiveBound = MAX_BACKLOG
+    max_inbound: PositiveBound = MAX_INBOUND
+    max_in_flight: PositiveBound = MAX_IN_FLIGHT
+    max_message_bytes: PositiveBound | None = None
 
     @field_validator("sort_by", mode="before")
     @classmethod
@@ -216,3 +222,12 @@ def _schema_keys(spec: Any, *, root: bool = False) -> None:
 
     if isinstance(additional, dict):
         _schema_keys(additional)
+
+
+class Stream(BaseModel):
+    """The complete definition of a durable stream, without live machinery."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    spec: StreamSpec
+    storage: Storage

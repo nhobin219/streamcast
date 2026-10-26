@@ -264,7 +264,7 @@ class Greeting:
     """Where the hint naming the stream's current metadata version is, or None
     for a stream with no log.
 
-    What `Stream.snapshot` opens to read the stream's history without this
+    What `StreamHandle.snapshot` opens to read the stream's history without this
     server — every log, where each is published, and what each holds. Every
     version the hint names is immutable, so a reader that opens the stream
     again — a live view every few seconds — reads only the hint (#123). An
@@ -275,7 +275,7 @@ class Greeting:
 
     From a protocol-4 server, its `metadata_hint`; from one from before the
     versions, which names no hint, its plain `metadata`, which a reader takes
-    as well (`Stream.snapshot` reads either).
+    as well (`StreamHandle.snapshot` reads either).
     """
 
     stream_id: str | None
@@ -665,7 +665,7 @@ def parse_subscribe(
     `/trades?offset=1200` is the whole of a subscribe. The name is the path
     with its leading slash removed, so a server serving one unnamed stream
     serves it at `/` and the name is `""` — which is the same empty name
-    `Stream()` carries, rather than a second spelling of "no name".
+    `StreamHandle()` carries, rather than a second spelling of "no name".
 
     Raises `ValueError` for anything malformed; the caller turns that into a
     4400, because a path this cannot read is a client bug and no amount of

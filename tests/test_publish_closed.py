@@ -36,7 +36,13 @@ SCHEMA: dict[str, Any] = {
 
 @pytest.fixture
 async def stream(tmp_path):
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+            storage=streamcast.Storage(root=tmp_path.absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     try:
         yield made
     finally:

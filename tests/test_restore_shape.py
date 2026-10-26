@@ -4,7 +4,7 @@ litelink 0.10.1 checks a restore's schema and `sort_by` against the replica or
 the published table, and needs them outright for a table no 0.10 publish
 stamped — from which an Iceberg schema alone cannot rebuild the log: it keeps
 no Arrow field metadata, where a binary column's wire encoding lives. So the
-stream's metadata records both, and `Stream.restore` passes them on.
+stream's metadata records both, and `StreamHandle.restore` passes them on.
 """
 
 from __future__ import annotations
@@ -38,8 +38,14 @@ def row(i: int) -> dict[str, object]:
 
 class TestTheMetadataRecordsTheSort:
     async def test_a_new_stream_records_it(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="t", schema=SCHEMA, sort_by=(SORT_BY or ())
+                ),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             stream.ensure_metadata()
@@ -54,8 +60,14 @@ class TestTheMetadataRecordsTheSort:
         ] == list(SORT_BY)
 
     async def test_a_file_from_before_it_gets_it_at_the_next_serve(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="t", schema=SCHEMA, sort_by=(SORT_BY or ())
+                ),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             stream.ensure_metadata()
@@ -79,8 +91,14 @@ class TestTheMetadataRecordsTheSort:
 
     async def test_the_recorded_shape_is_the_logs_exactly(self, tmp_path):
         """Binary encodings and system columns included: what Iceberg loses."""
-        stream = streamcast.Stream.open(
-            "t", create=True, root=tmp_path, schema=SCHEMA, sort_by=SORT_BY
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="t", schema=SCHEMA, sort_by=(SORT_BY or ())
+                ),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             stream.ensure_metadata()
@@ -99,14 +117,16 @@ class TestTheMetadataRecordsTheSort:
 class TestRestoringIt:
     async def _lost_box(self, root, bucket, s3) -> None:
         """A stream with no WAL replication, published, and then its box gone."""
-        stream = streamcast.Stream.open(
-            "t",
-            create=True,
-            root=root,
-            schema=SCHEMA,
-            sort_by=SORT_BY,
-            published=bucket,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="t", schema=SCHEMA, sort_by=(SORT_BY or ())
+                ),
+                storage=streamcast.Storage(
+                    root=root.absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             await stream.send_many([row(i) for i in range(5)])
@@ -137,7 +157,7 @@ class TestRestoringIt:
             return real(*args, **kwargs)
 
         monkeypatch.setattr(litelink, "restore", recording)
-        restored = streamcast.Stream.restore(
+        restored = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3
         )
         try:
@@ -164,7 +184,7 @@ class TestRestoringIt:
             },
         }
         with pytest.raises(Exception, match="price"):
-            streamcast.Stream.restore(
+            streamcast.StreamHandle.restore(
                 "t",
                 root=tmp_path / "b",
                 published=bucket,
@@ -175,7 +195,7 @@ class TestRestoringIt:
     async def test_config_replaces_the_restored_logs(self, tmp_path, s3, bucket):
         await self._lost_box(tmp_path / "a", bucket, s3)
         config = litelink.LogConfig(target_seal_size=123_456)
-        restored = streamcast.Stream.restore(
+        restored = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3, config=config
         )
         try:
@@ -187,14 +207,20 @@ class TestRestoringIt:
 
 class TestReviving:
     async def test_config_reaches_the_new_log(self, tmp_path):
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             await stream.send(row(0))
         finally:
             await stream.aclose()
 
-        streamcast.Stream.retire("t", root=tmp_path)
-        revived = streamcast.Stream.restore(
+        streamcast.StreamHandle.retire("t", root=tmp_path)
+        revived = streamcast.StreamHandle.restore(
             "t",
             root=tmp_path,
             published=tmp_path.as_uri(),

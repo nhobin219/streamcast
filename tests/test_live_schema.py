@@ -52,8 +52,8 @@ BAD = [
 ]
 
 
-def live() -> streamcast.Stream:
-    return streamcast.Stream("trades", schema=SCHEMA)
+def live() -> streamcast.StreamHandle:
+    return streamcast.StreamHandle("trades", schema=SCHEMA)
 
 
 class TestTheSameRule:
@@ -61,8 +61,12 @@ class TestTheSameRule:
     async def test_a_bad_row_is_refused_exactly_as_a_log_refuses_it(
         self, row, tmp_path
     ):
-        durable = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        durable = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             with pytest.raises(ValueError) as with_log:
@@ -97,7 +101,7 @@ class TestTheSameRule:
 
     def test_the_owned_column_cannot_be_declared(self):
         with pytest.raises(ValueError, match="another name"):
-            streamcast.Stream(
+            streamcast.StreamHandle(
                 "trades",
                 schema={
                     **SCHEMA,
@@ -110,7 +114,7 @@ class TestTheSameRule:
 
     def test_a_log_and_a_schema_together_are_refused(self, log):
         with pytest.raises(ValueError, match="not both"):
-            streamcast.Stream("trades", log=log, schema=SCHEMA)
+            streamcast.StreamHandle("trades", log=log, schema=SCHEMA)
 
 
 class TestOnTheWire:
@@ -182,12 +186,12 @@ class TestWithoutASchema:
     """Unchanged: a relay that declares nothing checks nothing, on purpose."""
 
     async def test_any_row_is_accepted(self):
-        stream = streamcast.Stream("relay")
+        stream = streamcast.StreamHandle("relay")
         await stream.send({"anything": [1, 2], "goes": {"here": True}})
 
     async def test_a_non_finite_float_arrives_as_null(self, serve):
         """JSON has no NaN; msgspec writes it as null. Declare a schema to refuse it."""
-        stream = streamcast.Stream("relay")
+        stream = streamcast.StreamHandle("relay")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send({"x": math.nan})
             _offset, ts, row = await asyncio.wait_for(sub.recv(), 5)

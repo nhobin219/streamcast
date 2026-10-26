@@ -13,9 +13,11 @@ import copy
 import json
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 import httpx
+import litelink
 import pytest
 import uvicorn
 from websockets.asyncio.client import connect as raw_connect
@@ -31,6 +33,10 @@ from streamcast import (
 )
 from streamcast._broker import runtime as implementation
 from streamcast._broker.registry import Registry
+from streamcast._children import _supervisors
+from streamcast._replicate import Sidecar
+
+from .test_replicate import settle
 
 SHAPE: dict[str, Any] = {
     "type": "object",
@@ -497,10 +503,13 @@ async def test_missing_bound_disk_is_not_recreated(config):
 async def test_guard_admits_complete_history_and_rejects_migration_before_journal(
     config,
 ):
-    from dataclasses import replace
 
-    old = streamcast.Stream.open(
-        "messages", root=config.profiles["local"].root, schema=SHAPE, create=True
+    old = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
+            storage=streamcast.Storage(root=(config.profiles["local"].root).absolute()),
+        ),
+        initialization="create_if_absent",
     )
     old.ensure_metadata()
     await old.send({"value": 7})
@@ -564,10 +573,13 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
     "wrong", ["identity", "witness", "migration", "empty_migration", "flags"]
 )
 async def test_guard_rejects_incompatible_history(config, wrong):
-    from dataclasses import replace
 
-    old = streamcast.Stream.open(
-        "messages", root=config.profiles["local"].root, schema=SHAPE, create=True
+    old = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
+            storage=streamcast.Storage(root=(config.profiles["local"].root).absolute()),
+        ),
+        initialization="create_if_absent",
     )
     old.ensure_metadata()
     if wrong != "empty_migration":
@@ -585,7 +597,7 @@ async def test_guard_rejects_incompatible_history(config, wrong):
                 "extra": {"type": ["string", "null"]},
             },
         }
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "messages", root=config.profiles["local"].root, schema=shape
         )
         if wrong == "empty_migration":
@@ -739,7 +751,7 @@ async def test_unexpected_data_failure_closes_without_storage_details(
         async def broken(*_args):
             raise OSError("private storage detail")
 
-        monkeypatch.setattr(streamcast.Stream, "serve_subscriber", broken)
+        monkeypatch.setattr(streamcast.StreamHandle, "serve_subscriber", broken)
         async with running(app) as base:
             async with raw_connect(
                 base.replace("ws://", "ws://admin:secret@") + "/events"
@@ -784,14 +796,6 @@ async def test_real_children_signal_exact_generation_readiness(config, monkeypat
 async def test_managed_replication_and_shared_group_replacement(
     config, monkeypatch, s3, bucket
 ):
-    from dataclasses import replace
-
-    import litelink
-
-    from streamcast._children import _supervisors
-    from streamcast._replicate import Sidecar
-
-    from .test_replicate import settle
 
     # One real role exercises replacement/readiness/reaping. Replication is
     # real as well; duplicating the role handshake in five interpreters makes
@@ -854,7 +858,7 @@ async def test_managed_replication_and_shared_group_replacement(
         assert not owner.children
         # Direct table reading is test evidence for publication; deployed
         # message consumers continue to use only the broker's WebSocket.
-        async with await streamcast.Stream.snapshot(
+        async with await streamcast.StreamHandle.snapshot(
             metadata_uri, s3_options=s3
         ) as snap:
             rows = [row async for _, _, row in snap.rows(1)]

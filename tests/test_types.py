@@ -72,8 +72,14 @@ def row(i: int = 0) -> dict[str, object]:
     }
 
 
-def stream_at(tmp_path) -> streamcast.Stream:
-    return streamcast.Stream.open("otel", create=True, root=tmp_path, schema=SCHEMA)
+def stream_at(tmp_path) -> streamcast.StreamHandle:
+    return streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="otel", schema=SCHEMA),
+            storage=streamcast.Storage(root=tmp_path.absolute()),
+        ),
+        initialization="create_if_absent",
+    )
 
 
 class TestTheSchema:

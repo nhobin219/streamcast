@@ -250,7 +250,7 @@ def finish_retiring(pending: Sequence[tuple[Path, str]]) -> list[tuple[Path, str
     has published nothing, and since retired logs take no maintainer passes,
     nothing else would ever publish it — a snapshot, a live view or a
     catch-up across its seam would fail for good. `retire()` is what
-    `Stream.migrate` does today: publish everything, evict staging, sweep both
+    `StreamHandle.migrate` does today: publish everything, evict staging, sweep both
     tables, and mark the log retired, after which it is skipped like any
     other.
 

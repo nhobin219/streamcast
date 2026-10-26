@@ -31,9 +31,9 @@ kdb+, a streamcast server is effectively a Python WebSocket
 [tickerplant](https://code.kx.com/q/architecture/).
 
 **A streamcast server is a log-backed pub/sub broker.** Publishers and subscribers are both
-its clients — a feed handler calling `Stream.send` in the same process or
-`streamcast.publish` from another machine on one side; `connect`, `Stream.snapshot` and
-`Stream.live` on the other — and the server owns the log, assigns the offsets, and is its
+its clients — a feed handler calling `StreamHandle.send` in the same process or
+`streamcast.publish` from another machine on one side; `connect`, `StreamHandle.snapshot` and
+`StreamHandle.live` on the other — and the server owns the log, assigns the offsets, and is its
 only writer.
 
 ## The log is the analytical table
@@ -55,7 +55,7 @@ async with streamcast.publish(uri) as producer:
 # The same rows as a table, from anywhere, from the stream's published
 # tables: every log it has been through, as of a point, with no server
 # involved.
-async with await streamcast.Stream.snapshot(
+async with await streamcast.StreamHandle.snapshot(
     "s3://bucket/prefix/trades/trades.metadata/version-hint.text"
 ) as snapshot:
     await snapshot.sql("SELECT count(*), max(price) FROM log WHERE side = 1").read_all()
@@ -94,37 +94,40 @@ as they do there. **The broker is a FastAPI application**: `create_app` builds i
 an ASGI server runs it — uvicorn, a dependency, with one worker and its lifespan on.
 TLS, the bind address and keepalive are that server's settings.
 
-`Stream.open` requires an existing local log by default. Servers pass `create=True`
-to create a stream only when it exists nowhere. A published replica with no local log
-is refused unless `restore=True`; stop the old writer before restoring on another
-machine. An empty prefix gives `FileNotFoundError` from `Stream.restore`.
+`StreamHandle.open` takes a `Stream` definition and opens an existing local log by default.
+Use `initialization="create_if_absent"` to create only when the stream exists nowhere,
+or `initialization="restore_published"` to restore a published replica when the local
+log is missing. Stop the old writer before restoring on another machine.
+`StreamSpec` carries schema and policy; `Storage` carries absolute paths, log
+configuration, replication and optional host-only `s3_options`.
 
 **`publish` has no `websockets` counterpart**; it is streamcast's, shaped like `connect`
 so it reads the same way. WebSocket itself has no verbs — the protocol is frames, and
 both subscribing and publishing here are URL conventions on top of it.
 
 ```python
-streamcast.Stream(name="", *, log=None, owns_log=False, max_replay=100_000)
-streamcast.Stream.open(name="", *, root, schema, create=False, restore=False, sort_by=None, config=None,
-                      published=None, s3_options=None, replay_published=False,
-                      max_replay=100_000)                     # None = no bound
+streamcast.Stream(spec=StreamSpec(...), storage=Storage(...))  # frozen definition
+streamcast.StreamHandle(name="", *, log=None, owns_log=False, schema=None,
+                       max_replay=100_000, max_backlog=8192, max_inbound=65_536,
+                       max_in_flight=64, max_message_bytes=None, replicate=False, ...)
+streamcast.StreamHandle.open(stream, *, initialization="open_existing")
+    stream.definition  # the exact Stream passed to open; None for a direct handle
     await stream.send(row) -> int | None       # durable, then fan out
     await stream.send_many(rows) -> list       # ONE fsync for the group
     stream.end_offset · stream.subscribers · stream.durable · stream.schema
     stream.metadata_uri                         # where a reader finds its history
 
-await streamcast.Stream.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
+await streamcast.StreamHandle.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3_options=None) -> Snapshot
     snapshot.scan(columns=, where=, filters=, start_offset=, end_offset=) -> Reader
     snapshot.sql(query, *, filters=, start_offset=, end_offset=) -> Reader  # table `log`
         await reader.read_all() -> pa.Table · async for batch in reader   # streamed
-streamcast.Stream.scan(metadata_uri, ...) · streamcast.Stream.sql(uri, query) -> Reader
-await streamcast.Stream.live(broker, *, s3_options=None) -> Live   # kept current
+streamcast.StreamHandle.scan(metadata_uri, ...) · streamcast.StreamHandle.sql(uri, query) -> Reader
+await streamcast.StreamHandle.live(broker, *, s3_options=None) -> Live   # kept current
     live.scan(...) · live.sql(query) -> Reader · await live.wait_for(offset | ts=)
 
 streamcast.create_app(config=None, *, streams=()) -> fastapi.FastAPI
-streamcast.BrokerConfig(maintain=True, replicate=False, max_backlog=8192,
-                       max_inbound=65_536, max_in_flight=64,
+streamcast.BrokerConfig(maintain=True, transport_max_bytes=1<<20,
                        subscriber_yield_every=64, ...)  # positive frame interval
 streamcast.connect(uri, *, offset=<unset>, cursor=None, cursor_uri=None,
                    catch_up=False, ...) -> Subscription
@@ -145,7 +148,7 @@ Three deliberate exceptions:
   reconnect a resume rather than a restart, and a subscriber that has to ask for it
   separately will forget to. `ts` is when the server took the row.
 - **A subscription is read-only.** It has no `send`, rather than a `send` that raises.
-  Publishing uses `Stream.send` locally or `publish` remotely.
+  Publishing uses `StreamHandle.send` locally or `publish` remotely.
 - **`compression` defaults to `None`**, where `websockets` defaults to `"deflate"`; run
   the broker with it off too (uvicorn's `ws_per_message_deflate=False`, whose default is on).
   permessage-deflate is per connection while the encode is shared: `send` encodes a frame
@@ -159,7 +162,7 @@ Three deliberate exceptions:
   context takeover the same frames compress 1.1×, so compressing once and sharing the
   result is not available.
 
-Routing is by `Stream.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
+Routing is by `StreamHandle.name`: `trades` is served at `/trades`, an unnamed stream at `/`.
 `create_app(streams=[trades, quotes])` serves both on one port.
 
 Full reference in [`docs/API.md`](docs/API.md).
@@ -186,7 +189,7 @@ with none at all.
 is published, and what each holds — through the hint naming its current version, and
 `metadata` is a plain copy of it for clients from before the hint, so a
 subscriber holding the greeting can read the
-history itself rather than through the socket: `Stream.snapshot(info.metadata)`, or any
+history itself rather than through the socket: `StreamHandle.snapshot(info.metadata)`, or any
 Iceberg engine pointed at a log's published table. `stream_id` says which stream the
 file is. Both `null` when the stream has no log. Credentials are never in it: they are
 the reader's own. Key order comes from the log's schema, so a replayed message is
@@ -212,6 +215,8 @@ The schema is yours, declared in JSON Schema. `streamcast` is the only import a 
 stream needs.
 
 ```python
+from pathlib import Path
+
 import asyncio, json, streamcast, uvicorn, websockets
 
 SCHEMA = {
@@ -225,16 +230,25 @@ SCHEMA = {
     "required": ["event_ts", "price", "amount", "side"],
 }
 
+
 async def main():
     # Creates the stream in data/trades/, or opens it if it is already there.
-    stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
-                                   sort_by=("event_ts",))
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(
+                name="trades", schema=SCHEMA, sort_by=("event_ts",)
+            ),
+            storage=streamcast.Storage(root=Path("data").absolute()),
+        ),
+        initialization="create_if_absent",
+    )
 
     # Fan-out, sealing and compaction, started and stopped by the app's lifespan;
-    # BrokerConfig(replicate=True) also starts WAL shipping.
+    # Storage(replicate=True, published=...) also starts WAL shipping for WAL-enabled logs.
     app = streamcast.create_app(streams=stream)
-    server = uvicorn.Server(uvicorn.Config(app, host="localhost", port=8765,
-                                           ws_per_message_deflate=False))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="localhost", port=8765, ws_per_message_deflate=False)
+    )
     serving = asyncio.create_task(server.serve())
     while not server.started:
         await asyncio.sleep(0.01)
@@ -243,15 +257,18 @@ async def main():
         await feed.send(SUBSCRIBE)
         async for message in feed:
             trade = json.loads(message)["data"]
-            await stream.send({                  # a row, durable, then fanned out
-                "event_ts": int(trade["microtimestamp"]),
-                "price": float(trade["price"]),
-                "amount": float(trade["amount"]),
-                "side": int(trade["type"]),
-            })
+            await stream.send(
+                {  # a row, durable, then fanned out
+                    "event_ts": int(trade["microtimestamp"]),
+                    "price": float(trade["price"]),
+                    "amount": float(trade["amount"]),
+                    "side": int(trade["type"]),
+                }
+            )
 
     server.should_exit = True
     await serving
+
 
 asyncio.run(main())
 ```
@@ -265,7 +282,7 @@ litestream is opt-in. Streams with different `S3Options` get separate child proc
 maintainer nothing ever seals — litelink is explicit that *"a maintainer is not
 optional"*.
 
-`Stream.open` creates or opens the log; `Stream(log=handle)` takes one you opened
+`StreamHandle.open` creates or opens the log; `StreamHandle(log=handle)` takes one you opened
 yourself and reads its frontier. `streamcast.to_arrow(SCHEMA)` is the `pa.schema` if you
 want it.
 
@@ -273,9 +290,9 @@ What it captures is a table, queried from its published tables:
 
 ```python
 uri = stream.metadata_uri
-await streamcast.Stream.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log").read_all()
-await streamcast.Stream.scan(uri, columns=["litelink_offset", "price"], where="side = 1").read_all()
-await streamcast.Stream.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
+await streamcast.StreamHandle.sql(uri, "SELECT count(*), max(price), sum(amount) FROM log").read_all()
+await streamcast.StreamHandle.scan(uri, columns=["litelink_offset", "price"], where="side = 1").read_all()
+await streamcast.StreamHandle.sql(uri, "SELECT max(streamcast_ts - event_ts) FROM log").read_all()   # feed latency, us
 ```
 
 The table has two columns you did not declare. `litelink_offset` is the offset every frame
@@ -288,7 +305,7 @@ A log's columns are fixed when it is created. To change them, stop the server an
 migrate:
 
 ```python
-stream = streamcast.Stream.migrate("trades", root="data", schema=SCHEMA_V2)
+stream = streamcast.StreamHandle.migrate("trades", root="data", schema=SCHEMA_V2)
 ```
 
 That seals the current log, starts `trades-v2` at the next offset, and records both in a
@@ -297,7 +314,7 @@ to leave in your startup: a stream already of that shape is just opened.
 
 ### Backpressure
 
-`Stream.send` never awaits a consumer: it encodes the frame once and does one non-blocking
+`StreamHandle.send` never awaits a consumer: it encodes the frame once and does one non-blocking
 queue insert per subscriber. A consumer that stops reading fills its own queue, hits
 `max_backlog`, and is **dropped**:
 
@@ -319,7 +336,7 @@ them:
 | checked | on every send, per subscriber | once, when the subscriber attaches |
 | exceeded | that subscriber is **dropped** — `TooSlow`, 4429 | the subscribe is **refused** — `too_old`, 4416 |
 | protects | the server's memory | the worker thread a replay scan holds |
-| set on | `BrokerConfig`, per process | `Stream`, per stream |
+| set on | `BrokerConfig`, per process | `StreamHandle`, per stream |
 
 **They interact, which is why sizing one without the other goes wrong.** A replay is
 served *before* the live queue, and live messages pile up behind it — so a subscriber
@@ -329,12 +346,12 @@ other; `just bench-replay` prints the arithmetic for your hardware.
 
 ### Recovering a server
 
-A client moves boxes with a cursor. A **server** moves with `Stream.restore`, which
+A client moves boxes with a cursor. A **server** moves with `StreamHandle.restore`, which
 rebuilds the log itself on a machine that never held it: from its replicated WAL when
 there is one, and otherwise from its published table alone:
 
 ```python
-stream = streamcast.Stream.restore(
+stream = streamcast.StreamHandle.restore(
     "trades", root="data", published="s3://market-data/prod", replay_published=True,
 )
 ```
@@ -371,16 +388,16 @@ frames, then restore. Unplanned failover loses whatever never shipped.
 ### Retiring a stream
 
 A stream that just stops being written leaves its last rows on the box, unpublished.
-`Stream.retire` finishes it: every row published, the log refusing writes for good, and
+`StreamHandle.retire` finishes it: every row published, the log refusing writes for good, and
 the retirement recorded in its metadata. It is still served, read-only — subscribers
-replay and catch up, publishers are refused with 4410. `Stream.restore(..., revive=True)`
+replay and catch up, publishers are refused with 4410. `StreamHandle.restore(..., revive=True)`
 undoes it on any box, continuing at exactly the retired end, so a planned move is
 `retire` on the old box and `revive` on the new one, losing nothing and skipping no
 offsets:
 
 ```python
-streamcast.Stream.retire("trades", root="data")                     # old box, stopped
-stream = streamcast.Stream.restore(
+streamcast.StreamHandle.retire("trades", root="data")                     # old box, stopped
+stream = streamcast.StreamHandle.restore(
     "trades", root="data", published="s3://market-data/prod", revive=True,
 )                                                                    # new box
 ```
@@ -392,9 +409,19 @@ log: no subscribe is refused for reaching too far back, and the server reads the
 table on the subscriber's behalf.
 
 ```python
-stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA,
-                               published="s3://bucket/prefix",
-                               replay_published=True, max_replay=None)
+from pathlib import Path
+
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(
+            name="trades", schema=SCHEMA, replay_published=True, max_replay=None
+        ),
+        storage=streamcast.Storage(
+            root=Path("data").absolute(), published="s3://bucket/prefix"
+        ),
+    ),
+    initialization="create_if_absent",
+)
 ```
 
 Every frame is still JSON over a plain WebSocket, so **a client in any language replays
@@ -497,7 +524,7 @@ has no `recv`. Neither carries a method that raises.
 
 ### Producer
 
-`Stream.send` publishes from the server's own process. `streamcast.publish` does it from
+`StreamHandle.send` publishes from the server's own process. `streamcast.publish` does it from
 anywhere else:
 
 ```python
@@ -528,11 +555,19 @@ On a stream served with `exactly_once=True`, a publisher that names itself has i
 deduped by the broker:
 
 ```python
-stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA, exactly_once=True)
+from pathlib import Path
+
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name="orders", schema=SCHEMA, exactly_once=True),
+        storage=streamcast.Storage(root=Path("data").absolute()),
+    ),
+    initialization="create_if_absent",
+)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
-    seq = out.info.publisher.last_seq + 1   # where the broker has this publisher
-    await out.send(row, seq=seq)            # rows 1, 2, 3, … with no holes
+    seq = out.info.publisher.last_seq + 1  # where the broker has this publisher
+    await out.send(row, seq=seq)  # rows 1, 2, 3, … with no holes
 ```
 
 The publisher id names one ordered sequence. The broker keeps the last seq it appended
@@ -675,7 +710,7 @@ should decide.
 
 **`catch_up` covers having been down too long.** A consumer past the server's `max_replay`
 is refused; the rows are in the stream's published tables, not gone. It reads them with
-`Stream.snapshot`, from the metadata file the greeting names, with **nothing connected** —
+`StreamHandle.snapshot`, from the metadata file the greeting names, with **nothing connected** —
 holding a socket through a long catch-up gets the subscriber dropped for falling behind —
 then opens the socket where the snapshot ended, looping if the server moved on meanwhile.
 
@@ -692,18 +727,18 @@ A subscription delivers rows one at a time. To ask a question of a stream — an
 a join, a scan of last Tuesday — read it as a table, `log`, that spans every log the
 stream has been through.
 
-**`Stream.snapshot` reads a fixed point.** Given the stream's metadata file on S3, it reads
+**`StreamHandle.snapshot` reads a fixed point.** Given the stream's metadata file on S3, it reads
 the published tables on your machine with your credentials, offline — or, given `broker=`,
 it also takes the rows the server has not published yet, up to an offset or the latest:
 
 ```python
-async with await streamcast.Stream.snapshot(
+async with await streamcast.StreamHandle.snapshot(
     "s3://market-data/prod/trades/trades.metadata/version-hint.text"
 ) as snapshot:
     await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
 # The same, completed from the server up to its newest row.
-async with await streamcast.Stream.snapshot(
+async with await streamcast.StreamHandle.snapshot(
     "s3://market-data/prod/trades/trades.metadata/version-hint.text",
     as_of_offset=streamcast.LATEST,
     broker="ws://localhost:8765/trades",
@@ -711,13 +746,13 @@ async with await streamcast.Stream.snapshot(
     ...
 ```
 
-**`Stream.live` is real-time analytics on a stream in one line.** It is a snapshot kept
+**`StreamHandle.live` is real-time analytics on a stream in one line.** It is a snapshot kept
 current with the broker's rows as they arrive, so every query answers as of the row that
 arrived a moment ago. It is online by design — it takes only the broker's address, because
 a view of the stream *now* has to be listening to it:
 
 ```python
-async with await streamcast.Stream.live("ws://localhost:8765/trades") as live:
+async with await streamcast.StreamHandle.live("ws://localhost:8765/trades") as live:
     await live.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 ```
 

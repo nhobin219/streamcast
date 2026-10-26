@@ -31,7 +31,7 @@ from msgspec import json
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from streamcast._stream import Stream
+    from streamcast._stream import StreamHandle
 
 STATS_PATH: Final = "/stats"
 """Where `BrokerConfig(stats=True)` answers.
@@ -52,7 +52,7 @@ every field here is a counter that moves.
 class Stats:
     """One stream, as of now.
 
-    Reachable as `Stream.stats` without a socket, which is the point: the
+    Reachable as `StreamHandle.stats` without a socket, which is the point: the
     facts are the API and HTTP is one way to publish them. The broker exposes
     `/stats` (`BrokerConfig(stats=)`); an application with routes of its own
     can write another over this.
@@ -73,7 +73,7 @@ class Stats:
     subscribers: int
 
     started_ts: float
-    """Wall clock when this `Stream` was constructed."""
+    """Wall clock when this `StreamHandle` was constructed."""
 
     uptime_s: float
     """Seconds since construction, from the monotonic clock.
@@ -104,7 +104,7 @@ class Stats:
     """
 
 
-def payload(streams: Iterable[Stream]) -> bytes:
+def payload(streams: Iterable[StreamHandle]) -> bytes:
     """Every stream's stats as a JSON object, for the `/stats` response.
 
     `served_at` is here so a caller can measure its own skew against this

@@ -33,12 +33,15 @@ WIDER: dict[str, Any] = {
 
 async def served(root, serve, **kwargs: object) -> None:
     """A stream with three rows, served once: the broker writes its first version."""
-    stream = streamcast.Stream.open(
-        "t",
-        create=True,
-        root=root,
-        schema=SCHEMA,
-        **kwargs,  # ty: ignore[invalid-argument-type]
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=(root).absolute(),
+                **kwargs,  # ty: ignore[invalid-argument-type]
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i} for i in range(3)])
@@ -49,7 +52,7 @@ async def served(root, serve, **kwargs: object) -> None:
 
 
 async def migrated(root) -> None:
-    await streamcast.Stream.migrate("t", root=root, schema=WIDER).aclose()
+    await streamcast.StreamHandle.migrate("t", root=root, schema=WIDER).aclose()
 
 
 def from_before(home, metadata: _metadata.Metadata, manifest) -> None:
@@ -123,7 +126,13 @@ class TestACommit:
         assert manifest is not None
         from_before(home, before, manifest)
 
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=WIDER)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=WIDER),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             async with serve(stream, maintain=False):
                 pass
@@ -147,7 +156,13 @@ class TestACommit:
         (home / "t.metadata.json").unlink()
         (home / "t.manifest.parquet").unlink()
 
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=WIDER)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=WIDER),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             async with serve(stream, maintain=False):
                 pass
@@ -170,7 +185,7 @@ class TestACommit:
         from_before(home, before, manifest)
 
         plain = (home / "t.metadata.json").resolve().as_uri()
-        async with await streamcast.Stream.snapshot(plain) as snap:
+        async with await streamcast.StreamHandle.snapshot(plain) as snap:
             assert [entry.name for entry in snap.metadata.logs] == ["t", "t-v2"]
             assert snap._manifest == manifest, "the plain one, beside it"  # noqa: SLF001
 
@@ -178,7 +193,13 @@ class TestACommit:
 class TestTheGreeting:
     async def test_it_names_the_hint(self, tmp_path, serve):
         await served(tmp_path, serve)
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri) as sub:
@@ -206,7 +227,7 @@ class TestTheGreeting:
         (home / "t.metadata.json").write_text(stale.to_json())
 
         plain = (home / "t.metadata.json").resolve().as_uri()
-        async with await streamcast.Stream.snapshot(plain) as snap:
+        async with await streamcast.StreamHandle.snapshot(plain) as snap:
             assert [entry.name for entry in snap.metadata.logs] == ["t", "t-v2"]
             assert snap._manifest is not None, "the version's, in its directory"  # noqa: SLF001
 
@@ -230,7 +251,7 @@ class Counting:
 class TestTheReadsItSaves:
     async def _opened(self, uri, s3, reads: list[str]) -> list[str]:
         reads.clear()
-        async with await streamcast.Stream.snapshot(uri, s3_options=s3):
+        async with await streamcast.StreamHandle.snapshot(uri, s3_options=s3):
             pass
 
         # The stream's own files: its metadata directory and the plain copies.
@@ -280,8 +301,12 @@ class TestTheReadsItSaves:
         for name in ("t.metadata.json", "t.manifest.parquet"):
             store.delete(name)
 
-        stream = streamcast.Stream.open(
-            "t", create=True, root=tmp_path, schema=WIDER, s3_options=s3
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=WIDER),
+                storage=streamcast.Storage(root=tmp_path.absolute(), s3_options=s3),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False):
@@ -301,11 +326,11 @@ class TestTheReadsItSaves:
     ):
         await served(tmp_path, serve, published=bucket, s3_options=s3)
         hint = f"{bucket}/t/t.metadata/{_versions.HINT}"
-        async with await streamcast.Stream.snapshot(hint, s3_options=s3) as snap:
+        async with await streamcast.StreamHandle.snapshot(hint, s3_options=s3) as snap:
             assert [entry.name for entry in snap.metadata.logs] == ["t"]
 
         await migrated(tmp_path)
-        async with await streamcast.Stream.snapshot(hint, s3_options=s3) as snap:
+        async with await streamcast.StreamHandle.snapshot(hint, s3_options=s3) as snap:
             assert [entry.name for entry in snap.metadata.logs] == ["t", "t-v2"]
 
     async def test_other_credentials_are_not_served_what_these_read(

@@ -17,7 +17,7 @@ only ever does what is cheap: validate, queue, and later fan out.
 * **Order within a stream.** One thread per stream takes jobs first in, first
   out, so commits happen in the order `send` queued them. Each commit is
   handed back with `call_soon_threadsafe`, which runs callbacks from one
-  thread in the order they were scheduled — so `Stream._deliver` sees commits
+  thread in the order they were scheduled — so `StreamHandle._deliver` sees commits
   in commit order, assigns `_end_offset` and fans out in that order (I1, I4).
 * **Durable before broadcast (I3).** Nothing is fanned out until the commit
   that holds it has returned.
@@ -110,7 +110,7 @@ _STOP: Final = object()
 class Writer:
     """The thread that commits one durable stream's rows, in order.
 
-    Started on the first job, so a `Stream` still does no I/O and starts
+    Started on the first job, so a `StreamHandle` still does no I/O and starts
     nothing when constructed. `deliver` and `fail` run on the event loop the
     first job came from.
     """
@@ -146,7 +146,7 @@ class Writer:
 
     def submit(self, job: Job) -> None:
         """Queue `job`. No await, and never blocks: this queue has no bound
-        of its own. `Stream._room` bounds it, at `max_inbound` rows, before
+        of its own. `StreamHandle._room` bounds it, at `max_inbound` rows, before
         a job gets here."""
         self._start()
         self._queue.put(job)

@@ -1,6 +1,6 @@
 """One broadcast: the offsets, the subscribers, and the subscribe handshake.
 
-A `Stream` is the whole of streamcast that is not transport. The broker puts it
+A `StreamHandle` is the whole of streamcast that is not transport. The broker puts it
 behind a WebSocket port and `connect` reads it from the other end, but the
 ordering guarantee, the offset assignment and the replay partition are all
 decided here — which means they can be tested without a socket, and are.
@@ -42,9 +42,11 @@ import time
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import litelink
+import pyarrow as pa
+from pydantic import TypeAdapter
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
@@ -77,10 +79,12 @@ from streamcast._limits import (
     MAX_IN_FLIGHT,
     MAX_INBOUND,
     MAX_PUBLISHERS,
+    MAX_REPLAY,
     MAX_TAIL,
     PAGE_BYTES,
     PAGE_ROWS,
     SUBSCRIBER_YIELD_EVERY,
+    PositiveBound,
 )
 from streamcast._protocol import (
     EARLIEST,
@@ -94,6 +98,7 @@ from streamcast._protocol import (
     refusal,
 )
 from streamcast._published import BATCH, ReadCache
+from streamcast._spec import Initialization, Stream
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
 from streamcast._tasks import thread
@@ -103,7 +108,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
     from os import PathLike
 
-    import pyarrow as pa
     from litelink import (
         LocalReadHandle,
         LogHandle,
@@ -116,34 +120,27 @@ if TYPE_CHECKING:
     from streamcast._filter import Predicate, Where
     from streamcast._transport import Peer
 
-MAX_REPLAY: Final = 100_000
-"""How far back a subscribe may ask to resume from.
 
-It bounds the server, not the log: a replay is a DuckDB scan in a worker
-thread and a subscriber asking for ten million rows would hold one for
-minutes. Past this, the answer is to read the log directly — which needs
-nothing from streamcast and is what litelink is for.
-
-**It is sized against `MAX_BACKLOG`, not independently.** A replay streams
-while live messages queue behind it, so a subscriber that takes longer to
-catch up than `MAX_BACKLOG` messages of live traffic is dropped the moment it
-arrives, having done all the work. The defaults hold with room: a replay reads
-at ~1M rows/s from local Parquet, so 100,000 messages is ~0.1 s, and a feed
-would have to run above 80,000 messages/s to put 8,192 messages into the queue
-in that time. Raise one and check the other.
-"""
+_BOUND = TypeAdapter(PositiveBound)
+_INITIALIZATION = TypeAdapter(Initialization)
 
 
-class Stream:
+class StreamHandle:
     """A broadcast, and the offsets that make it resumable.
 
     Constructed before there is a loop and serves any number of subscribers on
     whichever loop the broker runs on. It owns no thread and starts nothing —
     the broker's lifespan is what starts the maintainer and, with
-    `BrokerConfig(replicate=True)`, the litestream sidecar, and it stops them
+    `StreamHandle(replicate=True)`, the litestream sidecar, and it stops them
     again.
 
-        stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path("data").absolute()),
+            ),
+            initialization="create_if_absent",
+        )
 
         app = streamcast.create_app(streams=stream)
         async with app.router.lifespan_context(app):
@@ -159,7 +156,7 @@ class Stream:
     needs no import but this one.
 
     **Who closes the log depends on who opened it.** `root=`+`schema=` creates
-    it here with `open(create=True)` the first time and reopens it afterward.
+    it here with `open(..., initialization="create_if_absent")` the first time and reopens it afterward.
     `aclose` closes what it created. Pass `log=` an open handle instead and it
     stays the caller's, for a process that reads or writes it through litelink
     as well. The two are
@@ -215,6 +212,8 @@ class Stream:
         "_claims",
         "_closing",
         "_exactly_once",
+        "_definition",
+        "_replicate",
     )
 
     def __init__(
@@ -233,20 +232,25 @@ class Stream:
         retirement: _metadata.Retirement | None = None,
         exactly_once: bool = False,
         max_publishers: int = MAX_PUBLISHERS,
+        max_backlog: int = MAX_BACKLOG,
+        max_inbound: int = MAX_INBOUND,
+        max_in_flight: int = MAX_IN_FLIGHT,
+        max_message_bytes: int | None = None,
+        replicate: bool = False,
     ) -> None:
-        """Takes an already-open log and builds nothing. See `Stream.open`.
+        """Takes an already-open log and builds nothing. See `StreamHandle.open`.
 
         litelink's rule, which this used to break: it took `root=`+`schema=`
         and called `litelink.new`/`open` from here, so constructing a
-        `Stream` created directories and a SQLite database. That moved to
-        `new`, which is where litelink puts the same work.
+        `StreamHandle` created directories and a SQLite database. That moved to
+        `open`, which is where litelink puts the same work.
 
         `owns_log` is the one piece of lifetime this object holds: `aclose`
-        closes a log it owns and never one it was merely lent. `new` sets it;
+        closes a log it owns and never one it was merely lent. `open` sets it;
         a caller passing `log=` can set it too, to hand over the lifetime of
         a handle they opened.
 
-        `floor` and `retired` describe a MIGRATED stream, and `new`, `migrate`
+        `floor` and `retired` describe a MIGRATED stream, and `open`, `migrate`
         and `restore` read both off its metadata. `floor` is the offset the
         current log starts at: below it the rows are in a retired log, which
         this server does not replay from. `retired` is the `(root, name)` of
@@ -258,19 +262,27 @@ class Stream:
         does. It is kept, not used here: this initialiser does no I/O.
 
         `replay_published` says whether a replay may read the log's published
-        table, below what the server holds locally; see `Stream.open`.
+        table, below what the server holds locally; see `StreamHandle.open`.
 
         `schema` is for a stream WITHOUT a log: declared in JSON Schema, as
-        `Stream.open` takes it, and held to exactly the rule a log would hold
+        `StreamSpec` takes it, and held to exactly the rule a log would hold
         it to — see `send`. A stream with a log carries its own shape, so
         passing both is refused: two declarations, one of which would be
         silently ignored.
 
         `exactly_once` lets publishers that name themselves
         (`publish(uri, publisher=...)`) have their rows deduped by seq; see
-        `Stream.open`. `max_publishers` bounds the marks cached for them
+        `StreamHandle.open`. `max_publishers` bounds the marks cached for them
         (`MAX_PUBLISHERS`); the table in the log's buffer holds all of them.
         """
+        for limit in (max_publishers, max_backlog, max_inbound, max_in_flight):
+            _BOUND.validate_python(limit)
+
+        if max_message_bytes is not None:
+            _BOUND.validate_python(max_message_bytes)
+
+        self._definition: Stream | None = None
+        self._replicate = replicate
         if exactly_once and log is None:
             msg = (
                 "exactly_once needs a log: the publishers' marks are committed "
@@ -325,7 +337,7 @@ class Stream:
         # commits queued rows in groups, and one bad row in a group would fail
         # every other publisher's rows in its transaction; refused here, it
         # fails alone. Started lazily, on the first send: constructing a
-        # `Stream` still starts nothing.
+        # `StreamHandle` still starts nothing.
         self._check_stored = (
             None if log is None else partial(litelink.validate_row, log.schema)
         )
@@ -388,16 +400,15 @@ class Stream:
         self._owned = log if (owns_log and log is not None) else None
         self._name = name
         self._log = log
-        # The queue bounds, defaults until the broker sets the deployment's
-        # (`_bound`): they belong to the process serving the stream, not to
-        # the stream, so they can change on a restart. See `_limits`.
+        # Each handle carries its own queue policy, including when its log
+        # is lent by the caller and it has no durable definition.
         self._subscriber_yield_every = SUBSCRIBER_YIELD_EVERY
-        self._max_backlog = MAX_BACKLOG
-        self._max_inbound = MAX_INBOUND
-        self._max_in_flight = MAX_IN_FLIGHT
+        self._max_backlog = max_backlog
+        self._max_inbound = max_inbound
+        self._max_in_flight = max_in_flight
         # None checks nothing here: the transport's own frame limit is the
         # only one, as for a stream no runtime has bounded.
-        self._max_message_bytes: int | None = None
+        self._max_message_bytes = max_message_bytes
         self._max_replay = max_replay
         # Read ONCE, here, and maintained by `send` thereafter. litelink's
         # `end_offset()` is a SQLite read and `append` returns the offset it
@@ -434,8 +445,66 @@ class Stream:
         self._last_send: float | None = None
         self._last_send_ts: float | None = None
 
+    @property
+    def definition(self) -> Stream | None:
+        """The definition passed to open; None for a directly built handle."""
+        return self._definition
+
+    @property
+    def replicate(self) -> bool:
+        """Whether the broker starts a WAL sidecar for this handle's log."""
+        return self._replicate
+
     @classmethod
     def open(
+        cls, stream: Stream, *, initialization: Initialization = "open_existing"
+    ) -> StreamHandle:
+        """Open, create or restore a durable stream from its definition.
+
+        Initialization is explicit: opening never creates a missing log and
+        creating never replaces a published copy. Restoring uses restore's
+        default reserves, after the previous writer has stopped. The returned
+        handle owns its log; aclose closes it. Credentials travel on Storage
+        and are also passed to metadata uploads and child processes.
+        """
+        initialization = _INITIALIZATION.validate_python(initialization)
+        spec, storage = stream.spec, stream.storage
+        opened = cls._open(
+            spec.name,
+            root=storage.root,
+            schema=spec.schema_,
+            sort_by=spec.sort_by,
+            config=storage.config,
+            published=storage.published,
+            s3_options=storage.s3_options,
+            max_replay=spec.max_replay,
+            replay_published=spec.replay_published,
+            group_commit=spec.group_commit,
+            exactly_once=spec.exactly_once,
+            create=initialization == "create_if_absent",
+            restore=initialization == "restore_published",
+            max_publishers=spec.max_publishers,
+            max_backlog=spec.max_backlog,
+            max_inbound=spec.max_inbound,
+            max_in_flight=spec.max_in_flight,
+            max_message_bytes=spec.max_message_bytes,
+            replicate=storage.replicate,
+        )
+        opened._definition = stream
+        return opened
+
+    @classmethod
+    def _from_log(cls, name, *, log, **settings) -> StreamHandle:
+        # Factories own a log until construction succeeds. Validation or a
+        # failing injected constructor must not leave that log open.
+        try:
+            return cls(name, log=log, **settings)
+        except BaseException:
+            log.close()
+            raise
+
+    @classmethod
+    def _open(
         cls,
         name: str = "",
         *,
@@ -451,55 +520,12 @@ class Stream:
         exactly_once: bool = False,
         create: bool = False,
         restore: bool = False,
-    ) -> Stream:
-        """Open a stream, checking its declaration against the log on disk.
+        **handle_settings,
+    ) -> StreamHandle:
+        """Shared opening mechanism for definitions and the version-1 registry.
 
-        `create=True` creates it only when neither disk nor published prefix
-        holds it. `restore=True` brings back a published replica when the
-        local log is absent. Both default to False; neither overwrites a
-        replica with an empty stream. A failed store lookup propagates.
-
-            stream = streamcast.Stream.open("trades", create=True, root="data", schema=SCHEMA)
-
-        **Not created where `published` already holds it.** When the stream
-        is not on this disk and its remote prefix has its metadata, its
-        table or its WAL replica, this raises `FileExistsError`: that is a
-        box that lost its disk, and an empty stream here would replace the
-        copy when a broker first serves it. Pass `restore=True` or use `Stream.restore`
-        to bring it back, after stopping the old writer.
-
-        `sort_by`, `config`, `published` and `s3_options` configure the log.
-        Options also reach litelink when reopening an existing log and are
-        retained for metadata uploads and child processes. They are not
-        persisted: pass them on every open or use the environment.
-        `name` is both the stream's route and the log's name: one fact, one
-        home, and a server cannot serve `/trades` off a log called something
-        else.
-
-        The returned `Stream` OWNS its log and closes it in `aclose`. Pass
-        `log=` to the initialiser instead when the handle is yours to keep.
-
-        `replay_published` is NOT part of `config`: litelink persists a
-        `LogConfig` in the log's `meta` table, so a field there would be
-        durable policy shared by every process that opens the log, and one
-        caller's `set_config` would change another's read tier. Which tiers a
-        handle reads is a property of that handle, so it is passed and not
-        stored — reopen with it to get it again. With `max_replay=None`,
-        the server can replay all retained rows of the current log; size
-        `BrokerConfig(max_backlog=)` for live traffic arriving during the replay.
-
-        **`exactly_once=True` lets a publisher that names itself have its
-        rows deduped** (`publish(uri, publisher=...)`, `_dedupe`). Each such
-        publisher numbers its rows 1, 2, 3, … with no holes; a row at or below
-        the last seq the broker appended is not appended again; its reply
-        carries the original offset if known, otherwise None. A seq past the
-        next is refused as a gap.
-        The mark is committed with the rows, in the log's buffer, so it
-        survives a restart. It does NOT survive losing the buffer: a restore
-        from the published table alone, or a revive, forgets every mark
-        (best effort; `docs/SPEC.md` §6b). Like `group_commit` it is passed at each open,
-        not stored, and turning it off and on again leaves the marks valid:
-        plain publishers never touch them.
+        The registry retains its declaration format until the control API
+        adopts Stream definitions. This helper does no post-open mutation.
         """
         # Its own directory for a new stream, or the layout it already has;
         # the published side follows (`_metadata.home`).
@@ -521,6 +547,7 @@ class Stream:
                 s3_options=s3_options,
                 max_replay=max_replay,
                 replay_published=replay_published,
+                **handle_settings,
             )
 
         try:
@@ -539,7 +566,7 @@ class Stream:
             if not restore or prefix is None:
                 raise
 
-            return cls.restore(
+            return cls._restore(
                 name,
                 root=original_root,
                 published=prefix,
@@ -551,19 +578,21 @@ class Stream:
                 replay_published=replay_published,
                 group_commit=group_commit,
                 exactly_once=exactly_once,
+                **handle_settings,
             )
 
-        return cls(
+        return cls._from_log(
             name,
             log=log,
             owns_log=True,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,
             replay_published=replay_published,
             group_commit=group_commit,
             exactly_once=exactly_once,
+            **handle_settings,
         )
 
     @classmethod
@@ -580,10 +609,10 @@ class Stream:
         replay_published: bool = False,
         group_commit: bool = True,
         exactly_once: bool = False,
-    ) -> Stream:
+    ) -> StreamHandle:
         """Move a stream onto a new log with a new schema, and return it.
 
-            stream = streamcast.Stream.migrate("trades", root="data", schema=V2)
+            stream = streamcast.StreamHandle.migrate("trades", root="data", schema=V2)
             app = streamcast.create_app(streams=stream)
             async with app.router.lifespan_context(app):
                 ...
@@ -630,7 +659,7 @@ class Stream:
 
         **This server replays only the current log.** A subscriber resuming
         from below the seam is refused `evicted`, naming where the current log
-        starts; `catch_up=True` reads below it through `Stream.snapshot`,
+        starts; `catch_up=True` reads below it through `StreamHandle.snapshot`,
         which reads every log. A consumer that was caught up when the server
         stopped resumes exactly at the seam and loses nothing.
 
@@ -677,7 +706,7 @@ class Stream:
         except FileNotFoundError:
             msg = (
                 f"there is no stream {name!r} at {root} to migrate. "
-                f"Stream.open(..., create=True) creates one."
+                f"StreamHandle.open(..., initialization='create_if_absent') creates one."
             )
             raise FileNotFoundError(msg) from None
 
@@ -845,15 +874,15 @@ class Stream:
         replica_reserve: int | None = None,
         published_reserve: int | None = None,
         revive: bool = False,
-    ) -> Stream:
+    ) -> StreamHandle:
         """Stand a stream up on a box that never held its log.
 
-            stream = streamcast.Stream.restore(
+            stream = streamcast.StreamHandle.restore(
                 "trades", root="data", published="s3://market-data/prod"
             )
 
         Producer-side failover, and the counterpart to `connect(cursor=)` on
-        the consumer side. `Stream.open` restores it only with `restore=True`;
+        the consumer side. `StreamHandle.open` restores it only with `initialization="restore_published"`;
         this rebuilds it from its replicated WAL when there is one, and
         otherwise from its published table alone (litelink 0.10), then hands
         back a stream ready for the broker to serve and to `send` to.
@@ -891,7 +920,7 @@ class Stream:
         **A retired stream is refused** unless `revive=True`, which continues
         it on its next log at exactly the retired end — no fence, since
         retiring fixed the end — with the retired log's columns and sort and
-        `config`. See `Stream.retire`.
+        `config`. See `StreamHandle.retire`.
 
         **Exactly-once publishers' marks are best effort here** (`_dedupe`).
         They live in the log's buffer, so a restore from a WAL replica brings
@@ -909,6 +938,46 @@ class Stream:
         handles append, and both publish to the same table. Stop the old
         producer first. See `docs/SPEC.md`.
         """
+        return cls._restore(
+            name,
+            root=root,
+            published=published,
+            s3_options=s3_options,
+            binary=binary,
+            replay_published=replay_published,
+            group_commit=group_commit,
+            exactly_once=exactly_once,
+            max_replay=max_replay,
+            schema=schema,
+            sort_by=sort_by,
+            config=config,
+            replica_reserve=replica_reserve,
+            published_reserve=published_reserve,
+            revive=revive,
+        )
+
+    @classmethod
+    def _restore(
+        cls,
+        name: str = "",
+        *,
+        root: str | PathLike[str],
+        published: str,
+        s3_options: object | None = None,
+        binary: str | None = None,
+        replay_published: bool = False,
+        group_commit: bool = True,
+        exactly_once: bool = False,
+        max_replay: int | None = MAX_REPLAY,
+        schema: Mapping[str, object] | None = None,
+        sort_by: Sequence[str] | None = None,
+        config: object | None = None,
+        replica_reserve: int | None = None,
+        published_reserve: int | None = None,
+        revive: bool = False,
+        **handle_settings,
+    ) -> StreamHandle:
+        """Shared restore mechanism, retaining definition handle settings."""
         # **The metadata first**, because it says which log is current. Without
         # it this would rebuild a migrated stream's FIRST log and serve that as
         # though nothing had happened since.
@@ -1007,17 +1076,18 @@ class Stream:
         if metadata is not None:
             _versions.commit(root, metadata)
 
-        return cls(
+        return cls._from_log(
             name,
             log=log,
             owns_log=True,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,
             replay_published=replay_published,
             group_commit=group_commit,
             exactly_once=exactly_once,
+            **handle_settings,
         )
 
     @classmethod
@@ -1030,7 +1100,7 @@ class Stream:
     ) -> _metadata.Retirement:
         """Finish a stream for good: every row published, nothing more taken.
 
-            streamcast.Stream.retire("trades", root="data")
+            streamcast.StreamHandle.retire("trades", root="data")
 
         Run with the server stopped, as `migrate` is. In order:
 
@@ -1139,7 +1209,7 @@ class Stream:
     ) -> None:
         """Keep a stream's rows for `max_age`, or for good with None, the default.
 
-            streamcast.Stream.retain("trades", root="data", max_age=timedelta(days=30))
+            streamcast.StreamHandle.retain("trades", root="data", max_age=timedelta(days=30))
 
         **Off unless set: nothing ever leaves a stream that was not told to
         let it.** Set, a row whose `streamcast_ts` is older than `max_age`
@@ -1224,7 +1294,7 @@ class Stream:
         """Append `source`, an Arrow table or batch reader, to a stopped stream.
 
             reader = pq.ParquetFile("trades-2025.parquet").iter_batches()
-            streamcast.Stream.ingest("trades", pa.RecordBatchReader.from_batches(
+            streamcast.StreamHandle.ingest("trades", pa.RecordBatchReader.from_batches(
                 schema, reader), root="data")
 
         Returns the offsets the rows took, `[start, end)`, or None for a source
@@ -1285,8 +1355,6 @@ class Stream:
             msg = f"there is no stream {name!r} at {root} to ingest into"
             raise FileNotFoundError(msg) from None
 
-        import pyarrow as pa  # noqa: PLC0415 — litelink has loaded it already
-
         with log:
             reader = source.to_reader() if isinstance(source, pa.Table) else source
             if _log.STAMP in reader.schema.names:
@@ -1322,7 +1390,8 @@ class Stream:
         s3_options: object | None,
         max_replay: int | None,
         replay_published: bool,
-    ) -> Stream:
+        **handle_settings,
+    ) -> StreamHandle:
         """A retired stream, opened to be read: it replays, and refuses sends.
 
         Replays from the published table whatever `replay_published` says:
@@ -1332,16 +1401,17 @@ class Stream:
         stream reads the same retired or not.
         """
         del replay_published
-        return cls(
+        return cls._from_log(
             name,
-            log=log,  # ty: ignore[invalid-argument-type]
+            log=log,
             owns_log=True,
             max_replay=max_replay,
             floor=_floor(metadata),
             retired=_retired(root, metadata),
-            s3_options=s3_options,  # ty: ignore[invalid-argument-type]
+            s3_options=s3_options,
             replay_published=True,
             retirement=metadata.retirement,
+            **handle_settings,
         )
 
     @classmethod
@@ -1358,7 +1428,7 @@ class Stream:
         replay_published: bool,
         group_commit: bool,
         exactly_once: bool,
-    ) -> Stream:
+    ) -> StreamHandle:
         """A retired stream continued on a new log, where the retired one ended.
 
         The retired log is never written again — litelink refuses — so the
@@ -1439,7 +1509,7 @@ class Stream:
     def __repr__(self) -> str:
         durable = "durable" if self._log is not None else "live-only"
         return (
-            f"<streamcast.Stream {self._name!r} {durable} "
+            f"<streamcast.StreamHandle {self._name!r} {durable} "
             f"end_offset={self._end_offset} subscribers={len(self._subscribers)}>"
         )
 
@@ -1464,12 +1534,12 @@ class Stream:
     ) -> _snapshot.Snapshot:
         """A stream's history as of one point, read from its published tables.
 
-            snapshot = await Stream.snapshot(uri)                          # all published
-            snapshot = await Stream.snapshot(uri, as_of_offset=123)        # that point
-            snapshot = await Stream.snapshot(uri, as_of_ts=t)              # by streamcast_ts
-            snapshot = await Stream.snapshot(uri, as_of_offset=LATEST, broker=ws)
+            snapshot = await StreamHandle.snapshot(uri)                          # all published
+            snapshot = await StreamHandle.snapshot(uri, as_of_offset=123)        # that point
+            snapshot = await StreamHandle.snapshot(uri, as_of_ts=t)              # by streamcast_ts
+            snapshot = await StreamHandle.snapshot(uri, as_of_offset=LATEST, broker=ws)
 
-        `metadata_uri` is the stream's metadata file: `Stream.metadata_uri` on
+        `metadata_uri` is the stream's metadata file: `StreamHandle.metadata_uri` on
         the server, or the greeting's on a subscriber. A `Snapshot` reads, it
         does not write: `scan`, `sql` and `rows`, then `close` (or
         `async with`). See `_snapshot` for what each point means, when the
@@ -1537,14 +1607,14 @@ class Stream:
         """`Snapshot.scan` on a snapshot of its own, as a `Reader`, as litelink's
         `scan` is a reader.
 
-            table = await Stream.scan(uri, where="side = 1").read_all()
+            table = await StreamHandle.scan(uri, where="side = 1").read_all()
 
         The snapshot opens at the reader's first read, so that is where a
         refusal is raised, and closes once the reader is done.
         """
 
         async def opening() -> _snapshot.Reader:
-            snap = await Stream.snapshot(
+            snap = await StreamHandle.snapshot(
                 metadata_uri,
                 as_of_offset=as_of_offset,
                 as_of_ts=as_of_ts,
@@ -1591,7 +1661,7 @@ class Stream:
         """`Snapshot.sql` — over the table `log` — on a snapshot of its own, as
         a `Reader`, as litelink's `sql` is a reader.
 
-            table = await Stream.sql(uri, "SELECT count(*) FROM log").read_all()
+            table = await StreamHandle.sql(uri, "SELECT count(*) FROM log").read_all()
 
         `filters` and the offsets narrow `log` and prune whole logs; the
         query's own `WHERE` does not prune. See `Snapshot.sql`. The snapshot
@@ -1599,7 +1669,7 @@ class Stream:
         """
 
         async def opening() -> _snapshot.Reader:
-            snap = await Stream.snapshot(
+            snap = await StreamHandle.snapshot(
                 metadata_uri,
                 as_of_offset=as_of_offset,
                 as_of_ts=as_of_ts,
@@ -1641,7 +1711,7 @@ class Stream:
     ) -> _live.Live:
         """A stream's history kept current in memory: `scan` and `sql` as of now.
 
-            async with await Stream.live("ws://broker:8765/trades") as live:
+            async with await StreamHandle.live("ws://broker:8765/trades") as live:
                 await live.sql("SELECT side, sum(amount) FROM log GROUP BY side")
                 await live.wait_for(offset)     # until that row is visible
 
@@ -1714,7 +1784,7 @@ class Stream:
     def log(self) -> WriteHandle | None:
         """The litelink handle, or None.
 
-        Closed by `aclose` when this `Stream` created it from `root=`+`schema=`,
+        Closed by `aclose` when this `StreamHandle` created it from `root=`+`schema=`,
         and never when it was passed in — that one is the caller's.
 
         A retired stream's is opened read-only (`litelink.LocalReadHandle`):
@@ -1739,7 +1809,7 @@ class Stream:
 
         A retired stream is served read-only: it replays, snapshots and
         catches up, and refuses every send with `StreamRetired`. See
-        `Stream.retire`.
+        `StreamHandle.retire`.
         """
         return self._retirement
 
@@ -1768,7 +1838,7 @@ class Stream:
         connection; a failure is a failure to start. See `_metadata.ensure`. A
         stream with no log has no metadata and this does nothing.
 
-        Also where a `Stream(log=…)` learns it is part of a migrated stream:
+        Also where a `StreamHandle(log=…)` learns it is part of a migrated stream:
         its initialiser does no I/O, so the seam and the retired logs are read
         off the metadata here, before the first subscriber can ask below it.
         """
@@ -2610,7 +2680,7 @@ class Stream:
         # object storage. That is the setting that makes a plain WebSocket
         # client in any language able to replay a stream from the beginning
         # with no litelink, no credentials and no dependency on this repo —
-        # see `Stream.open` for what it costs.
+        # see `StreamHandle.open` for what it costs.
         if self._max_replay is not None and behind > self._max_replay:
             # **The offset distance said too far. Ask what it actually costs.**
             # `max_replay` bounds the work a replay does, and that work is
@@ -2825,8 +2895,8 @@ def _open_or_create(
             if held is not None:
                 msg = (
                     f"there is no stream {name!r} at {root}, and {held} already "
-                    f"holds it. Pass restore=True to Stream.open, or bring "
-                    f"it back with Stream.restore({name!r}, "
+                    f"holds it. Pass initialization='restore_published' to StreamHandle.open, or bring "
+                    f"it back with StreamHandle.restore({name!r}, "
                     f"root=..., published=...); to start it afresh, give it a "
                     f"prefix that holds nothing of it."
                 )
@@ -2847,7 +2917,7 @@ def _open_or_create(
                     if published
                     else ""
                 )
-                + "; pass create=True to create it"
+                + "; pass initialization='create_if_absent' to create it"
             )
             raise FileNotFoundError(msg) from None
 
@@ -2863,7 +2933,7 @@ def _open_or_create(
 
     # Compared WITHOUT `streamcast_ts`, so a log created before the column
     # existed still opens: it keeps its shape and is simply never stamped. A
-    # log's columns are fixed for its life; `Stream.migrate` is how a stream
+    # log's columns are fixed for its life; `StreamHandle.migrate` is how a stream
     # gains one.
     if list(_log.declared(log.schema)) != list(declared):
         # Read BEFORE closing. `log.schema` goes to the buffer's `meta` table,
@@ -2875,7 +2945,7 @@ def _open_or_create(
             f"the log at {root}/{current} has columns {found}, and this "
             f"stream declares {declared.names}. litelink fixes a log's shape at "
             f"creation, so an existing one cannot be re-declared. To change the "
-            f"schema, stop the server and use Stream.migrate; to keep it, "
+            f"schema, stop the server and use StreamHandle.migrate; to keep it, "
             f"declare the columns the log has."
         )
         raise ValueError(msg)
@@ -3042,7 +3112,7 @@ async def _prepend(
         yield item
 
 
-__all__ = ["MAX_REPLAY", "Stream"]
+__all__ = ["MAX_REPLAY", "StreamHandle"]
 
 
 def _failed(

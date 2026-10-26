@@ -2,7 +2,7 @@
 
     just demo otel        # the broker, the services, the exporter, and this
 
-A `Stream.live` view of `/spans`: the published tables plus every span the
+A `StreamHandle.live` view of `/spans`: the published tables plus every span the
 broker has sent since, so one SQL query answers over the whole history up to
 the span that arrived a moment ago. Every few seconds it asks, per service,
 for the error rate over the last `--window` seconds — by `streamcast_ts`,
@@ -85,7 +85,7 @@ async def main(broker: str, every: float, window: float) -> None:
     uri = f"{broker}/spans"
     while True:
         try:
-            async with await streamcast.Stream.live(uri) as live:
+            async with await streamcast.StreamHandle.live(uri) as live:
                 print(f"analysing {uri} live, every {every:.0f}s", flush=True)
                 while True:
                     table = await live.sql(query(int(window * 1_000_000))).read_all()

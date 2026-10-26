@@ -37,18 +37,7 @@ def serve_streams(streams, host=None, port=None, *, sock=None, **kwargs):
     names = {field.name for field in fields(streamcast.BrokerConfig)}
     settings = {key: kwargs.pop(key) for key in list(kwargs) if key in names}
     if "max_size" in kwargs:
-        if "max_message_bytes" in settings:
-            raise ValueError("max_size and max_message_bytes together")
-
-        size = kwargs.pop("max_size")
-        settings["max_message_bytes"] = size
-        settings["transport_max_bytes"] = size
-
-    if "max_message_bytes" in settings:
-        value = settings["max_message_bytes"]
-        settings["transport_max_bytes"] = (
-            max(value.values()) if isinstance(value, dict) else value
-        )
+        settings["transport_max_bytes"] = kwargs.pop("max_size")
 
     transport = {}
     if "compression" in kwargs:

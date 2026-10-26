@@ -130,7 +130,7 @@ def produce(
             **config,  # ty: ignore[invalid-argument-type]
         ),
     )
-    stream = streamcast.Stream("trades", log=handle)
+    stream = streamcast.StreamHandle("trades", log=handle)
 
     return stream, handle
 
@@ -152,7 +152,7 @@ class TestItStandsUpElsewhere:
             before = handle.end_offset()
 
         # Box B has never held this log — a different root entirely.
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -231,7 +231,7 @@ class TestItStandsUpElsewhere:
         # server still refuses 201 and the fence range above it was never
         # issued, so no published table will ever hold it. Raising the bound is the
         # only thing that closes it.
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -295,7 +295,7 @@ class TestTheFenceIsNotDistance:
             ship(handle.write_replication_config(), s3, litestream)
 
         # NOT `max_replay=None`. The default bound, which is the point.
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -323,7 +323,7 @@ class TestTheFenceIsNotDistance:
 
     async def test_a_genuinely_distant_cursor_is_still_refused(self, serve, log):
         """The bound still bounds. Counting rows is not removing the limit."""
-        stream = streamcast.Stream("trades", log=log, max_replay=5)
+        stream = streamcast.StreamHandle("trades", log=log, max_replay=5)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(40)])
             with pytest.raises(streamcast.NotReplayable) as raised:
@@ -359,7 +359,7 @@ class TestCatchUpOnTopOfIt:
             handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -406,7 +406,7 @@ class TestTheStagingTableComesBack:
             handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -446,7 +446,7 @@ class TestTheStagingTableComesBack:
             handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -489,7 +489,7 @@ class TestTheServerStartsWhatItNeeds:
             handle.publish(flush=True)
             ship(handle.write_replication_config(), s3, litestream)
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -516,14 +516,20 @@ class TestAMigratedStream:
         Without it, a restore of `trades` rebuilds the stream's FIRST log and
         serves it as though no migration had happened.
         """
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path / "box_a",
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
-            config=litelink.LogConfig(target_seal_size=SEAL_SIZE, wal_replication=True),
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=(tmp_path / "box_a").absolute(),
+                    published=bucket,
+                    replicate=True,
+                    s3_options=s3,
+                    config=litelink.LogConfig(
+                        target_seal_size=SEAL_SIZE, wal_replication=True
+                    ),
+                ),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(20)])
         await stream.aclose()
@@ -535,7 +541,7 @@ class TestAMigratedStream:
                 "venue": {"type": ["string", "null"]},
             },
         }
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "trades", root=tmp_path / "box_a", schema=v2, s3_options=s3
         )
         assert migrated.log is not None
@@ -543,7 +549,7 @@ class TestAMigratedStream:
         ship(str(migrated.log.write_replication_config()), s3, litestream)
         await migrated.aclose()
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "trades",
             root=tmp_path / "box_b",
             published=bucket,
@@ -555,7 +561,7 @@ class TestAMigratedStream:
             assert revived.log.name == "trades-v2"
             assert revived.schema is not None
             assert "venue" in revived.schema["properties"]  # ty: ignore[unsupported-operator]
-            # The metadata came down with it, so the next `Stream.open` on
+            # The metadata came down with it, so the next `StreamHandle.open` on
             # this box opens the same log.
             assert (
                 _metadata.load(_metadata.home(tmp_path / "box_b", "trades"), "trades")

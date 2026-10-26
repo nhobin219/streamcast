@@ -4,13 +4,14 @@ A publisher that names itself numbers its rows 1, 2, 3, … with no holes. The
 stream's writer keeps each publisher's mark -- the last seq appended and the
 offset it got -- in `streamcast_publishers`, a table in the log's buffer,
 committed in the same transaction as the rows (`_dedupe`, `_writer`). Most of
-this is tested on the `Stream` with no socket, as the rest of the suite is:
+this is tested on the `StreamHandle` with no socket, as the rest of the suite is:
 the guarantees live there, and the socket only carries them.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING
 
 import litelink
@@ -19,10 +20,11 @@ import pytest
 import websockets
 
 import streamcast
-from streamcast import _dedupe
+from streamcast import _dedupe, _versions, _writer
 from streamcast._protocol import (
     PUBLISH,
     Publish,
+    decode,
     decode_publish_seq,
     parse_publish_reply,
     parse_subscribe,
@@ -41,7 +43,9 @@ def marks(log: WriteHandle) -> dict[str, tuple[int, int]]:
     return {p: (s, o) for p, s, o in _dedupe.read_all(log)}
 
 
-async def claimed(stream: streamcast.Stream, publisher: str, seq: int, rows: list):
+async def claimed(
+    stream: streamcast.StreamHandle, publisher: str, seq: int, rows: list
+):
     """One exactly-once frame through the stream, as `serve_publisher` queues
     it: `(offsets, dup)`."""
     job = stream._submit_claimed(list(rows), publisher, seq)  # noqa: SLF001
@@ -51,7 +55,7 @@ async def claimed(stream: streamcast.Stream, publisher: str, seq: int, rows: lis
 
 class TestTheWriterJudgesEachFrame:
     async def test_contiguous_seqs_append_and_the_mark_commits_with_them(self, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         assert await claimed(stream, "a", 1, [trade(0)]) == ([1], 0)
         assert await claimed(stream, "a", 2, [trade(1), trade(2)]) == ([2, 3], 0)
         await stream.aclose()
@@ -61,7 +65,7 @@ class TestTheWriterJudgesEachFrame:
 
     async def test_a_duplicate_is_answered_with_its_original_offset(self, log):
         """Single rows, a group, and a resend that regroups rows."""
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await claimed(stream, "a", 1, [trade(i) for i in range(3)])  # offsets 1..3
         await stream.send(trade(9))  # a plain publisher's row between: offset 4
         await claimed(stream, "a", 4, [trade(3), trade(4)])  # offsets 5, 6
@@ -77,18 +81,17 @@ class TestTheWriterJudgesEachFrame:
     async def test_a_group_straddling_the_mark_appends_only_its_suffix(
         self, log, monkeypatch
     ):
-        from streamcast._protocol import decode
 
         received: list[tuple[int | None, dict]] = []
-        fan_out = streamcast.Stream._fan_out  # noqa: SLF001
+        fan_out = streamcast.StreamHandle._fan_out  # noqa: SLF001
 
         def capture(self, row, frame):
             offset, _ts, msg = decode(frame)
             received.append((offset, msg))
             fan_out(self, row, frame)
 
-        monkeypatch.setattr(streamcast.Stream, "_fan_out", capture)
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        monkeypatch.setattr(streamcast.StreamHandle, "_fan_out", capture)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await claimed(stream, "a", 1, [trade(0), trade(1)])
         offsets, dup = await claimed(stream, "a", 2, [trade(1), trade(2), trade(3)])
 
@@ -108,9 +111,6 @@ class TestTheWriterJudgesEachFrame:
 
         Falsify by dropping the second pass of `Publishers.settle`.
         """
-        import threading
-
-        from streamcast import _writer
 
         gate = threading.Event()
         real = _writer.Writer._commit_claimed  # noqa: SLF001
@@ -119,7 +119,7 @@ class TestTheWriterJudgesEachFrame:
             gate.wait()
             return real(self, loop, jobs, publishers)
 
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await claimed(stream, "a", 1, [trade(0)])
         monkeypatch.setattr(_writer.Writer, "_commit_claimed", held)
         plug = stream._submit_claimed([trade(1)], "a", 2)  # noqa: SLF001
@@ -132,7 +132,7 @@ class TestTheWriterJudgesEachFrame:
         await stream.aclose()
 
     async def test_a_gap_is_refused_with_nothing_appended(self, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await claimed(stream, "a", 1, [trade(0)])
         with pytest.raises(streamcast.SequenceGap) as gap:
             await claimed(stream, "a", 3, [trade(2)])
@@ -147,7 +147,7 @@ class TestTheWriterJudgesEachFrame:
         assert log.end_offset() == 3
 
     async def test_publishers_are_judged_independently(self, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await claimed(stream, "a", 1, [trade(0)])
         await claimed(stream, "b", 1, [trade(1)])
         await stream.send(trade(2))
@@ -178,7 +178,7 @@ class TestTheWriterJudgesEachFrame:
             return real(tx, jobs, offsets)
 
         monkeypatch.setattr(_dedupe.Publishers, "write", staticmethod(failing))
-        stream = streamcast.Stream(
+        stream = streamcast.StreamHandle(
             "trades", log=log, exactly_once=True, group_commit=False
         )
         first = stream._submit_claimed([trade(0)], "a", 1)  # noqa: SLF001
@@ -203,22 +203,30 @@ class TestTheMarkIsDurable:
         """After a restart only the table is left: a duplicate AT the mark gets
         its offset back, an older one gets `None` (the ranges were memory)."""
         root = tmp_path / "data"
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=root,
-            schema=streamcast.from_arrow(SCHEMA),
-            exactly_once=True,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades",
+                    schema=streamcast.from_arrow(SCHEMA),
+                    exactly_once=True,
+                ),
+                storage=streamcast.Storage(root=root.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await claimed(stream, "a", 1, [trade(0), trade(1), trade(2)])
         await stream.aclose()
 
-        reopened = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=root,
-            schema=streamcast.from_arrow(SCHEMA),
-            exactly_once=True,
+        reopened = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades",
+                    schema=streamcast.from_arrow(SCHEMA),
+                    exactly_once=True,
+                ),
+                storage=streamcast.Storage(root=root.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         writer = reopened._writer  # noqa: SLF001
         assert writer is not None
@@ -228,7 +236,7 @@ class TestTheMarkIsDurable:
         await reopened.aclose()
 
     async def test_an_evicted_publisher_is_read_back_from_the_table(self, log):
-        stream = streamcast.Stream(
+        stream = streamcast.StreamHandle(
             "trades", log=log, exactly_once=True, max_publishers=1
         )
         await claimed(stream, "a", 1, [trade(0)])
@@ -246,7 +254,7 @@ class TestTheMarkIsDurable:
         await stream.aclose()
 
     async def test_a_stream_without_exactly_once_publishers_gets_no_table(self, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         await stream.send(trade(0))
         await stream.aclose()
 
@@ -259,14 +267,20 @@ class TestTheMarkIsDurable:
     async def test_migrate_carries_the_marks_to_the_new_log(self, tmp_path):
         root = tmp_path / "data"
         schema = streamcast.from_arrow(SCHEMA)
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=root, schema=schema, exactly_once=True
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades", schema=schema, exactly_once=True
+                ),
+                storage=streamcast.Storage(root=root.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await claimed(stream, "a", 1, [trade(0), trade(1)])
         await stream.aclose()
 
         wider = streamcast.from_arrow(SCHEMA.append(pa.field("venue", pa.string())))
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "trades", root=root, schema=wider, exactly_once=True
         )
         log = migrated.log
@@ -281,12 +295,17 @@ class TestTheMarkIsDurable:
     ):
         """The retired log reopens read-only, with no transaction to read the
         table through; the copy beside the metadata is what carries them."""
-        from streamcast import _versions
 
         root = tmp_path / "data"
         schema = streamcast.from_arrow(SCHEMA)
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=root, schema=schema, exactly_once=True
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades", schema=schema, exactly_once=True
+                ),
+                storage=streamcast.Storage(root=root.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await claimed(stream, "a", 1, [trade(0)])
         await stream.aclose()
@@ -299,10 +318,10 @@ class TestTheMarkIsDurable:
 
         monkeypatch.setattr(_versions, "commit", dying)
         with pytest.raises(SystemExit):
-            streamcast.Stream.migrate("trades", root=root, schema=wider)
+            streamcast.StreamHandle.migrate("trades", root=root, schema=wider)
 
         monkeypatch.setattr(_versions, "commit", real)
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "trades", root=root, schema=wider, exactly_once=True
         )
         log = migrated.log
@@ -333,7 +352,7 @@ def migrated_home(root):
 
 class TestOverTheWire:
     async def test_a_publisher_resumes_from_the_greeting(self, serve, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, publisher="a") as first:
                 assert first.info.publisher is not None
@@ -359,7 +378,7 @@ class TestOverTheWire:
     async def test_seq_is_required_exactly_when_the_publication_is_exactly_once(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, publisher="a") as producer:
                 with pytest.raises(ValueError, match="needs seq="):
@@ -374,7 +393,7 @@ class TestOverTheWire:
     async def test_a_stream_not_served_exactly_once_refuses_the_publisher(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(streamcast.ExactlyOnceUnavailable) as refused:
                 await streamcast.publish(uri, publisher="a")
@@ -401,13 +420,12 @@ class TestOverTheWire:
         assert refused.value.why == "broker"
 
     async def test_a_probe_that_raises_leaves_no_claim(self, serve, log, monkeypatch):
-        from streamcast import _writer
 
         def broken(self, publisher):
             raise RuntimeError("can't start new thread")
 
         monkeypatch.setattr(_writer.Writer, "probe", broken)
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(Exception):  # noqa: B017, PT011 — the server's 1011
                 await streamcast.publish(uri, publisher="a")
@@ -415,7 +433,7 @@ class TestOverTheWire:
         assert stream._claims == {}  # noqa: SLF001
 
     async def test_a_newer_connection_supersedes_an_older_one(self, serve, log):
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             first = await streamcast.publish(uri, publisher="a")
             await first.send(trade(0), seq=1)
@@ -442,7 +460,7 @@ class TestOverTheWire:
         its duplicate.
         """
         parked, release = asyncio.Event(), asyncio.Event()
-        room = streamcast.Stream._room  # noqa: SLF001
+        room = streamcast.StreamHandle._room  # noqa: SLF001
         calls = 0
 
         async def hooked(self, rows):
@@ -454,8 +472,8 @@ class TestOverTheWire:
 
             await room(self, rows)
 
-        monkeypatch.setattr(streamcast.Stream, "_room", hooked)
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        monkeypatch.setattr(streamcast.StreamHandle, "_room", hooked)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             first = await streamcast.publish(uri, publisher="a")
             await first.send(trade(1), seq=1)
@@ -534,7 +552,7 @@ class TestTheWire:
 
     def test_exactly_once_needs_a_log(self):
         with pytest.raises(ValueError, match="needs a log"):
-            streamcast.Stream("trades", exactly_once=True)
+            streamcast.StreamHandle("trades", exactly_once=True)
 
 
 @pytest.fixture

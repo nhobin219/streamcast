@@ -18,9 +18,9 @@ of publishers, one writer.
 
 **Granularity is the publisher's, exactly as it is locally.** `send` is one
 row; `send_many` is a group in one transaction. The choice and
-its consequences are identical to `Stream.send` versus `Stream.send_many`,
+its consequences are identical to `StreamHandle.send` versus `StreamHandle.send_many`,
 because they ARE those calls — the server makes them on the publisher's
-behalf. See `Stream.send` for what a publisher that never yields does to a
+behalf. See `StreamHandle.send` for what a publisher that never yields does to a
 stream with no log; a remote publisher can do it too, and nothing here
 prevents it any more than the local path does.
 
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
 
     # litelink's own row type, spelled here so the annotations read the same
-    # as `Stream.send`'s without importing litelink at runtime.
+    # as `StreamHandle.send`'s without importing litelink at runtime.
     Row = Mapping[str, object]
 
 
@@ -155,7 +155,7 @@ class Publication:
         row in flight at a time: one round trip per row. To keep several in
         flight — and let the server commit them together — use `submit`.
 
-        `None` on a stream with no log, for the same reason `Stream.send`
+        `None` on a stream with no log, for the same reason `StreamHandle.send`
         returns it: nothing assigned an offset.
 
         Raises `Rejected` if the server would not take the row — a column the
@@ -201,7 +201,7 @@ class Publication:
         """Publish a group in ONE transaction. Returns their offsets.
 
         One fsync for the group rather than one each, which is a write
-        throughput lever beside `submit` — the same one `Stream.send_many`
+        throughput lever beside `submit` — the same one `StreamHandle.send_many`
         is, for the same reason, because it is that call.
 
         All or nothing: a row the schema refuses rejects the whole group and
@@ -385,7 +385,7 @@ class publish:  # noqa: N801 — a sibling of `connect`, which mirrors `websocke
 
     `max_in_flight` (64) is how many frames `submit` keeps unacknowledged
     at once. A server that owes one connection fewer replies than that
-    (`BrokerConfig(max_in_flight=)`) stops reading it, and the rest wait at the
+    (`StreamHandle(max_in_flight=)`) stops reading it, and the rest wait at the
     socket.
 
     Every other keyword goes to `websockets.connect` unchanged. `compression`

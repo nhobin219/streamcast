@@ -10,7 +10,7 @@ litelink minors, and a snapshot then reads files the other one wrote.
 
 Every pair runs `tests/interop_peer.py` on both ends, the server in one
 process and the client in another: the client publishes, subscribes from
-`EARLIEST`, and opens `Stream.snapshot` on the metadata URI its greeting
+`EARLIEST`, and opens `StreamHandle.snapshot` on the metadata URI its greeting
 named, once alone and once with the broker's tail. The server has sealed and
 published rows before the client connects, so the snapshot reads the files
 the other version wrote, not only rows over the socket.
@@ -22,6 +22,7 @@ lets the install reach PyPI: CI sets it, as it sets `STREAMCAST_REQUIRE_S3`.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import json
 import os
@@ -33,7 +34,11 @@ from pathlib import Path
 
 import pytest
 
+import streamcast
 from streamcast import _protocol
+
+from . import interop_peer
+from .hosting import serve_streams
 
 PEER = Path(__file__).resolve().parent / "interop_peer.py"
 
@@ -198,12 +203,6 @@ class TestTheMarks:
         server opens, seals, publishes and serves the log with the table of
         marks in its buffer, and leaves the table alone, so moving forward
         again resumes the dedupe where it was."""
-        import asyncio
-
-        import streamcast
-
-        from . import interop_peer
-        from .hosting import serve_streams
 
         version, python = release
         root = tmp_path / "data"
@@ -211,12 +210,14 @@ class TestTheMarks:
         ours = [interop_peer.row(i) for i in indices]
 
         async def dedupe() -> None:
-            stream = streamcast.Stream.open(
-                "trades",
-                create=True,
-                root=root,
-                schema=interop_peer.SCHEMA,
-                exactly_once=True,
+            stream = streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(
+                        name="trades", schema=interop_peer.SCHEMA, exactly_once=True
+                    ),
+                    storage=streamcast.Storage(root=root.absolute()),
+                ),
+                initialization="create_if_absent",
             )
             async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as s:
                 uri = f"ws://127.0.0.1:{s.sockets[0].getsockname()[1]}/trades"
@@ -226,12 +227,14 @@ class TestTheMarks:
             await stream.aclose()
 
         async def reopened() -> tuple[int, int | None]:
-            stream = streamcast.Stream.open(
-                "trades",
-                create=True,
-                root=root,
-                schema=interop_peer.SCHEMA,
-                exactly_once=True,
+            stream = streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(
+                        name="trades", schema=interop_peer.SCHEMA, exactly_once=True
+                    ),
+                    storage=streamcast.Storage(root=root.absolute()),
+                ),
+                initialization="create_if_absent",
             )
             try:
                 writer = stream._writer  # noqa: SLF001

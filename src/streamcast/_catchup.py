@@ -11,7 +11,7 @@ tables, then picks the socket up where they end:
 The consumer sees one stream. Underneath, the rows below the server's window
 come from object storage and the rest come from the socket.
 
-**Built on `Stream.snapshot`.** A snapshot is the layer below: be correct or
+**Built on `StreamHandle.snapshot`.** A snapshot is the layer below: be correct or
 fail, reading to a fixed point. Catch-up is one user of it, and owns only what
 a snapshot does not — the retry loop and the live connection. The greeting
 names the stream's metadata file and id, and a snapshot of it is everything
@@ -175,7 +175,7 @@ class Catcher:
     ) -> None:
         self._uri = uri
         # The cap on the DuckDB database the gap is read through, as
-        # `Stream.snapshot` takes it; None leaves DuckDB's default.
+        # `StreamHandle.snapshot` takes it; None leaves DuckDB's default.
         self._memory_limit = memory_limit
         # How much of the gap one query reads: see `_limits.PAGE_BYTES`.
         self._page_bytes = page_bytes
@@ -429,7 +429,7 @@ def _gap_below(
     consumer handed a stream that silently begins above where it asked has
     lost data and been told it recovered.
 
-    `retained` says the stream has a retention window (`Stream.retain`), so
+    `retained` says the stream has a retention window (`StreamHandle.retain`), so
     the rows were dropped on purpose rather than lost.
     """
     if retained:
@@ -437,7 +437,7 @@ def _gap_below(
             f"{name!r} asked to catch up from offset {requested}, but the stream "
             f"starts at {earliest}: it keeps rows for its retention window, and "
             f"the {earliest - requested} below that are past it and dropped "
-            f"(Stream.retain). Reconnect with offset=streamcast.EARLIEST, or with "
+            f"(StreamHandle.retain). Reconnect with offset=streamcast.EARLIEST, or with "
             f"offset={earliest}, to carry on from what the stream keeps."
         )
 

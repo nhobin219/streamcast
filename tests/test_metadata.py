@@ -47,12 +47,16 @@ def hint(root, stream: str = "trades") -> Path:
 
 class TestServeWritesIt:
     async def test_a_new_stream_gets_one_at_its_first_serve(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert not hint(tmp_path).exists(), (
-                "Stream.open stays offline; the file is serve's to write"
+                "StreamHandle.open stays offline; the file is serve's to write"
             )
             async with serve(stream, maintain=False):
                 pass
@@ -82,8 +86,12 @@ class TestServeWritesIt:
         ) as legacy:
             legacy.extend([row(i) for i in range(3)])
 
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False):
@@ -97,10 +105,16 @@ class TestServeWritesIt:
         assert found["live_log"]["system_schema"]["properties"] == {}
 
     async def test_the_id_is_minted_once(self, tmp_path, serve):
-        # A fresh `Stream.open` per serve, as a restart has: the broker closes the
+        # A fresh `StreamHandle.open` per serve, as a restart has: the broker closes the
         # log a stream owns when it shuts down.
         async with serve(
-            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA),
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                    storage=streamcast.Storage(root=tmp_path.absolute()),
+                ),
+                initialization="create_if_absent",
+            ),
             maintain=False,
         ):
             pass
@@ -108,28 +122,38 @@ class TestServeWritesIt:
         first = written(tmp_path)["stream_id"]
 
         async with serve(
-            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA),
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                    storage=streamcast.Storage(root=tmp_path.absolute()),
+                ),
+                initialization="create_if_absent",
+            ),
             maintain=False,
         ):
             pass
 
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.aclose()
 
         assert written(tmp_path)["stream_id"] == first
 
     async def test_a_live_only_stream_has_none(self, tmp_path, serve):
-        async with serve(streamcast.Stream("live"), maintain=False):
+        async with serve(streamcast.StreamHandle("live"), maintain=False):
             pass
 
         assert list(tmp_path.iterdir()) == []
 
     async def test_the_asgi_app_writes_it_at_start(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
-            streams = asgi(stream, maintain=False, replicate=False)
+            streams = asgi(stream, maintain=False)
             assert not hint(tmp_path).exists(), (
                 "constructed, often at import: no I/O yet"
             )
@@ -141,13 +165,17 @@ class TestServeWritesIt:
 
 class TestMigrationUpdatesIt:
     async def test_the_live_log_is_sealed_into_the_list(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
 
-        migrated = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        migrated = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await migrated.aclose()
 
         found = written(tmp_path)
@@ -168,12 +196,18 @@ class TestItNamesTheLiveLog:
         a migration under litelink 0.5 was never retired and still opens, so
         the broker checks the metadata too: here, a log it does not name as live.
         """
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send(row(0))
         await stream.aclose()
-        await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
+        await streamcast.StreamHandle.migrate(
+            "trades", root=tmp_path, schema=V2
+        ).aclose()
 
         with pytest.raises(litelink.RetiredError):
             litelink.open(_metadata.home(tmp_path, "trades"), "trades")
@@ -189,24 +223,30 @@ class TestItNamesTheLiveLog:
         )
         with litelink.open(_metadata.home(tmp_path, "trades"), "trades-v2") as unnamed:
             with pytest.raises(ValueError, match="live log is 'trades-v3'"):
-                async with serve(streamcast.Stream("trades", log=unnamed)):
+                async with serve(streamcast.StreamHandle("trades", log=unnamed)):
                     pass
 
     async def test_a_handed_in_live_log_learns_its_seam(self, tmp_path, serve):
-        """`Stream(log=…)` does no I/O, so the seam arrives when the broker starts.
+        """`StreamHandle(log=…)` does no I/O, so the seam arrives when the broker starts.
 
         Without it a subscribe below the seam would read the live log, find
         nothing there, and be served an empty replay — a silent hole.
         """
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
-        await streamcast.Stream.migrate("trades", root=tmp_path, schema=V2).aclose()
+        await streamcast.StreamHandle.migrate(
+            "trades", root=tmp_path, schema=V2
+        ).aclose()
 
         with litelink.open(_metadata.home(tmp_path, "trades"), "trades-v2") as live:
-            handed = streamcast.Stream("trades", log=live)
+            handed = streamcast.StreamHandle("trades", log=live)
             async with serve(handed, maintain=False) as uri:
                 assert handed.retired == (
                     (_metadata.home(tmp_path, "trades"), "trades"),
@@ -221,16 +261,17 @@ class TestItNamesTheLiveLog:
 @pytest.mark.replication
 class TestThePublishedCopy:
     async def test_serve_uploads_it(self, tmp_path, serve, s3, bucket):
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=tmp_path.absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
-            async with serve(stream, maintain=False, replicate=False):
+            async with serve(stream, maintain=False):
                 pass
         finally:
             await stream.aclose()
@@ -243,19 +284,24 @@ class TestThePublishedCopy:
     async def test_an_unchanged_stream_is_not_uploaded_again(
         self, tmp_path, serve, s3, bucket, monkeypatch
     ):
-        first = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
+        first = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=tmp_path.absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
-        async with serve(first, maintain=False, replicate=False):
+        async with serve(first, maintain=False):
             pass
 
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA, s3_options=s3
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute(), s3_options=s3),
+            ),
+            initialization="create_if_absent",
         )
         try:
             uploads: list[str] = []
@@ -268,7 +314,7 @@ class TestThePublishedCopy:
                     original(store, name, data),
                 ),
             )
-            async with serve(stream, maintain=False, replicate=False):
+            async with serve(stream, maintain=False):
                 pass
         finally:
             await stream.aclose()
@@ -279,17 +325,18 @@ class TestThePublishedCopy:
         self, tmp_path, serve, s3
     ):
         missing = f"s3://no-such-bucket-{uuid.uuid4().hex[:8]}/prefix"
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=missing,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(
+                    root=tmp_path.absolute(), published=missing, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             with pytest.raises(FileNotFoundError, match="does not exist"):
-                async with serve(stream, maintain=False, replicate=False):
+                async with serve(stream, maintain=False):
                     pass
         finally:
             await stream.aclose()

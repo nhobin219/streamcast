@@ -442,7 +442,7 @@ def _locked(home: Path, stream: str):  # noqa: ANN202
     """Every local commit of a stream's metadata, one at a time on this box.
 
     A commit reads the current version and writes the next; two at once —
-    a retention pass and a `Stream.retain`, say — would each build on what
+    a retention pass and a `StreamHandle.retain`, say — would each build on what
     the other is replacing. An `flock`, held for the write, beside the hint.
     """
     directory_ = home / directory(stream)

@@ -9,6 +9,38 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Breaking
+
+- `Stream` is now the frozen definition (`spec: StreamSpec`, `storage: Storage`).
+  The runtime class is `StreamHandle`; direct live-only and lent-log construction
+  keeps its keywords, including `owns_log=False`.
+- Replace `Stream.open("trades", root="data", schema=SCHEMA, create=True)` with:
+
+  ```python
+  from pathlib import Path
+  from streamcast import Storage, Stream, StreamHandle, StreamSpec
+
+  handle = StreamHandle.open(
+      Stream(
+          spec=StreamSpec(name="trades", schema=SCHEMA),
+          storage=Storage(root=Path("data").absolute()),
+      ),
+      initialization="create_if_absent",
+  )
+  ```
+
+  The default initialization is `open_existing`; `restore_published` replaces
+  `restore=True`. `handle.definition` retains that exact definition. Other runtime
+  operations (`snapshot`, `live`, `restore`, `migrate`, `retire`, `retain`, `ingest`)
+  are reached through `StreamHandle`.
+- `create_app(streams=...)` takes opened `StreamHandle`s. Move broker-level
+  `max_backlog`, `max_inbound`, `max_in_flight`, `max_message_bytes` and `replicate`
+  from `BrokerConfig` onto `StreamSpec` / `Storage`, or onto the direct handle
+  constructor. Name-to-limit mappings are removed. Limits validate at construction;
+  the host retains `transport_max_bytes` and `subscriber_yield_every`.
+  Sidecars follow each handle's replication flag and credential group.
+
+
 ### Changed — breaking
 
 - Replace `Outbox.pending()` with `pending_rows()`; no compatibility alias

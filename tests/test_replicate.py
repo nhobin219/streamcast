@@ -102,8 +102,8 @@ class TestItActuallyReplicates:
         sealed and maintained while NOTHING shipped — the operator believing
         they had continuous RPO protection with none of it.
         """
-        stream = streamcast.Stream("trades", log=shipped)
-        async with serve_streams(stream, "127.0.0.1", 0, replicate=True):
+        stream = streamcast.StreamHandle("trades", log=shipped, replicate=True)
+        async with serve_streams(stream, "127.0.0.1", 0):
             await stream.send_many(
                 [{"event_ts": i, "price": 1.0 * i} for i in range(2_000)]
             )
@@ -129,8 +129,10 @@ class TestItActuallyReplicates:
         Falsify by dropping the merge in `Sidecar._write_config` and writing
         only the first log's config: `quotes` then ships nothing.
         """
-        streams = [streamcast.Stream(h.name, log=h) for h in two_shipped]
-        async with serve_streams(streams, "127.0.0.1", 0, replicate=True) as server:
+        streams = [
+            streamcast.StreamHandle(h.name, log=h, replicate=True) for h in two_shipped
+        ]
+        async with serve_streams(streams, "127.0.0.1", 0) as server:
             sidecars = [c for c in server._children if isinstance(c, Sidecar)]  # noqa: SLF001
 
             assert len(sidecars) == 1, "one litestream per log is the defect"
@@ -291,7 +293,7 @@ class TestItActuallyReplicates:
         the failure this module exists to prevent — so the default warns,
         naming the log and both ways out.
         """
-        stream = streamcast.Stream("trades", log=shipped)
+        stream = streamcast.StreamHandle("trades", log=shipped)
         with pytest.warns(UserWarning, match="'?trades'?.*replicate=True"):
             server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
 
@@ -304,9 +306,9 @@ class TestItActuallyReplicates:
     async def test_replicate_false_starts_nothing_and_still_says_so(self, shipped):
         # For a deployment running its own, more finely tuned, litestream: one
         # line at start, which is cheap next to a log nobody replicates.
-        stream = streamcast.Stream("trades", log=shipped)
+        stream = streamcast.StreamHandle("trades", log=shipped)
         with pytest.warns(UserWarning, match="replicate=True"):
-            server = await serve_streams(stream, "127.0.0.1", 0, replicate=False)
+            server = await serve_streams(stream, "127.0.0.1", 0)
 
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
@@ -315,7 +317,7 @@ class TestItActuallyReplicates:
             await server.wait_closed()
 
     async def test_a_log_without_wal_replication_starts_nothing(self, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         server = await serve_streams(stream, "127.0.0.1", 0, maintain=False)
         try:
             assert [c for c in server._children if isinstance(c, Sidecar)] == []  # noqa: SLF001
@@ -397,18 +399,18 @@ class TestItFailsLoudly:
             "streamcast._replicate.litestream_binary",
             lambda override=None: "/nonexistent/litestream",
         )
-        stream = streamcast.Stream("trades", log=shipped)
+        stream = streamcast.StreamHandle("trades", log=shipped, replicate=True)
         with pytest.raises(SidecarUnavailable, match="litestream was not found"):
-            await serve_streams(stream, "127.0.0.1", 0, replicate=True)
+            await serve_streams(stream, "127.0.0.1", 0)
 
     async def test_the_message_names_the_way_out(self, shipped, monkeypatch):
         monkeypatch.setattr(
             "streamcast._replicate.litestream_binary",
             lambda override=None: "/nonexistent/litestream",
         )
-        stream = streamcast.Stream("trades", log=shipped)
+        stream = streamcast.StreamHandle("trades", log=shipped, replicate=True)
         with pytest.raises(SidecarUnavailable) as raised:
-            await serve_streams(stream, "127.0.0.1", 0, replicate=True)
+            await serve_streams(stream, "127.0.0.1", 0)
 
         assert "replicate=False" in str(raised.value)
         assert "'trades'" in str(raised.value)

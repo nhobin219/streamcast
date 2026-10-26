@@ -1,9 +1,9 @@
 """A stream's history, read from any machine, as of a fixed point (#32).
 
-    snapshot = await streamcast.Stream.snapshot(metadata_uri)
+    snapshot = await streamcast.StreamHandle.snapshot(metadata_uri)
     table = await snapshot.sql("SELECT side, sum(amount) FROM log GROUP BY side").read_all()
 
-A stream is a sequence of logs (`Stream.migrate`), each publishing an
+A stream is a sequence of logs (`StreamHandle.migrate`), each publishing an
 ordinary Iceberg table, and the stream's metadata says which, in order,
 where each is published, and the offsets and `streamcast_ts` range each
 holds. A snapshot reads that file and then the tables, on the reader's own
@@ -383,7 +383,7 @@ class Reader:
     never read or closed keeps it, and keeps its snapshot's connection open,
     until it is.
 
-    `Stream.sql` and `Stream.scan` return one with a snapshot of its own,
+    `StreamHandle.sql` and `StreamHandle.scan` return one with a snapshot of its own,
     opened at its first read and closed once it is done.
     """
 
@@ -975,7 +975,7 @@ async def snapshot(
     max_tail: int = MAX_TAIL,
     cache: ReadCache = DEFAULT_CACHE,
 ) -> Snapshot:
-    """See `Stream.snapshot`."""
+    """See `StreamHandle.snapshot`."""
     if as_of_offset is not None and as_of_ts is not None:
         msg = "pass as_of_offset or as_of_ts, not both"
         raise ValueError(msg)

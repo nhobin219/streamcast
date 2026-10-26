@@ -40,7 +40,7 @@ class TestCrossBoxRecovery:
         Not a restart — a restart has its local file. This is a different box
         with the same cursor key and nothing on disk.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
@@ -92,7 +92,7 @@ class TestCrossBoxRecovery:
         The remote lags by up to `upload_every`, so preferring it would mean a
         consumer's own position losing to a stale copy of itself.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
@@ -126,7 +126,7 @@ class TestCrossBoxRecovery:
     ):
         # Otherwise the bucket holds what it held `upload_every` ago, and a
         # short-lived consumer would ship nothing at all.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(20)])
 
@@ -155,7 +155,7 @@ class TestItIsBestEffort:
         A consumer that could not reach the bucket and therefore refused to
         run would have traded an outage for a backup.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 

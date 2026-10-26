@@ -151,8 +151,12 @@ class TestThePublisher:
         }
 
         async def broker(port: int = 0):  # noqa: ANN202
-            stream = streamcast.Stream.open(
-                "t", create=True, root=tmp_path, schema=schema
+            stream = streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="t", schema=schema),
+                    storage=streamcast.Storage(root=tmp_path.absolute()),
+                ),
+                initialization="create_if_absent",
             )
             return await serve_streams(stream, "127.0.0.1", port, maintain=False)
 
@@ -563,9 +567,13 @@ class TestTheAnalytics:
     async def test_the_query_counts_each_services_requests_and_errors(
         self, tmp_path, serve
     ):
-        """Through `Stream.live`, as the demo runs it: server spans only."""
-        stream = streamcast.Stream.open(
-            "spans", create=True, root=tmp_path, schema=spans.SCHEMA
+        """Through `StreamHandle.live`, as the demo runs it: server spans only."""
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="spans", schema=spans.SCHEMA),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
         )
         rows = [
             *(span_row(i, "checkout", failed=i == 0) for i in range(4)),
@@ -577,7 +585,7 @@ class TestTheAnalytics:
         await stream.send_many(rows)
         try:
             async with serve(stream, maintain=False) as uri:
-                async with await streamcast.Stream.live(uri) as live:
+                async with await streamcast.StreamHandle.live(uri) as live:
                     await live.wait_for(len(rows))
                     table = await live.sql(
                         analytics.query(3_600 * 1_000_000)

@@ -13,7 +13,7 @@ import litelink
 import pytest
 
 import streamcast
-from streamcast import _inbox
+from streamcast import _inbox, _log
 
 from .conftest import SCHEMA, trade
 
@@ -55,14 +55,13 @@ class TestReceivingAndProcessing:
     async def test_each_row_comes_once_with_its_ts_and_a_transaction(
         self, serve, tmp_path, opener
     ):
-        from streamcast import _log
 
         stamped = litelink.new(
             tmp_path / "s", "trades", schema=_log.with_system(SCHEMA)
         )
         store = await opener()
         with stamped:
-            stream = streamcast.Stream("trades", log=stamped)
+            stream = streamcast.StreamHandle("trades", log=stamped)
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.inbox(
                     uri, subscriber="s", store=store, **FAST
@@ -90,7 +89,7 @@ class TestReceivingAndProcessing:
     ):
         """Crash and redelivery: the row's delete commits only with its work."""
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             with pytest.raises(RuntimeError, match="crash"):
                 async with streamcast.inbox(
@@ -123,7 +122,7 @@ class TestReceivingAndProcessing:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
                 uri, subscriber="s", store=store, **FAST
@@ -149,7 +148,7 @@ class TestReceivingAndProcessing:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(3)])
             async with streamcast.inbox(
@@ -175,7 +174,7 @@ class TestReceivingAndProcessing:
 
     async def test_a_recreated_stream_is_refused_loudly(self, serve, log, opener):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(uri, subscriber="s", store=store, **FAST):
                 pass
@@ -193,7 +192,7 @@ class TestReceivingAndProcessing:
 
     async def test_an_empty_inbox_is_not_caught_up(self, serve, log, opener):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
                 uri, subscriber="s", store=store, inbox_max_rows=2, **FAST
@@ -220,7 +219,7 @@ class TestTheReceiveWindow:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         peak = 0
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
@@ -248,7 +247,7 @@ class TestTheReceiveWindow:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
                 uri, subscriber="s", store=store, inbox_max_rows=3, **FAST
@@ -270,7 +269,7 @@ class TestTheReceiveWindow:
 
     async def test_the_byte_bound_alone_stops_receiving(self, serve, log, opener):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         size = len(_inbox._ENCODE.encode(trade(0)))  # noqa: SLF001
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
@@ -286,7 +285,7 @@ class TestTheReceiveWindow:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
                 uri,
@@ -314,7 +313,7 @@ class TestTheReceiveWindow:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(
                 uri, subscriber="s", store=store, inbox_max_bytes=10, **FAST
@@ -343,8 +342,8 @@ class TestConsumeTransformPublish:
         source = litelink.new(tmp_path / "in", "orders", schema=SCHEMA)
         sink = litelink.new(tmp_path / "out", "enriched", schema=SCHEMA)
         with source, sink:
-            inputs = streamcast.Stream("orders", log=source)
-            outputs = streamcast.Stream("enriched", log=sink, exactly_once=True)
+            inputs = streamcast.StreamHandle("orders", log=source)
+            outputs = streamcast.StreamHandle("enriched", log=sink, exactly_once=True)
             async with serve(inputs, outputs, maintain=False) as uri:
                 out_uri = uri.replace("/orders", "/enriched")
                 async with store.transaction() as tx:
@@ -419,7 +418,7 @@ class TestTwoWorkersOnOneSubscriber:
         the state row read in `_insert`.
         """
         first, second = await opener(), await opener()
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with (
                 streamcast.inbox(uri, subscriber="w", store=first, **FAST) as a,

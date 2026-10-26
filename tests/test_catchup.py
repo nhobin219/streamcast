@@ -84,7 +84,7 @@ def published_log(tmp_path, s3, bucket):
     handle = litelink.new(
         tmp_path / "data",
         "trades",
-        # Stamped, because that is the shape `Stream.open` creates and so the
+        # Stamped, because that is the shape `StreamHandle.open` creates and so the
         # shape a published table a consumer catches up from actually has.
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         published=bucket,
@@ -146,7 +146,7 @@ class TestTheFilterHoldsAcrossTheJoin:
     async def test_only_matching_rows_arrive_from_either_side(
         self, serve, published_log, s3
     ):
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
         wanted = list(range(0, TOTAL + 100, 100))
 
@@ -178,14 +178,14 @@ class TestTheFilterHoldsAcrossTheJoin:
             },
             "required": ["to", "n"],
         }
-        stream = streamcast.Stream.open(
-            "inbox",
-            create=True,
-            root=tmp_path,
-            schema=schema,
-            published=bucket,
-            s3_options=s3,
-            max_replay=2,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="inbox", schema=schema, max_replay=2),
+                storage=streamcast.Storage(
+                    root=tmp_path.absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             await stream.send_many(
@@ -219,7 +219,7 @@ class TestItClosesTheGap:
         from the socket, and the consumer's loop cannot tell where the join
         was.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         published_through = await fill(stream, published_log)
         assert published_through > 0
 
@@ -261,10 +261,12 @@ class TestItClosesTheGap:
         here is 16: the old shape would be dropped with `TooSlow` long before
         finishing. Nothing is connected while the published table is read now.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle(
+            "trades", max_backlog=16, log=published_log, max_replay=600
+        )
         await fill(stream, published_log)
 
-        async with serve(stream, maintain=False, max_backlog=16) as uri:
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(
                 uri, offset=1, catch_up=True, s3_options=s3
             ) as sub:
@@ -283,7 +285,7 @@ class TestItClosesTheGap:
         with that read waiting — the case where it must be kept, never
         cancelled. Every row once, in order, across the join.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
         # Not published: these can only come from the server, after the join.
         live = 10
@@ -324,7 +326,7 @@ class TestItClosesTheGap:
         Had they aged out, the server says too old again and the loop reads
         the newly published rows instead.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
 
         async with serve(stream, maintain=False) as uri:
@@ -351,7 +353,7 @@ class TestItClosesTheGap:
     ):
         # A snapshot owns a scratch directory it removes on close, so leaking
         # one leaks disk as well as a DuckDB connection.
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
 
         async with serve(stream, maintain=False) as uri:
@@ -395,7 +397,7 @@ class TestItClosesTheGap:
 
         monkeypatch.setattr(Snapshot, "close", spy)
 
-        stream = streamcast.Stream("trades", log=published_log, max_replay=100)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=100)
         await fill(stream, published_log, total=800)
 
         async with serve(stream, maintain=False) as uri:
@@ -437,7 +439,7 @@ class TestItClosesTheGap:
 
         monkeypatch.setattr(Snapshot, "close", spy)
 
-        stream = streamcast.Stream("trades", log=published_log, max_replay=100)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=100)
         await fill(stream, published_log, total=800)
 
         async with serve(stream, maintain=False) as uri:
@@ -466,7 +468,7 @@ class TestTheLogIsNamedInTheGreeting:
     ):
         """A stream's name is not the log's, and its published table is the log's.
 
-        `Stream.open` feeds one name through, so the two agree. `Stream(log=)`
+        `StreamHandle.open` feeds one name through, so the two agree. `StreamHandle(log=)`
         takes a handle the caller opened and named, and nothing makes them
         equal. Catch-up asked the published tables for a table named after the STREAM,
         found nothing, and reported it as a credentials failure — the message
@@ -487,7 +489,7 @@ class TestTheLogIsNamedInTheGreeting:
             ),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle, max_replay=10)
+            stream = streamcast.StreamHandle("trades", log=handle, max_replay=10)
             await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
@@ -512,7 +514,7 @@ class TestTheLogIsNamedInTheGreeting:
     ):
         """The point of publishing it: a subscriber reads the history itself.
 
-        The greeting's metadata URI is all `Stream.snapshot` needs, so a
+        The greeting's metadata URI is all `StreamHandle.snapshot` needs, so a
         consumer that wants the whole history goes straight to object storage
         instead of through the socket. Credentials stay the reader's own; a
         server that sent them would be handing every subscriber its keys.
@@ -528,7 +530,7 @@ class TestTheLogIsNamedInTheGreeting:
             ),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle)
+            stream = streamcast.StreamHandle("trades", log=handle)
             await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
@@ -538,7 +540,7 @@ class TestTheLogIsNamedInTheGreeting:
             assert info.metadata is not None
             # Nothing from the server but the greeting, plus the reader's own
             # credentials.
-            table = await streamcast.Stream.scan(
+            table = await streamcast.StreamHandle.scan(
                 info.metadata, s3_options=s3
             ).read_all()
             assert table.num_rows == 800
@@ -570,7 +572,7 @@ class TestTheWholeHistoryGateway:
             config=dry(),
         )
         with handle:
-            stream = streamcast.Stream(
+            stream = streamcast.StreamHandle(
                 "trades", log=handle, max_replay=None, replay_published=True
             )
             await fill(stream, handle, total=800, pad=incompressible)
@@ -587,23 +589,26 @@ class TestTheWholeHistoryGateway:
             assert got[0][2]["i"] == 0
 
     async def test_the_factory_takes_it_too(self, tmp_path, s3, bucket, serve):
-        """`Stream.open(create=True, replay_published=True)`, rather than opening the handle.
+        """`StreamSpec(replay_published=True)` with create initialization, rather than opening the handle.
 
         The parameter is named for the replay, not for the tier: `published=`
         sits beside it and already means "where", so two near-identical names
         would be the kind a caller sets one of while meaning the other. Each
         replay passes it to litelink's reads as `published=`.
         """
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path / "data",
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
-            replay_published=True,
-            max_replay=None,
-            config=dry(),
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="trades", schema=SCHEMA, replay_published=True, max_replay=None
+                ),
+                storage=streamcast.Storage(
+                    root=(tmp_path / "data").absolute(),
+                    published=bucket,
+                    s3_options=s3,
+                    config=dry(),
+                ),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert stream.log is not None
@@ -622,7 +627,7 @@ class TestTheWholeHistoryGateway:
 
     async def test_the_bound_still_applies_when_it_is_set(self, serve, log):
         """The default is unchanged: a number still refuses."""
-        stream = streamcast.Stream("trades", log=log, max_replay=5)
+        stream = streamcast.StreamHandle("trades", log=log, max_replay=5)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(20)])
             with pytest.raises(streamcast.NotReplayable) as raised:
@@ -655,7 +660,7 @@ class TestAnEvictedLog:
             config=dry(),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle)
+            stream = streamcast.StreamHandle("trades", log=handle)
             await fill(stream, handle, total=800, pad=incompressible)
             await evict_dry(handle)
 
@@ -706,7 +711,7 @@ class TestTheGapItCannotClose:
             ),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle, max_replay=50)
+            stream = streamcast.StreamHandle("trades", log=handle, max_replay=50)
             await fill(stream, handle, total=800)
 
             async with serve(stream, maintain=False) as uri:
@@ -729,7 +734,7 @@ class TestFromTheEarliest:
     taken literally, the stream's first row was reported lost."""
 
     async def test_it_takes_every_row_from_the_first(self, serve, published_log, s3):
-        stream = streamcast.Stream("trades", log=published_log, max_replay=50)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=50)
         await fill(stream, published_log, total=400)
 
         async with serve(stream, maintain=False) as uri:
@@ -758,7 +763,7 @@ class TestFromTheEarliest:
             ),
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle, max_replay=50)
+            stream = streamcast.StreamHandle("trades", log=handle, max_replay=50)
             await fill(stream, handle, total=400)
 
             async with serve(stream, maintain=False) as uri:
@@ -775,7 +780,7 @@ class TestWhereTheHistoryIsRead:
         self, serve, published_log, s3
     ):
         """The hint naming its metadata, and the id that says it is this stream's."""
-        stream = streamcast.Stream("trades", log=published_log)
+        stream = streamcast.StreamHandle("trades", log=published_log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             assert sub.info.metadata == (
                 f"{published_log.published}/trades.metadata/version-hint.text"
@@ -784,7 +789,7 @@ class TestWhereTheHistoryIsRead:
             assert sub.info.stream_id == found.stream_id
 
     async def test_a_stream_without_a_log_names_none(self, serve):
-        stream = streamcast.Stream("live")
+        stream = streamcast.StreamHandle("live")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             assert sub.info.metadata is None
             assert sub.info.stream_id is None
@@ -799,7 +804,7 @@ class TestWhereTheHistoryIsRead:
         The numbers are what make a refusal readable; where to read the gap
         is the greeting's to say, and the greeting has no such limit.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=600)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=600)
         await fill(stream, published_log)
 
         async with serve(stream, maintain=False) as uri:
@@ -817,7 +822,7 @@ class TestWhereTheHistoryIsRead:
         self, serve, published_log, s3, tmp_path
     ):
         """A caller that named a file meant that one, not the greeting's."""
-        stream = streamcast.Stream("trades", log=published_log, max_replay=10)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=10)
         await fill(stream, published_log, total=800)
 
         async with serve(stream, maintain=False) as uri:
@@ -832,7 +837,7 @@ class TestWhenItCannot:
     async def test_nothing_published_says_so(self, serve, log):
         # A local-only log whose rows are all still buffered: its metadata is
         # readable on this machine, and its published table holds nothing.
-        stream = streamcast.Stream("trades", log=log, max_replay=2)
+        stream = streamcast.StreamHandle("trades", log=log, max_replay=2)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(20)])
 
@@ -846,7 +851,7 @@ class TestWhenItCannot:
         "AccessDenied" alone answers none of the questions they have, so this
         one names what was tried, which credential source, and four ways out.
         """
-        stream = streamcast.Stream("trades", log=published_log, max_replay=100)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=100)
         await fill(stream, published_log, total=1_200)
 
         async with serve(stream, maintain=False) as uri:
@@ -884,7 +889,7 @@ class TestWhenItCannot:
         # rather than on a gap between two populated tiers. It kept passing
         # for the wrong reason, which is the failure mode a test cannot
         # report about itself.
-        stream = streamcast.Stream("trades", log=published_log, max_replay=10)
+        stream = streamcast.StreamHandle("trades", log=published_log, max_replay=10)
         frontier = await fill(stream, published_log, total=800)
         # Sent past the published table without publishing, so it stays at
         # `frontier` while the server's window moves far above it.
@@ -914,7 +919,7 @@ class TestWhenItCannot:
         assert str(asking) in message, message
 
     async def test_catch_up_is_off_by_default(self, serve, log):
-        stream = streamcast.Stream("trades", log=log, max_replay=2)
+        stream = streamcast.StreamHandle("trades", log=log, max_replay=2)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([{"event_ts": i, "price": 1.0} for i in range(20)])
 

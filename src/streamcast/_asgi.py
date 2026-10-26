@@ -153,7 +153,7 @@ class _Peer:
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """Send the close. Idempotent, because two paths reach it.
 
-        `Subscriber.pump` closes on overflow and `Stream.aclose` closes every
+        `Subscriber.pump` closes on overflow and `StreamHandle.aclose` closes every
         subscriber; a shutdown that races a drop arrives twice, and Starlette
         raises on the second.
         """

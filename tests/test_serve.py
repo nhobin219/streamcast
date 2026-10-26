@@ -8,6 +8,7 @@ API claims. Replay and resume are `test_resume.py`; refusals are
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 import websockets
@@ -29,7 +30,7 @@ class TestLiveFanOut:
     ):
         # The sentence the library exists for. Six consumers on one box, one
         # upstream connection, and no way for two of them to disagree.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             subs = [await streamcast.connect(uri) for _ in range(6)]
             try:
@@ -56,7 +57,7 @@ class TestLiveFanOut:
     async def test_a_subscriber_joins_at_the_frontier_and_misses_what_came_before(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send(trade(0))
             async with streamcast.connect(uri) as sub:
@@ -69,7 +70,7 @@ class TestLiveFanOut:
                 assert row["price"] == 85_566.0
 
     async def test_a_row_arrives_as_the_row_that_was_sent(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send(trade(4))
             offset, ts, row = await sub.recv()
@@ -83,7 +84,7 @@ class TestLiveFanOut:
         # Batching is the server's durability decision. Making it visible on
         # the wire would make every subscriber's parser depend on how the
         # publisher happened to poll.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send_many([trade(i) for i in range(3)])
             got = await drain(sub, 3)
@@ -91,7 +92,7 @@ class TestLiveFanOut:
             assert [r["side"] for _, _ts, r in got] == [0, 1, 0]
 
     async def test_the_subscriber_count_tracks_attach_and_detach(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             assert stream.subscribers == 0
             async with streamcast.connect(uri) as sub:
@@ -114,8 +115,8 @@ class TestRouting:
     async def test_one_port_serves_many_streams(self, serve):
         # The multiplexing this library is named for: one process holding N
         # upstream subscriptions, every consumer reading whichever it wants.
-        trades = streamcast.Stream("trades")
-        quotes = streamcast.Stream("quotes")
+        trades = streamcast.StreamHandle("trades")
+        quotes = streamcast.StreamHandle("quotes")
         async with serve(trades, quotes) as uri:
             base = uri.rsplit("/", 1)[0]
             async with (
@@ -128,7 +129,7 @@ class TestRouting:
                 assert (await q.recv())[2]["price"] == 85_567.0
 
     async def test_an_unnamed_stream_is_served_at_the_root(self, serve):
-        stream = streamcast.Stream()
+        stream = streamcast.StreamHandle()
         async with serve(stream) as uri:
             assert uri.endswith("/")
             async with streamcast.connect(uri) as sub:
@@ -142,7 +143,9 @@ class TestRouting:
         # the subscriber that wanted it gets somebody else's messages — which
         # looks like working software.
         with pytest.raises(ValueError, match="both named"):
-            serve_streams([streamcast.Stream("trades"), streamcast.Stream("trades")])
+            serve_streams(
+                [streamcast.StreamHandle("trades"), streamcast.StreamHandle("trades")]
+            )
 
     def test_serving_nothing_is_refused(self):
         with pytest.raises(ValueError, match="needs streams"):
@@ -151,7 +154,7 @@ class TestRouting:
 
 class TestWebsocketsCompatibility:
     async def test_connect_works_as_an_await_and_as_a_context_manager(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             sub = await streamcast.connect(uri)
             try:
@@ -168,7 +171,7 @@ class TestWebsocketsCompatibility:
         # The claim the README makes: the broker and `connect` pass everything
         # through. `compression` is the one with a different default, so it is
         # the one worth proving still reaches the other side.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, compression="deflate") as uri:
             async with streamcast.connect(uri, compression="deflate") as sub:
                 await stream.send(trade(0))
@@ -178,10 +181,8 @@ class TestWebsocketsCompatibility:
         # The affordance the URL-shaped subscribe exists for. Nothing from
         # streamcast on this side: a greeting it can read, then frames whose
         # layout is documented.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri, websockets.connect(uri) as raw:
-            import json
-
             info = json.loads(await raw.recv())
             assert info["streamcast"] == streamcast._protocol.VERSION
             assert info["stream"] == "trades"
@@ -203,13 +204,13 @@ class TestWebsocketsCompatibility:
     async def test_the_subscription_exposes_the_connection_it_does_not_wrap(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             pong = await sub.connection.ping()
             await asyncio.wait_for(pong, timeout=5)
 
     async def test_iteration_stops_cleanly_when_the_server_goes_away(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(trade(0))
@@ -236,7 +237,7 @@ class TestLeaks:
 
         Deliberately NO message is sent, because sending one hides the bug.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             before = len(asyncio.all_tasks())
             for _ in range(25):
@@ -273,7 +274,7 @@ async def test_closing_mid_replay_completes_the_handshake(serve, log):
     statement about what happened rather than about how fast this machine is
     — the same test on a loaded box gives the same answer.
     """
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream) as uri:
         # Comfortably past `max_queue`, so the reader is certainly paused.
         await stream.send_many([trade(i) for i in range(50)])
@@ -291,6 +292,6 @@ async def test_closing_mid_replay_completes_the_handshake(serve, log):
 async def test_a_subscription_has_no_send(serve, log):
     # Not a `send` that raises. The type simply does not carry one, which is
     # the same reason litelink's read handles have no `append`.
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream) as uri, streamcast.connect(uri) as sub:
         assert not hasattr(sub, "send")

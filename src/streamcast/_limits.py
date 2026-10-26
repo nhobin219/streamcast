@@ -1,34 +1,34 @@
-"""The queue bounds: their defaults, and the runtime's per-stream form of each.
+"""Queue bounds shared by stream declarations, handles and clients.
 
-Neither end may be run out of memory by the other, or by a stall — SPEC §4
-lists each queue and what bounds it. The bounds are deployment settings, not
-properties of a stream: they belong to the process that serves or reads, so
-they change on a restart without touching the code that builds the streams.
-So each is a keyword of the call that owns the queue:
-
-    streamcast.BrokerConfig(max_backlog=16_384)        # every stream
-    streamcast.BrokerConfig(
-                     max_inbound={"trades": 262_144, "quotes": 65_536})  # per stream
-    streamcast.BrokerConfig(
-                     max_message_bytes={"trades": 2**20, "sessions": 8 * 2**20})
-    streamcast.publish(uri, max_in_flight=128)
-    await streamcast.Stream.live(uri, max_tail=5_000_000)
-
-`BrokerConfig` take each of theirs as one int for every stream or a map
-from stream name to int. A map must name exactly the streams being served — a
-missing name would serve that stream on a default nobody chose, and an
-unknown one is a typo — so either raises at the call, naming them.
+Server queue limits belong to each handle. Client windows belong to the
+client call; the transport ceiling belongs to BrokerConfig.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from typing import Annotated, Final
 
 from litelink import LogConfig
+from pydantic import Field, StrictInt
 
-if TYPE_CHECKING:
-    from streamcast._stream import Stream
+PositiveBound = Annotated[StrictInt, Field(ge=1)]
+
+MAX_REPLAY: Final = 100_000
+"""How far back a subscribe may ask to resume from.
+
+It bounds the server, not the log: a replay is a DuckDB scan in a worker
+thread and a subscriber asking for ten million rows would hold one for
+minutes. Past this, the answer is to read the log directly — which needs
+nothing from streamcast and is what litelink is for.
+
+**It is sized against `MAX_BACKLOG`, not independently.** A replay streams
+while live messages queue behind it, so a subscriber that takes longer to
+catch up than `MAX_BACKLOG` messages of live traffic is dropped the moment it
+arrives, having done all the work. The defaults hold with room: a replay reads
+at ~1M rows/s from local Parquet, so 100,000 messages is ~0.1 s, and a feed
+would have to run above 80,000 messages/s to put 8,192 messages into the queue
+in that time. Raise one and check the other.
+"""
 
 SUBSCRIBER_YIELD_EVERY: Final = 64
 """Data frames a subscriber is sent before its task yields to the event loop.
@@ -72,8 +72,8 @@ server's writer fed, so its rows group into one commit rather than one round
 trip each; few enough that a dropped connection leaves a short tail to check
 on reconnect (`docs/SPEC.md` §6b). The server's bound: how many replies it
 will owe one connection before it stops reading it — backpressure at the
-socket, not an error. `BrokerConfig` take one int or a map choosing the
-window for connections to each served stream; it is not a stream-wide total.
+socket, not an error. `StreamHandle(max_in_flight=)` chooses the
+window for connections to that stream; it is not a stream-wide total.
 The two ends share a default.
 """
 
@@ -115,7 +115,7 @@ stretches by 2**20, or 2**40 with no WAL replica.
 PAGE_BYTES: Final = LogConfig().target_row_group_size
 """Arrow bytes a catch-up reads from a published table in one query, at most.
 
-What `page_bytes=` bounds, on `connect(catch_up=True)`, `Stream.live` and
+What `page_bytes=` bounds, on `connect(catch_up=True)`, `StreamHandle.live` and
 `Snapshot.rows`: a page is one `ORDER BY` query over a range of offsets,
 which DuckDB sorts and hands back whole before its first row, so a page is
 what a catch-up holds at once. The rows it is turned into weigh a multiple of
@@ -151,75 +151,6 @@ def pages(page_bytes: int | None, page_rows: int | None) -> None:
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             msg = f"{keyword}={value!r}: a budget is an int of at least 1, or None"
             raise ValueError(msg)
-
-
-def per_stream(
-    keyword: str, value: int | Mapping[str, int], names: list[str]
-) -> dict[str, int]:
-    """Each served stream's `keyword` bound, from one int or a map naming every
-    stream. `names` are the streams' names as served (`""` is the one at `/`).
-    """
-    by_stream = isinstance(value, Mapping)
-    chosen = dict(value) if by_stream else dict.fromkeys(names, value)
-    missing = sorted(set(names) - set(chosen))
-    unknown = sorted(set(chosen) - set(names))
-    if missing or unknown:
-        parts = []
-        if missing:
-            parts.append(f"nothing for {', '.join(map(repr, missing))}")
-
-        if unknown:
-            parts.append(f"{', '.join(map(repr, unknown))}, which is not served")
-
-        msg = (
-            f"{keyword}= by stream must name exactly the streams served: "
-            f"{'; '.join(parts)}. Pass one int to apply it to every stream."
-        )
-        raise ValueError(msg)
-
-    for name in names:
-        bound = chosen[name]
-        # At the call, where a bad config is found, rather than at the first
-        # subscriber or send — and a zero would mean "never deliver anything".
-        if not isinstance(bound, int) or isinstance(bound, bool) or bound < 1:
-            where = f"[{name!r}]" if by_stream else ""
-            msg = f"{keyword}{where}={bound!r}: a bound is an int of at least 1"
-            raise ValueError(msg)
-
-    return {name: chosen[name] for name in names}
-
-
-def _bound(
-    routes: dict[str, Stream],
-    max_backlog: int | Mapping[str, int],
-    max_inbound: int | Mapping[str, int],
-    max_in_flight: int | Mapping[str, int],
-    max_message_bytes: int | Mapping[str, int] | None = None,
-) -> dict[str, int] | None:
-    """Resolve the runtime's bounds per stream and set them on each; return each
-    stream's `max_message_bytes`, or None when there is none to check.
-
-    Every keyword is checked before any stream is touched, so a bad one
-    leaves every stream as it was.
-    """
-    names = list(routes)
-    backlog = per_stream("max_backlog", max_backlog, names)
-    inbound = per_stream("max_inbound", max_inbound, names)
-    in_flight = per_stream("max_in_flight", max_in_flight, names)
-    message = (
-        None
-        if max_message_bytes is None
-        else per_stream("max_message_bytes", max_message_bytes, names)
-    )
-    for name, stream in routes.items():
-        stream._bound(  # noqa: SLF001 — the serving process's settings
-            max_backlog=backlog[name],
-            max_inbound=inbound[name],
-            max_in_flight=in_flight[name],
-            max_message_bytes=None if message is None else message[name],
-        )
-
-    return message
 
 
 DEDUPE_WINDOW: Final = 64
@@ -286,5 +217,4 @@ __all__ = [
     "POLL_EVERY",
     "SEND_BATCH",
     "pages",
-    "per_stream",
 ]

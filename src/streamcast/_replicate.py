@@ -333,7 +333,7 @@ class Sidecar:
         **Each log's `socket:` block is replaced by one of the process's
         own** (`socket`). litelink gives every log its own control socket,
         for `retire()` to flush the replica through, and one litestream
-        listens on one. A server never retires a log — `Stream.migrate`
+        listens on one. A server never retires a log — `StreamHandle.migrate`
         does, offline, through `retiring` below, on the log's own config —
         but a caller holding a merged process still needs to flush through
         it, so it listens on a path this process chose rather than on any
@@ -528,7 +528,7 @@ def retiring(
 
     `retire()` on a log with `wal_replication` flushes the replica through
     the log's own sidecar's control socket, and refuses rather than start a
-    litestream of its own. `Stream.migrate` runs with the server stopped, so
+    litestream of its own. `StreamHandle.migrate` runs with the server stopped, so
     there is no sidecar: this is it, on the log's own config, socket and all.
 
     **Under the same lock a server's sidecar takes**, so a migration beside a

@@ -36,7 +36,7 @@ def offsets(received):
 
 class TestReplay:
     async def test_a_subscriber_resumes_from_where_it_asks(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -49,7 +49,7 @@ class TestReplay:
         assert prices(got) == [85_565.0 + i for i in range(3, 10)]
 
     async def test_EARLIEST_replays_everything_the_log_still_holds(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -64,7 +64,7 @@ class TestReplay:
     ):
         # The common reconnect: a consumer that lost its connection rather
         # than falling behind has nothing outstanding.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(0), trade(1)])
 
@@ -77,7 +77,7 @@ class TestReplay:
         # A replay that never leaves SQLite has not exercised the tier it is
         # for. `target_seal_size` is 4 KB in the fixture, so this crosses it
         # and then reads back across the seam.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send_many([trade(i) for i in range(60)])
         while log.seal(flush=True) is not None:
             pass
@@ -106,7 +106,7 @@ class TestReplay:
         holding the same offset hold different data, which is the exact thing
         this library exists to prevent.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as live:
                 for i in range(6):
@@ -141,7 +141,7 @@ class TestThePartition:
         order — no gap at the join, no row delivered from both the log and the
         queue.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         # Long enough that the attach lands mid-publish (a yield per row), and
         # no longer: each `send` is its own durable write.
         total = 150
@@ -167,7 +167,7 @@ class TestThePartition:
     async def test_many_subscribers_attaching_at_once_all_see_the_same_stream(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(30)])
 
@@ -191,7 +191,7 @@ class TestThePartition:
         # The recovery loop from the README, end to end: drop the connection
         # mid-stream, reconnect one above what was processed, and check the
         # two halves join with no gap and no repeat.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(20)])
 
@@ -216,7 +216,7 @@ class TestDurabilityOrdering:
         # The ordering that makes recovery a replay rather than a
         # reconciliation: a row a subscriber has seen is always a row the log
         # holds, never the other way round.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             await stream.send_many([trade(i) for i in range(25)])
             got = await collect(sub, 25)
@@ -232,7 +232,7 @@ async def test_the_greeting_states_the_range_it_is_about_to_replay(serve, log, o
     # So that a subscriber knows what is coming before any of it arrives —
     # which on a stream that is quiet out of hours is the difference between
     # "connected" and "connected and the server agreed with my cursor".
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream) as uri:
         await stream.send_many([trade(i) for i in range(10)])
         async with streamcast.connect(uri, offset=offset) as sub:

@@ -17,7 +17,8 @@ from websockets.exceptions import ConnectionClosed
 from websockets.frames import CloseCode
 
 import streamcast
-from tests.hosting import serve_streams
+from tests.hosting import application as asgi
+from tests.test_asgi import running
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -27,9 +28,18 @@ SCHEMA: dict[str, Any] = {
 
 
 @pytest.fixture
-async def streams(tmp_path):
+async def streams(tmp_path, request):
+    limits = getattr(request, "param", {"small": 1_000, "large": 100_000})
     made = [
-        streamcast.Stream.open(name, create=True, root=tmp_path, schema=SCHEMA)
+        streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name=name, schema=SCHEMA, max_message_bytes=limits[name]
+                ),
+                storage=streamcast.Storage(root=tmp_path.absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         for name in ("small", "large")
     ]
     try:
@@ -55,8 +65,7 @@ def too_big(closed: ConnectionClosed, *, limit: int) -> None:
 
 class TestServe:
     async def test_each_stream_refuses_a_frame_over_its_own_limit(self, streams, serve):
-        limits = {"small": 1_000, "large": 100_000}
-        async with serve(*streams, maintain=False, max_message_bytes=limits) as uri:
+        async with serve(*streams, maintain=False, transport_max_bytes=100_000) as uri:
             base = uri.rsplit("/", 1)[0]
             small = await streamcast.publish(f"{base}/small")
             assert await small.send(row(10)) == 1
@@ -69,8 +78,7 @@ class TestServe:
 
     async def test_the_frames_before_it_are_answered(self, streams, serve):
         # Below the transport's limit, so this stream's own check refuses it.
-        limits = {"small": 1_000, "large": 100_000}
-        async with serve(*streams, maintain=False, max_message_bytes=limits) as uri:
+        async with serve(*streams, maintain=False, transport_max_bytes=100_000) as uri:
             producer = await streamcast.publish(uri.rsplit("/", 1)[0] + "/small")
             before = [await producer.submit(row(10)) for _ in range(5)]
             with pytest.raises(ConnectionClosed):
@@ -78,18 +86,25 @@ class TestServe:
 
             assert [await done for done in before] == [1, 2, 3, 4, 5]
 
+    @pytest.mark.parametrize(
+        "streams", [{"small": 1_000, "large": 2 * 2**20}], indirect=True
+    )
     async def test_a_large_stream_takes_frames_over_the_old_server_limit(
         self, streams, serve
     ):
         # Past websockets' 1 MiB default, which used to close the connection.
-        limits = {"small": 1_000, "large": 2 * 2**20}
-        async with serve(*streams, maintain=False, max_message_bytes=limits) as uri:
+        async with serve(
+            *streams, maintain=False, transport_max_bytes=2 * 2**20
+        ) as uri:
             base = uri.rsplit("/", 1)[0]
             async with streamcast.publish(f"{base}/large") as large:
                 assert await large.send(row(3 * 2**19)) == 1
 
-    async def test_one_int_applies_to_every_stream(self, streams, serve):
-        async with serve(*streams, maintain=False, max_message_bytes=1_000) as uri:
+    @pytest.mark.parametrize(
+        "streams", [{"small": 1_000, "large": 1_000}], indirect=True
+    )
+    async def test_handles_can_choose_the_same_limit(self, streams, serve):
+        async with serve(*streams, maintain=False, transport_max_bytes=1_000) as uri:
             base = uri.rsplit("/", 1)[0]
             for name in ("small", "large"):
                 producer = await streamcast.publish(f"{base}/{name}")
@@ -99,7 +114,10 @@ class TestServe:
                 assert raised.value.rcvd is not None
                 assert raised.value.rcvd.code == CloseCode.MESSAGE_TOO_BIG
 
-    async def test_max_size_alone_is_still_every_streams_limit(self, streams, serve):
+    @pytest.mark.parametrize("streams", [{"small": None, "large": None}], indirect=True)
+    async def test_transport_limit_applies_when_handles_leave_it_unspecified(
+        self, streams, serve
+    ):
         # A server configured before this keyword behaves as it did: the
         # transport's limit, and websockets' close for a frame over it.
         async with serve(*streams, maintain=False, max_size=4_096) as uri:
@@ -109,28 +127,15 @@ class TestServe:
                 with pytest.raises(ConnectionClosed):
                     await producer.send(row(5_000))
 
-    async def test_max_size_and_max_message_bytes_together_are_refused(self, streams):
-        with pytest.raises(ValueError, match="max_size"):
-            serve_streams(
-                streams, "127.0.0.1", 0, max_size=4_096, max_message_bytes=1_000
-            )
-
-    async def test_a_map_must_name_every_stream(self, streams):
-        with pytest.raises(ValueError, match="'large'"):
-            serve_streams(streams, "127.0.0.1", 0, max_message_bytes={"small": 1})
-
 
 class TestAsgi:
     async def test_a_mounted_stream_refuses_a_frame_over_its_limit(self, streams):
         pytest.importorskip("uvicorn", reason="the asgi extra is not installed")
-        from tests.hosting import application as asgi  # noqa: PLC0415
-        from tests.test_asgi import running  # noqa: PLC0415
 
         app = asgi(
             streams,
             maintain=False,
-            replicate=False,
-            max_message_bytes={"small": 1_000, "large": 100_000},
+            transport_max_bytes=100_000,
         )
         async with running(app) as base:
             small = await streamcast.publish(f"{base}/small")

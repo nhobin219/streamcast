@@ -1,6 +1,6 @@
 """`connect(catch_up=True, memory_limit=)`: the catch-up's DuckDB is capped too.
 
-`memory_limit=` reached `Stream.snapshot`, `scan`, `sql` and `live`, but not
+`memory_limit=` reached `StreamHandle.snapshot`, `scan`, `sql` and `live`, but not
 the snapshot a catch-up opens to read its gap, which sized itself at DuckDB's
 default: 80% of what the process may use. Two catching-up consumers in one
 cgroup were allowed 160% of it between them, and `connect` passed the keyword
@@ -32,13 +32,25 @@ LIMIT = "77MB"
 async def stream(tmp_path):
     """A stream whose published table holds every row, served with a replay
     window so short that a consumer at offset 1 must catch up from it."""
-    made = streamcast.Stream.open("rows", create=True, root=tmp_path, schema=SCHEMA)
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="rows", schema=SCHEMA),
+            storage=streamcast.Storage(root=tmp_path.absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     assert made.log is not None
     made.log.close()
     table = pa.table({"n": list(range(ROWS)), "text": ["x" * 50] * ROWS})
-    streamcast.Stream.ingest("rows", table, root=tmp_path, publish=True, flush=True)
-    served = streamcast.Stream.open(
-        "rows", create=True, root=tmp_path, schema=SCHEMA, max_replay=10
+    streamcast.StreamHandle.ingest(
+        "rows", table, root=tmp_path, publish=True, flush=True
+    )
+    served = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="rows", schema=SCHEMA, max_replay=10),
+            storage=streamcast.Storage(root=tmp_path.absolute()),
+        ),
+        initialization="create_if_absent",
     )
     try:
         yield served

@@ -9,16 +9,19 @@ drop the offset, ask again from a different one, or stop asking the server.
 from __future__ import annotations
 
 import asyncio
+import threading
 
+import litelink
 import pytest
 
 import streamcast
+from streamcast import _log
 from tests.conftest import SCHEMA, trade
 
 
 class TestNotReplayable:
     async def test_a_stream_with_no_log_refuses_any_offset(self, serve):
-        stream = streamcast.Stream("trades")
+        stream = streamcast.StreamHandle("trades")
         async with serve(stream) as uri:
             with pytest.raises(streamcast.NotReplayable) as raised:
                 await streamcast.connect(uri, offset=1)
@@ -34,7 +37,7 @@ class TestNotReplayable:
     ):
         """Not refused: "everything the stream can still serve" is, so far,
         nothing — and then every row, from the first."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
                 await stream.send(trade(0))
@@ -51,9 +54,6 @@ class TestNotReplayable:
         nor the live queue. Starting at the frontier read before the
         question means they are replayed.
         """
-        import threading  # noqa: PLC0415
-
-        from streamcast import _log  # noqa: PLC0415
 
         asked, release = threading.Event(), threading.Event()
         real = _log.earliest
@@ -65,7 +65,7 @@ class TestNotReplayable:
             return answer
 
         monkeypatch.setattr(_log, "earliest", held)
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             opening = asyncio.ensure_future(
                 streamcast.connect(uri, offset=streamcast.EARLIEST).__aenter__()
@@ -84,7 +84,7 @@ class TestNotReplayable:
     async def test_an_offset_above_the_frontier_is_refused_with_both_numbers(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(0), trade(1)])
             with pytest.raises(streamcast.NotReplayable) as raised:
@@ -98,7 +98,7 @@ class TestNotReplayable:
         # The bound exists to protect the server: a replay is a scan in a
         # worker thread, and one asking for ten million rows holds one for
         # minutes. Past it the answer is to read the log directly.
-        stream = streamcast.Stream("trades", log=log, max_replay=5)
+        stream = streamcast.StreamHandle("trades", log=log, max_replay=5)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(20)])
             with pytest.raises(streamcast.NotReplayable) as raised:
@@ -123,13 +123,12 @@ class TestNotReplayable:
         offset it holds is above what was asked for — and it needs no eviction
         pass to arrange.
         """
-        import litelink
 
         handle = litelink.new(
             tmp_path / "data", "trades", schema=SCHEMA, start_offset=500
         )
         with handle:
-            stream = streamcast.Stream("trades", log=handle)
+            stream = streamcast.StreamHandle("trades", log=handle)
             async with serve(stream) as uri:
                 await stream.send_many([trade(i) for i in range(3)])
                 with pytest.raises(streamcast.NotReplayable) as raised:
@@ -145,7 +144,7 @@ class TestNotReplayable:
         # A refusal runs before the subscriber joins the fan-out set, and the
         # handler has to unwind without leaving a task behind. Twenty-five of
         # them in a row is what makes a leak visible.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             before = len(asyncio.all_tasks())
             for _ in range(25):
@@ -165,8 +164,8 @@ class TestNotReplayable:
 
 class TestRoutingRefusals:
     async def test_an_unknown_stream_names_what_the_server_does_serve(self, serve):
-        trades = streamcast.Stream("trades")
-        quotes = streamcast.Stream("quotes")
+        trades = streamcast.StreamHandle("trades")
+        quotes = streamcast.StreamHandle("quotes")
         async with serve(trades, quotes) as uri:
             base = uri.rsplit("/", 1)[0]
             with pytest.raises(streamcast.StreamNotFound) as raised:
@@ -187,7 +186,7 @@ class TestRoutingRefusals:
     async def test_a_subscribe_the_server_cannot_parse_is_a_protocol_error(
         self, serve, query, match
     ):
-        stream = streamcast.Stream("trades")
+        stream = streamcast.StreamHandle("trades")
         async with serve(stream) as uri:
             with pytest.raises(streamcast.ProtocolError, match=match):
                 await streamcast.connect(uri + query)
@@ -202,7 +201,7 @@ class TestTheClientSide:
 
     async def test_the_offset_may_be_written_into_the_uri_instead(self, serve, log):
         # The affordance that makes `wscat ws://server/trades?offset=0` work.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(0), trade(1)])
             async with streamcast.connect(uri + "?offset=2") as sub:
@@ -232,7 +231,7 @@ class TestTheClientSide:
 async def test_every_refusal_is_a_StreamcastError(serve):
     # One base class to catch, which is what makes a supervising loop
     # writable without enumerating five types.
-    stream = streamcast.Stream("trades")
+    stream = streamcast.StreamHandle("trades")
     async with serve(stream) as uri:
         with pytest.raises(streamcast.StreamcastError):
             await streamcast.connect(uri, offset=1)
@@ -248,7 +247,7 @@ async def test_a_refusal_inside_async_with_does_not_wedge_the_teardown(serve, lo
     the bare `await connect(...)` form used elsewhere in this file does not
     reach it.
     """
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream) as uri:
         with pytest.raises(streamcast.NotReplayable):
             async with streamcast.connect(uri, offset=999) as sub:  # ahead
@@ -265,7 +264,7 @@ class TestTheCursor:
 
     async def test_it_saves_and_resumes(self, serve, log, tmp_path):
         cursor = tmp_path / "trades.offset"
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -293,7 +292,7 @@ class TestTheCursor:
         """
         cursor = tmp_path / "trades.offset"
         cursor.write_text("3")
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -314,7 +313,7 @@ class TestTheCursor:
         # Receiving is not finishing. Coming back for another is the only
         # evidence the library has that the last one was handled.
         cursor = tmp_path / "trades.offset"
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 
@@ -329,7 +328,7 @@ class TestTheCursor:
     async def test_an_explicit_offset_overrides_the_file(self, serve, log, tmp_path):
         cursor = tmp_path / "trades.offset"
         cursor.write_text("7")
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -343,7 +342,7 @@ class TestTheCursor:
         # as "ignore the file", distinct from "no offset given".
         cursor = tmp_path / "trades.offset"
         cursor.write_text("3")
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(10)])
 
@@ -358,7 +357,7 @@ class TestTheCursor:
         A cursor is a recovery hint; refusing to start because it is empty
         turns a crash mid-save into a service that will not come up.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(3)])
 
@@ -381,7 +380,7 @@ class TestTheCursor:
         assert list(tmp_path.glob("*.tmp")) == []
 
     async def test_without_a_cursor_nothing_is_written(self, serve, log, tmp_path):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send(trade(0))
             async with streamcast.connect(uri, offset=0) as sub:
@@ -403,7 +402,7 @@ class TestTheCursorNeverRewinds:
         between two hosts, which is why `recv` checks rather than trusts: see
         the next test.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(100)])
 
@@ -430,7 +429,7 @@ class TestTheCursorNeverRewinds:
         offsets went backwards means silently skipping data once a cursor is
         involved, so it stops instead. The retry loop recovers.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 
@@ -448,7 +447,7 @@ class TestTheCursorNeverRewinds:
         # litelink's offset space has legitimate gaps — `restore` fences 2**20
         # of them — so the check is `<=`, not `!= previous + 1`. A jump
         # forward is ordinary.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(3)])
 
@@ -460,7 +459,7 @@ class TestTheCursorNeverRewinds:
     async def test_a_live_only_stream_has_no_offsets_to_check(self, serve):
         # Every frame carries `null`, so there is nothing to compare and the
         # check must not trip on it.
-        stream = streamcast.Stream("live")
+        stream = streamcast.StreamHandle("live")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             for i in range(3):
                 await stream.send(trade(i))
@@ -480,7 +479,7 @@ class TestTheCursorNeverRewinds:
         over a file that said 400. Observed exactly that.
         """
         cursor = tmp_path / "trades.offset"
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
@@ -523,7 +522,7 @@ class TestTheCursorNeverRewinds:
         cannot know, never does it.
         """
         cursor = tmp_path / "trades.offset"
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(30)])
 
