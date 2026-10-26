@@ -521,6 +521,7 @@ class TestAMigratedStream:
                 storage=streamcast.Storage(
                     root=Path(tmp_path / "box_a").absolute(),
                     published=bucket,
+                    replicate=True,
                     s3_options=s3,
                     config=litelink.LogConfig(
                         target_seal_size=SEAL_SIZE, wal_replication=True
