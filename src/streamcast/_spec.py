@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from functools import cached_property
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, LiteralString, Self, cast
 
 import pyarrow as pa
 from litelink import LogConfig, S3Options
@@ -14,11 +14,16 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     StrictBool,
     StrictInt,
+    StrictStr,
+    ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from streamcast import _schema
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_PUBLISHERS
@@ -35,7 +40,7 @@ def _name(value: str) -> str:
     return value
 
 
-Name = Annotated[str, AfterValidator(_name)]
+Name = Annotated[StrictStr, AfterValidator(_name)]
 
 
 class StreamSpec(BaseModel):
@@ -61,6 +66,14 @@ class StreamSpec(BaseModel):
     max_inbound: Annotated[StrictInt, Field(ge=1)] = MAX_INBOUND
     max_in_flight: Annotated[StrictInt, Field(ge=1)] = MAX_IN_FLIGHT
     max_message_bytes: Annotated[StrictInt, Field(ge=1)] | None = None
+
+    @field_validator("sort_by", mode="before")
+    @classmethod
+    def _ordered_sort(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("sort_by must be a list or tuple of column names")
+
+        return value
 
     @model_validator(mode="after")
     def _validate_schema(self) -> Self:
@@ -90,7 +103,7 @@ class StreamSpec(BaseModel):
 class Storage(BaseModel):
     """Configured locations and host-only credentials for a durable stream."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     root: Path
     published: str | None = None
@@ -98,28 +111,65 @@ class Storage(BaseModel):
     config: LogConfig | None = None
     s3_options: S3Options | None = Field(default=None, exclude=True, repr=False)
 
+    @model_validator(mode="wrap")
+    @classmethod
+    def _safe_errors(cls, value: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            # Missing fields report the whole input, and invalid credentials
+            # report their own values. hide_input_in_errors only protects str().
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError(
+                            cast(LiteralString, e["type"]),
+                            "{message}",
+                            {"message": e["msg"]},
+                        ),
+                        loc=e["loc"],
+                        input=None,
+                    )
+                    for e in exc.errors(include_input=False)
+                ],
+                hide_input=True,
+            ) from None
+
     @field_validator("root")
     @classmethod
     def _absolute_root(cls, value: Path) -> Path:
-        root = value.expanduser()
+        try:
+            root = value.expanduser()
+        except RuntimeError as exc:
+            raise ValueError("root home directory could not be determined") from exc
+
         if not root.is_absolute():
             raise ValueError("root must be absolute after expanduser")
 
         return root
 
-    @model_validator(mode="after")
-    def _replication(self) -> Self:
-        if self.replicate and not self.published:
+    @field_validator("replicate")
+    @classmethod
+    def _replication(cls, value: bool, info: ValidationInfo) -> bool:
+        if value and not info.data.get("published"):
             raise ValueError("replicate requires published")
 
+        return value
+
+    @field_validator("config")
+    @classmethod
+    def _wal_replication(
+        cls, value: LogConfig | None, info: ValidationInfo
+    ) -> LogConfig | None:
         if (
-            self.config is not None
-            and self.config.wal_replication
-            and not self.replicate
+            value is not None
+            and value.wal_replication
+            and not info.data.get("replicate")
         ):
             raise ValueError("wal_replication requires replicate")
 
-        return self
+        return value
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Storage):

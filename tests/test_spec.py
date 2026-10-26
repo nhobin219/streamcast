@@ -60,7 +60,7 @@ def test_valid_names(name, shape):
     assert StreamSpec(name=name, schema=shape).name == name
 
 
-@pytest.mark.parametrize("name", ["", "-a", "a/b", "a\n", "a" * 129, "é", 12])
+@pytest.mark.parametrize("name", ["", "-a", "a/b", "a\n", "a" * 129, "é", 12, b"t"])
 def test_invalid_names(name, shape):
     with pytest.raises(ValidationError):
         StreamSpec(name=name, schema=shape)
@@ -131,7 +131,9 @@ def test_replay_accepts_zero_and_unlimited(value, shape):
     assert StreamSpec(name="trades", schema=shape, max_replay=value).max_replay == value
 
 
-@pytest.mark.parametrize("sort", [["ts", "ts"], ["missing"], [1], "ts"])
+@pytest.mark.parametrize(
+    "sort", [["ts", "ts"], ["missing"], [1], "ts", {"ts", "price"}, frozenset({"ts"})]
+)
 def test_sort_refuses_duplicates_unknowns_and_non_names(sort, shape):
     with pytest.raises(ValidationError):
         StreamSpec(name="trades", schema=shape, sort_by=sort)
@@ -236,6 +238,25 @@ def test_storage_defaults_absolute_root_and_expansion(tmp_path, monkeypatch):
             Storage(root=root)
 
 
+def test_storage_unknown_home_is_validation_error(monkeypatch):
+    def unknown_user(path):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr("pathlib.Path.expanduser", unknown_user)
+    with pytest.raises(ValidationError, match="home directory") as refused:
+        Storage(
+            root="~nosuchuser/logs",
+            s3_options=S3Options(secret_key="test-secret-LASTCHARS"),
+        )
+
+    for rendered in (
+        str(refused.value),
+        repr(refused.value.errors()),
+        refused.value.json(),
+    ):
+        assert "LASTCHARS" not in rendered
+
+
 @pytest.mark.parametrize("replicate", [True, False])
 def test_storage_replication_rules(replicate, tmp_path):
     storage = Storage(
@@ -292,6 +313,71 @@ def test_credentials_never_serialized_printed_or_compared(tmp_path):
     assert "test-key-one" not in repr(first)
     assert "test-secret-one" not in str(first)
     assert Storage.model_validate_json(first.model_dump_json()) == first
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {},
+        {"root": "logs"},
+        {"root": ""},
+        {"root": None},
+        {"root": "/srv/streams", "published": 1},
+        {"root": "/srv/streams", "replicate": True},
+        {"root": "/srv/streams", "replicate": True, "published": ""},
+        {"root": "/srv/streams", "replicate": "true"},
+        {"root": "/srv/streams", "replicate": None},
+        {"root": "/srv/streams", "config": LogConfig(wal_replication=True)},
+        {"root": "/srv/streams", "config": {"unknown": 1}},
+        {"root": "/srv/streams", "credentials": "archive"},
+    ],
+)
+@pytest.mark.parametrize(
+    "representation", [str, lambda e: repr(e.errors()), lambda e: e.json()]
+)
+def test_storage_refusals_never_disclose_credentials(invalid, representation):
+    options = S3Options(
+        access_key="test-access-key", secret_key="test-secret-LASTCHARS"
+    )
+    with pytest.raises(ValidationError) as refused:
+        Storage.model_validate({**invalid, "s3_options": options})
+
+    rendered = representation(refused.value)
+    for fragment in ("test-access-key", "test-secret-LASTCHARS", "LASTCHARS"):
+        assert fragment not in rendered
+
+
+@pytest.mark.parametrize(
+    "representation", [str, lambda e: repr(e.errors()), lambda e: e.json()]
+)
+def test_storage_invalid_credentials_never_disclosed(representation):
+    with pytest.raises(ValidationError) as refused:
+        Storage(
+            root="/srv/streams",
+            s3_options={
+                "access_key": "test-access-key",
+                "secret_key": ["test-secret-LASTCHARS"],
+            },
+        )
+
+    assert "test-secret-LASTCHARS" not in representation(refused.value)
+
+
+def test_storage_refusal_locations_types_and_messages():
+    with pytest.raises(ValidationError) as refused:
+        Storage.model_validate(
+            {"root": None, "replicate": True, "config": LogConfig(wal_replication=True)}
+        )
+
+    errors = refused.value.errors()
+    assert [(e["loc"], e["type"]) for e in errors] == [
+        (("root",), "path_type"),
+        (("replicate",), "value_error"),
+        (("config",), "value_error"),
+    ]
+    assert "valid path" in errors[0]["msg"]
+    assert errors[1]["msg"] == "Value error, replicate requires published"
+    assert errors[2]["msg"] == "Value error, wal_replication requires replicate"
 
 
 def test_initialization_contract():
