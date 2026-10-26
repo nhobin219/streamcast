@@ -1,4 +1,4 @@
-"""`Stream.ingest`'s source: stamped on the way in, and explained when it fails.
+"""`StreamHandle.ingest`'s source: stamped on the way in, and explained when it fails.
 
 litelink checks a bulk source in two places. Its schema up front, before any
 offset is reserved — names, and whether the types cast — and its VALUES one

@@ -13,7 +13,7 @@ import pytest
 
 import streamcast
 from streamcast._cursor import Cursor
-from streamcast._remote import RemoteCursor
+from streamcast._remote import RemoteCursor, _filesystem
 
 from .conftest import trade
 
@@ -40,7 +40,7 @@ class TestCrossBoxRecovery:
         Not a restart — a restart has its local file. This is a different box
         with the same cursor key and nothing on disk.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
@@ -92,7 +92,7 @@ class TestCrossBoxRecovery:
         The remote lags by up to `upload_every`, so preferring it would mean a
         consumer's own position losing to a stale copy of itself.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(50)])
 
@@ -126,7 +126,7 @@ class TestCrossBoxRecovery:
     ):
         # Otherwise the bucket holds what it held `upload_every` ago, and a
         # short-lived consumer would ship nothing at all.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream) as uri:
             await stream.send_many([trade(i) for i in range(20)])
 
@@ -155,7 +155,7 @@ class TestItIsBestEffort:
         A consumer that could not reach the bucket and therefore refused to
         run would have traded an outage for a backup.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             await stream.send_many([trade(i) for i in range(5)])
 
@@ -256,7 +256,6 @@ class TestConfiguration:
     def test_credentials_come_from_the_environment_and_are_overridable(self, s3):
         # litelink's model: `resolved()` fills unset fields from the
         # environment, and explicit wins.
-        from streamcast._remote import _filesystem
 
         filesystem, _path = _filesystem("s3://bucket/key", None)
         assert filesystem is not None
@@ -267,7 +266,6 @@ class TestConfiguration:
         """pyarrow's S3 stream opens a multipart upload as it opens: three
         billed writes for a cursor of a few bytes. Delayed, it is one PutObject.
         Read back off the filesystem, as litelink checks its own."""
-        from streamcast._remote import _filesystem
 
         filesystem, _path = _filesystem("s3://bucket/key", s3)
         _rebuild, (options,) = filesystem.__reduce__()

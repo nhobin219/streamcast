@@ -8,7 +8,7 @@ window that is not opening. The fix is not a faster loop; it is that the
 broadcast must not `await` a consumer at all.
 
 So `offer` is synchronous, never blocks, never raises, and is the ONLY thing
-`Stream.send` calls. Each subscriber owns a queue and a task, and a consumer
+`StreamHandle.send` calls. Each subscriber owns a queue and a task, and a consumer
 that stops reading fills its own queue and nobody else's.
 
 A full queue is the case with no free answer, and the one taken here is to
@@ -100,14 +100,14 @@ class Subscriber:
         """Queue one frame, if this subscriber asked for it.
 
         Never blocks, never awaits, never raises. Every one of those three
-        matters and `Stream.send` depends on all of them: it calls this in a
+        matters and `StreamHandle.send` depends on all of them: it calls this in a
         loop over every subscriber, and the loop has to be atomic against the
         event loop for messages to reach every subscriber in the same order
         they were assigned offsets.
 
         **`row` and `frame` are the same message twice**, and both are needed:
         the predicate reads the mapping, while what goes on the wire is the
-        bytes `Stream.send` encoded ONCE for every subscriber. Filtering
+        bytes `StreamHandle.send` encoded ONCE for every subscriber. Filtering
         decides whether to enqueue that shared frame, so a filter costs a dict
         lookup rather than a second encode.
 
@@ -182,7 +182,7 @@ class Subscriber:
         other rather than independently. A replay of `max_replay` messages has
         to finish within `max_backlog` messages of live traffic or the
         subscriber is dropped the moment it catches up, having done all the
-        work. See `Stream` for the arithmetic the defaults are chosen by.
+        work. See `StreamHandle` for the arithmetic the defaults are chosen by.
         """
         remaining = self._yield_every
         if replay is not None:

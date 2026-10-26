@@ -12,7 +12,7 @@ Numbers marked *measured* were taken on the machine this was developed on with
 
 **A log-backed pub/sub broker.** One process owns the log and the fan-out;
 publishers and subscribers are both its clients. A publisher is the server's
-own feed handler calling `Stream.send`, or `streamcast.publish` from another
+own feed handler calling `StreamHandle.send`, or `streamcast.publish` from another
 machine — either way the server is litelink's single writer, which is what
 makes the offsets one sequence.
 
@@ -30,7 +30,7 @@ upstream ws feed
 ┌─────────────────────────────────────────┐
 │ server process                          │
 │                                         │
-│   Stream.send(message)                  │
+│   StreamHandle.send(message)                  │
 │       │                                 │
 │       ├─► litelink.append   durable     │   ← before anyone sees it
 │       │                                 │
@@ -74,7 +74,7 @@ neighbor stream objects and connections remain in place.
 In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
 published tables when a consumer has fallen past what the server will replay.
-Reading a stream's whole history from another machine (`Stream.snapshot`) is
+Reading a stream's whole history from another machine (`StreamHandle.snapshot`) is
 in too, because catch-up is built on it.
 
 Out: broker-side consumer acknowledgements and consumer groups, topic hierarchies and
@@ -191,7 +191,7 @@ for clients from before the hint, and `stream_id` the id that metadata
 records; both are null on a
 stream with no log. They are all a reader on another machine needs, with its
 own credentials, to read every log the stream has had — which is what
-`catch_up` and `Stream.snapshot` start from. The id is checked against the
+`catch_up` and `StreamHandle.snapshot` start from. The id is checked against the
 file, because a `file://` path can exist on two machines for two different
 streams. Credentials are never sent.
 
@@ -266,7 +266,7 @@ browser exposes — against a real server, in CI.
 **Why text frames.** The payload is JSON, and a text frame is what a
 browser's `WebSocket` hands straight to `JSON.parse`, what devtools display,
 and what JSON feeds of this kind send; binary frames are for binary formats.
-It costs nothing on the server: `Stream.send` encodes a frame ONCE as UTF-8
+It costs nothing on the server: `StreamHandle.send` encodes a frame ONCE as UTF-8
 bytes, every subscriber shares them, and `websockets` sends them as a text
 frame without re-encoding (`send(frame, text=True)`). The ASGI transport has
 to hand ASGI a `str`, so it decodes once per subscriber, ~50 ns. A receiver
@@ -480,7 +480,7 @@ settings and check the other.
 A slow consumer is dropped; a slow DISK cannot be. Every publisher on a stream
 feeds one writer thread, and if commits fall behind what arrives, rows queue
 in memory — with nothing bounding them, until the broker is out of it.
-`BrokerConfig(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
+`StreamHandle(max_inbound=)` (65,536 rows by default) bounds that queue per stream, across
 all its publishers, and at the bound a sender **waits** rather than being
 refused: a local `send` waits for room, and a publisher connection's reader
 stops reading its socket, so TCP holds the remote publisher back and its
@@ -489,12 +489,12 @@ statements with no `await` between them — `tests/test_invariants.py` holds
 them so — or two senders could take the same room. A batch larger than the
 bound is let in when the queue is empty, so it waits rather than deadlocks.
 
-Per connection the bound is `BrokerConfig(max_in_flight=)`, 64 frames: the replies
+Per connection the bound is `StreamHandle(max_in_flight=)`, 64 frames: the replies
 one publisher may be owed. Each frame is at most `transport_max_bytes`, so
 a connection's share of memory is bounded too, and `max_inbound` caps what
 any number of connections add up to.
 
-Per stream, a frame is at most `BrokerConfig(max_message_bytes=)`, 1 MiB by
+Per stream, a frame is at most `StreamHandle(max_message_bytes=)`, 1 MiB by
 default, under one `transport_max_bytes` for every stream. One server often carries small rows
 beside large ones. A single limit has to fit the largest, and then every
 stream takes frames that large. A frame over its stream's limit closes the
@@ -504,7 +504,7 @@ are answered first. The ASGI server allocates a frame before the application
 sees it, so its own limit (uvicorn's `ws_max_size`) is set to
 `transport_max_bytes` as well.
 
-The broker's bounds are `BrokerConfig`'s fields, not the `Stream`'s: they are the
+The broker's bounds are `BrokerConfig`'s fields, not the `StreamHandle`'s: they are the
 serving process's settings, and change with a restart rather than with the stream. Each
 is one int for every stream or a map naming every stream served, checked in full before
 any stream is set. `max_in_flight` is still a per-connection window: the mapping chooses
@@ -518,11 +518,11 @@ connections add their own queues, and an oversized inbound batch is admitted alo
 
 | where | what | bound | at the bound |
 |---|---|---|---|
-| broker | a subscriber's outbound queue | `BrokerConfig(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
-| broker | a stream's rows queued for commit | `BrokerConfig(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
-| broker | replies owed one publisher connection | `BrokerConfig(max_in_flight=)`, 64 frames | the connection stops being read |
+| broker | a subscriber's outbound queue | `StreamHandle(max_backlog=)`, 8,192 frames | the subscriber is dropped (`TooSlow`) |
+| broker | a stream's rows queued for commit | `StreamHandle(max_inbound=)`, 65,536 rows | sends wait; publishers are held at the socket |
+| broker | replies owed one publisher connection | `StreamHandle(max_in_flight=)`, 64 frames | the connection stops being read |
 | both | a connection's received frames | `max_queue` (16) × the frame limit (`transport_max_bytes` at the broker, `max_size` at a client) | the connection stops being read |
-| broker | one publish frame | `BrokerConfig(max_message_bytes=)` per stream, 1 MiB | the connection is closed, 1009 |
+| broker | one publish frame | `StreamHandle(max_message_bytes=)` per stream, 1 MiB | the connection is closed, 1009 |
 | broker | a replay | one batch at a time, into the bounded subscriber queue | — |
 | client | a publisher's unanswered sends | `publish(max_in_flight=)`, 64 frames | `submit` waits |
 | client | a catch-up | `page_bytes` (64 MiB of Arrow) and optional `page_rows` per query | the next page is read after this one |
@@ -597,7 +597,7 @@ made once, by the publisher, instead of independently by every consumer.
 **`_log.SYSTEM` defines them, as JSON Schema, in one place.** It is what a new
 log is created with, which names a declaration may not use, which columns the
 wire and the greeting leave out, and whether a log is current enough that
-`Stream.migrate` leaves it alone. Each log's entry in `metadata.json` records
+`StreamHandle.migrate` leaves it alone. Each log's entry in `metadata.json` records
 its `system_schema` beside its user `schema`, because the two differ between
 logs: one from before a system column existed lacks it.
 
@@ -622,7 +622,7 @@ It is owned on exactly the terms litelink owns its offset:
 * **Never in the greeting's `schema`**, which is filtered by the same rule.
   Each log's `system_schema` in the metadata file names it instead.
 * **The server's to fill.** A row that carries it is refused rather than
-  overwritten, and a declaration that names it is refused at `Stream.open`.
+  overwritten, and a declaration that names it is refused at `StreamHandle.open`.
 
 **This is not owning the shape, and the line is worth drawing precisely.** The
 design this section argues against owned the ROW — a fixed schema with the
@@ -643,13 +643,13 @@ The rest is decided, not incidental:
   `event_ts` already uses.
 * **Per log, not per server.** A log created before the column existed opens
   unchanged and is never stamped — adding a column is not a side effect an
-  `open` should have (litelink#29). A handle passed as `Stream(log=)` is
+  `open` should have (litelink#29). A handle passed as `StreamHandle(log=)` is
   stamped only if its own schema has the column. The metadata file's
   `system_schema` says which.
 
 ### The counter
 
-`Stream.end_offset` is read from the log **once**, at construction, and maintained by
+`StreamHandle.end_offset` is read from the log **once**, at construction, and maintained by
 `send` thereafter — `append` returns the offset it assigned, so asking the log per
 message would be a round trip for a number the previous call already returned. It stays
 consistent provided this broker is the log's only writer; litelink does not enforce that
@@ -703,7 +703,7 @@ the saving holds only while that does, and a silent reordering would break I6.
 
 **Which tiers a replay reads was decided when the log was opened.** litelink
 passes `published=` per read, and a server reads staging and the buffer only
-unless `Stream.open(create=True, replay_published=True)` says otherwise — serving a replay
+unless `StreamHandle.open(Stream(spec=StreamSpec(..., replay_published=True), storage=...), initialization="create_if_absent")` says otherwise — serving a replay
 out of object storage is a long network read held on a worker thread while
 the subscriber's socket sits attached, which is the failure `catch_up` avoids
 by doing the same read client-side with nothing connected. A replay that
@@ -720,7 +720,7 @@ onto the other sits on the side that knows about JSON. Putting it in litelink
 was considered and rejected; it would make a JSON codec part of the public
 surface of a library whose value is being general.
 
-What it buys is an import list of one. `Stream.open(name, create=True, root=…, schema=…)` creates
+What it buys is an import list of one. `StreamHandle.open(Stream(spec=…, storage=…), initialization="create_if_absent")` creates
 the log, the broker maintains it (and replicates it, with `replicate=True`), and a caller reaches for neither
 litelink nor pyarrow.
 
@@ -808,7 +808,7 @@ and a microsecond one — which the examples use — is not.
 
 ### An existing log is checked, not adopted
 
-`Stream.open(root=…, create=True, schema=…)` opens a log that is already there, and litelink's
+`StreamHandle.open(Stream(spec=…, storage=…), initialization="create_if_absent")` opens a log that is already there, and litelink's
 `open` takes none of the shape: it reads it from disk. So a declaration that
 disagreed would be silently ignored and every send validated against columns
 the caller never wrote down. It is compared and refused instead, which is the
@@ -819,7 +819,7 @@ To change the schema, a stream is **migrated** instead.
 ### Migration: a stream becomes a sequence of logs
 
 litelink fixes a log's shape at creation, so a new schema means a new log.
-`Stream.migrate` makes the stream a sequence of them, with the server
+`StreamHandle.migrate` makes the stream a sequence of them, with the server
 stopped:
 
 1. **The current log is retired** (litelink's `retire()`): every buffered row
@@ -870,7 +870,7 @@ publish to S3 compares it with the copy there and uploads it if they differ. **A
 is a failure to start.** The file is what a reader on another machine starts
 from, so a stream without one can only be read through its own server, and
 that is better found out at deploy than at the first remote read. It is
-the broker's job rather than `Stream.open`'s so that a `Stream(log=…)` gets one
+the broker's job rather than `StreamHandle.open`'s so that a `StreamHandle(log=…)` gets one
 too: an initialiser does no I/O. A pre-0.9 log gains its file the first time a
 broker serves it, and nothing about the log changes.
 
@@ -912,7 +912,7 @@ until its first version is written.
   timestamps; the broker fills them in from the logs on this disk and rewrites
   it as version 2.
 - **The live log it names is the only one the broker will serve.** A
-  `Stream(log=…)` handed a sealed log is refused at start, because serving
+  `StreamHandle(log=…)` handed a sealed log is refused at start, because serving
   it would write to a log the file says is finished. Handed the live one, it
   reads its seam and its retired logs from the file at start.
 
@@ -920,7 +920,7 @@ until its first version is written.
 found", and a restore that read a mistyped bucket as "no copy" would rebuild
 the stream's first log as though it were live. So the bucket is checked.
 
-**Idempotent**, so `Stream.migrate(...)` can sit in a server's startup: a
+**Idempotent**, so `StreamHandle.migrate(...)` can sit in a server's startup: a
 current log that already has the requested schema and every system column is
 opened, not migrated. Migrating with an UNCHANGED schema is therefore the
 upgrade onto today's system columns — how a log from before `streamcast_ts`
@@ -955,7 +955,7 @@ the scan cannot see the problem: the current log holds nothing below its
 start, so a replay of the range would come back empty and read as "nothing
 outstanding". That is the hole at the join invariant 4 forbids. A consumer
 that was caught up when the server stopped resumes exactly at the seam and
-loses nothing. Reading across the seam belongs to `Stream.snapshot`, not to
+loses nothing. Reading across the seam belongs to `StreamHandle.snapshot`, not to
 the server's replay. `EARLIEST` on a freshly migrated stream is where the
 current log begins.
 
@@ -980,7 +980,7 @@ per **sealed** log, with a struct per column (`min`, `max`, `null_count`,
 `value_count`, and `nan_count` for floats), rolled up from the log's own
 Iceberg statistics (litelink#85). The live log has no row and is never pruned.
 
-**`Stream.migrate` writes it.** After the old log is retired,
+**`StreamHandle.migrate` writes it.** After the old log is retired,
 and before the next log exists, `migrate` reads the retired log's
 `column_statistics()` across every tier. A failure at that point leaves the
 stream exactly as it was. The retired log's row is added to the manifest
@@ -1070,11 +1070,11 @@ published, staging and buffer — and a server that replays from staging and the
 buffer reports the lowest of those two, so `EARLIEST` is never a promise the
 scan cannot keep.
 
-### Reading a stream's history: `Stream.snapshot`
+### Reading a stream's history: `StreamHandle.snapshot`
 
 A stream is a sequence of logs, each publishing an ordinary Iceberg table, and its
 metadata file says which, in order, where each is published, and the offsets and
-`streamcast_ts` range each holds. `Stream.snapshot(metadata_uri)` reads that file and
+`streamcast_ts` range each holds. `StreamHandle.snapshot(metadata_uri)` reads that file and
 then the tables, on the reader's machine with the reader's credentials. The tables are
 read through DuckDB's `iceberg_scan`, each pinned to the snapshot its
 `version-hint.text` named when it was opened, and the logs are read as one table with
@@ -1117,7 +1117,7 @@ there, as in any other read. The snapshot's own limits (the offsets, and the
 `as_of_ts` bound on logs that carry the stamp) stay inside, where they always
 bind and push down.
 
-### Keeping it current: `Stream.live`
+### Keeping it current: `StreamHandle.live`
 
 A `Live` is a snapshot kept moving: the published tables as a base, the
 broker's rows appended in memory as they arrive, and every query answered as
@@ -1189,7 +1189,7 @@ finishes: a recovery that guarantees its own failure on exactly the consumers
 that need it. *Measured* with `max_backlog=16`, where the first shape died
 immediately and this one caught up 20,000 rows.
 
-**It is built on `Stream.snapshot`.** Each round takes a snapshot of everything
+**It is built on `StreamHandle.snapshot`.** Each round takes a snapshot of everything
 published, streams its rows from the consumer's offset, and connects at the
 snapshot's `end_offset` — or at the last row plus one, if that is higher. The
 snapshot reads every log the stream has had, so a catch-up crosses a
@@ -1251,8 +1251,8 @@ market feed ─► streamcast A ─► live runner ─► streamcast B ─► da
 ```
 
 The live runner is a *subscriber* of A and *embeds* B in its own process — a
-`Stream` plus a broker app, exactly as §1 shows. Nothing publishes into a server
-over the wire in this topology — each stage publishes into a `Stream` it
+`StreamHandle` plus a broker app, exactly as §1 shows. Nothing publishes into a server
+over the wire in this topology — each stage publishes into a `StreamHandle` it
 holds. A stage that cannot hold one publishes remotely instead (§6b).
 
 **Offsets are per server.** A message that travels A → runner → B has one offset
@@ -1265,7 +1265,7 @@ it. A pipeline that needs end-to-end correlation puts its own id in the payload.
 ## 6b. Remote publishing
 
 `streamcast.publish(uri)` hands rows to a server, which appends them with the
-same `Stream.send` / `send_many` a local publisher calls. Every served stream
+same `StreamHandle.send` / `send_many` a local publisher calls. Every served stream
 takes publishers; one that cannot be written, a retired stream, refuses them
 (4410).
 
@@ -1303,8 +1303,15 @@ may lose it.
 ### Exactly-once: the broker dedupes each publisher on its seq
 
 ```python
-stream = streamcast.Stream.open("orders", create=True, root="data", schema=SCHEMA,
-                               exactly_once=True)
+from pathlib import Path
+
+stream = streamcast.StreamHandle.open(
+    streamcast.Stream(
+        spec=streamcast.StreamSpec(name='orders', schema=SCHEMA, exactly_once=True),
+        storage=streamcast.Storage(root=Path('data').absolute()),
+    ),
+    initialization="create_if_absent",
+)
 
 async with streamcast.publish(uri, publisher="enricher") as out:
     seq = out.info.publisher.last_seq + 1          # where the broker has us
@@ -1399,7 +1406,7 @@ other greeting and reply is byte for byte what it was.
 | event | the mark |
 |---|---|
 | broker restart, or a crash with the disk intact | kept, committed with its rows |
-| `Stream.migrate` | carried: read before the old log retires, kept beside the metadata (`<name>.publishers.json`) so a migration that dies after the retire still has it, written into the new log before the metadata names it current |
+| `StreamHandle.migrate` | carried: read before the old log retires, kept beside the metadata (`<name>.publishers.json`) so a migration that dies after the retire still has it, written into the new log before the metadata names it current |
 | retention, truncation | unaffected; the mark is not rows |
 | restore from a WAL replica, or failover to one | consistent with the rows it restored; the replication lag loses rows and marks together |
 | restore from the published table alone, or a revive | lost: the published table holds the log's rows and nothing else, and the greeting reports `last_seq = 0` |
@@ -1608,7 +1615,7 @@ explicit scheduling checkpoint is required.
 
 | | |
 |---|---|
-| **I1** | `Stream._commit` and `_deliver` contain no `await`. Rows are queued in call order, committed in queue order on the stream's writer thread, and delivered — frontier and fan-out — in commit order. |
+| **I1** | `StreamHandle._commit` and `_deliver` contain no `await`. Rows are queued in call order, committed in queue order on the stream's writer thread, and delivered — frontier and fan-out — in commit order. |
 | **I2** | Joining the fan-out set and reading the frontier are adjacent statements. The replay range and the live queue partition the stream exactly. |
 | **I3** | A message is durable before it is delivered, never after. |
 | **I4** | What a subscriber receives is a contiguous prefix of the stream from where it subscribed, in increasing offset order. A drop ends it; nothing punches a hole in it. The order is CHECKED at the subscriber, not assumed — see below. |
@@ -1664,7 +1671,7 @@ against the source. I3 and I4 are checked end to end. I5 is litelink's.
 
 ## 8b. Recovering a server
 
-`Stream.restore(name, root=…, published=…)` stands a stream up on a box that
+`StreamHandle.restore(name, root=…, published=…)` stands a stream up on a box that
 never held its log: litelink rebuilds it from its replicated WAL when there is
 one, and otherwise from its published table alone (litelink 0.10), and the
 result serves and appends like any other. Its schema and `sort_by` come from
@@ -1672,16 +1679,16 @@ the stream's metadata, exactly — an Iceberg schema keeps no Arrow field
 metadata, where a binary column's encoding lives — and litelink checks them
 against the replica or the table.
 
-**`Stream.open` opens an existing local log by default.** `create=True` permits
+**`StreamHandle.open` opens an existing local log by default.** `initialization="create_if_absent"` permits
 creation only when neither disk nor published prefix holds the stream. With neither
 copy and no creation request it raises `FileNotFoundError`, naming where it looked.
-`restore=True` restores a published replica only when the local log is absent; it
-does not imply creation. Both flags default to False. `Stream.restore` raises
+`initialization="restore_published"` restores a published replica only when the local log is absent; it
+does not imply creation. The default initialization is `"open_existing"`. `StreamHandle.restore` raises
 `FileNotFoundError` on an empty prefix. Store errors propagate, never count as absence.
 
-**`Stream.open` refuses to create a stream where its published prefix already
+**`StreamHandle.open` refuses to create a stream where its published prefix already
 holds it.** That means its metadata, its first log's table, or that log's WAL
-replica, and the refusal is a `FileExistsError` naming `restore=True` and `Stream.restore`. It
+replica, and the refusal is a `FileExistsError` naming `initialization="restore_published"` and `StreamHandle.restore`. It
 looks only when the stream is not on this disk, with one metadata read and a
 one-level listing. Creating an empty one there was the ordinary startup on a
 box that lost its disk. Its first start of the broker uploaded the empty stream's
@@ -1755,9 +1762,9 @@ and both published to the same table. Nothing refused, nothing warned.
 requirement, not something either library enforces, and it is
 [tracked upstream](https://github.com/nhobin219/litelink/issues/75).
 
-**A planned move needs no fence: retire, then revive.** `Stream.retire` fixes
+**A planned move needs no fence: retire, then revive.** `StreamHandle.retire` fixes
 the log's end — litelink stops appends and publishes every row before it — and
-records it in the metadata. `Stream.restore(..., revive=True)` then continues
+records it in the metadata. `StreamHandle.restore(..., revive=True)` then continues
 the stream on its next log at exactly that end, on any box: nothing after it
 was ever issued, so nothing is skipped, and nothing was left unpublished, so
 nothing is lost. Until revived, a retired stream is served read-only, from its

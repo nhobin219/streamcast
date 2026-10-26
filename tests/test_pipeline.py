@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import streamcast
+from streamcast._limits import MAX_IN_FLIGHT
+from streamcast._writer import Writer
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -24,30 +27,43 @@ SCHEMA: dict[str, Any] = {
 
 
 @pytest.fixture
-async def stream(tmp_path):
-    made = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=SCHEMA)
+async def stream(tmp_path, request):
+    made = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(
+                name="trades",
+                schema=SCHEMA,
+                max_in_flight=getattr(request, "param", MAX_IN_FLIGHT),
+            ),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     try:
         yield made
     finally:
         await made.aclose()
 
 
-def hold_commits(stream, monkeypatch) -> tuple[threading.Event, list[int]]:
+def hold_commits(stream, monkeypatch):
     """Hold the writer's FIRST commit until released; record every commit's size."""
     assert stream.log is not None
     held = threading.Event()
     commits: list[int] = []
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
     real = stream.log.extend
 
     def gated(rows):
         if not commits:
-            held.wait(5)
+            loop.call_soon_threadsafe(entered.set)
+            assert held.wait(20), "commit was not released"
 
         commits.append(len(rows))
         return real(rows)
 
     monkeypatch.setattr(stream.log, "extend", gated)
-    return held, commits
+    return held, commits, entered
 
 
 class TestOrder:
@@ -65,13 +81,26 @@ class TestOrder:
         self, stream, serve, monkeypatch
     ):
         """What pipelining is for: a single publisher keeps the writer fed."""
-        held, commits = hold_commits(stream, monkeypatch)
+        held, commits, entered = hold_commits(stream, monkeypatch)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 first = await producer.submit({"i": 0})
-                await asyncio.sleep(0.05)  # the server has it; its commit is held
+                await asyncio.wait_for(entered.wait(), 10)
+                queued = asyncio.Event()
+                submit = Writer.submit
+                count = 0
+
+                def counted(writer, job):
+                    nonlocal count
+                    submit(writer, job)
+                    if writer is stream._writer:
+                        count += 1
+                        if count == 20:
+                            queued.set()
+
+                monkeypatch.setattr(Writer, "submit", counted)
                 rest = [await producer.submit({"i": n}) for n in range(1, 21)]
-                await asyncio.sleep(0.05)  # all twenty read and queued behind it
+                await asyncio.wait_for(queued.wait(), 10)
                 held.set()
                 await asyncio.gather(first, *rest)
 
@@ -82,12 +111,13 @@ class TestTheWindow:
     async def test_a_full_window_holds_the_next_submit(
         self, stream, serve, monkeypatch
     ):
-        held, _commits = hold_commits(stream, monkeypatch)
+        held, _commits, entered = hold_commits(stream, monkeypatch)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, max_in_flight=4) as producer:
                 inflight = [await producer.submit({"i": n}) for n in range(4)]
                 fifth = asyncio.ensure_future(producer.submit({"i": 4}))
-                await asyncio.sleep(0.1)
+                await asyncio.wait_for(entered.wait(), 10)
+                await asyncio.sleep(0)
                 # Four unacknowledged, and the commit they wait on is held.
                 assert not fifth.done()
 
@@ -96,15 +126,17 @@ class TestTheWindow:
 
         assert offsets == [1, 2, 3, 4, 5]
 
+    @pytest.mark.parametrize("stream", [2], indirect=True)
     async def test_the_servers_bound_holds_a_client_allowed_more(
         self, stream, serve, monkeypatch
     ):
         """The server's `max_in_flight`: past it, the server stops reading."""
-        held, commits = hold_commits(stream, monkeypatch)
-        async with serve(stream, maintain=False, max_in_flight=2) as uri:
+        held, commits, entered = hold_commits(stream, monkeypatch)
+        async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, max_in_flight=10) as producer:
                 futures = [await producer.submit({"i": n}) for n in range(10)]
-                await asyncio.sleep(0.1)
+                await asyncio.wait_for(entered.wait(), 10)
+                await asyncio.sleep(0)
                 # The server read and queued at most its bound plus the frame
                 # it is blocked trying to queue: the rest wait at the socket.
                 assert stream.end_offset == 1  # nothing committed yet
@@ -149,12 +181,12 @@ class TestFailures:
     async def test_a_dropped_connection_fails_every_send_in_flight(
         self, stream, serve, monkeypatch
     ):
-        held, _commits = hold_commits(stream, monkeypatch)
+        held, _commits, entered = hold_commits(stream, monkeypatch)
         server_closed = False
         async with serve(stream, maintain=False) as uri:
             producer = await streamcast.publish(uri)
             futures = [await producer.submit({"i": n}) for n in range(5)]
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(entered.wait(), 10)
             await producer.connection.close()  # gone before any reply
             # The rows were read and queued, so they still commit; release
             # the hold so the server's handler can finish.

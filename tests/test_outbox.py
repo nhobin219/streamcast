@@ -49,7 +49,7 @@ class TestEnqueueing:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
@@ -69,7 +69,7 @@ class TestEnqueueing:
 
     async def test_a_rollback_returns_its_seqs(self, serve, log, opener):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
@@ -127,7 +127,7 @@ class TestRecovery:
         the rows: the next one's greeting says they landed, and they are not
         sent again."""
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with store.transaction() as tx:
                 await _outbox.enqueue(tx, "trades", "p", [trade(0), trade(1), trade(2)])
@@ -157,7 +157,7 @@ class TestRecovery:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
@@ -196,7 +196,7 @@ class TestRecovery:
 
         monkeypatch.setattr(_dedupe.Publishers, "plan", transient)
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
@@ -229,7 +229,7 @@ class TestRecovery:
         monkeypatch.setattr(_dedupe.Publishers, "plan", transient)
         said: list[str] = []
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, notice=said.append, **FAST
@@ -250,7 +250,7 @@ class TestRecovery:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
@@ -269,7 +269,7 @@ class TestRecovery:
         with log.transaction() as ltx:
             ltx.execute("DELETE FROM streamcast_publishers")
 
-        reborn = streamcast.Stream("trades", log=log, exactly_once=True)
+        reborn = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(reborn, maintain=False) as uri2:
             with pytest.raises(streamcast.AcknowledgedRowsLost):
                 async with streamcast.outbox(
@@ -290,7 +290,7 @@ class TestRecovery:
         schema mismatch: the row is dropped and never lands.
         """
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             # The fence as admission sees it, held: the runtime's readiness
             # monitor would lift a flag set on the generation within a beat.
@@ -324,7 +324,7 @@ class TestRecovery:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, publisher="p") as direct:
                 await direct.send_many([trade(0), trade(1), trade(2)], seq=1)
@@ -348,7 +348,7 @@ class TestRecovery:
                 "UPDATE streamcast_publisher_state SET streamcast_stream_id = 'old'"
             )
 
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri, publisher="probe") as direct:
                 assert direct.info.stream_id, "the refusal must be about a real id"
@@ -382,7 +382,7 @@ class TestAnOutage:
 
             await asyncio.sleep(0.3)  # several attempts, all refused
             assert len(said) == 1, said
-            stream = streamcast.Stream("trades", log=log, exactly_once=True)
+            stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
             server = await serve_streams([stream], "127.0.0.1", port, maintain=False)
             try:
                 await out.flush(timeout=10)
@@ -442,7 +442,7 @@ class TestLandedWaiters:
         self, serve, log, opener
     ):
         store = await opener()
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with store.transaction() as tx:
                 await _outbox.enqueue(tx, "trades", "p", [trade(0)])
@@ -577,7 +577,7 @@ class TestBacklogVisibility:
 
             assert await out.pending_rows() == 2
             assert landed(log) == []
-            stream = streamcast.Stream("trades", log=log, exactly_once=True)
+            stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
             server = await serve_streams([stream], "127.0.0.1", port, maintain=False)
             try:
                 # One row landed but its ack was lost. Reconciliation must
@@ -683,7 +683,7 @@ class TestBacklogVisibility:
             return await read_age(self)
 
         monkeypatch.setattr(streamcast.Outbox, "oldest_pending_age", transient_read)
-        stream = streamcast.Stream("trades", log=log, exactly_once=True)
+        stream = streamcast.StreamHandle("trades", log=log, exactly_once=True)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.outbox(
                 uri,

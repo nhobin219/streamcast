@@ -172,7 +172,7 @@ jobs:
               root = Path(tempfile.mkdtemp())
               with litelink.new(root, "trades", schema=SCHEMA,
                                 sort_by=("event_ts",)) as log:
-                  stream = streamcast.Stream("trades", log=log)
+                  stream = streamcast.StreamHandle("trades", log=log)
                   app = streamcast.create_app(streams=stream,
                       config=streamcast.BrokerConfig(maintain=False))
                   lifespan = app.router.lifespan_context(app)

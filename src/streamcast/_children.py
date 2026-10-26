@@ -8,11 +8,11 @@ from pathlib import Path
 from streamcast._maintain import ROLES, Maintain, Supervisor
 from streamcast._process import environment
 from streamcast._replicate import Sidecar
-from streamcast._stream import Stream
+from streamcast._stream import StreamHandle
 
 
 def _supervisors(
-    routes: dict[str, Stream], maintain: bool | Maintain
+    routes: dict[str, StreamHandle], maintain: bool | Maintain
 ) -> list[Supervisor]:
     """FIVE maintainers — one per role of litelink's split — for every log
     this server serves, plus five more for each dedicated log.
@@ -137,7 +137,7 @@ def _supervisors(
     ]
 
 
-def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
+def _sidecars(routes: dict[str, StreamHandle], replicate: bool) -> list[Sidecar]:
     """ONE litestream for every log this server replicates, or none.
 
     **Opt-in twice:** `wal_replication` on the log, and `replicate=True` on
@@ -181,7 +181,7 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
 
     # One per set of `S3Options`, as the maintainer is: litestream takes its
     # credentials from its environment, and one environment holds one set.
-    by_options: dict[tuple[tuple[str, str | None], ...], list[Stream]] = {}
+    by_options: dict[tuple[tuple[str, str | None], ...], list[StreamHandle]] = {}
     for stream in routes.values():
         if stream.log is not None and stream.log in shipping:
             by_options.setdefault(_credentials(stream), []).append(stream)
@@ -195,6 +195,6 @@ def _sidecars(routes: dict[str, Stream], replicate: bool) -> list[Sidecar]:
     ]
 
 
-def _credentials(stream: Stream) -> tuple[tuple[str, str | None], ...]:
+def _credentials(stream: StreamHandle) -> tuple[tuple[str, str | None], ...]:
     """What a child of `stream` needs in its environment, as a grouping key."""
     return tuple(sorted(environment(stream._s3).items()))  # noqa: SLF001

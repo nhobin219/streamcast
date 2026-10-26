@@ -2,7 +2,7 @@
 
 The same file runs under this checkout and under an older streamcast installed
 from PyPI into a virtualenv of its own. The factory dispatches to that version's
-API; `publish`, `connect` and `Stream.snapshot` are shared, and the server
+API; `publish`, `connect` and `StreamHandle.snapshot` are shared, and the server
 runs `create_app` under uvicorn or, before it existed, `serve`. It imports nothing from `tests`, and is run with `python -I`
 so the interpreter's own streamcast is the one it imports, never this tree's.
 
@@ -18,7 +18,12 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+import socket
 import sys
+from pathlib import Path
+from typing import Any
+
+import uvicorn
 
 import streamcast
 
@@ -44,13 +49,22 @@ async def server(root: str) -> None:
     # this version's metadata, manifest and Parquet, not only the broker's tail.
     # The helper also runs under releases with the pre-0.24 factory. This is
     # test-only version dispatch; the library exposes just `open`.
-    factory = getattr(streamcast.Stream, "open", None)
-    if factory is None:
-        old_factory = getattr(streamcast.Stream, "new", None)
-        assert old_factory is not None
-        stream = old_factory("trades", root=root, schema=SCHEMA)
+    handle_type = getattr(streamcast, "StreamHandle", None)
+    if handle_type is not None:
+        stream = handle_type.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
     else:
-        stream = factory("trades", create=True, root=root, schema=SCHEMA)
+        legacy_type: Any = streamcast.Stream
+        factory = getattr(legacy_type, "open", None)
+        if factory is None:
+            stream = legacy_type.new("trades", root=root, schema=SCHEMA)
+        else:
+            stream = factory("trades", create=True, root=root, schema=SCHEMA)
 
     await stream.send_many([row(-i) for i in range(SEALED, 0, -1)])
     assert stream.log is not None
@@ -71,10 +85,6 @@ async def server(root: str) -> None:
 
     # The canonical application under its supported server: one uvicorn
     # worker running the lifespan, on a socket bound first so the port is known.
-    import socket
-
-    import uvicorn
-
     app = streamcast.create_app(
         streams=stream, config=streamcast.BrokerConfig(maintain=False)
     )
@@ -96,6 +106,7 @@ async def server(root: str) -> None:
 
 async def client(uri: str, n: int) -> dict[str, object]:
     result: dict[str, object] = {"version": importlib.metadata.version("streamcast")}
+    handle_type: Any = getattr(streamcast, "StreamHandle", None) or streamcast.Stream
     step = "publish"
     try:
         async with streamcast.publish(uri) as producer:
@@ -125,13 +136,13 @@ async def client(uri: str, n: int) -> dict[str, object]:
         step = "snapshot"
         metadata = sub.info.metadata
         assert metadata is not None
-        async with await streamcast.Stream.snapshot(metadata) as snap:
+        async with await handle_type.snapshot(metadata) as snap:
             table = await snap.scan().read_all()
 
         result["snapshot"] = table.column("event_ts").to_pylist()
 
         step = "snapshot through the broker"
-        async with await streamcast.Stream.snapshot(
+        async with await handle_type.snapshot(
             metadata, as_of_offset=streamcast.LATEST, broker=uri
         ) as snap:
             table = await snap.scan().read_all()

@@ -40,7 +40,7 @@ async def test_full_startup_pauses_and_low_water_equality_waits(
     serve, log, opener, monkeypatch, bound
 ):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     size = len(_inbox._ENCODE.encode(trade(0)))
     limits: dict[str, Any] = {
         "inbox_max_rows": 2 if bound in ("rows", "both") else 100,
@@ -92,7 +92,7 @@ async def test_startup_below_high_is_active_including_low_water_equality(
     serve, log, opener, remaining
 ):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
             uri, subscriber="s", store=store, inbox_max_rows=4, **FAST
@@ -117,7 +117,7 @@ async def test_startup_recounts_processing_during_identity_connection(
     serve, log, opener, monkeypatch
 ):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
             uri, subscriber="s", store=store, inbox_max_rows=2, **FAST
@@ -149,7 +149,7 @@ async def test_startup_recounts_processing_during_identity_connection(
 
 async def test_full_startup_refuses_changed_identity(serve, log, opener):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
             uri, subscriber="s", store=store, inbox_max_rows=1, **FAST
@@ -180,7 +180,7 @@ async def test_immediate_exit_before_receiver_runs_closes_owned_subscription(
     serve, log, opener, monkeypatch, cancel
 ):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     original = _inbox.Inbox._receive
     entered = False
 
@@ -253,7 +253,7 @@ async def test_the_starting_state_is_reported_once_before_inbox_returns(
     `inbox()` hands the object back. "Over" is a restart with a smaller
     bound than the run that filled it."""
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         # A run bounded at `held_rows` leaves that many unprocessed.
         await fill(uri, stream, store, held_rows + 1, inbox_max_rows=held_rows)
@@ -278,7 +278,7 @@ async def test_each_transition_is_reported_once_and_in_order(serve, log, opener)
     `inbox_resume_at` of it, paused again: four calls, no repeats, and
     `Inbox.paused` agrees at each."""
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     recorder = Recorder()
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
@@ -313,7 +313,7 @@ async def test_inbox_resume_at_sets_where_a_startup_pause_ends(serve, log, opene
     """Restarted at the high bound of 4 with `inbox_resume_at=0.75`: 3 held
     rows is exactly low water and stays paused; 2 is below it and resumes."""
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     recorder = Recorder()
     async with serve(stream, maintain=False) as uri:
         await fill(uri, stream, store, 6, inbox_max_rows=4)
@@ -345,7 +345,7 @@ async def test_no_callback_is_the_same_receiver(serve, log, opener):
     """`on_pause_change=None` — the default — through a startup pause and a
     resume: nothing is called, and the rows still arrive."""
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         await fill(uri, stream, store, 3, inbox_max_rows=2)
         async with streamcast.inbox(
@@ -370,7 +370,7 @@ async def test_a_callback_that_raises_at_start_fails_inbox_and_closes_the_socket
     serve, log, opener
 ):
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
 
     def refuse(paused: bool) -> None:
         raise RuntimeError("callback failed")
@@ -395,7 +395,7 @@ async def test_a_dropped_connection_in_the_band_reconnects_at_once(log, opener):
     Falsify by waiting for low water after every drop: row 4 never arrives.
     """
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     recorder = Recorder()
     async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as server:
         uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
@@ -429,7 +429,7 @@ async def test_a_callback_that_raises_in_the_receiver_fails_recv(serve, log, ope
     """The receiver's own call raising: rows already received are still
     handed out, then `recv` raises it rather than waiting for ever."""
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
 
     def refuse_pause(paused: bool) -> None:
         if paused:
@@ -463,7 +463,7 @@ async def test_a_reconnect_counts_rows_other_workers_received(log, opener):
     reconnects, `paused` stays False, and nothing is reported.
     """
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     recorder = Recorder()
     async with serve_streams([stream], "127.0.0.1", 0, maintain=False) as server:
         uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"
@@ -514,7 +514,7 @@ async def test_a_broker_that_drops_at_once_is_retried_at_the_backoffs_pace(
     as the broker answers.
     """
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     connects = 0
 
     class Greeted:

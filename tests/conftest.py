@@ -8,15 +8,23 @@ that is a change to reject.
 from __future__ import annotations
 
 import contextlib
+import glob
+import json
 import os
+import shutil
+import subprocess
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import litelink
+import psycopg
 import pyarrow as pa
 import pytest
+from psycopg import sql
 
 import streamcast
+from streamcast import _log, _versions
 from tests.hosting import serve_streams
 
 if TYPE_CHECKING:
@@ -25,7 +33,7 @@ if TYPE_CHECKING:
 
     from litelink import WriteHandle
 
-    from streamcast import Stream
+    from streamcast import StreamHandle
     from tests.hosting import Listener
 
 
@@ -50,10 +58,6 @@ the round trip as NULL and come back the same way live or replayed.
 def current_json(home: Path | str, stream: str) -> dict[str, Any]:
     """The stream's current metadata version in `home`, as the JSON on disk:
     the file its hint names (`_versions`)."""
-    import json  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
-
-    from streamcast import _versions  # noqa: PLC0415
 
     directory = Path(home) / _versions.directory(stream)
     named = (directory / _versions.HINT).read_text().strip()
@@ -95,13 +99,12 @@ def log(tmp_path: Path) -> Iterator[WriteHandle]:
 
 @pytest.fixture
 def stamped(tmp_path: Path) -> Iterator[WriteHandle]:
-    """`log`, with the `streamcast_ts` column `Stream.open` creates every log with.
+    """`log`, with the `streamcast_ts` column `StreamHandle.open` creates every log with.
 
     `log` is kept WITHOUT it on purpose: that is a log from before the column
     existed, or one a caller opened and passed in, and both must keep working.
     This is the shape a log made by this library actually has.
     """
-    from streamcast import _log
 
     handle = litelink.new(
         tmp_path / "data",
@@ -125,7 +128,7 @@ def serve() -> Callable[..., contextlib.AbstractAsyncContextManager[str]]:
     """
 
     @contextlib.asynccontextmanager
-    async def _serve(*streams: Stream, **kwargs: Any) -> AsyncIterator[str]:
+    async def _serve(*streams: StreamHandle, **kwargs: Any) -> AsyncIterator[str]:
         kwargs.setdefault("maintain", False)
         server: Listener = await serve_streams(list(streams), "127.0.0.1", 0, **kwargs)
         try:
@@ -248,9 +251,6 @@ def bucket(s3: litelink.S3Options) -> str:
 
 
 def _pg_bin() -> Path | None:
-    import glob  # noqa: PLC0415
-    import shutil  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
 
     named = os.environ.get("STREAMCAST_PG_BIN")
     if named:
@@ -267,7 +267,6 @@ def _pg_bin() -> Path | None:
 @pytest.fixture(scope="session")
 def postgres_cluster(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """A DSN to the cluster's `postgres` database, or a skip."""
-    import subprocess  # noqa: PLC0415
 
     binaries = _pg_bin()
     if binaries is None or not (binaries / "initdb").exists():
@@ -311,8 +310,6 @@ def postgres_cluster(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 @pytest.fixture
 async def postgres_dsn(postgres_cluster: str) -> AsyncIterator[str]:
     """A fresh database in the cluster, dropped after the test."""
-    import psycopg  # noqa: PLC0415
-    from psycopg import sql  # noqa: PLC0415
 
     name = f"t_{uuid.uuid4().hex}"
     async with await psycopg.AsyncConnection.connect(

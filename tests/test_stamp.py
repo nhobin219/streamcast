@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import litelink
@@ -33,7 +34,7 @@ def stored(log) -> list[int]:
 
 class TestItIsStamped:
     async def test_every_row_carries_the_time_the_server_took_it(self, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         before = time.time_ns() // 1_000
         await stream.send(trade(0))
         after = time.time_ns() // 1_000
@@ -45,7 +46,7 @@ class TestItIsStamped:
     async def test_a_group_shares_one_stamp(self, stamped):
         # One transaction, one moment of durability. Distinct values would
         # claim an ordering in time that the commit does not have.
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         await stream.send_many([trade(i) for i in range(5)])
         await stream.send(trade(5))
 
@@ -54,7 +55,7 @@ class TestItIsStamped:
         assert stamps[5] >= stamps[0]
 
     async def test_stats_report_the_same_moment_the_log_stored(self, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         await stream.send(trade(0))
 
         [ts] = stored(stamped)
@@ -67,7 +68,7 @@ class TestItIsStamped:
         assert stream.stats.last_send_ts == pytest.approx(ts / 1e6, abs=1.5e-6)
 
     async def test_the_callers_row_is_not_modified(self, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         row = trade(0)
         await stream.send(row)
         await stream.send_many([row])
@@ -83,7 +84,7 @@ class TestItIsNeverSent:
         frame's key order — and filtering only one tells a subscriber about a
         column no frame will ever carry.
         """
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         await stream.send(trade(0))
 
         async with serve(stream) as uri, websockets.connect(uri + "?offset=1") as raw:
@@ -105,7 +106,7 @@ class TestItIsNeverSent:
         self, serve, stamped
     ):
         # Invariant 10, on a log that holds a column the wire does not.
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         async with serve(stream) as uri:
             async with websockets.connect(uri) as raw:
                 await raw.recv()
@@ -125,7 +126,7 @@ class TestItIsNeverSent:
         assert replayed == live
 
     async def test_the_greeting_names_the_columns_the_log_owns(self, serve, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             # In the stream's metadata, per log: the greeting names the file.
             assert sub.info.metadata is not None
@@ -135,7 +136,7 @@ class TestItIsNeverSent:
     async def test_a_filter_cannot_name_it(self, serve, stamped):
         # It is not a column a subscriber can see, so it is not one it can
         # select on either — the same answer as for any undeclared column.
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         async with serve(stream) as uri:
             with pytest.raises(streamcast.ProtocolError, match="does not have"):
                 await streamcast.connect(uri, where={_log.STAMP: 1})
@@ -160,7 +161,7 @@ def test_a_system_columns_type_never_changes():
 
 class TestItIsTheServersToFill:
     async def test_a_row_that_supplies_it_is_refused(self, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         with pytest.raises(ValueError, match="stamped by the server"):
             await stream.send({**trade(0), _log.STAMP: 1})
 
@@ -172,7 +173,7 @@ class TestItIsTheServersToFill:
         assert stored(stamped) == []
 
     async def test_a_remote_publisher_is_told_why(self, serve, stamped):
-        stream = streamcast.Stream("trades", log=stamped)
+        stream = streamcast.StreamHandle("trades", log=stamped)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(Exception, match="stamped by the server"):  # noqa: B017, PT011
@@ -190,8 +191,14 @@ class TestItIsTheServersToFill:
             },
             "required": [*SCHEMA_JSON.get("required", []), _log.STAMP],
         }
-        with pytest.raises(ValueError, match="another name"):
-            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=schema)
+        with pytest.raises(ValueError, match="reserved stream column"):
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=schema),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
+            )
 
     def test_a_column_by_that_name_of_another_type_is_refused(self, tmp_path):
         handle = litelink.new(
@@ -202,13 +209,17 @@ class TestItIsTheServersToFill:
             ),
         )
         with handle, pytest.raises(ValueError, match="streamcast owns that name"):
-            streamcast.Stream("trades", log=handle)
+            streamcast.StreamHandle("trades", log=handle)
 
 
 class TestLogsWithoutIt:
     async def test_stream_new_creates_every_log_with_it(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert stream.log is not None
@@ -223,13 +234,21 @@ class TestLogsWithoutIt:
             await stream.aclose()
 
     async def test_reopening_a_stamped_log_accepts_the_same_declaration(self, tmp_path):
-        first = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        first = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await first.aclose()
 
-        again = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        again = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await again.aclose()
 
@@ -238,8 +257,12 @@ class TestLogsWithoutIt:
         # column is not a side effect an open should have.
         litelink.new(tmp_path, "trades", schema=SCHEMA).close()
 
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert stream.log is not None
@@ -250,7 +273,7 @@ class TestLogsWithoutIt:
             await stream.aclose()
 
     async def test_a_handed_in_log_without_it_is_never_stamped(self, log, serve):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send(trade(0))
 
         assert _log.STAMP not in log.schema.names

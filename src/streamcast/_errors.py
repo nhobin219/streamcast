@@ -99,10 +99,10 @@ class StreamNotFound(StreamcastError):
 
 
 class StreamRetired(StreamcastError):
-    """The stream is retired (`Stream.retire`): finished, and taking no rows.
+    """The stream is retired (`StreamHandle.retire`): finished, and taking no rows.
 
     Its history stays readable — served read-only, snapshotted, caught up
-    from — but nothing appends to it. `Stream.restore(..., revive=True)`
+    from — but nothing appends to it. `StreamHandle.restore(..., revive=True)`
     brings it back on a new log that starts where it ended.
     """
 
@@ -125,13 +125,13 @@ class StreamRetired(StreamcastError):
         )
         super().__init__(
             f"stream {stream!r} is retired{f' ({detail})' if detail else ''} and "
-            f"takes no rows; Stream.restore(..., revive=True) continues it on a "
+            f"takes no rows; StreamHandle.restore(..., revive=True) continues it on a "
             f"new log"
         )
 
 
 class IngestFailed(StreamcastError):
-    """`Stream.ingest` stopped partway: what landed, what failed, where to resume.
+    """`StreamHandle.ingest` stopped partway: what landed, what failed, where to resume.
 
     litelink commits a load as it goes, a group of files at a time, so a
     failure leaves the files committed before it in the log and the rest of
@@ -231,7 +231,7 @@ _WHY: Final = {
     "too_old": (
         "offset {offset} is {behind} messages behind and this server replays "
         "at most {max_replay}. Reconnect with catch_up=True to read the gap "
-        "from the stream's published tables, or read them with Stream.snapshot."
+        "from the stream's published tables, or read them with StreamHandle.snapshot."
     ),
     # **Conditional on purpose.** `earliest` here is the lowest offset the
     # server's local tiers hold. The rows below it may be in the published
@@ -260,7 +260,7 @@ class Unavailable(ValueError):
     """The broker is not admitting writes to this stream for now: it is
     stopping, or its maintainers are being replaced and are not ready yet.
 
-    A `ValueError` to a local `Stream.send`, as before. Distinct from one so
+    A `ValueError` to a local `StreamHandle.send`, as before. Distinct from one so
     the publisher path can tell a fence from a bad row: a bad row is answered
     `rejected`, which an outbox drops from the caller's database for good,
     while a fence ends the connection with 1001, which a publisher retries.
@@ -291,7 +291,7 @@ class NotReplayable(StreamcastError):
 class Rejected(StreamcastError):
     """The server would not take a published row, and why.
 
-    The remote counterpart of `Stream.send` raising: litelink validates a row
+    The remote counterpart of `StreamHandle.send` raising: litelink validates a row
     against the declared schema and names the column it objects to, and that
     message arrives here whole rather than trimmed, because a publisher
     debugging a schema mismatch needs the column name.

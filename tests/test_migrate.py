@@ -1,4 +1,4 @@
-"""`Stream.migrate`: a stream becomes a sequence of logs, one schema each.
+"""`StreamHandle.migrate`: a stream becomes a sequence of logs, one schema each.
 
 The properties worth the file: offsets stay ONE dense sequence across the seam,
 a column's type is fixed for the life of the stream, a migration is safe to
@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 from typing import Any
 
 import litelink
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import streamcast
@@ -67,7 +69,13 @@ def row(i: int, **extra: object) -> dict[str, object]:
 
 async def seeded(root, count: int = 5) -> None:
     """A never-migrated stream at `root` holding `count` rows, closed again."""
-    stream = streamcast.Stream.open("trades", create=True, root=root, schema=V1)
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=V1),
+            storage=streamcast.Storage(root=Path(root).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     await stream.send_many([row(i) for i in range(count)])
     await stream.aclose()
 
@@ -76,7 +84,7 @@ class TestTheSeam:
     async def test_offsets_carry_on_densely_into_the_new_log(self, tmp_path):
         await seeded(tmp_path)
 
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -128,7 +136,7 @@ class TestTheSeam:
     async def test_a_second_migration_continues_the_sequence(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
-        stream = streamcast.Stream.migrate(
+        stream = streamcast.StreamHandle.migrate(
             "trades", root=tmp_path, schema=evolve(V2, side=None)
         )
         try:
@@ -146,12 +154,12 @@ class TestTheSeam:
 
 class TestItIsSafeAtEveryStart:
     async def test_migrating_again_to_the_same_shape_changes_nothing(self, tmp_path):
-        # The shape a server's startup takes: `Stream.migrate(...)` then
+        # The shape a server's startup takes: `StreamHandle.migrate(...)` then
         # the broker's start, run on every restart.
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        again = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert again.log is not None
             assert again.log.name == "trades-v2"
@@ -163,7 +171,13 @@ class TestItIsSafeAtEveryStart:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -174,15 +188,21 @@ class TestItIsSafeAtEveryStart:
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
 
-        with pytest.raises(ValueError, match="Stream.migrate"):
-            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
+        with pytest.raises(ValueError, match="StreamHandle.migrate"):
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=V1),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
+            )
 
     async def test_a_log_from_before_streamcast_ts_gains_it(self, tmp_path):
         # Same schema, and still a migration: the upgrade path for a log
         # created before the column existed.
         litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(V1)).close()
 
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -191,8 +211,8 @@ class TestItIsSafeAtEveryStart:
             await stream.aclose()
 
     async def test_there_must_be_a_stream_to_migrate(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="Stream.open"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        with pytest.raises(FileNotFoundError, match="StreamHandle.open"):
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
 
 
 class TestSystemColumns:
@@ -215,7 +235,7 @@ class TestSystemColumns:
         schema changes nothing — until there is a column it lacks.
         """
         await seeded(tmp_path)
-        again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        again = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
         assert again.log is not None
         assert again.log.name == "trades"
         await again.aclose()
@@ -232,7 +252,7 @@ class TestSystemColumns:
             _log._SYSTEM_ARROW.append(pa.field(extra, pa.int64(), nullable=False)),
         )
 
-        upgraded = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        upgraded = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
         try:
             assert upgraded.log is not None
             assert upgraded.log.name == "trades-v2"
@@ -248,12 +268,16 @@ class TestSystemColumns:
             await upgraded.aclose()
 
     async def test_no_system_column_can_be_declared(self, tmp_path):
-        with pytest.raises(ValueError, match="streamcast owns"):
-            streamcast.Stream.open(
-                "trades",
-                create=True,
-                root=tmp_path,
-                schema=evolve(V1, streamcast_ts={"type": ["integer", "null"]}),
+        with pytest.raises(ValueError, match="reserved stream column"):
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(
+                        name="trades",
+                        schema=evolve(V1, streamcast_ts={"type": ["integer", "null"]}),
+                    ),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
             )
 
 
@@ -263,7 +287,7 @@ class TestATypeIsForLife:
         narrowed = evolve(V1, price={"type": "number", "format": "float"})
 
         with pytest.raises(ValueError, match="fixed for the life"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=narrowed)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=narrowed)
 
         # Refused before anything changed: still one log, still current.
         assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None
@@ -274,7 +298,7 @@ class TestATypeIsForLife:
         widened = evolve(V1, side={"type": "integer"})
 
         with pytest.raises(ValueError, match="fixed for the life"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=widened)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=widened)
 
     async def test_a_removed_column_comes_back_only_as_what_it_was(self, tmp_path):
         await seeded(tmp_path)
@@ -282,9 +306,9 @@ class TestATypeIsForLife:
 
         back_wrong = evolve(V1, side={"type": "string"})
         with pytest.raises(ValueError, match="'side' was int32 in log 'trades'"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=back_wrong)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=back_wrong)
 
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V1)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V1)
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v3"
@@ -299,7 +323,9 @@ class TestATypeIsForLife:
             "side": {"type": ["integer", "null"], "format": "int32"},
         }
 
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=relaxed)
+        stream = streamcast.StreamHandle.migrate(
+            "trades", root=tmp_path, schema=relaxed
+        )
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -309,7 +335,7 @@ class TestATypeIsForLife:
     async def test_the_owned_column_still_cannot_be_declared(self, tmp_path):
         await seeded(tmp_path)
         with pytest.raises(ValueError, match="another name"):
-            streamcast.Stream.migrate(
+            streamcast.StreamHandle.migrate(
                 "trades",
                 root=tmp_path,
                 schema=evolve(V1, streamcast_ts={"type": ["integer", "null"]}),
@@ -327,7 +353,7 @@ class TestAnInterruptedMigration:
             start_offset=6,
         ).close()
 
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert stream.log is not None
             assert stream.log.name == "trades-v2"
@@ -346,7 +372,7 @@ class TestAnInterruptedMigration:
             orphan.append({**row(9), "venue": None, _log.STAMP: 0})
 
         with pytest.raises(FileExistsError, match="does not name it"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
 
         assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None
 
@@ -364,7 +390,7 @@ class TestAnInterruptedMigration:
             assert orphan.end_offset() == 6
 
         with pytest.raises(FileExistsError, match="does not name it"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
 
 
 class TestServingAMigratedStream:
@@ -372,7 +398,7 @@ class TestServingAMigratedStream:
         self, tmp_path, serve
     ):
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=6) as sub:
@@ -393,7 +419,7 @@ class TestServingAMigratedStream:
         consumer carries on without offsets 2-5.
         """
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             async with serve(stream, maintain=False) as uri:
                 with pytest.raises(streamcast.NotReplayable) as raised:
@@ -409,7 +435,7 @@ class TestServingAMigratedStream:
     ):
         """The refusal above, closed: a retired log is published in full."""
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=2, catch_up=True) as sub:
@@ -439,7 +465,7 @@ class TestServingAMigratedStream:
         shape of a log retired before every row was published.
         """
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         manifest = _manifest.load(_metadata.home(tmp_path, "trades"), "trades")
         assert manifest is not None
         counts = manifest.column("record_count").to_pylist()
@@ -470,7 +496,7 @@ class TestServingAMigratedStream:
     ):
         # Not "empty": the stream has history, it is just not in this log.
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with streamcast.connect(uri, offset=streamcast.EARLIEST) as sub:
@@ -490,7 +516,7 @@ class TestServingAMigratedStream:
         at every start and do nothing else.
         """
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             assert stream.retired == ((_metadata.home(tmp_path, "trades"), "trades"),)
             made = _supervisors({"trades": stream}, True)
@@ -528,7 +554,7 @@ class TestAStreamMigratedBeforeRetire:
 
         with monkeypatch.context() as patched:
             patched.setattr(litelink.WriteHandle, "retire", sealed_only)
-            stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+            stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
 
         try:
             with litelink.open(
@@ -549,14 +575,14 @@ class TestAStreamMigratedBeforeRetire:
             uri = stream.metadata_uri
             assert uri is not None
             stream.ensure_metadata()
-            table = await streamcast.Stream.scan(uri).read_all()
+            table = await streamcast.StreamHandle.scan(uri).read_all()
             assert table.column("litelink_offset").to_pylist() == [1, 2, 3, 4, 5]
         finally:
             await stream.aclose()
 
     async def test_the_publish_role_is_told_which(self, tmp_path):
         await seeded(tmp_path)
-        stream = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         try:
             [publish] = [
                 s for s in _supervisors({"trades": stream}, True) if s.retiring
@@ -620,7 +646,13 @@ class TestTheManifest:
     async def test_each_migration_adds_a_row_and_keeps_the_rest(self, tmp_path):
         await seeded(tmp_path)
         (await _migrated(tmp_path, V2)).close()
-        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         await stream.send(row(5, venue="x"))
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
@@ -636,7 +668,13 @@ class TestTheManifest:
         """End to end: statistics from litelink, pruned against a predicate."""
         await seeded(tmp_path)  # event_ts in [base, base + 4]
         (await _migrated(tmp_path, V2)).close()
-        stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V2)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V2),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         await stream.send_many([row(i, venue=None) for i in range(100, 105)])
         await stream.aclose()
         (await _migrated(tmp_path, evolve(V2, side=None))).close()
@@ -686,7 +724,7 @@ class TestTheManifest:
 
         monkeypatch.setattr(litelink.WriteHandle, "column_statistics", refuse)
         with pytest.raises(OSError, match="unreachable"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
 
         assert not (_metadata.home(tmp_path, "trades") / "trades-v2").exists()
         assert _manifest.load(_metadata.home(tmp_path, "trades"), "trades") is None
@@ -708,7 +746,7 @@ class TestTheManifest:
 
         monkeypatch.setattr(_versions, "commit", refuse)
         with pytest.raises(OSError, match="disk full"):
-            streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+            streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
 
         assert _metadata.load(_metadata.home(tmp_path, "trades"), "trades") is None, (
             "nothing committed"
@@ -730,7 +768,7 @@ class TestTheManifest:
         home = _metadata.home(tmp_path, "trades")
         before = current_json(home, "trades")["manifest"]
 
-        again = streamcast.Stream.migrate("trades", root=tmp_path, schema=V2)
+        again = streamcast.StreamHandle.migrate("trades", root=tmp_path, schema=V2)
         await again.aclose()
 
         assert current_json(home, "trades")["manifest"] == before
@@ -763,18 +801,19 @@ class TestThePublishedCopy:
     async def test_the_metadata_is_published_beside_the_logs(
         self, tmp_path, s3, bucket
     ):
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=V1,
-            published=bucket,
-            s3_options=s3,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=V1),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(5)])
         await stream.aclose()
 
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "trades", root=tmp_path, schema=V2, s3_options=s3
         )
         try:
@@ -787,8 +826,6 @@ class TestThePublishedCopy:
         assert published == _metadata.load(_metadata.home(tmp_path, "trades"), "trades")
 
         # And the manifest beside the version naming it, written before it.
-        import pyarrow as pa
-        import pyarrow.parquet as pq
 
         store = _versions._Remote(f"{bucket}/trades", "trades", s3)  # noqa: SLF001
         found = _versions.current(store)
@@ -876,7 +913,13 @@ def test_a_version_1_file_is_read_with_its_new_fields_unknown():
 
 async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     """`ensure` fills in what version 1 lacked, and rewrites the file at 2."""
-    stream = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=V1),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     await stream.send_many([row(i) for i in range(3)])
     async with serve(stream, maintain=False):
         pass
@@ -891,7 +934,13 @@ async def test_serve_upgrades_a_version_1_file(tmp_path, serve):
     )
     # From before the versions too: the plain file is all there is.
     shutil.rmtree(_metadata.home(tmp_path, "trades") / "trades.metadata")
-    again = streamcast.Stream.open("trades", create=True, root=tmp_path, schema=V1)
+    again = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=V1),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     assert again.log is not None
     while (
         again.log.seal(flush=True) is not None
@@ -917,6 +966,6 @@ def test_an_unknown_metadata_version_is_refused():
 
 async def _migrated(root, schema):
     """Migrate, and hand back the handle so the caller closes it."""
-    stream = streamcast.Stream.migrate("trades", root=root, schema=schema)
+    stream = streamcast.StreamHandle.migrate("trades", root=root, schema=schema)
     assert stream.log is not None
     return stream.log

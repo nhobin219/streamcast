@@ -10,6 +10,7 @@ moved in place. The published side follows the same shape under its prefix.
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import Any
 
 import litelink
@@ -32,12 +33,12 @@ WIDER: dict[str, Any] = {
 
 async def made(root, name: str = "t", **kwargs: object) -> None:
     """A stream with three rows and its metadata, then closed."""
-    stream = streamcast.Stream.open(
-        name,
-        create=True,
-        root=root,
-        schema=SCHEMA,
-        **kwargs,  # ty: ignore[invalid-argument-type]
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name=name, schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(root).absolute(), **kwargs),  # ty: ignore[invalid-argument-type],
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i} for i in range(3)])
@@ -54,7 +55,7 @@ async def legacy(root, name: str = "t", **kwargs: object) -> None:
         schema=_log.with_system(streamcast.to_arrow(SCHEMA)),
         **kwargs,  # ty: ignore[invalid-argument-type]
     )
-    stream = streamcast.Stream(name, log=log, owns_log=True)
+    stream = streamcast.StreamHandle(name, log=log, owns_log=True)
     try:
         await stream.send_many([{"i": i} for i in range(3)])
         stream.ensure_metadata()
@@ -82,7 +83,13 @@ class TestANewStream:
 
     async def test_it_reopens_where_it_is(self, tmp_path):
         await made(tmp_path)
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             assert stream.end_offset == 4
             assert stream.metadata_uri == (
@@ -93,7 +100,7 @@ class TestANewStream:
 
     async def test_a_migration_adds_its_log_beside_the_first(self, tmp_path):
         await made(tmp_path)
-        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
         await migrated.aclose()
 
         assert sorted(p.name for p in (tmp_path / "t").iterdir()) == [
@@ -108,13 +115,19 @@ class TestANewStream:
 class TestAStreamFromBefore:
     async def test_it_keeps_its_layout_through_a_migration(self, tmp_path):
         await legacy(tmp_path)
-        stream = streamcast.Stream.open("t", create=True, root=tmp_path, schema=SCHEMA)
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
+        )
         try:
             assert stream.end_offset == 4, "found where it was"
         finally:
             await stream.aclose()
 
-        migrated = streamcast.Stream.migrate("t", root=tmp_path, schema=WIDER)
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
         await migrated.aclose()
 
         assert sorted(p.name for p in tmp_path.iterdir()) == [
@@ -130,8 +143,12 @@ class TestAStreamFromBefore:
         litelink.new(
             tmp_path, "flat", schema=_log.with_system(streamcast.to_arrow(SCHEMA))
         ).close()
-        stream = streamcast.Stream.open(
-            "own", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="own", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.aclose()
 
@@ -146,8 +163,12 @@ class TestThePublishedSide:
         self, tmp_path, s3, bucket
     ):
         await made(tmp_path / "a", published=bucket, s3_options=s3)
-        stream = streamcast.Stream.open(
-            "t", create=True, root=tmp_path / "a", schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path / "a").absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert stream.metadata_uri == f"{bucket}/t/t.metadata/{_versions.HINT}"
@@ -165,7 +186,7 @@ class TestThePublishedSide:
             log.advance(flush=True)  # sealed, then published
 
         shutil.rmtree(tmp_path / "a")
-        restored = streamcast.Stream.restore(
+        restored = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3
         )
         try:
@@ -181,7 +202,7 @@ class TestThePublishedSide:
 
         assert _versions.fetch(bucket, "t", s3) is not None, "at the prefix itself"
         shutil.rmtree(tmp_path / "a")
-        restored = streamcast.Stream.restore(
+        restored = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3
         )
         try:
@@ -194,10 +215,10 @@ class TestThePublishedSide:
         """A stream never changes layout: not even a revive on a new box,
         which makes a new log, moves it into the new one."""
         await legacy(tmp_path / "a", published=bucket, s3_options=s3)
-        streamcast.Stream.retire("t", root=tmp_path / "a", s3_options=s3)
+        streamcast.StreamHandle.retire("t", root=tmp_path / "a", s3_options=s3)
         shutil.rmtree(tmp_path / "a")
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3, revive=True
         )
         try:
@@ -210,10 +231,10 @@ class TestThePublishedSide:
 
     async def test_a_new_one_revives_in_its_own_directory(self, tmp_path, s3, bucket):
         await made(tmp_path / "a", published=bucket, s3_options=s3)
-        streamcast.Stream.retire("t", root=tmp_path / "a", s3_options=s3)
+        streamcast.StreamHandle.retire("t", root=tmp_path / "a", s3_options=s3)
         shutil.rmtree(tmp_path / "a")
 
-        revived = streamcast.Stream.restore(
+        revived = streamcast.StreamHandle.restore(
             "t", root=tmp_path / "b", published=bucket, s3_options=s3, revive=True
         )
         try:

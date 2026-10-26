@@ -83,7 +83,7 @@ async def main() -> None:
     with litelink.new(
         root, "trades", schema=with_system(SCHEMA), sort_by=("event_ts",), config=config
     ) as log:
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         for start in range(0, args.rows, 500):
             await stream.send_many(
                 [row(i) for i in range(start, min(start + 500, args.rows))]

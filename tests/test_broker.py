@@ -11,8 +11,11 @@ import asyncio
 import base64
 import copy
 import json
+import os
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -31,6 +34,7 @@ from streamcast import (
 )
 from streamcast._broker import runtime as implementation
 from streamcast._broker.registry import Registry
+from streamcast._tasks import thread
 
 SHAPE: dict[str, Any] = {
     "type": "object",
@@ -182,6 +186,35 @@ async def test_create_stopped_identity_and_restart(config):
         )
         stream = owner.generations["events"].stream
         assert stream._stream_id == identity
+        assert stream.end_offset == 2
+        assert await stream.send({"value": 10}) == 2
+
+
+@pytest.mark.parametrize("relative_root", [False, True], ids=["absolute", "relative"])
+@pytest.mark.parametrize(
+    "replicate", [False, True], ids=["no-replication", "replicate"]
+)
+async def test_managed_profile_without_published_survives_restart(
+    config, tmp_path, monkeypatch, relative_root, replicate
+):
+    monkeypatch.chdir(tmp_path)
+    profile = StorageProfile(
+        "1", Path("logs") if relative_root else tmp_path / "logs", replicate=replicate
+    )
+    config = replace(config, profiles={"local": profile})
+    async with managed(config) as (owner, client, _):
+        stream = await serving(owner, client)
+        assert stream.replicate is replicate
+        assert stream.log is not None
+        assert Path(stream.log.root).is_relative_to(tmp_path / "logs")
+        assert await stream.send({"value": 9}) == 1
+        identity = stream._stream_id
+
+    async with managed(config) as (owner, _, _):
+        assert owner.view("events")["observed"]["state"] == "serving"
+        stream = owner.generations["events"].stream
+        assert stream._stream_id == identity
+        assert stream.replicate is replicate
         assert stream.end_offset == 2
         assert await stream.send({"value": 10}) == 2
 
@@ -362,7 +395,6 @@ async def test_stop_fences_before_drain_and_joins_actual_worker(config, monkeypa
         stream = await serving(owner, client)
         entered = threading.Event()
         release = threading.Event()
-        from streamcast._tasks import thread
 
         def scan():
             entered.set()
@@ -499,8 +531,14 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
 ):
     from dataclasses import replace
 
-    old = streamcast.Stream.open(
-        "messages", root=config.profiles["local"].root, schema=SHAPE, create=True
+    old = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
+            storage=streamcast.Storage(
+                root=Path(config.profiles["local"].root).absolute()
+            ),
+        ),
+        initialization="create_if_absent",
     )
     old.ensure_metadata()
     await old.send({"value": 7})
@@ -566,8 +604,14 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
 async def test_guard_rejects_incompatible_history(config, wrong):
     from dataclasses import replace
 
-    old = streamcast.Stream.open(
-        "messages", root=config.profiles["local"].root, schema=SHAPE, create=True
+    old = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="messages", schema=SHAPE),
+            storage=streamcast.Storage(
+                root=Path(config.profiles["local"].root).absolute()
+            ),
+        ),
+        initialization="create_if_absent",
     )
     old.ensure_metadata()
     if wrong != "empty_migration":
@@ -585,7 +629,7 @@ async def test_guard_rejects_incompatible_history(config, wrong):
                 "extra": {"type": ["string", "null"]},
             },
         }
-        migrated = streamcast.Stream.migrate(
+        migrated = streamcast.StreamHandle.migrate(
             "messages", root=config.profiles["local"].root, schema=shape
         )
         if wrong == "empty_migration":
@@ -739,7 +783,7 @@ async def test_unexpected_data_failure_closes_without_storage_details(
         async def broken(*_args):
             raise OSError("private storage detail")
 
-        monkeypatch.setattr(streamcast.Stream, "serve_subscriber", broken)
+        monkeypatch.setattr(streamcast.StreamHandle, "serve_subscriber", broken)
         async with running(app) as base:
             async with raw_connect(
                 base.replace("ws://", "ws://admin:secret@") + "/events"
@@ -771,7 +815,6 @@ async def test_real_children_signal_exact_generation_readiness(config, monkeypat
             owner, client, "events", {"state": "stopped"}, suffix="/desired", revision=2
         )
         assert not owner.children
-        import os
 
         for pid in pids:
             with pytest.raises(ProcessLookupError):
@@ -854,7 +897,7 @@ async def test_managed_replication_and_shared_group_replacement(
         assert not owner.children
         # Direct table reading is test evidence for publication; deployed
         # message consumers continue to use only the broker's WebSocket.
-        async with await streamcast.Stream.snapshot(
+        async with await streamcast.StreamHandle.snapshot(
             metadata_uri, s3_options=s3
         ) as snap:
             rows = [row async for _, _, row in snap.rows(1)]

@@ -15,9 +15,11 @@ import urllib.error
 import urllib.request
 
 import pytest
+from starlette.responses import Response
 
 import streamcast
 from streamcast._stats import STATS_PATH, Stats, payload
+from tests.hosting import Listener
 
 from .conftest import trade
 
@@ -47,9 +49,9 @@ class TestTheFacts:
         says that alone, so both are published.
         """
         for i in range(3):  # rows from "before the restart"
-            await streamcast.Stream("trades", log=log).send(trade(i))
+            await streamcast.StreamHandle("trades", log=log).send(trade(i))
 
-        restarted = streamcast.Stream("trades", log=log)
+        restarted = streamcast.StreamHandle("trades", log=log)
         stats = restarted.stats
 
         assert stats.end_offset == 4, "the log's history is still there"
@@ -59,7 +61,7 @@ class TestTheFacts:
         assert stats.started_ts > 0
 
     async def test_a_send_sets_both_the_timestamp_and_the_age(self, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send(trade(0))
         stats = stream.stats
 
@@ -70,7 +72,7 @@ class TestTheFacts:
     async def test_send_many_stamps_once_for_the_group(self, log):
         """One transaction, one time. Per-row values would imply a precision
         the commit does not have."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send_many([trade(i) for i in range(10)])
 
         assert stream.stats.last_send_age_s is not None
@@ -78,7 +80,7 @@ class TestTheFacts:
 
     async def test_the_age_grows_while_the_stream_is_quiet(self, log):
         """The measurement the endpoint exists for."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send(trade(0))
         first = stream.stats.last_send_age_s
         await asyncio.sleep(0.05)
@@ -90,7 +92,7 @@ class TestTheFacts:
 
     async def test_the_timestamp_does_not_move_while_the_stream_is_quiet(self, log):
         """The age moves; the wall-clock stamp of the last send does not."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send(trade(0))
         stamped = stream.stats.last_send_ts
         await asyncio.sleep(0.05)
@@ -98,7 +100,7 @@ class TestTheFacts:
         assert stream.stats.last_send_ts == stamped
 
     async def test_subscribers_is_live(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             assert stream.stats.subscribers == 0
             async with streamcast.connect(uri) as sub:
@@ -111,7 +113,7 @@ class TestTheFacts:
     async def test_a_live_only_stream_reports_no_offsets_and_still_reports_time(self):
         """Nothing assigned an offset, but it is still possible to say the
         stream is receiving — which is the multicast case's whole question."""
-        stream = streamcast.Stream("live")
+        stream = streamcast.StreamHandle("live")
         await stream.send({"anything": 1})
         stats = stream.stats
 
@@ -146,7 +148,7 @@ class TestWhatItDeliberatelyDoesNotCarry:
     def test_it_carries_no_server_facts(self):
         """`maintain` and `replicate` belong to whatever owns the children.
 
-        A `Stream` does not own its maintainer — the broker's lifespan does —
+        A `StreamHandle` does not own its maintainer — the broker's lifespan does —
         so reporting them here would be this object answering for something it
         cannot see.
         """
@@ -157,7 +159,7 @@ class TestWhatItDeliberatelyDoesNotCarry:
 
 class TestTheEndpoint:
     async def test_it_answers_on_the_port_the_server_already_has(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False, stats=True) as uri:
             await stream.send(trade(0))
             url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
@@ -171,7 +173,7 @@ class TestTheEndpoint:
 
     async def test_subscribing_still_works_on_the_same_port(self, serve, log):
         """The hook must defer, not swallow — a WebSocket upgrade is not a GET."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False, stats=True) as uri:
             async with streamcast.connect(uri) as sub:
                 await stream.send(trade(0))
@@ -187,7 +189,7 @@ class TestTheEndpoint:
         and read every row. Gating it would protect nothing while leaving a
         quiet stream undiagnosable by default — the failure it exists to fix.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:  # nothing passed
             url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             status, _body = await asyncio.to_thread(_get, url)
@@ -201,7 +203,7 @@ class TestTheEndpoint:
         disclosure argument above would no longer hold and the default should
         be revisited. This is the tripwire for that.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False, stats=False) as uri:
             with pytest.raises(streamcast.StreamNotFound) as raised:
                 await streamcast.connect(uri.replace("/trades", "/nope"))
@@ -212,7 +214,7 @@ class TestTheEndpoint:
         )
 
     async def test_it_can_be_turned_off(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False, stats=False) as uri:
             url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             status, _body = await asyncio.to_thread(_get, url)
@@ -220,7 +222,7 @@ class TestTheEndpoint:
         assert status != 200
 
     async def test_a_custom_path_is_honoured(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False, stats="/_internal/streams") as uri:
             base = uri.replace("ws://", "http://").replace("/trades", "")
             status, _body = await asyncio.to_thread(_get, f"{base}/_internal/streams")
@@ -231,11 +233,8 @@ class TestTheEndpoint:
 
     @pytest.mark.parametrize("asynchronous", [False, True])
     async def test_host_routes_compose_with_broker_stats(self, log, asynchronous):
-        from starlette.responses import Response
 
-        from tests.hosting import Listener
-
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         app = streamcast.create_app(
             streams=stream, config=streamcast.BrokerConfig(maintain=False)
         )
@@ -261,8 +260,8 @@ class TestTheEndpoint:
         assert ours == 200
 
     async def test_every_served_stream_is_listed(self, serve, log, tmp_path):
-        first = streamcast.Stream("trades", log=log)
-        second = streamcast.Stream("quotes")
+        first = streamcast.StreamHandle("trades", log=log)
+        second = streamcast.StreamHandle("quotes")
         async with serve(first, second, maintain=False, stats=True) as uri:
             url = uri.replace("ws://", "http://").replace("/trades", STATS_PATH)
             _status, body = await asyncio.to_thread(_get, url)
@@ -273,7 +272,7 @@ class TestTheEndpoint:
 
 class TestThePayload:
     async def test_it_is_json_and_round_trips(self, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.send(trade(0))
         got = json.loads(payload([stream]))
 
@@ -283,7 +282,7 @@ class TestThePayload:
     async def test_nulls_survive_encoding(self, log):
         """The startup case has to be expressible on the wire, not just in
         Python — a caller reading JSON must see `null`, not a missing key."""
-        got = json.loads(payload([streamcast.Stream("trades", log=log)]))
+        got = json.loads(payload([streamcast.StreamHandle("trades", log=log)]))
         entry = got["streams"][0]
 
         assert entry["last_send_ts"] is None
@@ -296,7 +295,7 @@ def test_the_greeting_and_the_stats_do_not_disagree(field):
     """Both describe one stream, so the names that overlap must mean the same.
 
     `Subscription.info` is the greeting — declared, fixed at connect.
-    `Stream.stats` is counters that move. Where they name the same thing they
+    `StreamHandle.stats` is counters that move. Where they name the same thing they
     must agree, or an operator reading both gets two answers.
     """
     assert field in Stats.__dataclass_fields__

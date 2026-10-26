@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import litelink
@@ -46,8 +47,12 @@ async def frames(uri: str, count: int, *, offset: int | None = None) -> list[byt
 
 class TestTheLiveFrame:
     async def test_it_carries_the_stamp_the_log_stored(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False) as uri:
@@ -65,8 +70,12 @@ class TestTheLiveFrame:
             await stream.aclose()
 
     async def test_a_group_shares_one_stamp(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False) as uri:
@@ -84,7 +93,7 @@ class TestTheLiveFrame:
             await stream.aclose()
 
     async def test_a_stream_with_no_log_sends_its_send_time(self, serve):
-        stream = streamcast.Stream("trades", schema=SCHEMA)
+        stream = streamcast.StreamHandle("trades", schema=SCHEMA)
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             before = time.time_ns() // 1_000
             await stream.send(row(0))
@@ -99,8 +108,12 @@ class TestTheLiveFrame:
 class TestTheReplayedFrame:
     async def test_it_is_the_live_frame_byte_for_byte(self, tmp_path, serve):
         """I10, with the stamp: read from the log, not taken at replay."""
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             async with serve(stream, maintain=False) as uri:
@@ -127,7 +140,7 @@ class TestALogWithoutTheStamp:
 
     async def test_it_sends_null_both_ways(self, tmp_path, serve):
         legacy = litelink.new(tmp_path, "trades", schema=streamcast.to_arrow(SCHEMA))
-        stream = streamcast.Stream("trades", log=legacy)
+        stream = streamcast.StreamHandle("trades", log=legacy)
         try:
             async with serve(stream, maintain=False) as uri:
                 async with websockets.connect(uri) as raw:
@@ -145,8 +158,12 @@ class TestALogWithoutTheStamp:
 
 class TestRowsReadFromTheTables:
     async def test_a_snapshot_carries_the_stored_stamps(self, tmp_path, serve):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(3)])
         log = stream.log
@@ -161,7 +178,7 @@ class TestRowsReadFromTheTables:
         assert uri is not None
         try:
             async with serve(stream, maintain=False) as broker:
-                async with await streamcast.Stream.snapshot(
+                async with await streamcast.StreamHandle.snapshot(
                     uri, as_of_offset=LATEST, broker=broker
                 ) as snap:
                     read = [(offset, ts) async for offset, ts, _ in snap.rows(1)]
@@ -185,14 +202,14 @@ class TestRowsReadFromTheTables:
     async def test_catch_up_delivers_the_stored_stamps(
         self, tmp_path, s3, bucket, serve
     ):
-        stream = streamcast.Stream.open(
-            "trades",
-            create=True,
-            root=tmp_path,
-            schema=SCHEMA,
-            published=bucket,
-            s3_options=s3,
-            max_replay=2,
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA, max_replay=2),
+                storage=streamcast.Storage(
+                    root=Path(tmp_path).absolute(), published=bucket, s3_options=s3
+                ),
+            ),
+            initialization="create_if_absent",
         )
         await stream.send_many([row(i) for i in range(10)])
         log = stream.log

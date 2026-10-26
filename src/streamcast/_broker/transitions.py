@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from streamcast import _metadata, _replicate
 from streamcast._process import popen
-from streamcast._stream import Stream
+from streamcast._spec import Storage, Stream, StreamSpec
+from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
 
 
@@ -54,9 +56,9 @@ async def storage(record: dict, profile, kind: str, target: dict) -> None:
             raise ValueError("identity mismatch")
 
         if kind == "retire":
-            Stream.retire(name, root=profile.root, s3_options=profile.s3_options)
+            StreamHandle.retire(name, root=profile.root, s3_options=profile.s3_options)
         else:
-            opened = Stream.migrate(
+            opened = StreamHandle.migrate(
                 name,
                 root=profile.root,
                 schema=target["schema"],
@@ -81,12 +83,17 @@ async def storage(record: dict, profile, kind: str, target: dict) -> None:
         if kind == "migration":
             # Open performs the authoritative compiler/schema check. Metadata
             # normalizes JSON annotations, so raw JSON equality is incorrect.
-            check = Stream.open(
-                name,
-                root=profile.root,
-                schema=target["schema"],
-                sort_by=target["sort_by"],
-                s3_options=profile.s3_options,
+            check = StreamHandle.open(
+                Stream(
+                    spec=StreamSpec(
+                        name=name, schema=target["schema"], sort_by=target["sort_by"]
+                    ),
+                    storage=Storage(
+                        root=Path(profile.root).absolute(),
+                        s3_options=profile.s3_options,
+                    ),
+                ),
+                initialization="open_existing",
             )
             assert check.log is not None
             try:

@@ -30,7 +30,7 @@ async def test_terminal_failure_notifies_once_after_storing_the_error(
 
     monkeypatch.setattr(_inbox.Inbox, "_fill", fail)
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
             uri, subscriber="s", store=store, on_receiver_error=on_error
@@ -86,7 +86,7 @@ async def test_recoverable_disconnects_do_not_notify(
     monkeypatch.setattr(_inbox.Inbox, "_fill", disconnect)
     monkeypatch.setattr(_inbox.Inbox, "_reconnect", reconnect_once)
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     async with serve(stream, maintain=False) as uri:
         async with streamcast.inbox(
             uri,
@@ -122,7 +122,7 @@ async def test_raising_error_callback_is_logged_without_failing_the_receiver_tas
 
     monkeypatch.setattr(_inbox.Inbox, "_fill", fail)
     store = await opener()
-    stream = streamcast.Stream("trades", log=log)
+    stream = streamcast.StreamHandle("trades", log=log)
     with caplog.at_level(logging.ERROR, logger="streamcast"):
         async with serve(stream, maintain=False) as uri:
             async with streamcast.inbox(

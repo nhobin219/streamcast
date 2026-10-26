@@ -10,15 +10,14 @@ contract.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 from fastapi import FastAPI
 
 from streamcast._broker.api import application
 from streamcast._broker.model import BrokerConfig
 from streamcast._broker.registry import Registry
-from streamcast._limits import _bound
-from streamcast._stream import Stream
+from streamcast._stream import StreamHandle
 
 
 def initialize_registry(config: BrokerConfig) -> None:
@@ -30,7 +29,9 @@ def initialize_registry(config: BrokerConfig) -> None:
 
 
 def create_app(
-    config: BrokerConfig | None = None, *, streams: Stream | Iterable[Stream] = ()
+    config: BrokerConfig | None = None,
+    *,
+    streams: StreamHandle | Iterable[StreamHandle] = (),
 ) -> FastAPI:
     """Build the broker application, without opening storage or sockets.
 
@@ -39,7 +40,7 @@ def create_app(
     Static streams cannot be reconfigured through HTTP. Registry-backed dynamic
     streams use the same runtime, admission, connection and shutdown paths.
     """
-    chosen = (streams,) if isinstance(streams, Stream) else tuple(streams)
+    chosen = (streams,) if isinstance(streams, StreamHandle) else tuple(streams)
     names = [stream.name for stream in chosen]
     if len(set(names)) != len(names):
         raise ValueError("two streams are both named the same")
@@ -48,20 +49,11 @@ def create_app(
         raise ValueError("create_app needs streams or a registry")
 
     settings = config or BrokerConfig()
-    ceilings = settings.max_message_bytes
-    values = ceilings.values() if isinstance(ceilings, Mapping) else (ceilings,)
     if any(
-        type(value) is int and value > settings.transport_max_bytes for value in values
+        stream._max_message_bytes is not None
+        and stream._max_message_bytes > settings.transport_max_bytes
+        for stream in chosen
     ):
         raise ValueError("max_message_bytes exceeds transport_max_bytes")
 
-    # Checked in full before any stream is touched; the runtime sets them
-    # again at startup, on the same streams.
-    _bound(
-        dict(zip(names, chosen, strict=True)),
-        settings.max_backlog,
-        settings.max_inbound,
-        settings.max_in_flight,
-        settings.max_message_bytes,
-    )
     return application(settings, chosen)

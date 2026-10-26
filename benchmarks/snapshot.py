@@ -13,7 +13,7 @@ Four things are worth separating:
 
 **cold vs warm.** The first query in a process loads DuckDB's extensions and
 resolves the first table. That lands on the first read a process makes, which
-for a one-shot `Stream.scan` in a script is the only one.
+for a one-shot `StreamHandle.scan` in a script is the only one.
 
 **the floor.** Opening a snapshot (the metadata file, the manifest, the live
 table's hint) and reading one row. Nothing a reader does costs less, and how it
@@ -81,12 +81,18 @@ def row(i: int) -> dict[str, object]:
 async def build(root: Path, rows: int, logs: int) -> str:
     """A stream of `rows` rows across `logs` logs; its metadata URI."""
     per_log = rows // logs
-    stream = streamcast.Stream.open("trades", create=True, root=root, schema=schema(1))
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=schema(1)),
+            storage=streamcast.Storage(root=Path(root).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
     sent = 0
     for version in range(1, logs + 1):
         if version > 1:
             await stream.aclose()
-            stream = streamcast.Stream.migrate(
+            stream = streamcast.StreamHandle.migrate(
                 "trades", root=root, schema=schema(version)
             )
 
@@ -128,24 +134,24 @@ async def measure(uri: str, rows: int, repeat: int) -> dict[str, float]:
     selective = 1_000.0 + rows - 100
 
     started = time.perf_counter()
-    async with await streamcast.Stream.snapshot(uri) as snap:
+    async with await streamcast.StreamHandle.snapshot(uri) as snap:
         await snap.scan(start_offset=rows, end_offset=rows + 1).read_all()
 
     results["cold: open + 1 row"] = (time.perf_counter() - started) * 1e3
 
     async def opened() -> None:
-        await (await streamcast.Stream.snapshot(uri)).close()
+        await (await streamcast.StreamHandle.snapshot(uri)).close()
 
     results["open"] = await median(repeat, opened)
 
     async def one_shot() -> None:
-        await streamcast.Stream.scan(
+        await streamcast.StreamHandle.scan(
             uri, start_offset=rows, end_offset=rows + 1
         ).read_all()
 
     results["one-shot: open + 1 row + close"] = await median(repeat, one_shot)
 
-    async with await streamcast.Stream.snapshot(uri) as snap:
+    async with await streamcast.StreamHandle.snapshot(uri) as snap:
         await snap.scan().read_all()  # opens every table, so what follows is warm
 
         async def last_row() -> None:

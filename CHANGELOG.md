@@ -11,6 +11,19 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed — breaking
 
+- For 0.27.0, `Stream` is a frozen `spec: StreamSpec` / `storage: Storage`
+  definition; the runtime class is `StreamHandle`, without a compatibility alias.
+  Its factory takes `open(stream, *, initialization="open_existing")`; choose
+  `create_if_absent` or `restore_published` explicitly (#205).
+- `create_app(streams=...)` takes opened handles. Queue limits and `replicate`
+  move from `BrokerConfig` to each handle (or its definition); the broker retains
+  its transport ceiling. Direct constructors validate limits by `StreamSpec` rules.
+- The static factory requires an absolute storage root and applies the portable
+  schema whitelist. Existing paths and data are preserved; callers resolve roots
+  before constructing `Storage`. Factory-created handles expose their definition.
+  Managed `StorageProfile` settings retain relative-root support and allow
+  `replicate=True` without a published prefix, including on restart.
+
 - Replace `Outbox.pending()` with `pending_rows()`; no compatibility alias
   (#195). Callers rename their count query. This API change requires a minor
   release.

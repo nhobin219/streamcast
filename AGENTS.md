@@ -79,7 +79,7 @@ possible is wrong even if every test passes.
    on either side still increase. Ordering on one connection is TCP's guarantee and needs
    no help; `recv`'s offset check is there for the catch-up join, where the rows come from
    object storage rather than the socket, and as an assertion on I2's partition.
-2. **Let one consumer's speed affect another's.** `Stream.send` must never await a
+2. **Let one consumer's speed affect another's.** `StreamHandle.send` must never await a
    consumer. The broadcast is a synchronous `put_nowait` per subscriber and nothing else.
 3. **Broadcast before the log has the message.** `append` then fan out, never the
    reverse. A server that died between the two has published nothing it cannot replay.
@@ -113,7 +113,7 @@ possible is wrong even if every test passes.
 
 `docs/SPEC.md` §3. Both compile fine when broken and produce a defect only under a race:
 
-- **`Stream._submit`, `_commit` and `_deliver` contain no `await`.** A durable row is
+- **`StreamHandle._submit`, `_commit` and `_deliver` contain no `await`.** A durable row is
   checked and queued for the stream's writer thread in one step, committed in queue order,
   and handed back in commit order; `_deliver` advances the frontier and fans out in one
   step against the event loop. The `max_inbound` check (`_room`) is followed directly by
@@ -134,11 +134,11 @@ it in the same PR.
   rejected, with the measurement if there was one. Match the density of the file.
 - **`__init__` takes built collaborators and does no I/O.** litelink's rule, and
   `tests/test_invariants.py` enforces it. Construction that opens a log, reads a cursor,
-  writes a config or probes PATH belongs in a factory — `Stream.open`, `Sidecar.new`,
-  `connect._resolve`. The one recorded exception is `Stream.__init__` reading
+  writes a config or probes PATH belongs in a factory — `StreamHandle.open`, `Sidecar.new`,
+  `connect._resolve`. The one recorded exception is `StreamHandle.__init__` reading
   `end_offset()` off the log it was handed: a read on an injected collaborator rather
   than the construction of one.
-- **A durable fact has one home.** The stream's name is on the `Stream` and routing reads
+- **A durable fact has one home.** The stream's name is on the `StreamHandle` and routing reads
   it; the offset counter is maintained by `send` and nothing re-reads it from the log;
   refusal sentences live in `_errors._WHY` and both ends build from there.
 - **A function that needs a capability takes that capability, not its owner.**
@@ -235,7 +235,7 @@ once, and 0.20.0 was yanked (#135).
 **Measure interoperability before you claim it.** The interop tier
 (`tests/test_interop.py`, CONTRIBUTING) installs the last releases from PyPI into their
 own virtualenvs beside the branch, runs each server against each client, and publishes,
-subscribes and opens `Stream.snapshot(info.metadata)`; add a release to its `RELEASES`
+subscribes and opens `StreamHandle.snapshot(info.metadata)`; add a release to its `RELEASES`
 when a change must still talk to it. #136 has the matrix that started it: it found that
 a 0.20.0 client refuses a 0.20.1 server, which the pull request and the CHANGELOG had
 both said worked. The release notes give the upgrade order the matrix supports.
@@ -312,7 +312,7 @@ a sentence the change does not need.
 src/streamcast/
     _protocol.py    the wire: frames, greeting, refusal codec, subscribe URLs
     _errors.py      the refusal vocabulary and the close codes that carry it
-    _stream.py      Stream — offsets, fan-out, the subscribe partition
+    _stream.py      StreamHandle — offsets, fan-out, the subscribe partition
     _writer.py      the durable append on a writer thread per stream, and group commit
     _dedupe.py      exactly-once publishers: each one's mark, committed with its rows
     _store.py       Store, Transaction: the caller's database, SQLite and Postgres
@@ -324,8 +324,8 @@ src/streamcast/
     _metadata.py    a migrated stream's logs, in order, and which one is current
     _manifest.py    per-log statistics, and pruning whole logs on them — soundly
     _published.py   one published table, read with DuckDB as another machine reads it
-    _snapshot.py    Stream.snapshot — a stream's history as of one point, anywhere
-    _live.py        Stream.live — a snapshot kept current with the broker's rows
+    _snapshot.py    StreamHandle.snapshot — a stream's history as of one point, anywhere
+    _live.py        StreamHandle.live — a snapshot kept current with the broker's rows
     _catchup.py     reading the gap from the published tables when the server will not
     _cursor.py      where a consumer keeps the offset it finished with
     _remote.py      shipping a consumer's cursor to S3, for recovery on another box

@@ -1,6 +1,6 @@
 """A stream reopened with `s3_options` reads its published table with THEM.
 
-`Stream.open` passed its options to `litelink.new`, which creates a log, and
+`StreamHandle.open` passed its options to `litelink.new`, which creates a log, and
 not to `litelink.open`, which reopens one. A reopened log then resolved its
 credentials from the environment. Where the environment holds another
 store's key — a server whose streams publish to different buckets — every
@@ -11,6 +11,7 @@ and the server did not start.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -24,8 +25,14 @@ SCHEMA = {
 
 
 async def _published_stream(root, bucket, s3) -> None:
-    stream = streamcast.Stream.open(
-        "t", create=True, root=root, schema=SCHEMA, published=bucket, s3_options=s3
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=Path(root).absolute(), published=bucket, s3_options=s3
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         await stream.send_many([{"i": i} for i in range(20)])
@@ -56,13 +63,14 @@ async def test_a_reopened_stream_reads_with_its_own_options(
             monkeypatch.delenv(name, raising=False)
 
     explicit = dataclasses.replace(s3)  # the stream's own, passed explicitly
-    reopened = streamcast.Stream.open(
-        "t",
-        create=True,
-        root=tmp_path,
-        schema=SCHEMA,
-        published=bucket,
-        s3_options=explicit,
+    reopened = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=Path(tmp_path).absolute(), published=bucket, s3_options=explicit
+            ),
+        ),
+        initialization="create_if_absent",
     )
     try:
         # What the broker does for every stream before it admits a connection.

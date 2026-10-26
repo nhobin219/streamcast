@@ -30,7 +30,7 @@ will replay, then picks the socket up where they ended. `_cursor`, `_remote` and
 **The second deviation is that there is no `send`.** A subscription is
 read-only, and rather than carrying a `send` that raises, it does not have
 one — the same reason litelink's read handles are not writable handles with
-thirteen methods that refuse. Publishing is `Stream.send` in the server's own
+thirteen methods that refuse. Publishing is `StreamHandle.send` in the server's own
 process; a remote publisher is an open question, not an omission (`docs/SPEC.md`
 §9).
 """
@@ -764,7 +764,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     **`catch_up=True` handles having been down too long.** A consumer that
     falls past the server's `max_replay` is refused — the rows are in the
     stream's published tables, not gone — and this reads the gap from there
-    with `Stream.snapshot`, then picks the socket up where they ended:
+    with `StreamHandle.snapshot`, then picks the socket up where they ended:
 
         streamcast.connect(uri, cursor=".trades.offset", catch_up=True)
 
@@ -775,7 +775,7 @@ class connect:  # noqa: N801 — `websockets.connect` is lowercase and this mirr
     most `page_bytes` of Arrow (`PAGE_BYTES`, litelink's row group) and, if
     set, `page_rows` rows; both None reads it in one query. `memory_limit`
     caps the DuckDB database the gap is read through (`"1GB"`), as
-    `Stream.snapshot` takes it; DuckDB's default is 80% of what the process may
+    `StreamHandle.snapshot` takes it; DuckDB's default is 80% of what the process may
     use, so a consumer that catches up beside other work leaves room for it
     here, and it means nothing without `catch_up=True`. `metadata=` overrides which metadata file to read —
     otherwise it is the greeting's — and `s3_options=` the credentials. A stream that

@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -41,7 +44,7 @@ from tests.hosting import application as asgi  # noqa: E402
 # backpressure, so the rows are large and the stalled client's own queue is 1.
 BULK = "x" * 65_536
 
-# `Stream.open` declares in JSON Schema; conftest's `SCHEMA` is the Arrow one.
+# `StreamHandle.open` declares in JSON Schema; conftest's `SCHEMA` is the Arrow one.
 SCHEMA_JSON = {
     "type": "object",
     "properties": {name: {"type": "number"} for name in ("event_ts", "price")},
@@ -55,8 +58,6 @@ def fat(i: int) -> dict:
 
 def _get_status(url: str) -> int:
     """A plain GET, on stdlib, so the 404 case costs no dev dependency."""
-    import urllib.error
-    import urllib.request
 
     try:
         with urllib.request.urlopen(url) as answer:  # noqa: S310 — a test-local URL
@@ -97,8 +98,11 @@ async def running(app: Any) -> AsyncIterator[str]:
 class TestItServes:
     async def test_a_mounted_stream_delivers_live_rows(self, log):
         """The headline: `connect` cannot tell it is talking to a mounted app."""
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base, streamcast.connect(f"{base}/trades") as sub:
             await stream.send(trade(0))
             offset, ts, row = await sub.recv()
@@ -112,8 +116,11 @@ class TestItServes:
         work — a stream mounted at `/streams` is still `trades`, not
         `streams/trades`, and its greeting says so.
         """
-        stream = streamcast.Stream("trades", log=log)
-        streams = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        streams = asgi(
+            stream,
+            maintain=False,
+        )
 
         @asynccontextmanager
         async def lifespan(_app):
@@ -128,8 +135,11 @@ class TestItServes:
                 assert (await sub.recv())[0] == 1
 
     async def test_a_resume_replays_from_the_requested_offset(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             for i in range(5):
                 await stream.send(trade(i))
@@ -138,8 +148,11 @@ class TestItServes:
                 assert [(await sub.recv())[0] for _ in range(3)] == [3, 4, 5]
 
     async def test_the_unnamed_stream_is_served_at_the_root(self, log):
-        stream = streamcast.Stream(log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle(log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base, streamcast.connect(f"{base}/") as sub:
             await stream.send(trade(0))
             assert (await sub.recv())[0] == 1
@@ -160,8 +173,11 @@ class TestTheWireIsUnchanged:
         Falsify by dropping `_Peer.send`'s `text` branch.
         """
         websockets = pytest.importorskip("websockets")
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with websockets.connect(f"{base}/trades") as raw:
                 greeting = await raw.recv()
@@ -180,8 +196,11 @@ class TestTheWireIsUnchanged:
         break a resume across the join and nothing else would notice.
         """
         websockets = pytest.importorskip("websockets")
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with websockets.connect(f"{base}/trades") as raw:
                 await raw.recv()
@@ -205,8 +224,11 @@ class TestWhatItRefuses:
     """
 
     async def test_an_unknown_stream_is_refused_and_names_what_is_served(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             with pytest.raises(streamcast.StreamNotFound) as raised:
                 await streamcast.connect(f"{base}/quotes")
@@ -215,8 +237,11 @@ class TestWhatItRefuses:
             assert "trades" in str(raised.value)
 
     async def test_a_malformed_path_is_refused_with_the_parse_detail(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             with pytest.raises(streamcast.ProtocolError) as raised:
                 await streamcast.connect(f"{base}/trades?offset=abc")
@@ -224,8 +249,11 @@ class TestWhatItRefuses:
             assert "offset" in str(raised.value)
 
     async def test_an_unreplayable_offset_is_refused(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             await stream.send(trade(0))
             with pytest.raises(streamcast.NotReplayable):
@@ -234,16 +262,22 @@ class TestWhatItRefuses:
     async def test_every_mounted_stream_takes_publishers(self, log):
         """No switch, as `BrokerConfig` has none: a stream that can be written takes
         publishers, and one that cannot (a retired one) refuses them itself."""
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with streamcast.publish(f"{base}/trades") as producer:
                 assert await producer.send(trade(0)) == 1
 
     async def test_an_http_request_gets_a_404_rather_than_a_traceback(self, log):
         """A routing mistake in the host app, answered rather than raised."""
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             url = base.replace("ws://", "http://")
             status = await asyncio.to_thread(_get_status, f"{url}/trades")
@@ -260,12 +294,10 @@ class TestBackpressureSurvives:
     """
 
     async def test_a_stalled_subscriber_is_dropped_with_4429_and_its_reason(self, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log, max_backlog=8)
         app = asgi(
             stream,
             maintain=False,
-            replicate=False,
-            max_backlog=8,
         )
         async with running(app) as base:
             stalled = await streamcast.connect(f"{base}/trades", max_queue=1)
@@ -286,12 +318,10 @@ class TestBackpressureSurvives:
 
     async def test_a_stalled_subscriber_does_not_slow_a_healthy_one(self, log):
         """The property the whole design exists for, re-proven per transport."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log, max_backlog=8)
         app = asgi(
             stream,
             maintain=False,
-            replicate=False,
-            max_backlog=8,
         )
         async with running(app) as base:
             stalled = await streamcast.connect(f"{base}/trades", max_queue=1)
@@ -323,8 +353,11 @@ class TestTheConnectionLifecycle:
         never consumes the Close echo. Whatever the equivalent is under ASGI,
         the assertion is the same one.
         """
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             sub = await streamcast.connect(f"{base}/trades")
             await stream.send(trade(0))
@@ -343,8 +376,11 @@ class TestTheConnectionLifecycle:
 
         Falsify by not starting the reader in `_Peer.__aenter__`.
         """
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with streamcast.connect(f"{base}/trades") as sub:
                 await stream.send(trade(0))
@@ -368,8 +404,11 @@ class TestRemotePublishing:
     async def test_a_publisher_appends_through_the_mount(self, log):
         """`serve_publisher` iterates the connection, so this exercises
         `__aiter__` — the one method a subscription never touches."""
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with streamcast.connect(f"{base}/trades") as sub:
                 async with streamcast.publish(f"{base}/trades") as producer:
@@ -381,8 +420,11 @@ class TestRemotePublishing:
         assert (delivered, ts, row) == (1, None, trade(0))  # `log` is unstamped
 
     async def test_send_many_stays_one_transaction(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with streamcast.publish(f"{base}/trades") as producer:
                 offsets = await producer.send_many([trade(i) for i in range(20)])
@@ -390,8 +432,11 @@ class TestRemotePublishing:
         assert offsets == list(range(1, 21))
 
     async def test_a_rejected_row_answers_and_keeps_the_connection(self, log):
-        stream = streamcast.Stream("trades", log=log)
-        app = asgi(stream, maintain=False, replicate=False)
+        stream = streamcast.StreamHandle("trades", log=log)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with running(app) as base:
             async with streamcast.publish(f"{base}/trades") as producer:
                 with pytest.raises(streamcast.Rejected) as raised:
@@ -410,11 +455,17 @@ class TestTheChildren:
         start no maintainer once mounted, and a log with nothing sealing it is
         the one failure this library says out loud it must never allow.
         """
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
-            streams = asgi(stream, replicate=False)
+            streams = asgi(
+                stream,
+            )
             async with streams.router.lifespan_context(streams):
                 assert not streams.state.broker.closed
                 # Built at start rather than construction: the maintainer is
@@ -433,15 +484,22 @@ class TestTheChildren:
         """Symmetry with the broker run on its own, which closes its streams on
         shutdown.
 
-        A stream built by `Stream.open` owns its log, so something has to close
+        A stream built by `StreamHandle.open` owns its log, so something has to close
         it; `aclose` is a no-op for a handle the caller passed in. Without this
         a mounted app would leak the log it opened, and the leak is invisible
         until a second process tries to write.
         """
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
-        app = asgi(stream, maintain=False, replicate=False)
+        app = asgi(
+            stream,
+            maintain=False,
+        )
         async with app.router.lifespan_context(app):
             await stream.send({"event_ts": 1.0, "price": 2.0})
 
@@ -451,7 +509,7 @@ class TestTheChildren:
             await stream.send({"event_ts": 3.0, "price": 4.0})
 
     async def test_a_live_only_stream_needs_no_children(self):
-        streams = asgi(streamcast.Stream("live"))
+        streams = asgi(streamcast.StreamHandle("live"))
         async with streams.router.lifespan_context(streams):
             assert streams.state.broker.children == []
 
@@ -462,11 +520,17 @@ class TestTheChildren:
         the one place the two halves could disagree: children owned by the
         host app's lifespan, routing owned by the mount.
         """
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=SCHEMA_JSON
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=SCHEMA_JSON),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
-            streams = asgi(stream, replicate=False)
+            streams = asgi(
+                stream,
+            )
 
             @contextlib.asynccontextmanager
             async def lifespan(_app: Any) -> AsyncIterator[None]:

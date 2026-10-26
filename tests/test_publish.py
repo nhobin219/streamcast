@@ -2,7 +2,7 @@
 
 The consumer half could always live anywhere. This is the other half, and the
 property that makes it safe is that it adds no authority: the server makes the
-same `Stream.send` / `send_many` calls a local publisher makes, on the same
+same `StreamHandle.send` / `send_many` calls a local publisher makes, on the same
 handle, in the same process. litelink allows one writer per log and that
 writer is still the server — which is exactly what a second `WriteHandle` on
 another box is not, and what litelink can neither refuse nor detect.
@@ -13,8 +13,20 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+from websockets.frames import Close
+from websockets.frames import Close as CloseFrame
 
 import streamcast
+from streamcast._client import _refusal
+from streamcast._protocol import (
+    greeting,
+    parse_greeting,
+    parse_publish_reply,
+    parse_subscribe,
+    publish_path,
+    refusal,
+)
 
 from .conftest import SCHEMA, trade
 
@@ -22,7 +34,7 @@ from .conftest import SCHEMA, trade
 class TestItPublishes:
     async def test_a_remote_publisher_appends_and_subscribers_see_it(self, serve, log):
         """The headline, end to end: publish over a socket, receive over another."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
                 async with streamcast.publish(uri) as producer:
@@ -35,8 +47,8 @@ class TestItPublishes:
         assert row == trade(0), "and the row is untouched"
 
     async def test_send_many_is_one_transaction(self, serve, log):
-        """Contiguous offsets, because it is the same call `Stream.send_many` is."""
-        stream = streamcast.Stream("trades", log=log)
+        """Contiguous offsets, because it is the same call `StreamHandle.send_many` is."""
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 offsets = await producer.send_many([trade(i) for i in range(20)])
@@ -44,7 +56,7 @@ class TestItPublishes:
         assert offsets == list(range(1, 21))
 
     async def test_an_empty_batch_sends_nothing(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 assert await producer.send_many([]) == []
@@ -57,7 +69,7 @@ class TestItPublishes:
         A subscriber uses it to decode; a publisher uses it to check the shape
         it is about to send against the shape the server will accept.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 shape = producer.info.schema
@@ -72,16 +84,16 @@ class TestConcurrentPublishers:
     async def test_two_publishers_never_share_an_offset(self, serve, log):
         """**I1 is what makes this free.**
 
-        `Stream.send` contains no `await`, so two handlers calling it cannot
+        `StreamHandle.send` contains no `await`, so two handlers calling it cannot
         interleave: each assigns its offset, appends and fans out in one step
         against the event loop. Nothing here coordinates the two publishers,
         and nothing needs to.
 
-        Falsify by putting an `await` inside `Stream.send` between the append
+        Falsify by putting an `await` inside `StreamHandle.send` between the append
         and the fan-out — `tests/test_invariants.py` guards that directly, and
         this is the behaviour that guard protects.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
 
             async def publisher(tag: int, count: int) -> list[int | None]:
@@ -104,7 +116,7 @@ class TestConcurrentPublishers:
         durable, but it would stop being one commit — and a consumer reading
         the log could see half a group.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
 
             async def batches() -> list[list[int | None]]:
@@ -138,7 +150,7 @@ class TestWhatItRefuses:
         """No switch on `BrokerConfig`: whether a stream can be written is the
         stream's to say — a retired one refuses publishers (`test_retire`) —
         and the same port serves its readers."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.connect(uri) as sub:
                 async with streamcast.publish(uri) as producer:
@@ -149,11 +161,6 @@ class TestWhatItRefuses:
     def test_an_older_servers_refusal_still_names_the_setting(self):
         """A server from before every stream took publishers sends
         `publish_disabled`; the client still says what to change."""
-        from websockets.exceptions import ConnectionClosed  # noqa: PLC0415
-        from websockets.frames import Close as CloseFrame  # noqa: PLC0415
-
-        from streamcast._client import _refusal  # noqa: PLC0415
-        from streamcast._protocol import refusal  # noqa: PLC0415
 
         closed = ConnectionClosed(
             CloseFrame(streamcast.Close.BAD_REQUEST, refusal("publish_disabled")), None
@@ -165,11 +172,11 @@ class TestWhatItRefuses:
     async def test_a_row_the_schema_refuses_is_rejected_not_committed(self, serve, log):
         """litelink's own message, and the connection survives it.
 
-        `Stream.send` raises on a bad row and the local publisher sends the
+        `StreamHandle.send` raises on a bad row and the local publisher sends the
         next one. A remote publisher is no worse off — closing the connection
         would make one bad row cost every good one behind it.
         """
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 with pytest.raises(streamcast.Rejected) as raised:
@@ -182,7 +189,7 @@ class TestWhatItRefuses:
                 assert await producer.send(trade(0)) == 1
 
     async def test_a_rejected_batch_commits_none_of_itself(self, serve, log):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 rows: list[dict[str, object]] = [
@@ -197,19 +204,17 @@ class TestWhatItRefuses:
 
     async def test_a_frame_that_is_not_a_row_is_refused(self, serve, log):
         """Answered rather than closed, like any other bad publish."""
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             async with streamcast.publish(uri) as producer:
                 await producer.connection.send('"just a string"')
                 with pytest.raises(streamcast.Rejected, match="not a row"):
-                    from streamcast._protocol import parse_publish_reply
-
                     parse_publish_reply(await producer.connection.recv())
 
     async def test_publishing_to_a_stream_that_is_not_served_is_refused(
         self, serve, log
     ):
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         async with serve(stream, maintain=False) as uri:
             wrong = uri.replace("/trades", "/quotes")
             with pytest.raises(streamcast.StreamNotFound):
@@ -246,7 +251,6 @@ class TestTheUrl:
         neither end has to know the query string and a URI in a config file
         works for both.
         """
-        from streamcast._protocol import publish_path
 
         assert publish_path("ws://h/trades") == "ws://h/trades?publish"
         # Idempotent, so a caller that spelled it out is not punished.
@@ -254,7 +258,6 @@ class TestTheUrl:
 
     async def test_publish_and_offset_together_are_refused(self):
         """Two different requests. Serving one silently would be a guess."""
-        from streamcast._protocol import parse_subscribe
 
         with pytest.raises(ValueError, match="different requests"):
             parse_subscribe("/trades?publish&offset=5")
@@ -268,10 +271,6 @@ class TestAConnectionClosingUnderASend:
 
         Falsify by popping the pending deque instead of removing by identity.
         """
-        from websockets.exceptions import ConnectionClosedError
-        from websockets.frames import Close
-
-        from streamcast._protocol import greeting, parse_greeting
 
         info = parse_greeting(
             greeting(stream="t", end_offset=1, replay=None, durable=True)

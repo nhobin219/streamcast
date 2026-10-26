@@ -7,13 +7,13 @@ Three numbers, because three different things could be the bottleneck and
 only one of them is streamcast's:
 
 **encode**  a row to its JSON frame, with msgspec. Done ONCE per message
-however many subscribers there are, which is the reason `Stream.send` takes a
+however many subscribers there are, which is the reason `StreamHandle.send` takes a
 row and the queue holds a shared `bytes`. If this scaled with subscriber
 count, the library's central claim would be wrong. The stdlib `json` figure is
 printed beside it, because that gap is what earns the dependency.
 
 **fan-out** the queue insert per subscriber, with no sockets — the part
-`Stream.send` actually spends. Linear in subscribers by construction; the
+`StreamHandle.send` actually spends. Linear in subscribers by construction; the
 question is the constant.
 
 **durable** the same send with a litelink log attached. One SQLite
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import statistics
 import tempfile
 import time
@@ -108,7 +109,6 @@ async def main() -> None:
     _report("encode (msgspec)", time.perf_counter() - started, args.messages)
 
     # The same frame through the stdlib, for the ratio that justifies msgspec.
-    import json
 
     started = time.perf_counter()
     for offset in range(args.messages):
@@ -118,7 +118,7 @@ async def main() -> None:
 
     # --- fan-out: the queue insert per subscriber, no sockets ---------------
     for count in sorted({1, 10, args.subscribers}):
-        stream = streamcast.Stream("bench")
+        stream = streamcast.StreamHandle("bench")
         subscribers = [
             Subscriber(_Sink(), max_backlog=args.messages + 1)  # ty: ignore[invalid-argument-type]
             for _ in range(count)
@@ -136,7 +136,7 @@ async def main() -> None:
     # --- durable: the same send, with the log in it -------------------------
     root = Path(tempfile.mkdtemp())
     with litelink.new(root, "bench", schema=SCHEMA, sort_by=("event_ts",)) as log:
-        stream = streamcast.Stream("bench", log=log)
+        stream = streamcast.StreamHandle("bench", log=log)
         started = time.perf_counter()
         for _ in range(args.durable):
             await stream.send(row)
@@ -167,7 +167,7 @@ async def main() -> None:
     )
 
     # --- end to end, over a real socket -------------------------------------
-    stream = streamcast.Stream("bench")
+    stream = streamcast.StreamHandle("bench")
     server = await Listening(
         streamcast.create_app(streams=stream, config=streamcast.BrokerConfig()),
         "127.0.0.1",

@@ -31,7 +31,7 @@ that sizes `max_replay` against `max_backlog` for your hardware. The numbers in
 [`docs/SPEC.md`](../docs/SPEC.md) §4 come from it, after an earlier version of
 that section stated two guesses as measurements and had both about 2x wrong.
 
-`bench-snapshot` measures `Stream.snapshot` over a stream written as `--logs` logs, each
+`bench-snapshot` measures `StreamHandle.snapshot` over a stream written as `--logs` logs, each
 a migration adding a column, so the read is the real `UNION ALL BY NAME`. It reports the
 cold first query, the floor (opening a snapshot, reading one row), a full count, scan and
 aggregate, and the same selective read written as `where=` and as `filters=`, which is

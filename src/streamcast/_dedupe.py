@@ -288,7 +288,7 @@ def write_all(log: WriteHandle, marks: Sequence[tuple[str, int, int]]) -> None:
 
 
 def carried(root: Path, name: str) -> Path:
-    """Where `Stream.migrate` keeps the marks between retiring one log and
+    """Where `StreamHandle.migrate` keeps the marks between retiring one log and
     committing the next: beside the stream's metadata, streamcast's own file.
 
     A retired log reopens read-only, and a read-only handle has no
@@ -319,7 +319,7 @@ def unstash(path: Path, log: str) -> list[tuple[str, int, int]] | None:
     """The marks `stash` wrote from the log named `log`, or None.
 
     Keyed by the log they were read from, because a file a crash left behind
-    can outlive its migration: a log retired some other way (`Stream.retire`)
+    can outlive its migration: a log retired some other way (`StreamHandle.retire`)
     and then migrated never stashed its own, and an earlier log's marks
     applied to its successor would send every publisher back to an old seq.
     """

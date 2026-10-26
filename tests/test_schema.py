@@ -8,10 +8,14 @@ that knows about JSON, and these are its edges.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import litelink
 import pyarrow as pa
 import pytest
+import websockets
+from jsonschema import Draft202012Validator
+from litelink._types import column_type
 
 import streamcast
 from streamcast import _metadata
@@ -164,7 +168,6 @@ class TestRefusals:
     def test_everything_arrow_accepts_that_litelink_does_not_is_unreachable(self):
         # The mapping's whole point: nothing it produces can be refused one
         # layer down.
-        from litelink._types import column_type
 
         for spec in (
             {"type": "boolean"},
@@ -215,8 +218,12 @@ class TestTheStreamOwnsItsLog:
     """`root=` + `schema=` — the whole reason a caller imports one thing."""
 
     async def test_it_creates_the_log(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert stream.durable
@@ -233,8 +240,12 @@ class TestTheStreamOwnsItsLog:
             await stream.aclose()
 
     async def test_it_reopens_an_existing_one_and_continues_the_offsets(self, tmp_path):
-        first = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        first = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         await first.send_many(
             [{"event_ts": i, "price": 1.0, "side": 0, "live": True} for i in range(5)]
@@ -243,8 +254,12 @@ class TestTheStreamOwnsItsLog:
 
         # A restart. `new` would raise FileExistsError; the offsets must
         # continue, never restart.
-        second = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        second = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert second.end_offset == 6
@@ -257,8 +272,12 @@ class TestTheStreamOwnsItsLog:
         Every send would then be validated against columns the caller never
         wrote down — the failure this convenience would otherwise introduce.
         """
-        await streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        await streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         ).aclose()
 
         other = {
@@ -266,44 +285,36 @@ class TestTheStreamOwnsItsLog:
             "required": ["different"],
         }
         with pytest.raises(ValueError, match="has columns"):
-            streamcast.Stream.open("trades", create=True, root=tmp_path, schema=other)
+            streamcast.StreamHandle.open(
+                streamcast.Stream(
+                    spec=streamcast.StreamSpec(name="trades", schema=other),
+                    storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+                ),
+                initialization="create_if_absent",
+            )
 
     async def test_a_log_it_was_handed_is_not_closed(self, log):
         # The caller may be sharing it. A library that closes a borrowed
         # handle is one you cannot lend to.
-        stream = streamcast.Stream("trades", log=log)
+        stream = streamcast.StreamHandle("trades", log=log)
         await stream.aclose()
         assert log.end_offset() >= 1 or log.end_offset() == 1  # still usable
 
-    async def test_the_signature_is_what_refuses_the_bad_combinations(self, tmp_path):
-        """Two hand-written `ValueError`s became impossible to reach.
-
-        When one initialiser took both `log=` and `root=`+`schema=`, it had
-        to check by hand that you passed one set and not the other, and that
-        `root` and `schema` arrived together. Splitting the factory out
-        deletes both checks: `new` has no `log` parameter, and `root` and
-        `schema` are required keyword-only, so Python refuses the calls and
-        the type checker refuses them before that. A structural fix beats a
-        runtime one, and this records that it is structural.
-        """
+    def test_the_factory_only_takes_a_definition(self, tmp_path):
+        definition = streamcast.Stream(
+            spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+            storage=streamcast.Storage(root=tmp_path),
+        )
         with pytest.raises(TypeError):
-            streamcast.Stream.open(
-                "trades",
-                create=True,
-                log=object(),  # ty: ignore[unknown-argument]
-                root=tmp_path,
-                schema=TRADES,
-            )
-
-        with pytest.raises(TypeError):
-            streamcast.Stream.open("trades", create=True, root=tmp_path)  # ty: ignore[missing-argument]
-
-        with pytest.raises(TypeError):
-            streamcast.Stream.open("trades", create=True, schema=TRADES)  # ty: ignore[missing-argument]
+            streamcast.StreamHandle.open(definition, log=object())  # ty: ignore[unknown-argument]
 
     async def test_serve_closes_a_log_the_stream_created(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         async with serve_streams(stream, "127.0.0.1", 0, maintain=False):
             await stream.send({"event_ts": 1, "price": 1.0, "side": 0, "live": True})
@@ -318,8 +329,12 @@ class TestTheGreetingPublishesIt:
     async def test_a_subscriber_learns_the_columns_without_this_repo(
         self, serve, tmp_path
     ):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         async with serve(stream) as uri:
             async with streamcast.connect(uri) as sub:
@@ -330,16 +345,19 @@ class TestTheGreetingPublishesIt:
         await stream.aclose()
 
     async def test_a_live_only_stream_publishes_none(self, serve):
-        stream = streamcast.Stream("live")
+        stream = streamcast.StreamHandle("live")
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             assert sub.info.schema is None
             assert stream.schema is None
 
     async def test_it_is_readable_by_a_plain_websocket_client(self, serve, tmp_path):
-        import websockets
 
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         async with serve(stream) as uri:
             async with websockets.connect(uri) as raw:
@@ -368,8 +386,12 @@ class TestRequiredIsEnforced:
     """
 
     async def test_a_missing_required_column_is_refused(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             with pytest.raises(ValueError, match="non-nullable"):
@@ -381,8 +403,12 @@ class TestRequiredIsEnforced:
     async def test_an_explicit_none_in_a_required_column_is_refused(self, tmp_path):
         # The other way to violate it, and litelink tells them apart:
         # "Absent from the row" against "Supplied as None".
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             with pytest.raises(ValueError, match="Supplied as None"):
@@ -394,8 +420,12 @@ class TestRequiredIsEnforced:
             await stream.aclose()
 
     async def test_an_optional_column_may_be_omitted_or_null(self, tmp_path):
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         try:
             assert (
@@ -420,8 +450,12 @@ class TestRequiredIsEnforced:
     async def test_nothing_is_broadcast_when_a_row_is_refused(self, serve, tmp_path):
         # The refusal happens inside `append`, before the fan-out — so a
         # subscriber never sees a row the log rejected.
-        stream = streamcast.Stream.open(
-            "trades", create=True, root=tmp_path, schema=TRADES
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="trades", schema=TRADES),
+                storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+            ),
+            initialization="create_if_absent",
         )
         async with serve(stream) as uri, streamcast.connect(uri) as sub:
             with pytest.raises(ValueError, match="non-nullable"):
@@ -448,20 +482,17 @@ class TestNullability:
 
     @staticmethod
     def _json_allows_null(schema: dict) -> bool:
-        from jsonschema import Draft202012Validator
 
         return not list(Draft202012Validator(schema).iter_errors({"c": None}))
 
     @staticmethod
     def _json_allows_absence(schema: dict) -> bool:
-        from jsonschema import Draft202012Validator
 
         return not list(Draft202012Validator(schema).iter_errors({}))
 
     def test_required_is_about_presence_not_nullability(self):
         # The premise, straight from the validator: a null is rejected by the
         # `type` keyword, an absence by `required`. They are different rules.
-        from jsonschema import Draft202012Validator
 
         schema = {
             "type": "object",
@@ -531,7 +562,6 @@ class TestNullability:
         assert to_arrow(published) == to_arrow(TRADES)
 
     def test_the_published_schema_validates_a_real_row(self):
-        from jsonschema import Draft202012Validator
 
         published = from_arrow(to_arrow(TRADES))
         validator = Draft202012Validator(published)

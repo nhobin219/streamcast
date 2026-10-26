@@ -142,7 +142,7 @@ import streamcast
 
 async def main():
     uri = Path("streamcast-data/trades/trades.metadata/version-hint.text").resolve().as_uri()
-    async with await streamcast.Stream.snapshot(uri) as snapshot:
+    async with await streamcast.StreamHandle.snapshot(uri) as snapshot:
         print(await snapshot.sql("""
             SELECT count(*) trades, min(price) low, max(price) high, sum(amount) btc
             FROM log
@@ -323,7 +323,7 @@ so a metric leads straight to a request: the failed order's count points at
 the failed order's trace.
 
 `otel/analytics.py` is real-time analytics on the same telemetry, in one
-`Stream.live` view of `spans`. Every few seconds it asks, in one SQL query,
+`StreamHandle.live` view of `spans`. Every few seconds it asks, in one SQL query,
 each service's error rate over the last 30 seconds against its error rate
 over everything, and p95 latency, and prints a line to the console, flagging
 a service whose recent rate is well above its long-term one. There is no
@@ -344,7 +344,7 @@ current, and the question is a query.
 | `otel/demo.py` | the two services, the broker, and the one-shot demo |
 | `otel/export.py` | rows back to OTel records, spans and metric exports, out through OTel's OTLP exporters |
 | `otel/services.py` | the producer: two services logging, tracing and recording metrics through OTel, publishing to the broker |
-| `otel/analytics.py` | real-time analytics with `Stream.live`: error rate now against always, per service |
+| `otel/analytics.py` | real-time analytics with `StreamHandle.live`: error rate now against always, per service |
 | `otel/gui.py` | otel-gui, downloaded, checked and run: where `export.py` sends what it reads |
 
 **None of this is in streamcast.** The schemas and conversions are built from

@@ -9,14 +9,18 @@ seals it, replays it, and compares the bytes.
 
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 import websockets
 
 import streamcast
 from streamcast import _log, _metadata, _schema
+from streamcast._codec import compile_codec
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -72,8 +76,14 @@ def row(i: int = 0) -> dict[str, object]:
     }
 
 
-def stream_at(tmp_path) -> streamcast.Stream:
-    return streamcast.Stream.open("otel", create=True, root=tmp_path, schema=SCHEMA)
+def stream_at(tmp_path) -> streamcast.StreamHandle:
+    return streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="otel", schema=SCHEMA),
+            storage=streamcast.Storage(root=Path(tmp_path).absolute()),
+        ),
+        initialization="create_if_absent",
+    )
 
 
 class TestTheSchema:
@@ -187,9 +197,6 @@ class TestAMapIsAnObject:
 
 
 def test_a_map_nested_in_a_list_is_checked_too():
-    import pyarrow as pa
-
-    from streamcast._codec import compile_codec
 
     codec = compile_codec(
         pa.schema([pa.field("groups", pa.list_(pa.map_(pa.string(), pa.string())))])
@@ -208,11 +215,6 @@ def test_every_unrolled_arity_converts_every_column(count, encoding):
     Each arity is its own function, so each is its own chance to skip a
     column; four covers the general loop.
     """
-    import base64
-
-    import pyarrow as pa
-
-    from streamcast._codec import compile_codec
 
     meta = {_schema.ENCODING: encoding.encode()}
     schema = pa.schema(

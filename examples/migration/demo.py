@@ -104,20 +104,42 @@ def diff(
 async def main(root: Path, *, bug: bool = False, count: int = 200) -> dict[str, Any]:
     """Run the demo under `root`: `count` orders of history, then `count` live."""
     streams = {
-        "orders": streamcast.Stream.open(
-            "orders", create=True, root=root, schema=stages.ORDERS
+        "orders": streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="orders", schema=stages.ORDERS),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
-        "positions": streamcast.Stream.open(
-            "positions", create=True, root=root, schema=stages.POSITIONS
+        "positions": streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="positions", schema=stages.POSITIONS),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
-        "alerts": streamcast.Stream.open(
-            "alerts", create=True, root=root, schema=stages.ALERTS
+        "alerts": streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="alerts", schema=stages.ALERTS),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
-        "positions_v2": streamcast.Stream.open(
-            "positions_v2", create=True, root=root, schema=stages.POSITIONS_V2
+        "positions_v2": streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="positions_v2", schema=stages.POSITIONS_V2
+                ),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
-        "alerts_shadow": streamcast.Stream.open(
-            "alerts_shadow", create=True, root=root, schema=stages.ALERTS
+        "alerts_shadow": streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="alerts_shadow", schema=stages.ALERTS),
+                storage=streamcast.Storage(root=Path(root).absolute()),
+            ),
+            initialization="create_if_absent",
         ),
     }
     # No maintainer: a run this short never fills a log enough to seal it. A
