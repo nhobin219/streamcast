@@ -1573,6 +1573,13 @@ answered as duplicates of the old stream's.
   than being swallowed; a status that silently stopped updating would be
   worse than none. Applications must not persist the value or feed it back:
   the next process decides again from the durable window.
+- **A terminal receiver failure is observable without calling `recv`.**
+  `inbox(on_receiver_error=)` calls a synchronous hook once with the exception,
+  after storing it and waking waiting readers. Recoverable disconnects keep
+  reconnecting without notifying it; startup errors and normal shutdown do not
+  notify it either. The hook must be quick and non-blocking. Its exceptions are
+  logged without escaping the receiver, preserving the original failure for
+  `recv` after received rows are processed. The default, `None`, calls nothing.
 
 The file `Cursor` (`connect(cursor=)`) stays the at-least-once option for a
 consumer without a database: one file, no driver, right for an idempotent
