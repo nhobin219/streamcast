@@ -21,9 +21,28 @@ there was nothing to have changed from. Everything above it is ordinary.
 - The static factory requires an absolute storage root and applies the portable
   schema whitelist. Existing paths and data are preserved; callers resolve roots
   before constructing `Storage`. Factory-created handles expose their definition.
-  Managed `StorageProfile` settings retain relative-root support and allow
-  `replicate=True` without a published prefix, including on restart.
-
+- For 0.27.0, replace `BrokerConfig(profiles={name: StorageProfile(...)})` with
+  `BrokerConfig(storage_profiles={name: Storage(...)})`. Roots must be absolute;
+  replication requires a published prefix. `StorageProfile`, profile revisions
+  and `profile_revision_changed` are removed. Empty configuration supplies
+  `default` under `~/.streamcast/<broker_id>/`; broker ids follow stream names.
+- Control PUT takes a flat `StreamSpec` body with `name`; `storage_profile` and
+  `initialization` move to query parameters. Replace keeps omitted values,
+  rejects a different profile and ignores initialization. GET/listing returns
+  `stream: {spec, storage}` with resolved paths visible to `control.read`.
+  Credentials remain host-only; profile discovery exposes storage without keys.
+- Registry v2 requires explicit `upgrade_registry(config)` while stopped. It
+  fsyncs `<registry>.v1`, validates bound identities and converts records/pending
+  definitions in one transaction. Downgrade restores that backup, losing later
+  changes. Pre-upgrade receipt keys return `idempotency_mismatch` after upgrade.
+- Managed opens intentionally accept adopted or restored logs whose stored
+  `wal_replication` is enabled under a profile with `replicate=False`, matching
+  static handles. Serving emits a warning and starts no WAL sidecar; enable
+  replication on the profile or run litestream separately for WAL protection.
+- Managed streams use the same definition factory, including `max_publishers`
+  and `restore_published`. Recorded storage survives profile edits; current
+  profile keys are used on restart. A removed profile observes
+  `unknown_storage_profile` rather than silently using environment credentials.
 - Replace `Outbox.pending()` with `pending_rows()`; no compatibility alias
   (#195). Callers rename their count query. This API change requires a minor
   release.

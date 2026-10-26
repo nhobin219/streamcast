@@ -45,6 +45,7 @@ def error(fault: Fault) -> JSONResponse:
                 "message": fault.code.replace("_", " "),
                 "retryable": fault.status in (429, 503),
                 "operation_id": None,
+                **fault.details,
             }
         },
         status_code=fault.status,
@@ -150,11 +151,38 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
             "control_max_bytes": config.control_max_bytes,
             "max_pending": config.max_pending,
             "storage_profiles": {
-                name: profile.public() for name, profile in config.profiles.items()
+                name: {
+                    "replicate": profile.replicate,
+                    "publishes": bool(profile.published),
+                }
+                for name, profile in config.storage_profiles.items()
             },
             "history_prefix_protected": sorted(config.history_guards),
             "wire_versions": {"write": VERSION, "read": list(ACCEPTED)},
         }
+
+    @app.get(CONTROL + "/storage-profiles")
+    async def storage_profiles(request: Request):
+        await authorize(config, request.scope, "control.read", "*")
+        runtime()
+        return {
+            name: profile.model_dump(mode="json")
+            for name, profile in config.storage_profiles.items()
+        }
+
+    @app.get(CONTROL + "/storage-profiles/{name}")
+    async def storage_profile(name: str, request: Request):
+        await authorize(config, request.scope, "control.read", "*")
+        runtime()
+        profile = config.storage_profiles.get(name)
+        if profile is None:
+            raise Fault(
+                422,
+                "unknown_storage_profile",
+                available=sorted(config.storage_profiles),
+            )
+
+        return profile.model_dump(mode="json")
 
     @app.get(CONTROL + "/streams")
     async def listing(request: Request):
@@ -237,6 +265,14 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
             raise Fault(400, "invalid_idempotency_key")
 
         value = await body(request, config.control_max_bytes)
+        allowed = (
+            {"storage_profile", "initialization"} if kind == "definition" else set()
+        )
+        if any(key not in allowed for key in request.query_params) or any(
+            len(request.query_params.getlist(key)) != 1 for key in request.query_params
+        ):
+            raise Fault(422, "invalid_query")
+
         # These tasks belong to the runtime, not the socket. Close drains them
         # before the operation worker and the registry are shut down.
         receipt = await owner.control(
@@ -249,6 +285,8 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
                 value,
                 request.headers.get("if-match"),
                 request.headers.get("if-none-match"),
+                storage_profile=request.query_params.get("storage_profile"),
+                initialization=request.query_params.get("initialization"),
             )
         )
         return JSONResponse(

@@ -54,8 +54,8 @@ from streamcast._broker.model import (
     Authorization,
     BrokerConfig,
     HistoryGuard,
-    StorageProfile,
 )
+from streamcast._broker.upgrade import upgrade_registry
 from streamcast._catchup import CatchUpUnavailable
 from streamcast._client import Subscription, connect
 from streamcast._cursor import Cursor
@@ -164,11 +164,11 @@ __all__ = [
     "Authorization",
     "BrokerConfig",
     "HistoryGuard",
-    "StorageProfile",
     "Storage",
     "StreamSpec",
     "create_app",
     "initialize_registry",
+    "upgrade_registry",
     "store_ddl",
     "to_arrow",
 ]

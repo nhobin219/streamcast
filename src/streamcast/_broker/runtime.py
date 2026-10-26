@@ -10,16 +10,18 @@ import uuid
 from collections.abc import Coroutine
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, get_args
+
+from pydantic import ValidationError
 
 from streamcast import _log, _metadata
-from streamcast._broker.model import NAME, BrokerConfig, Fault, declaration
+from streamcast._broker.model import NAME, BrokerConfig, Fault
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._broker.transitions import storage, with_replica
 from streamcast._children import _sidecars, _supervisors
 from streamcast._errors import Unavailable
 from streamcast._maintain import stop
-from streamcast._spec import Storage, Stream, StreamSpec
+from streamcast._spec import Initialization, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
 
@@ -95,8 +97,16 @@ class BrokerRuntime:
                 if record.get("pending") is None and record["name"] not in recovered:
                     try:
                         await self.reconcile(record)
-                    except Exception:
-                        self.observe(record["name"], "error", error="recovery_failed")
+                    except Exception as exc:
+                        self.observe(
+                            record["name"],
+                            "error",
+                            error=(
+                                self.transition_error(exc)
+                                if isinstance(exc, Fault)
+                                else "recovery_failed"
+                            ),
+                        )
 
             # Injected streams share every connection/admission/child lifetime.
             # Only their construction remains the host's responsibility.
@@ -123,12 +133,48 @@ class BrokerRuntime:
             await self.close()
             raise
 
-    def profile(self, record: dict):
-        profile = self.config.profiles[record["definition"]["storage_profile"]]
-        if profile.revision != record["profile_revision"]:
-            raise Fault(409, "profile_revision_changed")
+    def recorded_storage(self, record: dict) -> Storage:
+        return Storage.model_validate(record["stream"]["storage"])
 
-        return profile
+    def s3_options(self, record: dict):
+        profile = self.config.storage_profiles.get(record["storage_profile"])
+        if profile is None:
+            raise Fault(422, "unknown_storage_profile")
+
+        return profile.s3_options
+
+    def validate_spec(self, body: Any, name: str) -> dict:
+        try:
+            spec = StreamSpec.model_validate(body)
+        except ValidationError as exc:
+            raise Fault(
+                422,
+                "invalid_declaration",
+                errors=[{"loc": e["loc"], "type": e["type"]} for e in exc.errors()],
+            ) from None
+
+        if spec.name != name:
+            raise Fault(422, "name_mismatch")
+
+        if (
+            spec.max_message_bytes is not None
+            and spec.max_message_bytes > self.config.transport_max_bytes
+        ):
+            raise Fault(
+                422,
+                "invalid_declaration",
+                errors=[{"loc": ["max_message_bytes"], "type": "less_than_equal"}],
+            )
+
+        return spec.model_dump(mode="json")
+
+    @staticmethod
+    def transition_error(exc: Exception) -> str:
+        return (
+            "unknown_storage_profile"
+            if isinstance(exc, Fault) and exc.code == "unknown_storage_profile"
+            else "transition_failed"
+        )
 
     def claim_path(self, path) -> None:
         path = path.resolve()
@@ -145,7 +191,7 @@ class BrokerRuntime:
         )
 
     def claim_storage(self, record: dict, *, opening: bool = False) -> None:
-        profile = self.profile(record)
+        profile = self.recorded_storage(record)
         name = record["name"]
         root = profile.root.resolve()
         self.claim_path(root / ".streamcast-owners" / f"{name}.lock")
@@ -183,7 +229,6 @@ class BrokerRuntime:
         return copy.deepcopy(
             {
                 **record,
-                "profile": self.profile(record).public(),
                 "observed": self.observed.get(name, {"state": "unknown"}),
             }
         )
@@ -214,6 +259,9 @@ class BrokerRuntime:
         body: Any,
         match: str | None,
         none: str | None,
+        *,
+        storage_profile: str | None = None,
+        initialization: str | None = None,
     ) -> dict:
         if name in self.static:
             raise Fault(409, "static_stream")
@@ -222,7 +270,9 @@ class BrokerRuntime:
             raise Fault(403, "management_disabled")
 
         digest = hashlib.sha256(
-            dumps([method, name, kind, body, match, none]).encode()
+            dumps(
+                [method, name, kind, body, storage_profile, initialization, match, none]
+            ).encode()
         ).hexdigest()
         async with self.serial:
             prior = await thread(self.registry.receipt, principal, key, digest)
@@ -236,6 +286,46 @@ class BrokerRuntime:
                 raise Fault(422, "invalid_name")
 
             previous = self.records.get(name)
+            target = body
+            if kind == "definition":
+                spec = self.validate_spec(body, name)
+                profile_name = (
+                    storage_profile
+                    if storage_profile is not None
+                    else (
+                        "default" if previous is None else previous["storage_profile"]
+                    )
+                )
+                intent = (
+                    (initialization if initialization is not None else "open_existing")
+                    if previous is None
+                    else previous["initialization"]
+                )
+                if previous is not None and profile_name != previous["storage_profile"]:
+                    raise Fault(409, "immutable_storage")
+
+                if (
+                    previous is None
+                    and profile_name not in self.config.storage_profiles
+                ):
+                    raise Fault(
+                        422,
+                        "unknown_storage_profile",
+                        available=sorted(self.config.storage_profiles),
+                    )
+
+                if previous is None and intent not in get_args(Initialization):
+                    raise Fault(422, "invalid_initialization")
+
+                if name in self.config.history_guards and intent != "open_existing":
+                    raise Fault(403, "history_prefix_protected")
+
+                target = {
+                    "spec": spec,
+                    "storage_profile": profile_name,
+                    "initialization": intent,
+                }
+
             if previous is None:
                 if kind != "definition":
                     raise Fault(404, "unknown_stream")
@@ -246,25 +336,20 @@ class BrokerRuntime:
                 if none != "*" or match is not None:
                     raise Fault(412, "precondition_failed")
 
-                definition = declaration(
-                    body, self.config.profiles, self.config.transport_max_bytes
-                )
-                if (
-                    name in self.config.history_guards
-                    and definition["initialization"] != "open_existing"
-                ):
-                    raise Fault(403, "history_prefix_protected")
-
                 record = {
                     "name": name,
-                    "definition": definition,
+                    "stream": {
+                        "spec": spec,
+                        "storage": self.config.storage_profiles[
+                            profile_name
+                        ].model_dump(mode="json"),
+                    },
+                    "storage_profile": profile_name,
+                    "initialization": intent,
                     "desired": "stopped",
                     "revision": 1,
                     "stream_id": None,
                     "pending": None,
-                    "profile_revision": self.config.profiles[
-                        definition["storage_profile"]
-                    ].revision,
                 }
             else:
                 if match is None:
@@ -280,43 +365,24 @@ class BrokerRuntime:
                     if (
                         pending["status"] != "failed"
                         or kind != pending["kind"]
-                        or dumps(body) != dumps(pending["target"])
+                        or dumps(target) != dumps(pending["target"])
                     ):
                         raise Fault(409, "transition_pending")
 
                 record = copy.deepcopy(previous)
                 state = self.observed[name]["state"]
                 if kind == "definition":
-                    definition = declaration(
-                        body, self.config.profiles, self.config.transport_max_bytes
-                    )
-                    if (
-                        name in self.config.history_guards
-                        and definition["initialization"] != "open_existing"
-                    ):
-                        raise Fault(403, "history_prefix_protected")
-
-                    if dumps(definition) != dumps(record["definition"]):
+                    if dumps(spec) != dumps(record["stream"]["spec"]):
                         if state != "stopped":
                             raise Fault(409, "must_be_stopped")
 
                         if any(
-                            dumps(definition[k]) != dumps(record["definition"][k])
+                            dumps(spec[k]) != dumps(record["stream"]["spec"][k])
                             for k in ("schema", "sort_by")
                         ):
                             raise Fault(409, "migration_required")
 
-                        if (
-                            definition["storage_profile"]
-                            != record["definition"]["storage_profile"]
-                            and record["stream_id"] is not None
-                        ):
-                            raise Fault(409, "immutable_storage")
-
-                    record["definition"] = definition
-                    record["profile_revision"] = self.config.profiles[
-                        definition["storage_profile"]
-                    ].revision
+                    record["stream"]["spec"] = spec
                 elif kind == "desired":
                     if (
                         not isinstance(body, dict)
@@ -362,11 +428,10 @@ class BrokerRuntime:
                     ):
                         raise Fault(409, "must_be_stopped")
 
-                    declaration(
-                        record["definition"]
+                    self.validate_spec(
+                        record["stream"]["spec"]
                         | {"schema": body["schema"], "sort_by": body["sort_by"]},
-                        self.config.profiles,
-                        self.config.transport_max_bytes,
+                        name,
                     )
                 else:
                     raise Fault(422, "invalid_operation")
@@ -385,7 +450,7 @@ class BrokerRuntime:
             noop = (
                 previous is not None
                 and kind != "migration"
-                and dumps(previous["definition"]) == dumps(record["definition"])
+                and dumps(previous["stream"]) == dumps(record["stream"])
                 and previous["desired"] == record["desired"]
                 and self.observed[name]["state"] in (record["desired"],)
             )
@@ -397,7 +462,7 @@ class BrokerRuntime:
                 "name": name,
                 "kind": kind,
                 "revision": record["revision"],
-                "target": body,
+                "target": target,
                 "status": "succeeded" if noop else "accepted",
                 "error": None,
             }
@@ -454,7 +519,7 @@ class BrokerRuntime:
                 self.observe(name, "migrating")
                 target = operation["target"]
                 await self.storage_transition(record, "migration", target)
-                record["definition"] = record["definition"] | {
+                record["stream"]["spec"] = record["stream"]["spec"] | {
                     "schema": target["schema"],
                     "sort_by": target["sort_by"],
                 }
@@ -465,16 +530,16 @@ class BrokerRuntime:
             operation["status"] = "succeeded"
             operation["error"] = None
             record["pending"] = None
-        except Exception:
+        except Exception as exc:
             # Keep intent and close admission; errors contain no storage paths,
             # row values, credentials, or framework exception strings.
             operation["status"] = "failed"
-            operation["error"] = "transition_failed"
+            operation["error"] = self.transition_error(exc)
             generation = self.generations.get(name)
             if generation is not None:
                 generation.accepting = generation.writable = False
 
-            self.observe(name, "error", error="transition_failed")
+            self.observe(name, "error", error=operation["error"])
 
         async with self.serial:
             await thread(self.registry.update, record, operation)
@@ -483,6 +548,7 @@ class BrokerRuntime:
 
     async def reconcile(self, record: dict) -> None:
         name = record["name"]
+        self.s3_options(record)
         desired = record["desired"]
         if desired == "stopped":
             await self.offline(record)
@@ -522,7 +588,7 @@ class BrokerRuntime:
             raise
 
     def check_identity(self, record: dict) -> Any:
-        profile = self.profile(record)
+        profile = self.recorded_storage(record)
         home = _metadata.home(profile.root, record["name"])
         metadata = _metadata.load(home, record["name"])
         if metadata is None or metadata.stream_id != record["stream_id"]:
@@ -534,40 +600,17 @@ class BrokerRuntime:
         return metadata
 
     def open_stream(self, record: dict) -> StreamHandle:
-        profile = self.profile(record)
-        definition = record["definition"]
         if record["stream_id"]:
             self.check_identity(record)
 
         self.claim_storage(record, opening=True)
-        spec = StreamSpec(
-            name=record["name"],
-            schema=definition["schema"],
-            sort_by=definition["sort_by"],
-            **{
-                k: definition[k]
-                for k in (
-                    "max_replay",
-                    "exactly_once",
-                    "replay_published",
-                    "group_commit",
-                )
-            },
-            **definition["limits"],
+        resolved = self.recorded_storage(record).model_copy(
+            update={"s3_options": self.s3_options(record)}
         )
-        # Profiles retain their v1 contract: relative roots and replication
-        # without a published prefix are legal. This host-only bridge must
-        # not apply the static definition's stricter admission rules.
-        storage = Storage.model_construct(
-            root=Path(profile.root).absolute(),
-            published=profile.published,
-            replicate=profile.replicate,
-            config=profile.config,
-            s3_options=profile.s3_options,
-        )
+        definition = Stream.model_validate(record["stream"])
         opened = StreamHandle.open(
-            Stream(spec=spec, storage=storage),
-            initialization=definition["initialization"]
+            Stream(spec=definition.spec, storage=resolved),
+            initialization=record["initialization"]
             if record["stream_id"] is None
             else "open_existing",
         )
@@ -579,13 +622,10 @@ class BrokerRuntime:
             if record["stream_id"] and opened._stream_id != record["stream_id"]:
                 raise ValueError("identity mismatch")
 
-            if list(log.sort_by) != definition["sort_by"]:
+            if tuple(log.sort_by) != definition.spec.sort_by:
                 raise ValueError("sort mismatch")
 
             opened._subscriber_yield_every = self.config.subscriber_yield_every
-            if log.config.wal_replication and not profile.replicate:
-                raise ValueError("replication required")
-
             return opened
         except BaseException:
             log.close()
@@ -630,7 +670,7 @@ class BrokerRuntime:
         ):
             raise ValueError("history prefix protected")
 
-        definition = record["definition"]
+        definition = record["stream"]["spec"]
         if (
             not definition["exactly_once"]
             or not definition["replay_published"]
@@ -693,15 +733,13 @@ class BrokerRuntime:
 
         # A replicated log's seal/publish may flush its WAL through its own
         # control socket. Spawn the offline sidecar on the lifespan thread.
-
-        await with_replica(log, self.profile(record).s3_options, finish)
+        await with_replica(log, self.s3_options(record), finish)
 
     async def storage_transition(self, record: dict, kind: str, target: dict) -> None:
-
         def reserve() -> None:
             self.claim_storage(record, opening=True)
             if kind == "migration":
-                profile = self.profile(record)
+                profile = self.recorded_storage(record)
                 home = _metadata.home(profile.root, record["name"])
                 metadata = _metadata.load(home, record["name"])
                 if metadata is None:
@@ -710,7 +748,14 @@ class BrokerRuntime:
                 self.claim_log(home, metadata.next_name())
 
         await thread(reserve)
-        await storage(record, self.profile(record), kind, target)
+        await storage(
+            record,
+            self.recorded_storage(record).model_copy(
+                update={"s3_options": self.s3_options(record)}
+            ),
+            kind,
+            target,
+        )
 
     async def stop_children(self) -> None:
         self.changing_children = True

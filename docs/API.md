@@ -91,6 +91,10 @@ and returns `None`. The constructor opens no storage. It takes a lent log or bui
 a live-only handle and validates its limits by the `StreamSpec` rules. Every limit
 is a strict positive integer, except `max_replay` permits zero and `None`, and
 `max_message_bytes` permits `None`. `handle.replicate` holds its replication policy.
+An adopted or restored log with stored `wal_replication` enabled can be served
+with `replicate=False`, including through a managed profile. The broker warns
+and starts no WAL sidecar for it; set `replicate=True` or run litestream
+separately to protect its WAL.
 An existing log keeps its stored configuration and published location. Credentials
 are passed on creation and reopening and retained for metadata uploads and child
 processes. Credentials are not persisted; supply them on each open or use the environment.
@@ -607,8 +611,8 @@ is the same per-stream object for application-specific health decisions.
 
 ## Dynamic management
 
-Use root exports `BrokerConfig`, `StorageProfile`, `Authorization`,
-`HistoryGuard`, `initialize_registry` and `create_app`. Provision a registry
+Use root exports `BrokerConfig`, `Storage`, `Authorization`,
+`HistoryGuard`, `initialize_registry`, `upgrade_registry` and `create_app`. Provision a registry
 once, explicitly, then start the application; startup never creates one:
 
 ```python
@@ -616,18 +620,19 @@ from pathlib import Path
 
 config = streamcast.BrokerConfig(
     broker_id="primary", registry=Path("state/broker.db"),
-    profiles={"local": streamcast.StorageProfile("1", Path("data"))},
+    storage_profiles={"local": streamcast.Storage(root=Path("data").absolute())},
     authorization=authorization,
 )
 streamcast.initialize_registry(config)  # once; existing files are refused
 app = streamcast.create_app(config)     # optionally streams=[static_stream]
 ```
 
-Managed `StorageProfile` roots may be relative to the broker's working directory.
-Profiles also allow `replicate=True` without `published`; replication starts a
-sidecar only for logs with `wal_replication` enabled. These profile settings retain
-their existing contract; static `Storage` definitions require absolute roots and
-a published prefix when replication is enabled.
+Profiles are named `Storage` objects, with the same validation as the static
+factory: absolute roots after `expanduser()`, and a published prefix when
+`replicate=True`. `config.wal_replication` requires replication. With no
+profiles configured, the broker provides `default` under
+`~/.streamcast/<broker_id>/`, publishing nothing. Any configured mapping replaces
+that default. Broker identities and profile names follow the stream-name rule.
 
 ### Ownership and recovery
 
@@ -645,7 +650,8 @@ Startup requires the explicitly provisioned registry with the configured
 broker identity. It replays pending intent before reconciling other desired
 states. It never initializes a missing registry or recreates a bound missing
 log. A new definition starts stopped and creates no log. First serving may
-create only an unbound `create_if_absent` declaration. Once a stream identity
+create only an unbound `create_if_absent` declaration, or restore an unbound
+`restore_published` declaration from published storage. Once a stream identity
 is bound, disk and authoritative version-hint metadata must match it.
 
 Each accepted mutation atomically commits the declaration/desired state,
@@ -679,13 +685,19 @@ operation never proves a destructive transition had no effect.
 
 ### Host policy and authorization
 
-`StorageProfile(revision, root, published=None, config=None, s3_options=None,
-replicate=False)` holds host-only locations, litelink configuration and
-credentials. Its immutable revision is bound into each declaration; changing
-a profile revision requires a reviewed host handoff. HTTP never supplies
-paths, URLs, credentials, WAL settings, or maintenance policy. Public profile
-data contains revision, replication/maintenance flags and replay scope only.
-WAL-replicated logs require a replication-enabled profile.
+`BrokerConfig(storage_profiles={name: Storage(...)})` holds host locations,
+litelink configuration and explicit `s3_options`. The registry stores resolved
+storage and the profile name, never keys. Existing streams keep their recorded
+paths even if the profile changes. Opening and offline transitions use that
+profile's current keys; removing the profile makes the stream observe
+`error: unknown_storage_profile`, without falling back to environment credentials.
+Rotating keys takes effect on restart. GET returns configured `LogConfig`; it can
+differ from the configuration persisted by an existing litelink log.
+
+HTTP callers never supply paths, URLs, WAL settings or credentials. Principals
+with `control.read` can see storage paths and published prefixes, including in
+profile discovery. No response includes `s3_options` or credential values.
+Capabilities summarize only `replicate` and `publishes` for each profile.
 
 `BrokerConfig` also accepts `history_guards={}`, `transport_max_bytes=1<<20`,
 `control_max_bytes=256*1024`, `max_pending=32`, `readiness_timeout=30.0` and
@@ -743,7 +755,9 @@ before adoption rather than silently stripping keywords in the broker.
 | --- | --- |
 | `GET /control/v1` | Contract version, broker/boot identities, bounds, public profiles, protected names, wire versions. |
 | `GET /control/v1/streams?limit=100&cursor=...` | Name-ordered page: `revision`, `streams`, nullable `next_cursor`. Limit is 1–1000. |
-| `GET /control/v1/streams/{name}` | Definition, desired/observed state, revision, identity, pending operation and public profile; `ETag`. |
+| `GET /control/v1/streams/{name}` | Full `stream: {spec, storage}`, `storage_profile`, `initialization`, desired/observed state, revision, identity and pending operation; `ETag`. |
+| `GET /control/v1/storage-profiles` | Named host `Storage` objects without keys; requires `control.read` on `"*"`. |
+| `GET /control/v1/storage-profiles/{name}` | One host `Storage` without keys; the same discovery grant. |
 | `PUT /control/v1/streams/{name}` | Create or replace the full declaration. Create requires `If-None-Match: *`; replace requires `If-Match`. |
 | `PUT /control/v1/streams/{name}/desired` | `{"state":"serving"}`, `"stopped"`, or terminal `"retired"`; requires `If-Match`. |
 | `POST /control/v1/streams/{name}/migrations` | `stream_id`, target `schema` and target `sort_by`; requires `If-Match` and `control.migrate`. |
@@ -757,36 +771,49 @@ together are refused. Collection cursors bind the collection revision and
 last name; a mutation invalidates an older cursor with 409. Restart from the
 first page. A no-op does not change collection or stream revision.
 
-A declaration is a JSON object with no unknown keys:
+PUT takes `StreamSpec` JSON, the same portable model as the static factory:
 
 ```json
 {
+  "name": "events",
   "schema": {
     "type": "object",
     "properties": {"value": {"type": "integer"}},
     "required": ["value"]
   },
   "sort_by": [],
-  "storage_profile": "local",
-  "initialization": "open_existing",
   "exactly_once": false,
   "replay_published": false,
   "max_replay": 100000,
   "group_commit": true,
-  "limits": {
-    "max_backlog": 8192,
-    "max_inbound": 65536,
-    "max_in_flight": 64,
-    "max_message_bytes": 1048576
-  }
+  "max_publishers": 4096,
+  "max_backlog": 8192,
+  "max_inbound": 65536,
+  "max_in_flight": 64,
+  "max_message_bytes": null
 }
 ```
 
-`schema` and `storage_profile` are required. Other keys default as shown
-except `limits`, whose authoritative defaults are `_limits` and the host's
-transport ceiling. `initialization` may also be `create_if_absent`;
-`max_replay` may be null (unbounded) or a nonnegative integer. Limits are
-positive integers. Boolean fields accept JSON booleans only.
+`name` and `schema` are required. The body name must match the path
+(`422 name_mismatch`). All other defaults come from `StreamSpec`;
+`max_message_bytes: null` means the transport ceiling and remains null in GET.
+Limits are strict positive integers; `max_replay` may be null or nonnegative.
+Flags accept JSON booleans only. Unknown fields, including the old nested
+`limits`, fail closed as `422 invalid_declaration`. Its `errors` array contains
+only `loc` and `type`, never input values or validator messages.
+
+Storage and initialization are query parameters:
+`PUT /control/v1/streams/events?storage_profile=local&initialization=create_if_absent`.
+On create they default to `default` and `open_existing`; initialization also
+accepts `create_if_absent` and `restore_published`. Unknown or repeated query
+parameters are refused with 422. Unknown profiles return
+`422 unknown_storage_profile` with sorted `available` names.
+
+Replace preserves omitted query values. A different storage profile is refused
+with `409 immutable_storage`, including before the first bind. Initialization
+is create-only and ignored on replace. Storage is fixed for a stream's life;
+the record contains its concrete resolved paths, never a live reference to a
+host profile. Static streams have no registry record and GET returns 404.
 
 Schema property order is significant. The schema compiler in
 [`API.md`](API.md#stream) defines supported types, nullability, integer and
@@ -797,8 +824,7 @@ validation. `title` and `description` are annotations. Explicit
 `litelink_offset` columns are refused. Sort columns must be distinct declared
 column names. Row validation and protocol framing remain the existing core's.
 
-Non-schema definition changes require observed `stopped`. A bound stream's
-storage profile cannot change. Schema/order/sort changes require an explicit
+Non-schema definition changes require observed `stopped`. A stream's storage profile cannot change. Schema/order/sort changes require an explicit
 migration, with the current stream identity and both desired and observed
 stopped (or a failed stopped transition). Migration keeps the active
 definition separate from the durable target until metadata and target
@@ -811,8 +837,8 @@ A mutation returns 202 with `status`, `operation_id`, `revision`, an ETag and
 `Location: /control/v1/operations/{id}`. Poll the operation: `accepted` →
 `running` → `succeeded` or `failed`. A satisfied no-op returns 200 and a
 succeeded operation without a new generation. A receipt is scoped to the
-principal and broker registry and hashes method, resource, ordered JSON body
-and preconditions. An identical retry returns the original status/body/
+principal and broker registry and hashes method, resource, ordered JSON body,
+query profile/initialization and preconditions. An identical retry returns the original status/body/
 Location **before checking today's ETag**. Different intent under that key
 receives 409. The controller persists keys across network retries and polls
 to completion; 202 alone does not establish readiness.
@@ -826,8 +852,27 @@ rows. Statuses include 400 malformed input, 401 authentication, 403 grants
 or history guard, 404 unknown resources, 409 conflict, 412 preconditions,
 413 size, 415 media type, 422 unsupported declaration, 428 preconditions
 required, 429 capacity, and 503 unavailable. 429/503 are retryable and include
-`Retry-After: 1`. A failed operation reports `transition_failed`; inspect
+`Retry-After: 1`. A failed operation reports `transition_failed` (or `unknown_storage_profile` for
+a removed host profile); inspect
 host-side evidence before retrying an irreversible operation.
+
+### Registry v2 upgrade
+
+Stop the broker, port host profiles to `storage_profiles={name: Storage(...)}`,
+and call `streamcast.upgrade_registry(config)` explicitly before startup.
+A v1 registry otherwise refuses with `registry version 1: run upgrade_registry`.
+The upgrade takes the registry lock, backs up SQLite to `<registry>.v1` and
+fsyncs it before changing any records. One transaction resolves every profile,
+verifies each bound identity against authoritative disk metadata, flattens limits
+while keeping the old resolved message-byte limit, normalizes raw pending
+definition intents with 0.26 defaults, and sets version 2. Unknown profiles or
+identity mismatches abort the whole transaction. A failure before commit leaves v1 intact; rerunning replaces
+the backup. After commit the registry is v2. The backup is the operator's to delete.
+
+Receipts keep their old digests. Retrying a pre-upgrade request with its original
+key returns `409 idempotency_mismatch`; create preconditions still prevent a
+duplicate. Older brokers refuse v2. Downgrade requires restoring the `.v1` copy
+and loses all changes made since the upgrade.
 
 ### Data consumer contract and protected history
 
