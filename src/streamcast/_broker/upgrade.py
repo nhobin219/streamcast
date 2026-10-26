@@ -13,20 +13,23 @@ from streamcast._broker.registry import VERSION, Lock, dumps
 from streamcast._spec import Stream, StreamSpec
 
 
-def _request(name: str, definition: dict) -> dict:
+def _request(name: str, definition: dict, max_message_bytes: int) -> dict:
+    # Raw v1 operation targets omit defaults that stream records already hold.
+    # StreamSpec shares the v1 defaults except for the byte ceiling, which
+    # comes from the accepted record rather than the current host settings.
     spec = StreamSpec.model_validate(
         {
             key: value
             for key, value in definition.items()
             if key not in {"storage_profile", "initialization", "limits"}
         }
-        | {"name": name}
-        | definition["limits"]
+        | {"name": name, "max_message_bytes": max_message_bytes}
+        | definition.get("limits", {})
     )
     return {
         "spec": spec.model_dump(mode="json"),
         "storage_profile": definition["storage_profile"],
-        "initialization": definition["initialization"],
+        "initialization": definition.get("initialization", "open_existing"),
     }
 
 
@@ -77,7 +80,11 @@ def upgrade_registry(config: BrokerConfig) -> None:
             db.execute("BEGIN IMMEDIATE")
             for name, body in db.execute("SELECT name, body FROM streams").fetchall():
                 record = json.loads(body)
-                target = _request(name, record["definition"])
+                target = _request(
+                    name,
+                    record["definition"],
+                    record["definition"]["limits"]["max_message_bytes"],
+                )
                 profile = config.storage_profiles.get(target["storage_profile"])
                 if profile is None:
                     raise ValueError("unknown_storage_profile")
@@ -109,7 +116,11 @@ def upgrade_registry(config: BrokerConfig) -> None:
                         ).fetchone()[0]
                     )
                     if operation["kind"] == "definition":
-                        operation["target"] = _request(name, operation["target"])
+                        operation["target"] = _request(
+                            name,
+                            operation["target"],
+                            target["spec"]["max_message_bytes"],
+                        )
                         db.execute(
                             "UPDATE operations SET body=? WHERE id=?",
                             (dumps(operation), operation_id),

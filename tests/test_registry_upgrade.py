@@ -13,6 +13,7 @@ import pytest
 
 from streamcast import Storage, Stream, StreamHandle, StreamSpec, upgrade_registry
 from streamcast._broker.registry import Lock, Registry, dumps
+from streamcast._broker.runtime import BrokerRuntime
 from tests.test_broker import SHAPE, managed, put
 
 pytest_plugins = ["tests.test_broker"]
@@ -48,13 +49,17 @@ V1_OPERATION: dict[str, Any] = {
     "name": "events",
     "kind": "definition",
     "revision": 3,
-    "target": V1_DEFINITION,
+    "target": {
+        "schema": SHAPE,
+        "storage_profile": "local",
+        "initialization": "create_if_absent",
+    },
     "status": "accepted",
     "error": None,
 }
 
 
-def seed_v1(config, records=None):
+def seed_v1(config, records=None, operation=None):
     with sqlite3.connect(config.registry) as db:
         db.execute("UPDATE identity SET version=1")
         for record in records or [V1_RECORD]:
@@ -63,7 +68,8 @@ def seed_v1(config, records=None):
             )
 
         db.execute(
-            "INSERT INTO operations VALUES (?,?)", ("pending", dumps(V1_OPERATION))
+            "INSERT INTO operations VALUES (?,?)",
+            ("pending", dumps(operation or V1_OPERATION)),
         )
         db.execute(
             "INSERT INTO receipts VALUES (?,?,?,?)",
@@ -129,6 +135,86 @@ async def test_explicit_upgrade_backup_pending_intent_and_receipts(config):
         assert retry.json()["error"]["code"] == "idempotency_mismatch"
 
 
+@pytest.mark.parametrize("status", ["accepted", "failed"])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"limits": {"max_inbound": 17}},
+        {
+            "limits": {"max_message_bytes": 32768},
+            "sort_by": ["value"],
+            "exactly_once": True,
+            "replay_published": True,
+            "group_commit": False,
+            "max_replay": None,
+        },
+    ],
+)
+async def test_upgrade_raw_pending_defaults_and_retry(
+    config, monkeypatch, status, changes
+):
+    # 0.26 stores the raw PUT target, beside the resolved declaration. The
+    # current host ceiling can differ from the one that accepted that PUT.
+    raw = {"schema": SHAPE, "storage_profile": "local"} | changes
+    record = copy.deepcopy(V1_RECORD)
+    resolved = record["definition"]
+    resolved.update({k: v for k, v in changes.items() if k != "limits"})
+    resolved["initialization"] = "open_existing"
+    resolved["limits"]["max_message_bytes"] = 32768
+    resolved["limits"].update(changes.get("limits", {}))
+    operation = copy.deepcopy(V1_OPERATION) | {"target": raw, "status": status}
+    seed_v1(config, [record], operation)
+    before = state(config.registry)
+
+    upgrade_registry(config)
+
+    after = state(config.registry)
+    assert state(Path(str(config.registry) + ".v1")) == before
+    assert after["receipts"] == before["receipts"]
+    converted = json.loads(after["streams"][0][1])
+    target = json.loads(after["operations"][0][1])["target"]
+    assert target == {
+        "spec": converted["stream"]["spec"],
+        "storage_profile": "local",
+        "initialization": "open_existing",
+    }
+    assert target["spec"] == {
+        "name": "events",
+        "schema": SHAPE,
+        "sort_by": resolved["sort_by"],
+        "exactly_once": resolved["exactly_once"],
+        "replay_published": resolved["replay_published"],
+        "group_commit": resolved["group_commit"],
+        "max_replay": resolved["max_replay"],
+        "max_publishers": 4096,
+        **resolved["limits"],
+    }
+
+    async def fail_reconcile(self, record):
+        raise RuntimeError("injected recovery failure")
+
+    reconcile = BrokerRuntime.reconcile
+    monkeypatch.setattr(BrokerRuntime, "reconcile", fail_reconcile)
+    async with managed(config) as (owner, client, _):
+        # Force recovery to fail so a v2 retry must match the converted intent.
+        monkeypatch.setattr(BrokerRuntime, "reconcile", reconcile)
+        assert owner.operations["pending"]["status"] == "failed"
+        assert owner.records["events"]["pending"] == "pending"
+        retry = await put(
+            owner,
+            client,
+            "events",
+            target["spec"],
+            revision=3,
+            key="v2-retry",
+            initialization="open_existing",
+        )
+        assert retry.status_code == 202, retry.text
+        assert owner.records["events"]["pending"] is None
+        assert owner.operations[retry.json()["operation_id"]]["status"] == "succeeded"
+
+
 @pytest.mark.parametrize("bad", ["profile", "identity", "conversion", "pending"])
 async def test_upgrade_rolls_back_all_records_and_can_retry(config, tmp_path, bad):
     # The first record is valid and converted before the second fails.
@@ -151,7 +237,7 @@ async def test_upgrade_rolls_back_all_records_and_can_retry(config, tmp_path, ba
     if bad == "pending":
         with sqlite3.connect(config.registry) as db:
             operation = copy.deepcopy(V1_OPERATION)
-            operation["target"]["limits"]["max_inbound"] = 0
+            operation["target"]["limits"] = {"max_inbound": 0}
             db.execute("UPDATE operations SET body=?", (dumps(operation),))
 
     original = state(config.registry)

@@ -91,6 +91,10 @@ and returns `None`. The constructor opens no storage. It takes a lent log or bui
 a live-only handle and validates its limits by the `StreamSpec` rules. Every limit
 is a strict positive integer, except `max_replay` permits zero and `None`, and
 `max_message_bytes` permits `None`. `handle.replicate` holds its replication policy.
+An adopted or restored log with stored `wal_replication` enabled can be served
+with `replicate=False`, including through a managed profile. The broker warns
+and starts no WAL sidecar for it; set `replicate=True` or run litestream
+separately to protect its WAL.
 An existing log keeps its stored configuration and published location. Credentials
 are passed on creation and reopening and retained for metadata uploads and child
 processes. Credentials are not persisted; supply them on each open or use the environment.
@@ -860,9 +864,9 @@ A v1 registry otherwise refuses with `registry version 1: run upgrade_registry`.
 The upgrade takes the registry lock, backs up SQLite to `<registry>.v1` and
 fsyncs it before changing any records. One transaction resolves every profile,
 verifies each bound identity against authoritative disk metadata, flattens limits
-while keeping the old resolved message-byte limit, converts pending definition
-intents, and sets version 2. Unknown profiles or identity mismatches abort the
-whole transaction. A failure before commit leaves v1 intact; rerunning replaces
+while keeping the old resolved message-byte limit, normalizes raw pending
+definition intents with 0.26 defaults, and sets version 2. Unknown profiles or
+identity mismatches abort the whole transaction. A failure before commit leaves v1 intact; rerunning replaces
 the backup. After commit the registry is v2. The backup is the operator's to delete.
 
 Receipts keep their old digests. Retrying a pre-upgrade request with its original

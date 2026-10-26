@@ -35,6 +35,10 @@ there was nothing to have changed from. Everything above it is ordinary.
   fsyncs `<registry>.v1`, validates bound identities and converts records/pending
   definitions in one transaction. Downgrade restores that backup, losing later
   changes. Pre-upgrade receipt keys return `idempotency_mismatch` after upgrade.
+- Managed opens intentionally accept adopted or restored logs whose stored
+  `wal_replication` is enabled under a profile with `replicate=False`, matching
+  static handles. Serving emits a warning and starts no WAL sidecar; enable
+  replication on the profile or run litestream separately for WAL protection.
 - Managed streams use the same definition factory, including `max_publishers`
   and `restore_published`. Recorded storage survives profile edits; current
   profile keys are used on restart. A removed profile observes
