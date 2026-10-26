@@ -125,8 +125,12 @@ jobs:
 
           async def main():
               root = Path(tempfile.mkdtemp())
-              stream = streamcast.Stream.open("trades", create=True, root=root, schema=SCHEMA,
-                                             sort_by=("event_ts",))
+              stream = streamcast.StreamHandle.open(
+                  streamcast.Stream(
+                      spec=streamcast.StreamSpec(name="trades", schema=SCHEMA,
+                                                 sort_by=("event_ts",)),
+                      storage=streamcast.Storage(root=root),
+                  ), initialization="create_if_absent")
               try:
                   app = streamcast.create_app(streams=stream,
                       config=streamcast.BrokerConfig(maintain=False))
