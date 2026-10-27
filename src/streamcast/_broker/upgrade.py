@@ -52,83 +52,96 @@ def upgrade_registry(config: BrokerConfig) -> None:
 
         db = sqlite3.connect(path)
         db.execute("PRAGMA synchronous=FULL")
-        if db.execute("SELECT version, broker FROM identity").fetchall() != [
-            (1, config.broker_id)
-        ]:
+        steps = {1: _upgrade_v1_to_v2}
+        identity = db.execute("SELECT version, broker FROM identity").fetchall()
+        if (
+            len(identity) != 1
+            or identity[0][1] != config.broker_id
+            or identity[0][0] not in steps
+            or identity[0][0] >= VERSION
+        ):
             raise ValueError("registry identity mismatch: v1 required")
 
-        backup_path = Path(str(path) + ".v1")
-        # An interrupted SQLite copy need not be a readable database. The
-        # locked source is still v1, so replace that incomplete backup first.
-        backup_path.unlink(missing_ok=True)
-        backup = sqlite3.connect(backup_path)
-        try:
-            db.backup(backup)
-        finally:
-            backup.close()
+        version = identity[0][0]
+        while version < VERSION and version in steps:
+            steps[version](db, path, config)
+            version = db.execute("SELECT version FROM identity").fetchone()[0]
 
-        with backup_path.open("rb") as handle:
-            os.fsync(handle.fileno())
-
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-
-        with db:
-            db.execute("BEGIN IMMEDIATE")
-            for name, body in db.execute("SELECT name, body FROM streams").fetchall():
-                record = json.loads(body)
-                target = _request(
-                    name,
-                    record["definition"],
-                    record["definition"]["limits"]["max_message_bytes"],
-                )
-                profile = config.storage_profiles.get(target["storage_profile"])
-                if profile is None:
-                    raise ValueError("unknown_storage_profile")
-
-                if record["stream_id"] is not None:
-                    metadata = _metadata.load(_metadata.home(profile.root, name), name)
-                    if metadata is None or metadata.stream_id != record["stream_id"]:
-                        raise ValueError("identity mismatch")
-
-                converted = {
-                    key: value
-                    for key, value in record.items()
-                    if key not in {"definition", "profile_revision"}
-                } | {
-                    "stream": Stream(
-                        spec=StreamSpec.model_validate(target["spec"]), storage=profile
-                    ).model_dump(mode="json"),
-                    "storage_profile": target["storage_profile"],
-                    "initialization": target["initialization"],
-                }
-                db.execute(
-                    "UPDATE streams SET body=? WHERE name=?", (dumps(converted), name)
-                )
-                if record["pending"] is not None:
-                    operation_id = record["pending"]
-                    operation = json.loads(
-                        db.execute(
-                            "SELECT body FROM operations WHERE id=?", (operation_id,)
-                        ).fetchone()[0]
-                    )
-                    if operation["kind"] == "definition":
-                        operation["target"] = _request(
-                            name,
-                            operation["target"],
-                            target["spec"]["max_message_bytes"],
-                        )
-                        db.execute(
-                            "UPDATE operations SET body=? WHERE id=?",
-                            (dumps(operation), operation_id),
-                        )
-
-            db.execute("UPDATE identity SET version=?", (VERSION,))
     finally:
         if db is not None:
             db.close()
 
         lock.close()
+
+
+def _upgrade_v1_to_v2(db: sqlite3.Connection, path: Path, config: BrokerConfig) -> None:
+    backup_path = Path(str(path) + ".v1")
+    # An interrupted SQLite copy need not be a readable database. The
+    # locked source is still v1, so replace that incomplete backup first.
+    backup_path.unlink(missing_ok=True)
+    backup = sqlite3.connect(backup_path)
+    try:
+        db.backup(backup)
+    finally:
+        backup.close()
+
+    with backup_path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        for name, body in db.execute("SELECT name, body FROM streams").fetchall():
+            record = json.loads(body)
+            target = _request(
+                name,
+                record["definition"],
+                record["definition"]["limits"]["max_message_bytes"],
+            )
+            profile = config.storage_profiles.get(target["storage_profile"])
+            if profile is None:
+                raise ValueError("unknown_storage_profile")
+
+            if record["stream_id"] is not None:
+                metadata = _metadata.load(_metadata.home(profile.root, name), name)
+                if metadata is None or metadata.stream_id != record["stream_id"]:
+                    raise ValueError("identity mismatch")
+
+            converted = {
+                key: value
+                for key, value in record.items()
+                if key not in {"definition", "profile_revision"}
+            } | {
+                "stream": Stream(
+                    spec=StreamSpec.model_validate(target["spec"]), storage=profile
+                ).model_dump(mode="json"),
+                "storage_profile": target["storage_profile"],
+                "initialization": target["initialization"],
+            }
+            db.execute(
+                "UPDATE streams SET body=? WHERE name=?", (dumps(converted), name)
+            )
+            if record["pending"] is not None:
+                operation_id = record["pending"]
+                operation = json.loads(
+                    db.execute(
+                        "SELECT body FROM operations WHERE id=?", (operation_id,)
+                    ).fetchone()[0]
+                )
+                if operation["kind"] == "definition":
+                    operation["target"] = _request(
+                        name,
+                        operation["target"],
+                        target["spec"]["max_message_bytes"],
+                    )
+                    db.execute(
+                        "UPDATE operations SET body=? WHERE id=?",
+                        (dumps(operation), operation_id),
+                    )
+
+        db.execute("UPDATE identity SET version = 2")
