@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import time
 import uuid
 from collections.abc import Coroutine
@@ -45,7 +44,9 @@ class BrokerRuntime:
         self.registry = registry
         self.boot_id = uuid.uuid4().hex
         self.records: dict[str, dict] = {}
-        self.operations: dict[str, dict] = {}
+        self.queued: set[str] = set()
+        self.attempts: dict[tuple[str, int, int], asyncio.Future] = {}
+        self.waiters = 0
         self.observed: dict[str, dict] = {}
         self.generations: dict[str, Generation] = {}
         self.locks: dict[Any, Lock] = {}
@@ -77,7 +78,7 @@ class BrokerRuntime:
         try:
             self.static = {stream.name: stream for stream in streams}
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
-            self.records, self.operations, self.collection = await thread(registry.load)
+            self.records, self.collection = await thread(registry.load)
             if self.static.keys() & self.records.keys():
                 raise ValueError("static and managed stream names overlap")
 
@@ -88,10 +89,16 @@ class BrokerRuntime:
                 self.observe(record["name"], "unknown")
 
             recovered = set()
-            for operation in list(self.operations.values()):
-                if self.records[operation["name"]].get("pending") == operation["id"]:
-                    await self.execute(operation)
-                    recovered.add(operation["name"])
+            for name, record in list(self.records.items()):
+                if record["pending"] is not None:
+                    # Recovery resumes every durable intent, including failed
+                    # attempts. execute itself accepts only queued/accepted work.
+                    record = copy.deepcopy(record)
+                    record["pending"]["status"] = "accepted"
+                    await thread(registry.update, record)
+                    self.records[name] = record
+                    await self.execute(name)
+                    recovered.add(name)
 
             for record in self.records.values():
                 if record.get("pending") is None and record["name"] not in recovered:
@@ -249,11 +256,49 @@ class BrokerRuntime:
         task.add_done_callback(completed)
         return await asyncio.shield(task)
 
+    def status(self, name: str) -> dict:
+        record = self.records[name]
+        pending = record["pending"]
+        observed = self.observed.get(name, {"state": "unknown"})
+        return copy.deepcopy(
+            {
+                "name": name,
+                "revision": record["revision"],
+                "pending": None
+                if pending is None
+                else {
+                    key: pending[key]
+                    for key in ("kind", "revision", "status", "attempt", "error")
+                },
+                "observed": {
+                    "state": observed["state"],
+                    "error": observed.get("error"),
+                },
+            }
+        )
+
+    def attempt(self, name: str) -> asyncio.Future:
+        pending = self.records[name]["pending"]
+        key = (name, pending["revision"], pending["attempt"])
+        if key not in self.attempts:
+            future = asyncio.get_running_loop().create_future()
+            # A commit already in flight may finish after shutdown or worker
+            # exit resolved the existing waiters. Its result is unknown too.
+            if self.closing:
+                future.set_result({"outcome": "unknown"})
+                return future
+
+            self.attempts[key] = future
+
+        return self.attempts[key]
+
+    def enqueue(self, name: str) -> None:
+        if name not in self.queued:
+            self.queued.add(name)
+            self.queue.put_nowait(name)
+
     async def mutate(
         self,
-        principal: str,
-        key: str,
-        method: str,
         name: str,
         kind: str,
         body: Any,
@@ -269,16 +314,7 @@ class BrokerRuntime:
         if self.config.registry is None:
             raise Fault(403, "management_disabled")
 
-        digest = hashlib.sha256(
-            dumps(
-                [method, name, kind, body, storage_profile, initialization, match, none]
-            ).encode()
-        ).hexdigest()
         async with self.serial:
-            prior = await thread(self.registry.receipt, principal, key, digest)
-            if prior is not None:
-                return prior
-
             if self.closing:
                 raise Fault(503, "broker_stopping")
 
@@ -325,6 +361,43 @@ class BrokerRuntime:
                     "storage_profile": profile_name,
                     "initialization": intent,
                 }
+            elif kind == "desired":
+                if (
+                    not isinstance(body, dict)
+                    or set(body) != {"state"}
+                    or body["state"] not in ("serving", "stopped", "retired")
+                ):
+                    raise Fault(422, "invalid_desired")
+
+                if body["state"] == "retired" and name in self.config.history_guards:
+                    raise Fault(403, "history_prefix_protected")
+
+            elif kind == "migration":
+                if name in self.config.history_guards:
+                    raise Fault(403, "history_prefix_protected")
+
+                if not isinstance(body, dict) or set(body) != {
+                    "stream_id",
+                    "schema",
+                    "sort_by",
+                }:
+                    raise Fault(422, "invalid_migration")
+
+                if previous is not None:
+                    if (
+                        not previous["stream_id"]
+                        or body["stream_id"] != previous["stream_id"]
+                    ):
+                        raise Fault(409, "identity_mismatch")
+
+                    self.validate_spec(
+                        previous["stream"]["spec"]
+                        | {"schema": body["schema"], "sort_by": body["sort_by"]},
+                        name,
+                    )
+
+            else:
+                raise Fault(422, "invalid_operation")
 
             if previous is None:
                 if kind != "definition":
@@ -335,6 +408,9 @@ class BrokerRuntime:
 
                 if none != "*" or match is not None:
                     raise Fault(412, "precondition_failed")
+
+                if len(self.records) >= self.config.max_streams:
+                    raise Fault(409, "stream_limit", limit=self.config.max_streams)
 
                 record = {
                     "name": name,
@@ -352,22 +428,34 @@ class BrokerRuntime:
                     "pending": None,
                 }
             else:
+                if none is not None:
+                    raise Fault(412, "precondition_failed")
+
                 if match is None:
                     raise Fault(428, "precondition_required")
 
                 if match != f'"{previous["revision"]}"' or none is not None:
                     raise Fault(412, "precondition_failed")
 
-                if previous.get("pending") is not None:
-                    pending = self.operations[previous["pending"]]
-                    # A failed irreversible intent may only be retried at
-                    # exactly its stored target. Never overwrite its journal.
-                    if (
-                        pending["status"] != "failed"
-                        or kind != pending["kind"]
-                        or dumps(target) != dumps(pending["target"])
-                    ):
+                pending = previous["pending"]
+                if pending is not None:
+                    # Validated target shapes are disjoint between routes.
+                    # A different intent must never replace a failed migration.
+                    if dumps(target) != dumps(pending["target"]):
                         raise Fault(409, "transition_pending")
+
+                    if pending["status"] == "failed":
+                        record = copy.deepcopy(previous)
+                        record["pending"].update(
+                            status="accepted",
+                            error=None,
+                            attempt=pending["attempt"] + 1,
+                        )
+                        await thread(self.registry.update, record)
+                        self.records[name] = record
+                        self.enqueue(name)
+
+                    return {"future": self.attempt(name), "status": self.status(name)}
 
                 record = copy.deepcopy(previous)
                 state = self.observed[name]["state"]
@@ -384,119 +472,77 @@ class BrokerRuntime:
 
                     record["stream"]["spec"] = spec
                 elif kind == "desired":
-                    if (
-                        not isinstance(body, dict)
-                        or set(body) != {"state"}
-                        or body["state"] not in ("serving", "stopped", "retired")
-                    ):
-                        raise Fault(422, "invalid_desired")
-
                     if record["desired"] == "retired" and body["state"] != "retired":
                         raise Fault(409, "retired_stream")
-
-                    if (
-                        body["state"] == "retired"
-                        and name in self.config.history_guards
-                    ):
-                        raise Fault(403, "history_prefix_protected")
 
                     if body["state"] == "retired" and not record["stream_id"]:
                         raise Fault(409, "unbound_stream")
 
                     record["desired"] = body["state"]
-                elif kind == "migration":
-                    # This is host admission, independent of controller grants.
-                    if name in self.config.history_guards:
-                        raise Fault(403, "history_prefix_protected")
+                elif (
+                    state not in ("stopped", "error") or record["desired"] != "stopped"
+                ):
+                    raise Fault(409, "must_be_stopped")
 
-                    if not isinstance(body, dict) or set(body) != {
-                        "stream_id",
-                        "schema",
-                        "sort_by",
-                    }:
-                        raise Fault(422, "invalid_migration")
+                equal = (
+                    kind != "migration"
+                    and dumps(previous["stream"]) == dumps(record["stream"])
+                    and previous["desired"] == record["desired"]
+                )
+                if equal and state == record["desired"]:
+                    return {"future": None, "status": self.status(name)}
 
-                    if (
-                        not record["stream_id"]
-                        or body["stream_id"] != record["stream_id"]
-                    ):
-                        raise Fault(409, "identity_mismatch")
+                # A repair re-executes this revision, rather than inventing a
+                # new intent merely because observed state was lost or failed.
+                if not equal:
+                    record["revision"] += 1
 
-                    if (
-                        state not in ("stopped", "error")
-                        or record["desired"] != "stopped"
-                    ):
-                        raise Fault(409, "must_be_stopped")
-
-                    self.validate_spec(
-                        record["stream"]["spec"]
-                        | {"schema": body["schema"], "sort_by": body["sort_by"]},
-                        name,
-                    )
-                else:
-                    raise Fault(422, "invalid_operation")
-
-                record["revision"] += 1
-
-            pending_count = sum(
-                r.get("pending") is not None
-                for other, r in self.records.items()
-                if other != name
-            )
+            pending_count = sum(r["pending"] is not None for r in self.records.values())
             if pending_count >= self.config.max_pending:
                 raise Fault(429, "operation_queue_full")
 
-            operation_id = uuid.uuid4().hex
-            noop = (
-                previous is not None
-                and kind != "migration"
-                and dumps(previous["stream"]) == dumps(record["stream"])
-                and previous["desired"] == record["desired"]
-                and self.observed[name]["state"] in (record["desired"],)
-            )
-            if noop:
-                record["revision"] = previous["revision"]
-
-            operation = {
-                "id": operation_id,
-                "name": name,
+            record["pending"] = {
                 "kind": kind,
                 "revision": record["revision"],
                 "target": target,
-                "status": "succeeded" if noop else "accepted",
+                "status": "accepted",
+                "attempt": 1,
                 "error": None,
             }
-            record["pending"] = None if noop else operation_id
-            receipt = {
-                "status": 200 if noop else 202,
-                "operation_id": operation_id,
-                "revision": record["revision"],
-            }
-            # Persist before publishing desired state or scheduling any effect.
-            await thread(
-                self.registry.accept, record, operation, principal, key, digest, receipt
-            )
-            self.records[name] = record
-            self.operations[operation_id] = operation
-            if not noop:
+            # Persist before publishing intent or scheduling any storage effect.
+            if previous is None or record["revision"] != previous["revision"]:
+                await thread(self.registry.accept, record)
                 self.collection += 1
-                self.observe(name, self.observed.get(name, {}).get("state", "unknown"))
-                self.queue.put_nowait(operation_id)
+            else:
+                await thread(self.registry.update, record)
 
-            return receipt
+            self.records[name] = record
+            self.observe(name, self.observed.get(name, {}).get("state", "unknown"))
+            future = self.attempt(name)
+            self.enqueue(name)
+            return {"future": future, "status": self.status(name)}
 
     async def work(self) -> None:
         while True:
-            key = await self.queue.get()
+            name = await self.queue.get()
             try:
-                if key is None:
+                if name is None:
                     return
 
-                await self.execute(self.operations[key])
+                self.queued.discard(name)
+                await self.execute(name)
             finally:
                 self.queue.task_done()
 
+    def unavailable(self) -> None:
+        for future in self.attempts.values():
+            if not future.done():
+                future.set_result({"outcome": "unknown"})
+
+        self.attempts.clear()
+
     def worker_done(self, worker: asyncio.Task) -> None:
+        self.unavailable()
         if not self.closing:
             self.closing = True
             for generation in self.generations.values():
@@ -505,19 +551,25 @@ class BrokerRuntime:
         if not worker.cancelled():
             worker.exception()
 
-    async def execute(self, operation: dict) -> None:
-        operation = copy.deepcopy(operation)
-        name = operation["name"]
-        record = copy.deepcopy(self.records[name])
-        operation["status"] = "running"
-        await thread(self.registry.update, record, operation)
-        self.operations[operation["id"]] = copy.deepcopy(operation)
+    async def execute(self, name: str) -> None:
+        async with self.serial:
+            pending = self.records[name]["pending"]
+            if pending is None or pending["status"] != "accepted":
+                return
+
+            record = copy.deepcopy(self.records[name])
+            pending = record["pending"]
+            pending["status"] = "running"
+            await thread(self.registry.update, record)
+            self.records[name] = copy.deepcopy(record)
+
+        key = (name, pending["revision"], pending["attempt"])
         try:
             await self.claim(record)
-            if operation["kind"] == "migration":
+            if pending["kind"] == "migration":
                 await self.offline(record)
                 self.observe(name, "migrating")
-                target = operation["target"]
+                target = pending["target"]
                 await self.storage_transition(record, "migration", target)
                 record["stream"]["spec"] = record["stream"]["spec"] | {
                     "schema": target["schema"],
@@ -527,24 +579,30 @@ class BrokerRuntime:
             else:
                 await self.reconcile(record)
 
-            operation["status"] = "succeeded"
-            operation["error"] = None
             record["pending"] = None
+            outcome = "applied"
         except Exception as exc:
-            # Keep intent and close admission; errors contain no storage paths,
-            # row values, credentials, or framework exception strings.
-            operation["status"] = "failed"
-            operation["error"] = self.transition_error(exc)
+            pending["status"] = "failed"
+            pending["error"] = self.transition_error(exc)
             generation = self.generations.get(name)
             if generation is not None:
                 generation.accepting = generation.writable = False
 
-            self.observe(name, "error", error=operation["error"])
+            self.observe(name, "error", error=pending["error"])
+            outcome = "failed"
 
         async with self.serial:
-            await thread(self.registry.update, record, operation)
+            await thread(self.registry.update, record)
             self.records[name] = record
-            self.operations[operation["id"]] = operation
+            snapshot = {
+                "outcome": outcome,
+                "error": pending["error"],
+                "revision": record["revision"],
+                "status": self.status(name),
+            }
+            future = self.attempts.pop(key, None)
+            if future is not None:
+                future.set_result(snapshot)
 
     async def reconcile(self, record: dict) -> None:
         name = record["name"]
@@ -703,7 +761,7 @@ class BrokerRuntime:
             await thread(stream._writer.close)
 
         await self.stop_children()
-        # Final publication errors are visible to the operation. Maintainers'
+        # Final publication errors are visible to the pending attempt. Maintainers'
         # best-effort exit hooks alone cannot establish a successful stop.
         if name not in self.static:
             await self.finalize(stream, record)
@@ -856,6 +914,7 @@ class BrokerRuntime:
             return
 
         self.closing = True
+        self.unavailable()
         if self.controls:
             await asyncio.gather(*list(self.controls), return_exceptions=True)
 

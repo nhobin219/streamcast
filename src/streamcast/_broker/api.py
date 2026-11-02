@@ -43,8 +43,7 @@ def error(fault: Fault) -> JSONResponse:
             "error": {
                 "code": fault.code,
                 "message": fault.code.replace("_", " "),
-                "retryable": fault.status in (429, 503),
-                "operation_id": None,
+                "retryable": fault.status in (429, 500, 503),
                 **fault.details,
             }
         },
@@ -239,31 +238,10 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
         value = runtime().view(name)
         return JSONResponse(value, headers={"ETag": f'"{value["revision"]}"'})
 
-    @app.get(CONTROL + "/operations/{operation_id}")
-    async def operation(operation_id: str, request: Request):
-        principal = await authorize(config, request.scope, "control.read", "*")
-        value = runtime().operations.get(operation_id)
-        if value is None:
-            raise Fault(404, "unknown_operation")
-
-        if not await config.authorization.allows(
-            principal, "control.read", value["name"]
-        ):
-            raise Fault(403, "forbidden")
-
-        return value
-
     async def mutation(name: str, request: Request, kind: str):
         action = "control.migrate" if kind == "migration" else "control.mutate"
-        principal = await authorize(config, request.scope, action, name)
+        await authorize(config, request.scope, action, name)
         owner = runtime()
-        key = request.headers.get("idempotency-key", "")
-        if not key:
-            raise Fault(428, "idempotency_key_required")
-
-        if not 1 <= len(key) <= 128 or any(ord(c) < 33 or ord(c) > 126 for c in key):
-            raise Fault(400, "invalid_idempotency_key")
-
         value = await body(request, config.control_max_bytes)
         allowed = (
             {"storage_profile", "initialization"} if kind == "definition" else set()
@@ -274,12 +252,9 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
             raise Fault(422, "invalid_query")
 
         # These tasks belong to the runtime, not the socket. Close drains them
-        # before the operation worker and the registry are shut down.
-        receipt = await owner.control(
+        # before the transition worker and the registry are shut down.
+        accepted = await owner.control(
             owner.mutate(
-                principal,
-                key,
-                request.method,
                 name,
                 kind,
                 value,
@@ -289,17 +264,55 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
                 initialization=request.query_params.get("initialization"),
             )
         )
-        return JSONResponse(
-            receipt,
-            status_code=receipt["status"],
-            headers={
-                "ETag": f'"{receipt["revision"]}"',
-                "Location": (
+        future = accepted["future"]
+        result = None
+        # Waiting is outside both the acceptance task and the serial lock.
+        # Every socket waits on a shield of its attempt's shared future.
+        if (
+            future is not None
+            and config.control_apply_wait_s > 0
+            and owner.waiters < config.max_waiters
+        ):
+            owner.waiters += 1
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(future), config.control_apply_wait_s
+                )
+            except TimeoutError:
+                pass
+            finally:
+                owner.waiters -= 1
+
+        if result is not None and result["outcome"] == "unknown":
+            response = error(
+                Fault(
+                    503,
+                    "control_unavailable",
+                    name=name,
+                    revision=accepted["status"]["revision"],
+                )
+            )
+        elif result is not None and result["outcome"] == "failed":
+            response = error(
+                Fault(500, result["error"], name=name, revision=result["revision"])
+            )
+        else:
+            status = accepted["status"] if result is None else result["status"]
+            code = 200 if future is None or result is not None else 202
+            response = JSONResponse(status, status_code=code)
+            if code == 202:
+                response.headers["Location"] = (
                     f"{request.scope.get('root_path', '').rstrip('/')}"
-                    f"{CONTROL}/operations/{receipt['operation_id']}"
-                ),
-            },
+                    f"{CONTROL}/streams/{name}"
+                )
+
+        revision = (
+            accepted["status"]["revision"]
+            if result is None or result["outcome"] == "unknown"
+            else result["revision"]
         )
+        response.headers["ETag"] = f'"{revision}"'
+        return response
 
     @app.put(CONTROL + "/streams/{name}")
     async def put_stream(name: str, request: Request):
@@ -309,7 +322,7 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
     async def desired(name: str, request: Request):
         return await mutation(name, request, "desired")
 
-    @app.post(CONTROL + "/streams/{name}/migrations")
+    @app.put(CONTROL + "/streams/{name}/schema")
     async def migration(name: str, request: Request):
         return await mutation(name, request, "migration")
 

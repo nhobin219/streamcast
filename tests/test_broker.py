@@ -118,6 +118,7 @@ def config(tmp_path, monkeypatch):
         tmp_path / "registry.db",
         {"local": Storage(root=tmp_path / "logs")},
         Grants(),
+        control_apply_wait_s=0,
         readiness_every=0.01,
         readiness_timeout=2,
     )
@@ -161,7 +162,7 @@ async def put(
     headers["If-None-Match" if revision is None else "If-Match"] = (
         "*" if revision is None else f'"{revision}"'
     )
-    method = client.post if suffix == "/migrations" else client.put
+    method = client.put
     params = (
         {}
         if suffix
@@ -250,34 +251,23 @@ async def test_managed_profile_survives_restart(config, tmp_path, replicate):
         assert await stream.send({"value": 10}) == 2
 
 
-async def test_receipts_precede_stale_etag_and_are_durable(config):
+async def test_stale_etag_after_lost_response_and_current_noop(config):
     async with managed(config) as (owner, client, _):
-        first = await put(owner, client, "events", definition(), key="create")
+        await put(owner, client, "events", definition(), key="create")
+        repeated = await put(owner, client, "events", definition(), key="create")
+        assert repeated.status_code == 412
         await put(
             owner, client, "events", {"state": "serving"}, suffix="/desired", revision=1
         )
-        repeated = await put(owner, client, "events", definition(), key="create")
-        assert repeated.status_code == 202
-        assert repeated.json() == first.json()
-        assert repeated.headers["location"] == first.headers["location"]
-        mismatch = await put(
-            owner, client, "events", definition(exactly_once=True), key="create"
-        )
-        assert mismatch.status_code == 409
-        assert owner.view("events")["revision"] == 2
 
     async with managed(config) as (owner, client, _):
         repeated = await put(owner, client, "events", definition(), key="create")
-        assert repeated.json() == first.json()
+        assert repeated.status_code == 412
+        current = await client.get("/control/v1/streams/events")
+        assert current.headers["etag"] == '"2"'
         collection = owner.collection
         noop = await put(
-            owner,
-            client,
-            "events",
-            {"state": "serving"},
-            suffix="/desired",
-            revision=2,
-            key="noop",
+            owner, client, "events", {"state": "serving"}, suffix="/desired", revision=2
         )
         assert noop.status_code == 200
         assert noop.json()["revision"] == 2
@@ -288,7 +278,6 @@ async def test_auth_before_body_lookup_and_upgrade(config):
     async with managed(config) as (owner, client, app):
         for target in (
             "/control/v1/streams/missing",
-            "/control/v1/operations/missing",
             "/stats",
         ):
             response = await client.get(target, headers={"Authorization": "invalid"})
@@ -320,10 +309,10 @@ async def test_schema_validation_preconditions_and_order(config):
             "/control/v1/streams/events",
             json=definition(),
             params={"storage_profile": "local", "initialization": "create_if_absent"},
-            headers={"If-None-Match": "*"},
+            headers={},
         )
         assert missing.status_code == 428
-        assert not owner.operations
+        assert not owner.records
         response = await client.put(
             "/control/v1/streams/events",
             json=definition(),
@@ -510,8 +499,8 @@ async def test_lost_request_cannot_abandon_committed_intent(config, monkeypatch)
         await owner.queue.join()
         assert owner.view("events")["observed"]["state"] == "stopped"
         repeated = await put(owner, client, "events", definition(), key="lost")
-        assert repeated.status_code == 202
-        assert len(owner.operations) == 1
+        assert repeated.status_code == 412
+        assert owner.records["events"]["pending"] is None
 
 
 async def test_registry_and_stream_ownership_are_exclusive(config, tmp_path):
@@ -553,8 +542,8 @@ async def test_missing_bound_disk_is_not_recreated(config):
         response = await put(
             owner, client, "events", {"state": "serving"}, suffix="/desired", revision=3
         )
-        operation = owner.operations[response.json()["operation_id"]]
-        assert operation["status"] == "failed"
+        assert response.status_code == 202
+        assert owner.records["events"]["pending"]["status"] == "failed"
         assert owner.view("events")["stream_id"] == identity
         assert "events" not in owner.generations
         assert not (config.storage_profiles["local"].root / "events").exists()
@@ -604,18 +593,18 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
             suffix="/desired",
             revision=2,
         )
-        before = len(owner.operations)
+        before = owner.collection
         response = await put(
             owner,
             client,
             "messages",
             {"stream_id": identity, "schema": SHAPE, "sort_by": []},
-            suffix="/migrations",
+            suffix="/schema",
             revision=3,
             key="migrate",
         )
         assert response.status_code == 403
-        assert len(owner.operations) == before
+        assert owner.collection == before
         assert owner.view("messages")["pending"] is None
         retired = await put(
             owner,
@@ -627,7 +616,7 @@ async def test_guard_admits_complete_history_and_rejects_migration_before_journa
             key="protected-retirement",
         )
         assert retired.status_code == 403
-        assert len(owner.operations) == before
+        assert owner.collection == before
 
 
 @pytest.mark.parametrize(
@@ -700,7 +689,8 @@ async def test_guard_rejects_incompatible_history(config, wrong):
             suffix="/desired",
             revision=1,
         )
-        assert owner.operations[result.json()["operation_id"]]["status"] == "failed"
+        assert result.status_code == 202
+        assert owner.records["messages"]["pending"]["status"] == "failed"
         assert not owner.view("messages")["observed"]["read_admission"]
 
 
@@ -769,7 +759,7 @@ async def test_body_and_transport_limits(config):
         assert any(m["type"] == "websocket.close" and m["code"] == 1009 for m in sent)
 
 
-async def test_mounted_controller_receipts_and_data_share_owner(config):
+async def test_mounted_controller_location_and_data_share_owner(config):
     child = create_app(config)
 
     @asynccontextmanager
@@ -799,7 +789,7 @@ async def test_mounted_controller_receipts_and_data_share_owner(config):
             assert response.headers["Location"].startswith("/broker/control/v1/")
             receipt = await client.get(response.headers["Location"])
             assert receipt.status_code == 200
-            assert receipt.json()["status"] == "succeeded"
+            assert receipt.json()["pending"] is None
 
 
 async def test_unexpected_data_failure_closes_without_storage_details(
@@ -898,7 +888,8 @@ async def test_managed_replication_and_shared_group_replacement(
             suffix="/desired",
             revision=2,
         )
-        assert owner.operations[stopped.json()["operation_id"]]["status"] == "succeeded"
+        assert stopped.status_code == 202
+        assert owner.records["other"]["pending"] is None
         assert owner.generations["events"] is generation
         assert await stream.send({"value": 101}) == 102
 
@@ -910,7 +901,8 @@ async def test_managed_replication_and_shared_group_replacement(
             suffix="/desired",
             revision=2,
         )
-        assert owner.operations[stopped.json()["operation_id"]]["status"] == "succeeded"
+        assert stopped.status_code == 202
+        assert owner.records["events"]["pending"] is None
         assert not owner.children
         # Direct table reading is test evidence for publication; deployed
         # message consumers continue to use only the broker's WebSocket.
@@ -934,28 +926,18 @@ async def test_pending_journal_recovers_without_http_resubmission(config):
         "desired": "serving",
         "revision": 1,
         "stream_id": None,
-        "pending": "pending",
+        "pending": {
+            "kind": "desired",
+            "revision": 1,
+            "target": {"state": "serving"},
+            "status": "running",
+            "attempt": 1,
+            "error": None,
+        },
     }
-    operation = {
-        "id": "pending",
-        "name": "events",
-        "kind": "desired",
-        "revision": 1,
-        "target": {"state": "serving"},
-        "status": "running",
-        "error": None,
-    }
-    registry.accept(
-        record,
-        operation,
-        "admin",
-        "key",
-        "digest",
-        {"status": 202, "operation_id": "pending", "revision": 1},
-    )
+    registry.accept(record)
     registry.close()
     async with managed(config) as (owner, _, _):
-        assert owner.operations["pending"]["status"] == "succeeded"
         assert owner.view("events")["pending"] is None
         assert owner.view("events")["observed"]["state"] == "serving"
         assert owner.generations["events"].number == 1
@@ -1066,9 +1048,9 @@ async def test_failed_intent_can_reuse_its_bounded_queue_slot(config, monkeypatc
             revision=1,
             key="failed",
         )
-        first_id = first.json()["operation_id"]
-        assert owner.operations[first_id]["status"] == "failed"
-        assert owner.records["events"]["pending"] == first_id
+        assert first.status_code == 202
+        assert owner.records["events"]["pending"]["status"] == "failed"
+        assert owner.records["events"]["pending"]["attempt"] == 1
         monkeypatch.setattr(owner, "reconcile", reconcile)
         retry = await put(
             owner,
@@ -1080,15 +1062,12 @@ async def test_failed_intent_can_reuse_its_bounded_queue_slot(config, monkeypatc
             key="retry",
         )
         assert retry.status_code == 202, retry.text
-        retry_id = retry.json()["operation_id"]
-        assert retry_id != first_id
-        assert owner.operations[first_id]["status"] == "failed"
-        assert owner.operations[retry_id]["status"] == "succeeded"
+        assert retry.json()["revision"] == 2
         assert owner.records["events"]["pending"] is None
         assert owner.view("events")["observed"]["state"] == "serving"
 
 
-async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypatch):
+async def test_migration_intent_recovers_after_metadata_commit(config, monkeypatch):
     target_shape = {
         **SHAPE,
         "properties": {**SHAPE["properties"], "extra": {"type": ["string", "null"]}},
@@ -1113,12 +1092,12 @@ async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypa
             client,
             "events",
             target,
-            suffix="/migrations",
+            suffix="/schema",
             revision=3,
             key="migration",
         )
-        operation_id = response.json()["operation_id"]
-        assert owner.operations[operation_id]["status"] == "failed"
+        assert response.status_code == 202
+        assert owner.records["events"]["pending"]["status"] == "failed"
         assert owner.view("events")["stream"]["spec"]["schema"] == SHAPE
         metadata = _metadata.load(
             _metadata.home(config.storage_profiles["local"].root, "events"), "events"
@@ -1128,18 +1107,18 @@ async def test_migration_receipt_recovers_after_metadata_commit(config, monkeypa
         assert metadata.live_log.start_offset == 2
 
     async with managed(config) as (owner, client, _):
-        assert owner.operations[operation_id]["status"] == "succeeded"
+        assert owner.records["events"]["pending"] is None
         assert owner.view("events")["stream"]["spec"]["schema"] == target_shape
         repeated = await put(
             owner,
             client,
             "events",
             target,
-            suffix="/migrations",
+            suffix="/schema",
             revision=3,
             key="migration",
         )
-        assert repeated.json()["operation_id"] == operation_id
+        assert repeated.status_code == 412
         await put(
             owner, client, "events", {"state": "serving"}, suffix="/desired", revision=4
         )

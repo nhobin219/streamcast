@@ -121,9 +121,8 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
                 suffix="/desired",
                 revision=1,
             )
-            assert (
-                owner.operations[result.json()["operation_id"]]["status"] == "succeeded"
-            )
+            assert result.status_code == 202
+            assert owner.records["events"]["pending"] is None
             remote = owner.generations[spec.name].stream
             handles = [static, remote]
             assert set(OBSERVE) == set(StreamSpec.model_fields)
@@ -288,12 +287,10 @@ async def test_invalid_declaration_is_sanitized(config, bad, code):
             assert all(set(item) == {"loc", "type"} for item in error["errors"])
 
         assert "sensitive" not in response.text
-        assert not owner.records and not owner.operations
+        assert not owner.records and not owner.attempts
 
 
-async def test_query_replace_receipts_and_normalized_retry(
-    config, tmp_path, monkeypatch
-):
+async def test_query_replace_and_normalized_retry(config, tmp_path, monkeypatch):
     async with managed(config) as (owner, client, _):
         created = await put(owner, client, "events", definition(), key="create")
         assert created.status_code == 202
@@ -301,7 +298,7 @@ async def test_query_replace_receipts_and_normalized_retry(
             owner, client, "events", definition(), key="create", storage_profile="other"
         )
         assert mismatch.status_code == 409
-        assert mismatch.json()["error"]["code"] == "idempotency_mismatch"
+        assert mismatch.json()["error"]["code"] == "immutable_storage"
         unchanged = copy.deepcopy(owner.records["events"])
         for profile in (None, "local"):
             params = {} if profile is None else {"storage_profile": profile}
@@ -331,10 +328,7 @@ async def test_query_replace_receipts_and_normalized_retry(
             initialization="restore_published",
         )
         assert ignored.status_code == 200
-        assert (
-            owner.operations[ignored.json()["operation_id"]]["target"]["initialization"]
-            == "create_if_absent"
-        )
+        assert ignored.json()["pending"] is None
         assert owner.records["events"]["initialization"] == "create_if_absent"
         for params in (
             {"unknown": "x"},
@@ -357,7 +351,8 @@ async def test_query_replace_receipts_and_normalized_retry(
 
         monkeypatch.setattr(owner, "reconcile", fail)
         failed = await put(owner, client, "failed", definition(), key="failed-create")
-        operation = owner.operations[failed.json()["operation_id"]]
+        assert failed.status_code == 202
+        operation = owner.records["failed"]["pending"]
         assert operation["status"] == "failed"
         assert set(operation["target"]) == {"spec", "storage_profile", "initialization"}
         monkeypatch.setattr(owner, "reconcile", reconcile)
@@ -365,7 +360,7 @@ async def test_query_replace_receipts_and_normalized_retry(
             owner, client, "failed", definition(), revision=1, key="retry"
         )
         assert retried.status_code == 202
-        assert owner.operations[retried.json()["operation_id"]]["status"] == "succeeded"
+        assert owner.records["failed"]["pending"] is None
 
 
 @pytest.mark.parametrize("intent", ["create_if_absent", "restore_published"])

@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from streamcast import upgrade_registry
 from streamcast._broker import upgrade
 from tests.test_broker import SHAPE
@@ -22,7 +24,13 @@ def test_v1_step_writes_literal_v2_shape(config, monkeypatch):
 
     # Changing the binding used by the upgrader must not relabel the v2 step.
     monkeypatch.setattr(upgrade, "VERSION", 3)
-    upgrade_registry(config)
+
+    def interrupted(*_):
+        raise RuntimeError("after v2 commit")
+
+    monkeypatch.setattr(upgrade, "_upgrade_v2_to_v3", interrupted)
+    with pytest.raises(RuntimeError, match="after v2 commit"):
+        upgrade_registry(config)
 
     converted = state(config.registry)
     assert converted["identity"] == [(2, config.broker_id)]
@@ -80,3 +88,7 @@ def test_v1_step_writes_literal_v2_shape(config, monkeypatch):
     assert converted["receipts"] == original["receipts"]
     assert converted["collection"] == original["collection"]
     assert state(Path(str(config.registry) + ".v1")) == original
+
+    monkeypatch.undo()
+    upgrade_registry(config)
+    assert state(config.registry)["identity"] == [(3, config.broker_id)]

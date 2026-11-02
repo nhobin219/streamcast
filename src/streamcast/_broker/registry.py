@@ -1,4 +1,4 @@
-"""Durable definitions, intent and idempotency receipts; never log authority."""
+"""Durable definitions and one pending intent per stream; never log authority."""
 
 from __future__ import annotations
 
@@ -11,13 +11,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from streamcast._broker.model import Fault
-
-VERSION = 2
+VERSION = 3
 
 
 def dumps(value: Any) -> str:
-    # Property order matters to schema/wire order and request identity.
+    # Property order matters to schema/wire order and target equality.
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
@@ -72,12 +70,6 @@ class Registry:
             db.execute(
                 "CREATE TABLE streams (name TEXT PRIMARY KEY, body TEXT NOT NULL)"
             )
-            db.execute(
-                "CREATE TABLE operations (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
-            )
-            db.execute(
-                "CREATE TABLE receipts (principal TEXT, key TEXT, digest TEXT, body TEXT, PRIMARY KEY(principal,key))"
-            )
             db.execute("CREATE TABLE collection (revision INTEGER)")
             db.execute("INSERT INTO collection VALUES (0)")
 
@@ -108,8 +100,10 @@ class Registry:
                     os.close(directory)
 
             identity = db.execute("SELECT version, broker FROM identity").fetchall()
-            if identity == [(1, broker_id)]:
-                raise ValueError("registry version 1: run upgrade_registry")
+            if identity in ([(1, broker_id)], [(2, broker_id)]):
+                raise ValueError(
+                    f"registry version {identity[0][0]}: run upgrade_registry"
+                )
 
             if identity != [(VERSION, broker_id)]:
                 raise ValueError("registry identity mismatch")
@@ -123,71 +117,31 @@ class Registry:
             raise
 
     @serialized
-    def load(self) -> tuple[dict, dict, int]:
+    def load(self) -> tuple[dict, int]:
         return (
             {
                 name: json.loads(body)
                 for name, body in self.db.execute("SELECT name, body FROM streams")
             },
-            {
-                key: json.loads(body)
-                for key, body in self.db.execute("SELECT id, body FROM operations")
-            },
             self.db.execute("SELECT revision FROM collection").fetchone()[0],
         )
 
     @serialized
-    def receipt(self, principal: str, key: str, digest: str) -> dict | None:
-        found = self.db.execute(
-            "SELECT digest, body FROM receipts WHERE principal=? AND key=?",
-            (principal, key),
-        ).fetchone()
-        if found is None:
-            return None
-
-        if found[0] != digest:
-            raise Fault(409, "idempotency_mismatch")
-
-        return json.loads(found[1])
-
-    @serialized
-    def accept(
-        self,
-        record: dict,
-        operation: dict,
-        principal: str,
-        key: str,
-        digest: str,
-        receipt: dict,
-    ) -> None:
+    def accept(self, record: dict) -> None:
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO streams VALUES (?,?)",
                 (record["name"], dumps(record)),
             )
-            self.db.execute(
-                "INSERT INTO operations VALUES (?,?)",
-                (operation["id"], dumps(operation)),
-            )
-            self.db.execute(
-                "INSERT INTO receipts VALUES (?,?,?,?)",
-                (principal, key, digest, dumps(receipt)),
-            )
-            if receipt["status"] != 200:
-                self.db.execute("UPDATE collection SET revision=revision+1")
+            self.db.execute("UPDATE collection SET revision=revision+1")
 
     @serialized
-    def update(self, record: dict, operation: dict | None = None) -> None:
+    def update(self, record: dict) -> None:
         with self.db:
             self.db.execute(
                 "UPDATE streams SET body=? WHERE name=?",
                 (dumps(record), record["name"]),
             )
-            if operation is not None:
-                self.db.execute(
-                    "UPDATE operations SET body=? WHERE id=?",
-                    (dumps(operation), operation["id"]),
-                )
 
     @serialized
     def close(self) -> None:

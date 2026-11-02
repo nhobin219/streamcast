@@ -62,6 +62,10 @@ V1_OPERATION: dict[str, Any] = {
 def seed_v1(config, records=None, operation=None):
     with sqlite3.connect(config.registry) as db:
         db.execute("UPDATE identity SET version=1")
+        db.execute("CREATE TABLE operations (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        db.execute(
+            "CREATE TABLE receipts (principal TEXT, key TEXT, digest TEXT, body TEXT, PRIMARY KEY(principal,key))"
+        )
         for record in records or [V1_RECORD]:
             db.execute(
                 "INSERT INTO streams VALUES (?,?)", (record["name"], dumps(record))
@@ -86,7 +90,9 @@ def state(path):
     with sqlite3.connect(path) as db:
         return {
             table: db.execute("SELECT * FROM " + table).fetchall()
-            for table in ("identity", "streams", "operations", "receipts", "collection")
+            for (table,) in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()
         }
 
 
@@ -100,8 +106,8 @@ async def test_explicit_upgrade_backup_pending_intent_and_receipts(config):
     backup = Path(str(config.registry) + ".v1")
     assert state(backup) == original
     converted = state(config.registry)
-    assert converted["identity"] == [(2, config.broker_id)]
-    assert converted["receipts"] == original["receipts"]
+    assert converted["identity"] == [(3, config.broker_id)]
+    assert "receipts" not in converted and "operations" not in converted
     record = json.loads(converted["streams"][0][1])
     assert set(record) == {
         "name",
@@ -117,22 +123,22 @@ async def test_explicit_upgrade_backup_pending_intent_and_receipts(config):
     assert full.storage == config.storage_profiles["local"]
     assert full.spec.max_message_bytes == 1048576
     assert full.spec.max_publishers == 4096
-    operation = json.loads(converted["operations"][0][1])
+    operation = record["pending"]
     assert operation["target"] == {
         "spec": record["stream"]["spec"],
         "storage_profile": "local",
         "initialization": "create_if_absent",
     }
-    with pytest.raises(ValueError, match="v1 required"):
+    with pytest.raises(ValueError, match="registry already version 3"):
         upgrade_registry(config)
 
     assert state(backup) == original
     async with managed(config) as (owner, client, _):
-        assert owner.operations["pending"]["status"] == "succeeded"
         assert owner.records["events"]["pending"] is None
-        retry = await put(owner, client, "events", {"schema": SHAPE}, key="pre-upgrade")
-        assert retry.status_code == 409
-        assert retry.json()["error"]["code"] == "idempotency_mismatch"
+        retry = await put(
+            owner, client, "events", record["stream"]["spec"], key="pre-upgrade"
+        )
+        assert retry.status_code == 412
 
 
 @pytest.mark.parametrize("status", ["accepted", "failed"])
@@ -171,9 +177,9 @@ async def test_upgrade_raw_pending_defaults_and_retry(
 
     after = state(config.registry)
     assert state(Path(str(config.registry) + ".v1")) == before
-    assert after["receipts"] == before["receipts"]
+    assert "receipts" not in after and "operations" not in after
     converted = json.loads(after["streams"][0][1])
-    target = json.loads(after["operations"][0][1])["target"]
+    target = converted["pending"]["target"]
     assert target == {
         "spec": converted["stream"]["spec"],
         "storage_profile": "local",
@@ -199,8 +205,7 @@ async def test_upgrade_raw_pending_defaults_and_retry(
     async with managed(config) as (owner, client, _):
         # Force recovery to fail so a v2 retry must match the converted intent.
         monkeypatch.setattr(BrokerRuntime, "reconcile", reconcile)
-        assert owner.operations["pending"]["status"] == "failed"
-        assert owner.records["events"]["pending"] == "pending"
+        assert owner.records["events"]["pending"]["status"] == "failed"
         retry = await put(
             owner,
             client,
@@ -212,7 +217,6 @@ async def test_upgrade_raw_pending_defaults_and_retry(
         )
         assert retry.status_code == 202, retry.text
         assert owner.records["events"]["pending"] is None
-        assert owner.operations[retry.json()["operation_id"]]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize("bad", ["profile", "identity", "conversion", "pending"])
@@ -257,7 +261,7 @@ async def test_upgrade_rolls_back_all_records_and_can_retry(config, tmp_path, ba
     assert state(Path(str(config.registry) + ".v1")) == repaired
     registry = Registry.open(config.registry, config.broker_id)
     try:
-        assert registry.db.execute("SELECT version FROM identity").fetchone() == (2,)
+        assert registry.db.execute("SELECT version FROM identity").fetchone() == (3,)
     finally:
         registry.close()
 
