@@ -1,4 +1,4 @@
-"""Explicit, locked conversion of a v1 registry; startup never upgrades it."""
+"""Explicit, locked registry upgrades; startup never upgrades it."""
 
 from __future__ import annotations
 
@@ -34,11 +34,11 @@ def _request(name: str, definition: dict, max_message_bytes: int) -> dict:
 
 
 def upgrade_registry(config: BrokerConfig) -> None:
-    """Back up v1 to ``<registry>.v1`` and convert it in one transaction.
+    """Upgrade v1 or v2 through individually backed-up, atomic steps.
 
-    Stop the broker first and configure the v1 profiles as named Storage
-    objects. Bound identities must match disk. Downgrade restores the backup
-    and loses subsequent changes. Receipts retain their pre-upgrade digests.
+    Stop the broker first. Each source version has its own fsynced backup
+    (``<registry>.v1`` or ``<registry>.v2``). Downgrade restores the matching
+    backup and loses subsequent changes. V3 has no receipts or operation log.
     """
     if config.registry is None:
         raise ValueError("a registry path is required")
@@ -52,15 +52,18 @@ def upgrade_registry(config: BrokerConfig) -> None:
 
         db = sqlite3.connect(path)
         db.execute("PRAGMA synchronous=FULL")
-        steps = {1: _upgrade_v1_to_v2}
+        steps = {1: _upgrade_v1_to_v2, 2: _upgrade_v2_to_v3}
         identity = db.execute("SELECT version, broker FROM identity").fetchall()
+        if identity == [(3, config.broker_id)]:
+            raise ValueError("registry already version 3")
+
         if (
             len(identity) != 1
             or identity[0][1] != config.broker_id
             or identity[0][0] not in steps
             or identity[0][0] >= VERSION
         ):
-            raise ValueError("registry identity mismatch: v1 required")
+            raise ValueError("registry identity mismatch: v1 or v2 required")
 
         version = identity[0][0]
         while version < VERSION and version in steps:
@@ -145,3 +148,56 @@ def _upgrade_v1_to_v2(db: sqlite3.Connection, path: Path, config: BrokerConfig) 
                     )
 
         db.execute("UPDATE identity SET version = 2")
+
+
+def _upgrade_v2_to_v3(db: sqlite3.Connection, path: Path, config: BrokerConfig) -> None:
+    backup_path = Path(str(path) + ".v2")
+    # Only a still-v2 source can reach this step. An interrupted copy may be
+    # replaced, but a committed v3 must never touch its rollback database.
+    backup_path.unlink(missing_ok=True)
+    backup = sqlite3.connect(backup_path)
+    try:
+        db.backup(backup)
+    finally:
+        backup.close()
+
+    with backup_path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        for name, body in db.execute("SELECT name, body FROM streams").fetchall():
+            record = json.loads(body)
+            if record["pending"] is not None:
+                row = db.execute(
+                    "SELECT body FROM operations WHERE id=?", (record["pending"],)
+                ).fetchone()
+                if row is None:
+                    raise ValueError(
+                        f"registry upgrade: stream {name} pending operation missing"
+                    )
+
+                operation = json.loads(row[0])
+                record["pending"] = {
+                    "kind": operation["kind"],
+                    "revision": operation["revision"],
+                    "target": operation["target"],
+                    "status": (
+                        "failed" if operation["status"] == "failed" else "accepted"
+                    ),
+                    "attempt": 1,
+                    "error": operation["error"],
+                }
+                db.execute(
+                    "UPDATE streams SET body=? WHERE name=?", (dumps(record), name)
+                )
+
+        db.execute("DROP TABLE operations")
+        db.execute("DROP TABLE receipts")
+        db.execute("UPDATE identity SET version = 3")

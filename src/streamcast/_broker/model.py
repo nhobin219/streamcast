@@ -30,7 +30,7 @@ class Fault(Exception):
 class Authorization(Protocol):
     """Host authentication and per-resource grants; None challenges with Basic.
 
-    The principal is a stable, nonsecret identity used to scope receipts.
+    The principal is a stable, nonsecret identity used for authorization.
     The host validates ingress trust and Origin here; forwarded headers are
     never interpreted by the broker. Actions are data.read, data.publish,
     stats.read, control.read, control.mutate, and control.migrate.
@@ -76,6 +76,9 @@ class BrokerConfig:
     transport_max_bytes: int = MAX_MESSAGE_BYTES
     control_max_bytes: int = 256 * 1024
     max_pending: int = 32
+    control_apply_wait_s: float = 10.0
+    max_streams: int = 1024
+    max_waiters: int = 256
     readiness_timeout: float = 30.0
     readiness_every: float = 0.25
     subscriber_yield_every: int = SUBSCRIBER_YIELD_EVERY
@@ -109,6 +112,7 @@ class BrokerConfig:
                 self.transport_max_bytes,
                 self.control_max_bytes,
                 self.max_pending,
+                self.max_streams,
                 self.subscriber_yield_every,
             )
         ):
@@ -119,6 +123,15 @@ class BrokerConfig:
             for value in (self.readiness_timeout, self.readiness_every)
         ):
             raise ValueError("positive readiness bounds required")
+
+        if (
+            not math.isfinite(self.control_apply_wait_s)
+            or self.control_apply_wait_s < 0
+        ):
+            raise ValueError("nonnegative finite control wait required")
+
+        if type(self.max_waiters) is not int or self.max_waiters < 0:
+            raise ValueError("nonnegative integer max_waiters required")
 
         if self.registry is not None and isinstance(self.authorization, PublicAccess):
             raise ValueError("registry hosting requires explicit authorization")

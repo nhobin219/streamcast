@@ -11,6 +11,17 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Changed — breaking
 
+- For 0.27.0, managed control is declarative: each stream has one bounded
+  pending intent. Mutations wait up to `control_apply_wait_s=10.0`, returning
+  200 applied, 202 pending with a stream Location, 500 failed, or 503 unknown.
+  Per-attempt waits survive other waiters' timeout/cancellation. Mutation
+  responses omit definitions, storage and targets. Equal targets at a current
+  ETag join or retry; failed retries preserve the revision and increment the
+  attempt. `max_streams=1024` and `max_waiters=256` bound records and waits.
+- Replace `POST /streams/{name}/migrations` with `PUT /streams/{name}/schema`.
+  Operation lookup and idempotency receipts are removed; `Idempotency-Key` is
+  ignored. A stale precondition always returns 412. Recover a lost response
+  with GET and target comparison, requiring `control.read` (#215).
 - For 0.27.0, `Stream` is a frozen `spec: StreamSpec` / `storage: Storage`
   definition; the runtime class is `StreamHandle`, without a compatibility alias.
   Its factory takes `open(stream, *, initialization="open_existing")`; choose
@@ -31,10 +42,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   rejects a different profile and ignores initialization. GET/listing returns
   `stream: {spec, storage}` with resolved paths visible to `control.read`.
   Credentials remain host-only; profile discovery exposes storage without keys.
-- Registry v2 requires explicit `upgrade_registry(config)` while stopped. It
-  fsyncs `<registry>.v1`, validates bound identities and converts records/pending
-  definitions in one transaction. Downgrade restores that backup, losing later
-  changes. Pre-upgrade receipt keys return `idempotency_mismatch` after upgrade.
+- Registry v3 requires explicit `upgrade_registry(config)` while stopped.
+  Individually backed-up and fsynced v1 → v2 → v3 transactions preserve active
+  definitions and revisions, fold pending operations into streams, and remove
+  receipt/operation history. A failed step is retryable; a completed v3 rerun
+  refuses before changing backups. Downgrade restores the matching backup and
+  loses subsequent changes (#215).
 - Managed opens intentionally accept adopted or restored logs whose stored
   `wal_replication` is enabled under a profile with `replicate=False`, matching
   static handles. Serving emits a warning and starts no WAL sidecar; enable

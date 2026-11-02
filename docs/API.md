@@ -636,7 +636,7 @@ that default. Broker identities and profile names follow the stream-name rule.
 
 ### Ownership and recovery
 
-The top-level lifespan owns one runtime: registry, operation worker, readiness
+The top-level lifespan owns one runtime: registry, intent worker, readiness
 monitor, stream generations, connections, writer threads, maintenance roles,
 and replication sidecars. It acquires an exclusive registry lock and holds
 canonical logical-stream and physical-log locks even for stopped definitions.
@@ -654,10 +654,11 @@ create only an unbound `create_if_absent` declaration, or restore an unbound
 `restore_published` declaration from published storage. Once a stream identity
 is bound, disk and authoritative version-hint metadata must match it.
 
-Each accepted mutation atomically commits the declaration/desired state,
-operation and idempotency receipt before returning 202. HTTP disconnect or
-cancellation does not cancel accepted work. Operations are serialized; reads
-and data traffic do not wait on the control serialization lock. Blocking
+Each accepted mutation atomically commits the declaration/desired state and
+one pending intent on that stream. A single worker applies intents in FIFO
+order. HTTP disconnect, timeout or cancellation does not cancel accepted work.
+The HTTP wait is outside acceptance and the control serialization lock; reads,
+other control requests and data traffic continue during it. Blocking
 storage work runs off the event loop. Subprocess creation runs on the
 lifespan thread so its parent-death relationship survives worker completion.
 
@@ -700,12 +701,18 @@ profile discovery. No response includes `s3_options` or credential values.
 Capabilities summarize only `replicate` and `publishes` for each profile.
 
 `BrokerConfig` also accepts `history_guards={}`, `transport_max_bytes=1<<20`,
-`control_max_bytes=256*1024`, `max_pending=32`, `readiness_timeout=30.0` and
-`readiness_every=0.25`. Bounds must be positive; a per-stream frame limit
-cannot exceed the transport ceiling. The runtime bounds pending operations
-and in-flight control tasks. It returns 429 with `Retry-After: 1` rather than
-growing an unbounded queue. Durable operation and receipt history is retained;
-there is no automatic eviction.
+`control_max_bytes=256*1024`, `max_pending=32`, `max_streams=1024`,
+`control_apply_wait_s=10.0`, `max_waiters=256`, `readiness_timeout=30.0` and
+`readiness_every=0.25`. Integer bounds are positive except `max_waiters`, which
+may be zero. The control wait is finite and nonnegative; zero always returns
+202 for real work. A per-stream frame limit cannot exceed the transport ceiling.
+Pending intents (including failed ones) and in-flight acceptance tasks are
+bounded by `max_pending`; overflow returns 429 with `Retry-After: 1`.
+`max_streams` refuses the next create with `409 stream_limit` and `limit`;
+lowering it never removes or prevents serving existing streams. Waiter overflow
+returns 202 immediately. There is no durable operation or receipt history:
+each stream holds at most one pending intent, and per-attempt futures are
+removed when resolved. The worker queue deduplicates stream names.
 
 The injected `Authorization` protocol has two asynchronous methods:
 
@@ -717,9 +724,7 @@ async def allows(principal: str, action: str, resource: str) -> bool: ...
 The principal is a stable nonsecret identity. Actions are `data.read`,
 `data.publish`, `stats.read`, `control.read`, `control.mutate` and
 `control.migrate`. Resources are exact stream names, with `"*"` for collection
-and operation discovery. Discovery also filters each returned stream by its
-individual grant. Operation lookup requires both the discovery grant and
-the target stream grant.
+discovery. Discovery also filters each returned stream by its individual grant.
 
 Authentication and the applicable grant precede body parsing, stream lookup
 and WebSocket upgrade. Unauthenticated requests receive 401 with a Basic
@@ -732,9 +737,8 @@ trusted ingress, Origin and proxy headers. Registry hosting requires an explicit
 ### HTTP contract, version 1
 
 All paths below are relative to the application mount. Requests and
-responses are JSON. Mutations require `Content-Type: application/json` and
-`Idempotency-Key` (1–128 printable ASCII characters, no spaces).
-Missing keys receive 428; malformed keys receive 400. Duplicate
+responses are JSON. Mutations require `Content-Type: application/json`.
+`Idempotency-Key` is ignored; no key is required, checked or persisted. Duplicate
 JSON keys, nonfinite numbers and malformed JSON receive 400. Bodies over the
 configured control limit receive 413 before the application accumulates them.
 Framework validation is supplemented by the existing schema compiler;
@@ -755,13 +759,12 @@ before adoption rather than silently stripping keywords in the broker.
 | --- | --- |
 | `GET /control/v1` | Contract version, broker/boot identities, bounds, public profiles, protected names, wire versions. |
 | `GET /control/v1/streams?limit=100&cursor=...` | Name-ordered page: `revision`, `streams`, nullable `next_cursor`. Limit is 1–1000. |
-| `GET /control/v1/streams/{name}` | Full `stream: {spec, storage}`, `storage_profile`, `initialization`, desired/observed state, revision, identity and pending operation; `ETag`. |
+| `GET /control/v1/streams/{name}` | Full `stream: {spec, storage}`, `storage_profile`, `initialization`, desired/observed state, revision, identity and pending intent; `ETag`. |
 | `GET /control/v1/storage-profiles` | Named host `Storage` objects without keys; requires `control.read` on `"*"`. |
 | `GET /control/v1/storage-profiles/{name}` | One host `Storage` without keys; the same discovery grant. |
 | `PUT /control/v1/streams/{name}` | Create or replace the full declaration. Create requires `If-None-Match: *`; replace requires `If-Match`. |
 | `PUT /control/v1/streams/{name}/desired` | `{"state":"serving"}`, `"stopped"`, or terminal `"retired"`; requires `If-Match`. |
-| `POST /control/v1/streams/{name}/migrations` | `stream_id`, target `schema` and target `sort_by`; requires `If-Match` and `control.migrate`. |
-| `GET /control/v1/operations/{id}` | Operation `id`, `name`, `kind`, `revision`, `target`, `status`, nullable `error`. |
+| `PUT /control/v1/streams/{name}/schema` | `stream_id`, target `schema` and target `sort_by`; requires `If-Match` and `control.migrate`. |
 | `GET /stats` | The existing stats payload, filtered by `stats.read`. |
 
 Names match `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. The ETag is the exact quoted
@@ -829,50 +832,91 @@ migration, with the current stream identity and both desired and observed
 stopped (or a failed stopped transition). Migration keeps the active
 definition separate from the durable target until metadata and target
 schema are verified. Failed irreversible intent cannot be overwritten with
-a different target. Retrying that exact intent uses a new idempotency key
-and current ETag; reusing the original key returns its original receipt.
-Retirement is terminal and leaves replay available without writes.
+a different target. With a current ETag, an equal normalized target joins an
+accepted/running attempt, or retries a failed attempt at the same revision with
+`attempt + 1`. Any other target returns `409 transition_pending`. Request body
+validation, history guards and migration identity checks precede preconditions;
+preconditions precede the pending rule and all state/no-op shortcuts.
+`/schema` always runs a migration, even for the active user schema: a log may
+lack current system columns. Retirement is terminal and leaves replay available
+without writes.
 
-A mutation returns 202 with `status`, `operation_id`, `revision`, an ETag and
-`Location: /control/v1/operations/{id}`. Poll the operation: `accepted` →
-`running` → `succeeded` or `failed`. A satisfied no-op returns 200 and a
-succeeded operation without a new generation. A receipt is scoped to the
-principal and broker registry and hashes method, resource, ordered JSON body,
-query profile/initialization and preconditions. An identical retry returns the original status/body/
-Location **before checking today's ETag**. Different intent under that key
-receives 409. The controller persists keys across network retries and polls
-to completion; 202 alone does not establish readiness.
+A mutation waits up to `control_apply_wait_s` for its accepted attempt.
+Success returns 200; work still pending or waiter overflow returns 202 with
+`Location: /control/v1/streams/{name}` (including any application mount).
+Both return only:
 
-Observed state carries `state`, `boot_id`, `generation`, `revision`, `at`
-(Unix seconds), `read_admission`, `write_admission`, and `children_ready`.
-These are observations of this boot, not durable proof of current health.
-Errors use `{"error":{"code":...,"message":...,"retryable":false,
-"operation_id":null}}`; messages contain no storage paths, credentials or
-rows. Statuses include 400 malformed input, 401 authentication, 403 grants
-or history guard, 404 unknown resources, 409 conflict, 412 preconditions,
-413 size, 415 media type, 422 unsupported declaration, 428 preconditions
-required, 429 capacity, and 503 unavailable. 429/503 are retryable and include
-`Retry-After: 1`. A failed operation reports `transition_failed` (or `unknown_storage_profile` for
-a removed host profile); inspect
-host-side evidence before retrying an irreversible operation.
+```json
+{"name":"events","revision":2,"pending":null,"observed":{"state":"serving","error":null}}
+```
 
-### Registry v2 upgrade
+A non-null `pending` contains only `kind`, `revision`, `status`, `attempt` and
+`error`. Mutation responses never expose the stream, storage or target, so a
+mutate-only principal can receive them. The full GET requires `control.read`
+and includes `pending.target`. A satisfied definition/desired no-op returns 200,
+writes nothing and preserves both revisions. Equal intent with a mismatched
+observation schedules a repair at the current revision. Each waiting request
+answers for its own attempt, even if a later writer has already changed the
+record. Timeout and cancellation end only that request's wait.
 
-Stop the broker, port host profiles to `storage_profiles={name: Storage(...)}`,
-and call `streamcast.upgrade_registry(config)` explicitly before startup.
-A v1 registry otherwise refuses with `registry version 1: run upgrade_registry`.
-The upgrade takes the registry lock, backs up SQLite to `<registry>.v1` and
-fsyncs it before changing any records. One transaction resolves every profile,
-verifies each bound identity against authoritative disk metadata, flattens limits
-while keeping the old resolved message-byte limit, normalizes raw pending
-definition intents with 0.26 defaults, and sets version 2. Unknown profiles or
-identity mismatches abort the whole transaction. A failure before commit leaves v1 intact; rerunning replaces
-the backup. After commit the registry is v2. The backup is the operator's to delete.
+An attempt failure returns 500 with its own error code, `retryable: true`,
+`name` and `revision`. Worker exit or shutdown resolves unfinished waits with
+503 `control_unavailable`. Each of these results carries the attempt's `ETag`.
+The removed operation route and old POST migrations route return 404.
 
-Receipts keep their old digests. Retrying a pre-upgrade request with its original
-key returns `409 idempotency_mismatch`; create preconditions still prevent a
-duplicate. Older brokers refuse v2. Downgrade requires restoring the `.v1` copy
-and loses all changes made since the upgrade.
+#### Lost responses
+
+A stale precondition always gets 412, including a resend of a successful change
+with its original `If-Match`, or a successful create resent with
+`If-None-Match: *`. Recover with `GET /control/v1/streams/{name}` and compare:
+
+- active definition/desired equals the target and `pending` is null: applied;
+- `pending.target` equals the target: in progress, or failed with `pending.error`;
+  resend the target with the current ETag to join or retry;
+- neither: not applied, or overwritten by another writer. Decide whether to
+  resend with the current ETag.
+
+Controllers that recover lost responses need `control.read` on their streams.
+A principal with only mutation or migration permission has no recovery read.
+No request key or operation-polling endpoint supplies one.
+
+The full GET's observed state carries `state`, `boot_id`, `generation`,
+`revision`, `at` (Unix seconds), `read_admission`, `write_admission`, and
+`children_ready`. These are observations of this boot, not durable proof of
+current health. Errors use
+`{"error":{"code":...,"message":...,"retryable":false}}`; messages contain
+no storage paths, credentials or rows. Statuses include 400 malformed input,
+401 authentication, 403 grants or history guard, 404 unknown resources,
+409 conflict, 412 preconditions, 413 size, 415 media type, 422 unsupported
+declaration, 428 preconditions required, 429 capacity, 500 attempt failure,
+and 503 unavailable. 429/503 include `Retry-After: 1`. Transition errors are
+`transition_failed` or `unknown_storage_profile` for a removed host profile;
+inspect host-side evidence before retrying an irreversible transition.
+
+### Registry v3 upgrade
+
+Stop the broker and call `streamcast.upgrade_registry(config)` explicitly
+before startup. V1 and v2 otherwise refuse with
+`registry version <version>: run upgrade_registry`. A lifetime registry lock
+covers both steps. Every step copies SQLite to `<registry>.v1` or
+`<registry>.v2` and fsyncs the file and parent directory before its transaction.
+
+The v1 → v2 transaction resolves profiles, verifies each bound identity against
+authoritative disk metadata, flattens limits while preserving resolved message
+limits, and normalizes pending definition targets with 0.26 defaults. Configure
+those profiles as named `Storage` objects. Its committed identity is exactly 2.
+The v2 → v3 transaction folds each referenced operation into its stream's
+`pending`: `running` becomes `accepted`, `failed` preserves target and error,
+and `attempt` starts at 1. It preserves active definitions and revisions,
+drops the operations and receipts tables, then commits identity 3. A dangling
+reference aborts with `registry upgrade: stream <name> pending operation missing`.
+Startup executes every pending slot, including failed ones, before admission.
+
+A pre-commit failure leaves that step's source intact; rerun replaces an
+incomplete backup. An interrupted chain resumes at its committed version.
+A v3 rerun refuses with `registry already version 3` before touching backups.
+Older brokers refuse v3. Downgrade restores the matching backup and loses
+subsequent changes; the backups are the operator's to delete.
 
 ### Data consumer contract and protected history
 
@@ -904,8 +948,8 @@ guard or mutating storage outside this owner invalidates that assurance.
 ### Integration responsibilities
 
 The library owns runtime, protocol, durable intent and local lifecycle
-invariants. A deployment controller owns declaration reconciliation,
-idempotency keys, ETags and operation polling. The host operator owns storage
+invariants. A deployment controller owns declaration reconciliation, ETags,
+and lost-response recovery with GET and comparison. The host operator owns storage
 profiles, authentication, ingress, shutdown budgets, retained-state handoff,
 and stopping previous writers. Each consuming application owns its stream
 bindings, stable producer identities, durable cursors, frame sizing and
