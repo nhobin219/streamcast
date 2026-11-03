@@ -22,6 +22,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    # Explicit histogram boundaries advisory starts at API 1.30. No SDK here:
+    # the embedding application owns providers and exporters.
+    "opentelemetry-api>=1.30.0,<2",
     # The transport, and the interface this library is shaped after. 14 is the
     # floor because `websockets.asyncio` is what everything here imports: the
     # legacy `websockets.server`/`websockets.client` implementation is
@@ -154,9 +157,8 @@ dev = [
     "ty>=0.0.15",
     # FOR AN EXAMPLE ONLY: `examples/otel/` runs OpenTelemetry logs and
     # traces through two streams and re-exports them as OTLP, and
-    # `tests/test_otel_example.py` runs it. Nothing in `streamcast` imports
-    # OTel — the schemas and conversions live in the example, built from
-    # streamcast's ordinary column types.
+    # `tests/test_otel_example.py` runs it. The library uses only the API;
+    # the example owns its SDK, schemas and conversions.
     "opentelemetry-sdk>=1.45.0",
     "opentelemetry-instrumentation-logging>=0.66b0",
     "opentelemetry-exporter-otlp-proto-http>=1.45.0",

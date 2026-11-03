@@ -48,6 +48,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import time
+from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
@@ -60,6 +62,7 @@ from streamcast._codec import from_greeting
 from streamcast._dedupe import check_publisher_id
 from streamcast._errors import ExactlyOnceUnavailable, ProtocolError
 from streamcast._limits import MAX_IN_FLIGHT
+from streamcast._metrics import PUBLISH_LAG
 from streamcast._protocol import (
     Greeting,
     encode_publish,
@@ -71,13 +74,21 @@ from streamcast._protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
     from websockets.asyncio.client import ClientConnection
 
     # litelink's own row type, spelled here so the annotations read the same
     # as `StreamHandle.send`'s without importing litelink at runtime.
     Row = Mapping[str, object]
+
+
+@dataclass
+class _Pending:
+    done: asyncio.Future[list[int | None]]
+    started: float
+    count: int
+    enqueued_at: Sequence[int] | None
 
 
 class Publication:
@@ -111,9 +122,7 @@ class Publication:
         # The replies still owed, in the order their frames went out. The
         # server answers in that order, so the next reply is the oldest
         # entry's — no correlation id.
-        self._pending: collections.deque[asyncio.Future[list[int | None]]] = (
-            collections.deque()
-        )
+        self._pending: collections.deque[_Pending] = collections.deque()
         self._window = asyncio.Semaphore(max_in_flight)
         # Queueing a reply's future and writing its frame are one step under
         # this lock, so two tasks submitting at once cannot cross them.
@@ -227,6 +236,19 @@ class Publication:
         for the window and the order. `single` sends one row as a row rather
         than a list of one — the shape `send` uses on the wire.
         """
+        return await self._submit_many(rows, single=single, seq=seq)
+
+    async def _submit_many(
+        self,
+        rows: Iterable[Row],
+        *,
+        single: bool = False,
+        seq: int | None = None,
+        enqueued_at: Sequence[int] | None = None,
+    ) -> asyncio.Future[list[int | None]]:
+        # Durable senders carry original enqueue times to the ACK reader;
+        # recording again in the outbox would count each row twice.
+        started = time.monotonic()
         if self._publisher is None and seq is not None:
             msg = "seq= is for an exactly-once publication; open it with publisher="
             raise ValueError(msg)
@@ -252,7 +274,7 @@ class Publication:
                 asyncio.get_running_loop().create_future()
             )
             async with self._writing:
-                self._pending.append(done)
+                self._pending.append(_Pending(done, started, len(batch), enqueued_at))
                 try:
                     # A TEXT frame, as every frame is: the payload is JSON.
                     await self._connection.send(frame, text=True)
@@ -303,8 +325,10 @@ class Publication:
         retrieved: the send raises the connection's end itself, and `done` is
         never handed out, so asyncio would log it as never retrieved.
         """
-        with contextlib.suppress(ValueError):
-            self._pending.remove(done)
+        for pending in self._pending:
+            if pending.done is done:
+                self._pending.remove(pending)
+                break
 
         if done.done() and not done.cancelled():
             done.exception()
@@ -323,13 +347,27 @@ class Publication:
         failure: BaseException
         try:
             async for frame in self._connection:
-                done = self._pending.popleft()
+                pending = self._pending.popleft()
+                done = pending.done
                 try:
                     offsets = parse_publish_reply(frame)
                 except Exception as exc:  # noqa: BLE001 — that send's to raise
                     if not done.done():
                         done.set_exception(exc)
                 else:
+                    if pending.enqueued_at is None:
+                        lag = max(0.0, time.monotonic() - pending.started)
+                        for _ in range(pending.count):
+                            PUBLISH_LAG.record(lag, {"stream": self._stream})
+
+                    else:
+                        now = time.time_ns() // 1_000
+                        for enqueued in pending.enqueued_at:
+                            PUBLISH_LAG.record(
+                                max(0.0, (now - enqueued) / 1_000_000),
+                                {"stream": self._stream},
+                            )
+
                     if not done.done():
                         done.set_result(offsets)
 
@@ -341,7 +379,7 @@ class Publication:
 
         # Every send still owed a reply learns the connection is gone.
         while self._pending:
-            done = self._pending.popleft()
+            done = self._pending.popleft().done
             if not done.done():
                 done.set_exception(failure)
 
@@ -352,7 +390,9 @@ class Publication:
         when the connection ends raises from its own future.
         """
         if self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+            await asyncio.gather(
+                *(pending.done for pending in self._pending), return_exceptions=True
+            )
 
         await self._connection.close(code, reason)
         if self._reader is not None:
