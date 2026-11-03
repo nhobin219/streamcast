@@ -1292,6 +1292,22 @@ A row the schema refuses is answered and the connection stays open, because
 that is what the local call does: `send` raises, the caller catches it, the
 next call works. Closing would make one bad row cost every good one behind it.
 
+### Publish lag
+
+The library emits `streamcast.publish.lag`, an OpenTelemetry API histogram in
+seconds, with the stream name as its sole attribute. Each successful ACK
+records one sample per row. A plain `Publication` measures monotonic time from
+submission, including a wait for the in-flight window. An `Outbox` measures
+wall-clock time from each row's stored `streamcast_enqueued_at`; queue time
+before streamcast receives a row is outside this interval. Negative intervals
+are clamped to zero. Rejections, failed commits, and rows removed by reconnect
+reconciliation have no successful ACK time and record nothing.
+
+The advised bucket boundaries are `0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300`.
+The 30-second boundary supports an exact count above that threshold. Applications
+configure the provider and exporter; streamcast imports no SDK and installs no
+global provider. Without a configured provider the API is a no-op.
+
 ### A plain publisher is at-least-once under retry
 
 A row is durable when `send` returns. If the connection drops before the reply arrives,

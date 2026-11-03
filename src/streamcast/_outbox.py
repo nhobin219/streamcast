@@ -174,18 +174,19 @@ async def enqueue(
 
 async def pending(
     tx: Transaction, stream: str, publisher: str, *, above: int = 0, limit: int
-) -> list[tuple[int, dict[str, Any]]]:
+) -> list[tuple[int, dict[str, Any], int]]:
     """Up to `limit` pending rows with a seq above `above`, in seq order."""
     rows = await tx.fetch(
         sql(
             tx.store.dialect,
-            "SELECT streamcast_seq, streamcast_row FROM streamcast_outbox "
+            "SELECT streamcast_seq, streamcast_row, streamcast_enqueued_at "
+            "FROM streamcast_outbox "
             "WHERE streamcast_stream = ? AND streamcast_publisher_id = ? "
             "AND streamcast_seq > ? ORDER BY streamcast_seq LIMIT ?",
         ),
         (stream, publisher, above, limit),
     )
-    return [(int(seq), _DECODE.decode(text)) for seq, text in rows]
+    return [(int(seq), _DECODE.decode(text), int(at)) for seq, text, at in rows]
 
 
 async def count(tx: Transaction, stream: str, publisher: str) -> int:
@@ -700,7 +701,7 @@ class Outbox:
         """Send pending rows in ordered, pipelined batches until none is left."""
         sent = 0  # the highest seq on the wire this session
         flight: deque[
-            tuple[int, list[tuple[int, dict[str, Any]]], asyncio.Future[Any]]
+            tuple[int, list[tuple[int, dict[str, Any], int]], asyncio.Future[Any]]
         ] = deque()
         while True:
             if len(flight) < self._max_in_flight and not self._closed:
@@ -715,7 +716,11 @@ class Outbox:
 
                 if batch:
                     first = batch[0][0]
-                    future = await out.submit_many([row for _, row in batch], seq=first)
+                    future = await out._submit_many(
+                        [row for _, row, _ in batch],
+                        seq=first,
+                        enqueued_at=[at for _, _, at in batch],
+                    )
                     flight.append((first, batch, future))
                     sent = batch[-1][0]
                     continue
@@ -744,21 +749,27 @@ class Outbox:
                 continue
 
             await self._acknowledged(
-                batch[-1][0], dict(zip((s for s, _ in batch), offsets, strict=True))
+                batch[-1][0], dict(zip((s for s, _, _ in batch), offsets, strict=True))
             )
 
     async def _sift(
-        self, out: Publication, batch: list[tuple[int, dict[str, Any]]]
+        self, out: Publication, batch: list[tuple[int, dict[str, Any], int]]
     ) -> None:
         """A refused batch, again one row at a time: only the refused row goes."""
         remaining = len(batch)
         while remaining:
             async with self._store.transaction() as tx:
-                [(seq, row)] = await pending(tx, self._stream, self._publisher, limit=1)
+                [(seq, row, enqueued)] = await pending(
+                    tx, self._stream, self._publisher, limit=1
+                )
 
             remaining -= 1
             try:
-                offset = await out.send(row, seq=seq)
+                [offset] = await (
+                    await out._submit_many(
+                        [row], single=True, seq=seq, enqueued_at=[enqueued]
+                    )
+                )
             except Rejected as exc:
                 log.error(
                     "streamcast outbox %r: the broker refused seq %d and it is "

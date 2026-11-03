@@ -7,6 +7,18 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- Emit `streamcast.publish.lag` through the OpenTelemetry API only: seconds per
+  successfully acknowledged row, tagged by stream, with an explicit 30-second
+  histogram boundary. Durable outboxes include time since the stored enqueue;
+  plain publications use monotonic submit time. Lost-ACK reconciliation and
+  failed replies produce no samples; negative intervals clamp to zero.
+- Runtime `opentelemetry-api>=1.30.0,<2`; providers and exporters remain the
+  application's responsibility. No public call or stored format changes.
+
 ## 0.27.0 — 2026-11-03
 
 ### Changed — breaking

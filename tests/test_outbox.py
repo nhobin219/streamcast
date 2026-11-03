@@ -137,13 +137,17 @@ class TestRecovery:
                 await direct.send_many([trade(0), trade(1)], seq=1)
 
             sent: list[int | None] = []
-            original = streamcast.Publication.submit_many
+            original = streamcast.Publication._submit_many
 
-            async def recording(self, rows, *, single=False, seq=None):
+            async def recording(
+                self, rows, *, single=False, seq=None, enqueued_at=None
+            ):
                 sent.append(seq)
-                return await original(self, rows, single=single, seq=seq)
+                return await original(
+                    self, rows, single=single, seq=seq, enqueued_at=enqueued_at
+                )
 
-            monkeypatch.setattr(streamcast.Publication, "submit_many", recording)
+            monkeypatch.setattr(streamcast.Publication, "_submit_many", recording)
             async with streamcast.outbox(
                 uri, publisher="p", store=store, **FAST
             ) as out:
