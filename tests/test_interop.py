@@ -42,8 +42,8 @@ from .hosting import serve_streams
 
 PEER = Path(__file__).resolve().parent / "interop_peer.py"
 
-RELEASES = ("0.19.0", "0.20.1", "0.21.1", "0.22.0")
-"""Every release a 0.23 process may meet during an upgrade (CHANGELOG, 0.20.1).
+RELEASES = ("0.19.0", "0.20.1", "0.21.1", "0.22.0", "0.27.0")
+"""Releases this build may meet during a rolling upgrade (CHANGELOG, 0.20.1).
 
 0.20.0 is not here: it reads only protocol 5, so it refuses this build's
 server as it refuses a 0.19 one, and it was yanked for that (#135).
@@ -156,6 +156,48 @@ def assert_works(report: dict, *, client: str, before: Sequence[int] = ()) -> No
 THIS = importlib.metadata.version("streamcast")
 
 
+def registry_peer(python: str, phase: str, root: Path) -> dict:
+    peer = PEER.with_name("registry_interop_peer.py")
+    done = subprocess.run(
+        [python, "-I", str(peer), phase, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("release", ["0.27.0"], indirect=True)
+@pytest.mark.parametrize("writer", ["this", "release"])
+def test_registry_pending_target_and_recovery_between_027_versions(
+    release, tmp_path, writer
+):
+    version, python = release
+    source, reader = (
+        (sys.executable, python) if writer == "this" else (python, sys.executable)
+    )
+    written = registry_peer(source, "write", tmp_path)
+    read = registry_peer(reader, "read", tmp_path)
+    assert written["version"] == (THIS if writer == "this" else version)
+    assert read["version"] == (version if writer == "this" else THIS)
+    assert written["default_maintenance"] is (writer == "this")
+    assert read["default_maintenance"] is (writer == "release")
+    assert read["record"] == written["record"]
+    assert read["collection"] == written["collection"] == 1
+    record = written["record"]
+    assert record["revision"] == 1
+    assert record["pending"]["kind"] == "definition"
+    assert record["pending"]["status"] == "accepted"
+    assert "maintenance" not in record["stream"]["spec"]
+    assert "maintenance" not in record["pending"]["target"]["spec"]
+    recovered = registry_peer(reader, "recover", tmp_path)
+    assert recovered["rows"] == 2
+    assert recovered["record"]["pending"] is None
+    assert recovered["record"]["revision"] == 1
+    assert "maintenance" not in recovered["record"]["stream"]["spec"]
+
+
 class TestThisClient:
     def test_it_reads_an_older_server(self, release, tmp_path):
         version, python = release
@@ -250,13 +292,16 @@ class TestTheMarks:
         )
         assert asyncio.run(reopened()) == (2, 2)
 
-    def test_an_older_server_refuses_an_exactly_once_publisher(self, release, tmp_path):
+    def test_a_release_refuses_exactly_once_on_an_unconfigured_stream(
+        self, release, tmp_path
+    ):
         """Real releases, not a fixture of their refusal: every one before
         0.23 refuses the unknown `publisher` parameter at the open, before
-        anything is appended, and this client says the broker is too old
-        rather than falling back to at least once."""
+        anything is appended. Newer releases refuse this stream because it
+        was not configured for deduplication. Neither falls back to at least
+        once."""
 
-        _version, python = release
+        version, python = release
         process = subprocess.Popen(
             [python, "-I", str(PEER), "server", str(tmp_path / "data")],
             stdin=subprocess.PIPE,
@@ -274,7 +319,8 @@ class TestTheMarks:
             with pytest.raises(streamcast.ExactlyOnceUnavailable) as refused:
                 asyncio.run(attempt())
 
-            assert refused.value.why == "broker"
+            supports_dedupe = tuple(map(int, version.split("."))) >= (0, 23, 0)
+            assert refused.value.why == ("stream" if supports_dedupe else "broker")
         finally:
             process.communicate(timeout=60)
 

@@ -9,6 +9,19 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Fixed
+
+- Expand the 0.27.1 declaration reader to accept default `maintenance` in
+  specs and pending definition targets, normalize it away before replay
+  writes, and retain the old serialized shape and shared maintenance.
+  The private model validates strict flags, finite positive cadences and
+  dedication; non-default declarations are refused as `invalid_declaration`
+  with a message that they require streamcast 0.28. There is no new public
+  export. 0.27.0 still rejects an explicit default field; a downgrade needs
+  old-shaped active specs and pending targets. Interop with the real 0.27.0
+  release passes in both directions: publish, subscribe, published snapshots,
+  log takeover, and registry/pending-definition handoffs and recovery.
+
 ### Added
 
 - Emit `streamcast.publish.lag` through the OpenTelemetry API only: seconds per

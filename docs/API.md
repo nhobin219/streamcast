@@ -805,6 +805,24 @@ Flags accept JSON booleans only. Unknown fields, including the old nested
 `limits`, fail closed as `422 invalid_declaration`. Its `errors` array contains
 only `loc` and `type`, never input values or validator messages.
 
+The 0.27.1 reader also accepts `maintenance` when it is the default: an empty
+object, `dedicated: false`, and null or omitted `seal_every`, `compact_every`,
+`publish_every`, `clean_every`, `clean_published_every` and `flush_every`.
+It normalizes that field away in serialized specs and pending definition
+targets; other defaults and schema property order remain unchanged. Shared
+maintenance behavior is unchanged. `Maintenance` is private in this release.
+Non-default maintenance is refused with `422 invalid_declaration`; the error's
+fixed `message` says `non-default maintenance requires streamcast 0.28`.
+Cadences must be finite positive numbers and require `dedicated: true`.
+
+Upgrade readers to 0.27.1 before introducing 0.28 definitions. 0.27.1 accepts
+only default maintenance; non-default dedication and cadence declarations
+require 0.28 on every broker that reads them. Before downgrading to 0.27.0,
+ensure all active specs and pending definition targets omit `maintenance`:
+0.27.0 rejects even an explicit default. Reading a registry does not rewrite
+all its records, so inspect its persisted shapes before a downgrade. Arbitrary
+0.28 registry contents are not compatible with 0.27.0 or 0.27.1.
+
 Storage and initialization are query parameters:
 `PUT /control/v1/streams/events?storage_profile=local&initialization=create_if_absent`.
 On create they default to `default` and `open_existing`; initialization also

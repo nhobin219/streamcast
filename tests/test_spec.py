@@ -9,9 +9,10 @@ import pytest
 from litelink import LogConfig, S3Options
 from pydantic import TypeAdapter, ValidationError
 
-from streamcast import Storage, StreamSpec, to_arrow
+import streamcast
+from streamcast import Storage, Stream, StreamSpec, to_arrow
 from streamcast._limits import MAX_BACKLOG, MAX_IN_FLIGHT, MAX_INBOUND, MAX_PUBLISHERS
-from streamcast._spec import Initialization
+from streamcast._spec import Initialization, Maintenance
 from streamcast._stream import MAX_REPLAY
 
 
@@ -389,3 +390,76 @@ def test_initialization_contract():
 
     with pytest.raises(ValidationError):
         adapter.validate_python("create")
+
+
+CADENCES = (
+    "seal_every",
+    "compact_every",
+    "publish_every",
+    "clean_every",
+    "clean_published_every",
+    "flush_every",
+)
+
+
+@pytest.mark.parametrize("cadence", CADENCES)
+@pytest.mark.parametrize(
+    "value", [0, -1, float("nan"), float("inf"), -float("inf"), True, "1"]
+)
+def test_maintenance_cadences_are_strict_finite_positive(cadence, value):
+    with pytest.raises(ValidationError):
+        Maintenance.model_validate({"dedicated": True, cadence: value})
+
+
+@pytest.mark.parametrize("cadence", CADENCES)
+def test_maintenance_cadences_require_dedication(cadence):
+    for value in (0.25, 1):
+        with pytest.raises(ValidationError):
+            Maintenance.model_validate({cadence: value})
+
+        declared = Maintenance.model_validate({"dedicated": True, cadence: value})
+        assert getattr(declared, cadence) == value
+        assert Maintenance.model_validate_json(declared.model_dump_json()) == declared
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{"dedicated": 1}, {"dedicated": "true"}, {"dedicated": None}, {"unknown": 1}],
+)
+def test_maintenance_flags_and_keys_are_strict(bad):
+    with pytest.raises(ValidationError):
+        Maintenance.model_validate(bad)
+
+
+def test_maintenance_is_private_and_frozen():
+    assert not hasattr(streamcast, "Maintenance")
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        Maintenance().dedicated = True  # ty: ignore[invalid-assignment]
+
+
+@pytest.mark.parametrize(
+    "maintenance", [{}, {"dedicated": False}, Maintenance().model_dump()]
+)
+def test_default_maintenance_roundtrips_in_old_shape(shape, tmp_path, maintenance):
+    old = StreamSpec(name="trades", schema=shape)
+    spec = StreamSpec.model_validate(
+        {"name": "trades", "schema": shape, "maintenance": maintenance}
+    )
+    assert spec == old
+    assert spec.maintenance == Maintenance()
+    assert spec.model_dump() == old.model_dump()
+    assert spec.model_dump_json() == old.model_dump_json()
+    assert StreamSpec.model_validate_json(spec.model_dump_json()) == spec
+    definition = Stream(spec=spec, storage=Storage(root=tmp_path))
+    assert "maintenance" not in definition.model_dump()["spec"]
+    assert Stream.model_validate_json(definition.model_dump_json()) == definition
+
+
+@pytest.mark.parametrize(
+    "maintenance", [{"dedicated": True}, {"dedicated": True, "seal_every": 1}]
+)
+def test_nondefault_maintenance_needs_028(shape, maintenance):
+    with pytest.raises(ValidationError, match="requires streamcast 0.28"):
+        StreamSpec.model_validate(
+            {"name": "trades", "schema": shape, "maintenance": maintenance}
+        )
