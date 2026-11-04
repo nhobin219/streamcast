@@ -15,12 +15,14 @@ from pydantic import (
     ConfigDict,
     Field,
     ModelWrapValidatorHandler,
+    SerializerFunctionWrapHandler,
     StrictBool,
     StrictInt,
     StrictStr,
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import InitErrorDetails, PydanticCustomError
@@ -46,6 +48,32 @@ def _name(value: str) -> str:
 
 
 Name = Annotated[StrictStr, AfterValidator(_name)]
+_Cadence = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+class Maintenance(BaseModel):
+    """Reader support for the next minor's per-stream maintenance settings."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    dedicated: bool = False
+    seal_every: _Cadence | None = None
+    compact_every: _Cadence | None = None
+    publish_every: _Cadence | None = None
+    clean_every: _Cadence | None = None
+    clean_published_every: _Cadence | None = None
+    flush_every: _Cadence | None = None
+
+    @model_validator(mode="after")
+    def _dedicated_cadences(self) -> Self:
+        if not self.dedicated and any(
+            value is not None
+            for key, value in self.model_dump().items()
+            if key != "dedicated"
+        ):
+            raise ValueError("maintenance cadences require dedicated=true")
+
+        return self
 
 
 class StreamSpec(BaseModel):
@@ -71,6 +99,17 @@ class StreamSpec(BaseModel):
     max_inbound: Annotated[StrictInt, Field(ge=1)] = MAX_INBOUND
     max_in_flight: Annotated[StrictInt, Field(ge=1)] = MAX_IN_FLIGHT
     max_message_bytes: Annotated[StrictInt, Field(ge=1)] | None = None
+    maintenance: Maintenance = Maintenance()
+
+    @model_serializer(mode="wrap")
+    def _old_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        # A patch reader must leave definitions readable by the previous patch.
+        # Other defaults stay explicit: target equality preserves schema order.
+        if self.maintenance == Maintenance():
+            data.pop("maintenance", None)
+
+        return data
 
     @field_validator("sort_by", mode="before")
     @classmethod

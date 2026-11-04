@@ -9,6 +9,21 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Fixed
+
+- Expand the 0.27.1 declaration reader for the upcoming `maintenance` field,
+  including registry replay and pending definition targets, while continuing
+  shared maintenance. The strict, frozen model stays private. Cadences must be
+  finite and positive and require dedication. Default maintenance is omitted
+  from serialized specs and targets; all other defaults keep their old shape.
+  Non-default control declarations fail with `422 invalid_declaration` and
+  require streamcast 0.28, before any intent is persisted.
+- Interop covers the released 0.27.0 in both wire directions, log takeover,
+  publisher-mark preservation, and registry/pending-create/pending-replacement
+  exchange in both directions. Upgrade readers before the 0.28 writer; returning
+  to 0.27.0 requires no `maintenance` in stored specs or pending targets. The
+  released-0.27.1 reader against 0.28 remains a gate for the definition-field PR.
+
 ### Added
 
 - Emit `streamcast.publish.lag` through the OpenTelemetry API only: seconds per
