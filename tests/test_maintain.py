@@ -352,10 +352,6 @@ def test_there_is_no_thread_mode_to_get_wrong():
         "publish_every",
         "clean_every",
         "clean_published_every",
-        # Names logs that get their own PROCESS, which is the opt-out from
-        # sharing one — still not a thread, and there is no way to ask for
-        # one.
-        "dedicated",
         # When `seal` and `publish` pass `flush=True`: the RPO interval.
         "flush_every",
     }
