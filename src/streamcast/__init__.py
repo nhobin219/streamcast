@@ -96,7 +96,7 @@ from streamcast._protocol import EARLIEST, Greeting, PublisherMark
 from streamcast._publish import Publication, publish
 from streamcast._schema import from_arrow, to_arrow
 from streamcast._snapshot import LATEST, Reader, Snapshot, SnapshotUnavailable
-from streamcast._spec import Storage, Stream, StreamSpec
+from streamcast._spec import Maintenance, Storage, Stream, StreamSpec
 from streamcast._stats import Stats
 from streamcast._store import PostgresStore, SqliteStore, Store, Transaction, store_ddl
 from streamcast._stream import StreamHandle
@@ -132,6 +132,7 @@ __all__ = [
     "Inbox",
     "IngestFailed",
     "Maintain",
+    "Maintenance",
     "S3Options",
     "NotReplayable",
     "Outbox",

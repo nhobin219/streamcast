@@ -69,7 +69,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -168,29 +168,21 @@ class Maintain:
     takes only finished files, and RPO is WAL replication's alone.
     """
 
-    dedicated: tuple[str, ...] = field(default=())
-    """Logs that get their own five processes rather than sharing them.
-
-    Each role's process sweeps its logs in series, so one log whose
-    compaction takes seconds delays every other log's compaction by that
-    much. That is
-    a fine trade for the small streams this sharing exists for and a bad one
-    for a very large or very hot log, which is what this names.
-
-    By the LOG's name, which need not be the route it is served at. A name
-    this server does not serve with a log is a `ValueError` when the broker
-    starts rather than a no-op: ignored, a typo puts the log straight back into
-    the shared loop — the one thing it was named to avoid — and the symptom is
-    a latency problem the caller believes they already fixed.
-
-    Naming every log starts no shared maintainer at all, rather than five
-    interpreters sweeping nothing.
-    """
-
     def __post_init__(self) -> None:
-        if self.flush_every is not None and self.flush_every <= 0:
-            msg = f"flush_every={self.flush_every}: a positive interval, or None"
-            raise ValueError(msg)
+        for name in (
+            *[f"{role.replace('-', '_')}_every" for role in ROLES],
+            "flush_every",
+        ):
+            value = getattr(self, name)
+            if name == "flush_every" and value is None:
+                continue
+
+            if (
+                type(value) not in (float, int)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name}: a finite positive interval required")
 
     def every(self, role: str) -> float:
         """The cadence of `role`'s passes, in seconds."""
@@ -539,7 +531,7 @@ class Supervisor:
 
     The work itself was never per-process: `seal()` on an idle log is an
     indexed read of one row, so N of them in a loop is the same shape as one.
-    `Maintain.dedicated` names the logs that should still get their own.
+    `StreamSpec.maintenance.dedicated` isolates a declarative stream's roles.
     """
 
     __slots__ = (

@@ -224,93 +224,41 @@ class TestLifecycle:
             for handle in others:
                 handle.close()
 
-    async def test_dedicated_names_a_log_that_gets_its_own(self, log, tmp_path):
-        """The opt-out, for a log large or hot enough that its compaction
-        would hold up everyone else's.
-
-        The shared loop sweeps in series, so that delay is real — it is just a
-        fine trade for the small streams sharing exists for.
-        """
-
-        busy = _a_log(tmp_path / "busy", "busy")
-        try:
-            routes = {
-                "a": streamcast.StreamHandle("a", log=log),
-                "busy": streamcast.StreamHandle("busy", log=busy),
-            }
-            made = _supervisors(routes, Maintain(dedicated=("busy",)))
-
-            by_role = {
-                role: sorted(
-                    sorted(n for _r, n in sup.targets)
-                    for sup in made
-                    if sup.role == role
-                )
-                for role in ROLES
-            }
-            # Every role twice: once for the dedicated log, once shared.
-            assert by_role == {role: [["busy"], ["trades"]] for role in ROLES}
-
-        finally:
-            busy.close()
-
-    async def test_dedicating_every_log_starts_no_empty_shared_process(
+    async def test_declarative_dedication_and_no_empty_shared_process(
         self, log, tmp_path
     ):
-        """**No maintainer with nothing to maintain.**
-
-        `dedicated` naming every log leaves the shared set empty, and a
-        `Supervisor` over no logs would be a full interpreter — 149 MB RSS
-        measured — sweeping nothing for the life of the server. That is the
-        cost this whole change exists to remove, reappearing as a rounding
-        error in the opt-out.
-
-        Falsify by appending the shared `Supervisor` unconditionally.
-        """
-
-        other = _a_log(tmp_path / "other", "other")
+        dedicated = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(
+                    name="busy",
+                    schema=streamcast.from_arrow(SCHEMA),
+                    maintenance=streamcast.Maintenance(dedicated=True),
+                ),
+                storage=streamcast.Storage(root=tmp_path / "dedicated"),
+            ),
+            initialization="create_if_absent",
+        )
+        shared = streamcast.StreamHandle("route", log=log)
         try:
-            routes = {
-                "a": streamcast.StreamHandle("a", log=log),
-                "b": streamcast.StreamHandle("b", log=other),
-            }
-            made = _supervisors(routes, Maintain(dedicated=("trades", "other")))
-
-            assert len(made) == 2 * len(ROLES), "an empty shared set was started"
-            assert sorted(sorted(n for _r, n in s.targets) for s in made) == (
-                [["other"]] * len(ROLES) + [["trades"]] * len(ROLES)
-            )
-            assert all(sup.targets for sup in made), "a maintainer sweeps nothing"
-
+            made = _supervisors({"route": shared, "busy": dedicated}, Maintain())
+            assert len(made) == 2 * len(ROLES)
+            assert {
+                role: sorted(
+                    sorted(name for _root, name in child.targets)
+                    for child in made
+                    if child.role == role
+                )
+                for role in ROLES
+            } == {role: [["busy"], ["trades"]] for role in ROLES}
+            dedicated_only = _supervisors({"busy": dedicated}, Maintain())
+            assert len(dedicated_only) == len(ROLES)
+            assert all(child.targets for child in dedicated_only)
         finally:
-            other.close()
+            await dedicated.aclose()
 
-    async def test_dedicating_a_name_nothing_serves_is_refused(self, log):
-        """A typo would otherwise put the log back in the shared loop.
-
-        Which is the one thing the caller named it to avoid, with the symptom
-        being a latency problem they believe they already fixed. `_routes`
-        refuses a name collision rather than resolving one, for the same
-        reason.
-        """
-
-        with pytest.raises(ValueError, match="does not serve with a log") as raised:
-            _supervisors(
-                {"a": streamcast.StreamHandle("a", log=log)},
-                Maintain(dedicated=("trade",)),
-            )
-
-        # It names what IS served, and that the name is the log's.
-        assert "'trades'" in str(raised.value)
-        assert "LOG's" in str(raised.value)
-
-    async def test_a_live_only_stream_cannot_be_dedicated(self):
-        """It has no log, so there is nothing for a maintainer to sweep."""
-
-        with pytest.raises(ValueError, match="does not serve with a log"):
-            _supervisors(
-                {"a": streamcast.StreamHandle("a")}, Maintain(dedicated=("a",))
-            )
+    def test_dedication_is_not_a_host_tuple(self):
+        with pytest.raises(TypeError, match="dedicated"):
+            Maintain(dedicated=("unknown",))  # ty: ignore[unknown-argument]
 
     async def test_the_maintainer_stops_when_the_server_closes(self, log):
         stream = streamcast.StreamHandle("trades", log=log)
@@ -659,3 +607,25 @@ class TestStopping:
             finally:
                 gate.set()
                 await server.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "cadence",
+    [
+        "seal_every",
+        "compact_every",
+        "publish_every",
+        "clean_every",
+        "clean_published_every",
+        "flush_every",
+    ],
+)
+@pytest.mark.parametrize(
+    "value", [0, -1, float("nan"), float("inf"), -float("inf"), True, "1", None]
+)
+def test_host_cadences_are_finite_positive(cadence, value):
+    if cadence == "flush_every" and value is None:
+        assert Maintain(flush_every=None).flush_every is None
+    else:
+        with pytest.raises(ValueError, match=cadence):
+            Maintain(**{cadence: value})

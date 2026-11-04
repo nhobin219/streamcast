@@ -121,41 +121,6 @@ async def test_default_maintenance_pending_target_and_noop(config, monkeypatch):
         assert owner.registry.load()[1] == collection
 
 
-@pytest.mark.parametrize(
-    "maintenance", [{"dedicated": True}, {"dedicated": True, "flush_every": 1}]
-)
-async def test_nondefault_maintenance_refused_before_registry_write(
-    config, monkeypatch, maintenance
-):
-    async with managed(replace(config, control_apply_wait_s=5)) as (owner, client, _):
-        created = await request(client)
-        assert created.status_code == 200
-        before = copy.deepcopy(owner.records), owner.registry.load()
-
-        def forbidden(*_):
-            pytest.fail("non-default maintenance reached a registry write")
-
-        monkeypatch.setattr(owner.registry, "accept", forbidden)
-        monkeypatch.setattr(owner.registry, "update", forbidden)
-        for name, revision in (("other", None), ("events", 1)):
-            response = await request(
-                client,
-                name=name,
-                revision=revision,
-                body=definition(name=name, maintenance=maintenance),
-            )
-            assert response.status_code == 422
-            error = response.json()["error"]
-            assert error["code"] == "invalid_declaration"
-            assert "requires streamcast 0.28" in error["message"]
-            assert error["errors"] == [
-                {"loc": ["maintenance"], "type": "maintenance_version"}
-            ]
-            assert (owner.records, owner.registry.load()) == before
-
-        monkeypatch.undo()
-
-
 async def test_wait_outside_acceptance_and_serial_lock(config, monkeypatch):
     async with managed(replace(config, control_apply_wait_s=5, max_pending=1)) as (
         owner,

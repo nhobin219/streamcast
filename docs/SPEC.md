@@ -70,7 +70,13 @@ not replace deployment fencing of another host or writers outside this runtime. 
 injects authentication and storage profiles. Child reconciliation restarts
 only changed groups, leaving neighbor stream objects and connections in place.
 Only a stream's WAL-replication sidecar group gates its writes; maintainers
-contribute readiness telemetry alone.
+contribute readiness telemetry alone. Dedication belongs to `StreamSpec.maintenance`,
+with null cadence overrides inherited from host defaults. A maintenance-only
+edit retains a serving generation and its writer and connections; stopped or
+retired edits touch only the registry record. New dedications require admission
+under `max_dedicated`; replay and existing dedication are never evicted by a
+lower host cap. Default maintenance is omitted from serialized definitions.
+Non-default definitions require 0.28 readers; the 0.27.1 reader rejects them.
 
 In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
