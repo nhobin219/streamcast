@@ -642,7 +642,7 @@ class TestStopping:
             async def wait_closed(self):
                 await gate.wait()
 
-        monkeypatch.setattr(runtime, "_supervisors", lambda *_: [Finishing()])
+        monkeypatch.setattr(runtime, "build", lambda *_: Finishing())
         stream = streamcast.StreamHandle("trades", log=log)
         server = await serve_streams(stream, "127.0.0.1", 0)
         uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/trades"

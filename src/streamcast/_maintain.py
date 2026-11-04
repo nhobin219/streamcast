@@ -634,6 +634,11 @@ class Supervisor:
         except OSError:
             return False
 
+    @property
+    def failed(self) -> bool:
+        """A dead supervision task needs a reap before replacement."""
+        return self._watch is not None and self._watch.done()
+
     def start(self) -> None:
         self._process = self._spawn()
         self._watch = asyncio.create_task(self._supervise())
@@ -701,7 +706,7 @@ class Supervisor:
     async def wait_closed(self) -> None:
         """Wait for it to go, and kill it if it will not."""
         if self._watch is not None:
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._watch
 
         process, self._stopped = self._stopped, None

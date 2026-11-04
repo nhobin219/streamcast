@@ -172,8 +172,9 @@ class Sidecar:
         would never be claimed, and its database never replicated. Refused
         here, naming both, as is a config given twice.
 
-        A missing binary raises HERE, before anything serves, for the reason
-        `new` gives. So does a control socket path too long to bind: a Unix
+        A missing binary raises here; the broker records the failure and retries
+        without opening that group's write gates. So does a control socket
+        path too long to bind: a Unix
         socket path is limited to about 104 bytes, and a litestream that
         cannot listen exits at once and is restarted for ever.
         """
@@ -237,14 +238,12 @@ class Sidecar:
     ) -> Sidecar:
         """Write each log's config, then build the sidecar from them (`of`).
 
-        **Both ordering guarantees the initialiser used to carry are kept
-        here, and they are the reason this is a factory rather than a
-        lazily-initialised field.** Every config is written NOW, when the
-        broker starts, while this process indisputably owns the logs and before any
-        maintainer is spawned against them. And a missing binary raises HERE,
-        which `_sidecars` reaches before the listener binds — so a server that
-        cannot replicate never starts accepting subscribers who would believe
-        it was.
+        Configs are written while the broker owns the logs, before sidecar
+        supervision starts. This I/O belongs in a factory rather than a
+        lazily-initialised field. A missing binary raises here:
+        standalone callers see it directly, while the broker reports the failed
+        identity and retries it. The affected generation's write gate stays
+        closed until its sidecar is first observed ready.
 
         litelink's per-log `litestream.yml` files are still written and still
         the thing to hand your own litestream. The merged config this process
@@ -390,6 +389,11 @@ class Sidecar:
 
         return True
 
+    @property
+    def failed(self) -> bool:
+        """A dead supervision task needs a reap before replacement."""
+        return self._watch is not None and self._watch.done()
+
     def start(self) -> None:
         self._watch = asyncio.create_task(self._supervise())
 
@@ -491,7 +495,7 @@ class Sidecar:
 
     async def wait_closed(self) -> None:
         if self._watch is not None:
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._watch
 
         process, self._process = self._process, None

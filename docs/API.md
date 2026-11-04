@@ -264,12 +264,12 @@ children. Static streams and registry-backed streams use that same owner.
 Shutdown fences writes, closes peers, joins replay and writer work, then reaps
 children and closes owned handles. Borrowed log handles remain the caller's.
 
-Startup waits for the children to report ready, up to `readiness_timeout` (30
-seconds), and fails rather than serve without a maintainer: five interpreters
-loading pyarrow and DuckDB can take most of that on a small loaded host. Static
-streams share the maintainer group with managed ones, so a managed stream's
-transition, which replaces the group, also fences a static stream's writes
-until the new group is ready, rather than accept rows no maintainer will seal.
+Startup and child passes start children without waiting for readiness.
+Maintainers never gate writes. A generation that requires WAL replication
+opens writes only after its sidecar group is first observed ready. Later,
+it remains writable for `readiness_timeout` (30 seconds) since the last
+observed readiness. Membership changes and retries do not renew that grace.
+A stream without a sidecar is writable while accepting.
 A local `stream.send` then raises `ValueError("stream unavailable")`; retry
 after a moment. A publisher connection is closed with 1001, as at a stop, with
 nothing of the refused frame queued: `publish` raises `ConnectionClosed` and an
@@ -669,16 +669,37 @@ publication is an operation failure; handles and locks are retained rather
 than handed to another owner. The process must exit and recover. Repeated
 ASGI cancellation joins owned startup/shutdown tasks before returning.
 
-Maintenance roles have fixed group membership. A stream transition replaces
-the shared group: all writes are fenced while old children are reaped and
-new children become ready. Neighbor stream objects and connections stay in
-place; their write admission resumes after readiness. A maintainer reports
-its PID only after opening its whole group. A replication sidecar must own
-its logs and accept a connection on its control socket. This establishes
-local readiness, **not remote object-store durability**. Startup/replacement
-has a bounded readiness timeout (30 seconds); later child unavailability
-fences writes after that deadline. Reads may continue. There is no promise
-of uninterrupted writes during membership changes.
+Each maintenance role and sidecar has an immutable identity containing its
+effective inputs. A single owner reconciles the desired set: it stops only
+changed groups, preserving seal → publish → other roles, awaits their reap,
+and starts missing groups without waiting for readiness. Unchanged groups,
+neighbor stream objects and connections stay in place. A trigger during a
+pass causes another pass on fresh state. Offline runs an excluding pass
+before final publication; shutdown stops every child once before its offline
+loop and starts none. Readiness files are unique per boot and start.
+
+A maintainer reports its PID only after opening its whole group. A replication
+sidecar must own every member and accept a connection on its control socket.
+This establishes local readiness, **not remote object-store durability**.
+Watch ticks continue during child passes. Only a stream's sidecar group gates
+its writes, with the grace described above; reads may continue. Missing or
+failing maintainers affect readiness telemetry alone. There is no promise
+of uninterrupted writes during sidecar membership changes.
+
+Construction, start and supervision failures are logged and retried while the
+identity remains desired, with backoff from 0.5 seconds to 30 seconds. An
+accepted stream transition is not reverted for a child failure. A dead
+supervision task is still stopped and reaped before replacement, and sidecar
+locks are released. Convergence means the running and desired sets match and
+every child is ready.
+
+`/stats` includes aggregate `children: {converged, wanted, running, failing}`
+counts. `GET /control/v1` includes `children: {converged, failing}`; each failure
+has `kind`, `role` (null for sidecars), authorized `streams`, and a fixed `error`
+code: `construction_failed`, `start_failed`, `supervision_failed` or `not_ready`.
+Paths, credential keys and exception text are not returned. A stream's
+`children_ready` covers only its own groups: missing desired children count
+as unready, and no requirements count as ready.
 
 The host owns shutdown deadlines. Killing a process before draining may
 leave accepted intent to recover on the next boot. An unavailable or failed
