@@ -198,9 +198,6 @@ def test_registry_pending_target_and_recovery_between_027_versions(
     assert "maintenance" not in recovered["record"]["stream"]["spec"]
 
 
-@pytest.mark.skip(
-    reason="0.27.1 is not on PyPI; enable after the approved release tag and publication"
-)
 @pytest.mark.parametrize("release", ["0.27.1"], indirect=True)
 def test_0271_reads_default_definitions_written_by_028(release, tmp_path):
     _version, python = release
