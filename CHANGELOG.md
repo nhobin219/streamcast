@@ -7,6 +7,25 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- Reconcile immutable maintenance and replication child identities instead of
+  replacing every group. Changed groups stop and reap before replacement;
+  unchanged groups survive. Passes start children without waiting for readiness.
+  Construction, start and supervision failures retry with 0.5–30 second backoff
+  rather than reverting accepted stream transitions. Cleanup reaps processes and
+  releases locks even after a supervision task fails.
+- Gate each generation's writes only on its WAL-replication sidecar group.
+  Maintainers affect readiness telemetry alone. A new generation waits for its
+  sidecar's first readiness; later failures fence after the timeout since last
+  observed readiness, including during passes. Retries and membership churn do
+  not renew grace. Readiness markers are unique per boot and start.
+- Add aggregate child convergence counts to `/stats`, safe failure summaries
+  to control capabilities, and per-stream `children_ready`. Dedication still
+  uses the host's `Maintain.dedicated` tuple in this slice.
+
 ## 0.27.1 — 2026-11-04
 
 ### Fixed

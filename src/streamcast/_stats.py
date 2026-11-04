@@ -104,7 +104,7 @@ class Stats:
     """
 
 
-def payload(streams: Iterable[StreamHandle]) -> bytes:
+def payload(streams: Iterable[StreamHandle], *, children: dict | None = None) -> bytes:
     """Every stream's stats as a JSON object, for the `/stats` response.
 
     `served_at` is here so a caller can measure its own skew against this
@@ -112,7 +112,13 @@ def payload(streams: Iterable[StreamHandle]) -> bytes:
     immune to that, and this makes the wall-clock fields usable too.
     """
     return json.encode(
-        {"served_at": time.time(), "streams": [stream.stats for stream in streams]}
+        {
+            "served_at": time.time(),
+            "streams": [stream.stats for stream in streams],
+            "children": children
+            if children is not None
+            else {"converged": True, "wanted": 0, "running": 0, "failing": 0},
+        }
     )
 
 

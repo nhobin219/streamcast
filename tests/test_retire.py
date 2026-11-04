@@ -149,19 +149,21 @@ class TestARetiredStreamIsReadOnly:
             ),
             initialization="create_if_absent",
         )
-        planned: list[list[str]] = []
-        real = _server._supervisors  # noqa: SLF001
+        planned: list[list[str | None]] = []
+        real = _server.desired
 
-        def recording(routes, maintain):  # noqa: ANN001, ANN202
-            children = real(routes, maintain)
-            planned.append([child.name for child in children])  # ty: ignore[unresolved-attribute]
-            return children
+        def recording(generations, maintain):
+            specs = real(generations, maintain)
+            planned.append([spec.role for spec in specs])
+            return specs
 
-        monkeypatch.setattr(_server, "_supervisors", recording)
+        monkeypatch.setattr(_server, "desired", recording)
         async with serve(stream):
             pass
 
-        assert planned == [[]], "no maintainer for a finished log"
+        assert planned and all(not specs for specs in planned), (
+            "no maintainer for a finished log"
+        )
 
 
 class TestReviving:

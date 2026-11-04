@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import time
 import uuid
 from collections.abc import Coroutine
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from pydantic import ValidationError
 
@@ -17,12 +18,20 @@ from streamcast import _log, _metadata
 from streamcast._broker.model import NAME, BrokerConfig, Fault
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._broker.transitions import storage, with_replica
-from streamcast._children import _sidecars, _supervisors
+from streamcast._children import (
+    ChildSpec,
+    build,
+    desired,
+    validate_dedicated,
+    warn_unreplicated,
+)
 from streamcast._errors import Unavailable
-from streamcast._maintain import stop
+from streamcast._maintain import Supervisor, stop
 from streamcast._spec import Initialization, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
+
+logger = logging.getLogger(__name__)
 
 
 class Generation:
@@ -32,6 +41,8 @@ class Generation:
         self.accepting = False
         self.writable = False
         self.connections: dict[asyncio.Task, Any] = {}
+        self.sidecar_wait_at: float | None = None
+        self.sidecar_ready_at: float | None = None
 
     def check(self) -> None:
         if not self.accepting or not self.writable:
@@ -50,18 +61,21 @@ class BrokerRuntime:
         self.observed: dict[str, dict] = {}
         self.generations: dict[str, Generation] = {}
         self.locks: dict[Any, Lock] = {}
-        self.children: list[Any] = []
+        self.running: dict[ChildSpec, Any] = {}
+        self.wanted: set[ChildSpec] = set()
+        self.retries: dict[ChildSpec, tuple[float, float, str]] = {}
+        self.child_health: dict[ChildSpec, bool] = {}
+        self.child_pass: asyncio.Task | None = None
+        self.children_dirty = False
+        self.child_starts = 0
+        self.excluding: set[str] = set()
         self.collection = 0
         self.serial = asyncio.Lock()
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.worker: asyncio.Task | None = None
         self.monitor: asyncio.Task | None = None
         self.closing = False
-        self.child_ready = False
-        self.children_complete = False
         self.generation = 0
-        self.ready_at = 0.0
-        self.changing_children = False
         self.closed = False
         self.controls: set[asyncio.Task] = set()
         self.static: dict[str, StreamHandle] = {}
@@ -141,11 +155,17 @@ class BrokerRuntime:
                 generation = Generation(stream, self.generation)
                 stream._admission = generation.check
                 self.generations[name] = generation
+                warn_unreplicated(stream)
 
-            await self.replace_children()
+            validate_dedicated(
+                {name: g.stream for name, g in self.generations.items()},
+                config.maintain,
+            )
+            await self.reconcile_children()
             for name in self.static:
                 self.generations[name].accepting = True
 
+            self.refresh_gates(time.monotonic())
             self.worker = asyncio.create_task(self.work())
             self.worker.add_done_callback(self.worker_done)
             self.monitor = asyncio.create_task(self.watch())
@@ -249,7 +269,7 @@ class BrokerRuntime:
             "write_admission": bool(
                 generation and generation.accepting and generation.writable
             ),
-            "children_ready": self.child_ready,
+            "children_ready": self.children_ready(name),
             **extra,
         }
 
@@ -655,15 +675,14 @@ class BrokerRuntime:
             generation = Generation(opened, self.generation)
             opened._admission = generation.check
             self.generations[name] = generation
+            warn_unreplicated(opened)
             # Bind identity durably before a data route can expose it.
             record["stream_id"] = opened._stream_id
             await thread(self.registry.update, record)
-            await self.replace_children()
+            await self.reconcile_children()
             generation.accepting = not self.closing
-            generation.writable = (
-                not self.closing and desired == "serving" and self.child_ready
-            )
             self.observe(name, desired)
+            self.refresh_gates(time.monotonic())
         except BaseException:
             if name not in self.generations:
                 await opened.aclose()
@@ -770,6 +789,7 @@ class BrokerRuntime:
             return
 
         generation.accepting = generation.writable = False
+        self.excluding.add(name)
         if name not in self.static:
             self.observe(name, "stopping")
 
@@ -785,7 +805,12 @@ class BrokerRuntime:
         if stream._writer is not None:
             await thread(stream._writer.close)
 
-        await self.stop_children()
+        # An in-flight worker may enter offline just as close starts. It must
+        # still reap live children before final publication; the close loop
+        # itself reaches here with an already empty running set.
+        if not self.closing or self.running:
+            await self.reconcile_children()
+
         # Final publication errors are visible to the pending attempt. Maintainers'
         # best-effort exit hooks alone cannot establish a successful stop.
         if name not in self.static:
@@ -796,10 +821,7 @@ class BrokerRuntime:
         # rather than naming a generation that no longer exists.
         stream._admission = None
         del self.generations[name]
-        # Closing takes every stream offline in turn, writes already fenced:
-        # a group restarted for the ones left would be reaped again at once.
-        if not self.closing:
-            await self.replace_children()
+        self.excluding.discard(name)
 
     async def finalize(self, stream: StreamHandle, record: dict) -> None:
         if stream.retirement is not None:
@@ -840,99 +862,242 @@ class BrokerRuntime:
             target,
         )
 
+    @property
+    def children(self) -> list[Any]:
+        return list(self.running.values())
+
+    def trigger_children(self) -> asyncio.Task:
+        self.children_dirty = True
+        if self.child_pass is None or self.child_pass.done():
+            self.child_pass = asyncio.create_task(self.child_passes())
+
+        return self.child_pass
+
+    async def reconcile_children(self) -> None:
+        # Cancellation of one waiter cannot abandon a half-stopped group.
+        await asyncio.shield(self.trigger_children())
+
     async def stop_children(self) -> None:
-        self.changing_children = True
-        self.child_ready = False
-        self.children_complete = False
-        for generation in self.generations.values():
-            generation.writable = False
+        assert self.closing
+        await self.reconcile_children()
 
-        children = self.children
-        await stop(children)
-        self.children = []
-        for child in children:
-            marker = getattr(child, "_ready_file", None)
-            if marker is not None:
-                await thread(marker.unlink, missing_ok=True)
-
-    async def replace_children(self) -> None:
-        self.changing_children = True
-        try:
-            await self._replace_children()
-        finally:
-            self.changing_children = False
-
-    async def _replace_children(self) -> None:
-        await self.stop_children()
-        routes = {name: g.stream for name, g in self.generations.items()}
-        if not routes:
-            self.children_complete = self.child_ready = True
-            return
-
-        children: list[Any] = list(_supervisors(routes, self.config.maintain))
-        assert self.ready_directory is not None
-        for index, child in enumerate(children):
-            child._ready_file = (
-                Path(self.ready_directory.name) / f".ready-{self.boot_id}-{index}"
+    async def child_passes(self) -> None:
+        while self.children_dirty:
+            self.children_dirty = False
+            generations = {
+                name: g
+                for name, g in self.generations.items()
+                if name not in self.excluding
+            }
+            self.wanted = (
+                set() if self.closing else desired(generations, self.config.maintain)
             )
+            # Only currently desired identities may retain a retry deadline.
+            self.retries = {s: r for s, r in self.retries.items() if s in self.wanted}
+            obsolete = {
+                spec: child
+                for spec, child in self.running.items()
+                if spec not in self.wanted or getattr(child, "failed", False)
+            }
+            for spec, child in obsolete.items():
+                if spec in self.wanted and getattr(child, "failed", False):
+                    task = getattr(child, "_watch", None)
+                    if task is not None and not task.cancelled():
+                        exc = task.exception()
+                        if exc is not None:
+                            logger.error(
+                                "child supervision failed: %s %s",
+                                spec.kind,
+                                spec.role,
+                                exc_info=exc,
+                            )
 
-        # A handle carries its replication policy, whether static or managed.
-        # The child factory groups each set further by its credentials.
-        by_replication: dict[bool, dict] = {}
-        for name, stream in routes.items():
-            by_replication.setdefault(stream.replicate, {})[name] = stream
+                    self.child_failure(spec, "supervision_failed")
 
-        for replicate, members in by_replication.items():
-            children.extend(_sidecars(members, replicate))
+            # Existing stop preserves seal -> publish -> other roles. Never
+            # publish a removal, or replace a child, before its reap finishes.
+            await stop(list(obsolete.values()))
+            for spec, child in obsolete.items():
+                del self.running[spec]
+                self.child_health.pop(spec, None)
+                marker = getattr(child, "_ready_file", None)
+                if marker is not None:
+                    await thread(marker.unlink, missing_ok=True)
 
-        self.children = children
-        for child in children:
-            child.start()
+            if self.closing:
+                continue
 
-        self.children_complete = True
-        self.ready_at = time.monotonic() + self.config.readiness_timeout
-        async with asyncio.timeout(self.config.readiness_timeout):
-            while not await thread(self.children_ready):
-                await asyncio.sleep(self.config.readiness_every)
+            routes = {name: g.stream for name, g in generations.items()}
+            for spec in self.wanted - self.running.keys():
+                retry = self.retries.get(spec)
+                if retry is not None and time.monotonic() < retry[1]:
+                    continue
 
-        self.child_ready = True
+                child = None
+                error = "construction_failed"
+                try:
+                    child = build(spec, routes)
+                    if spec.kind == "maintainer":
+                        assert self.ready_directory is not None
+                        self.child_starts += 1
+                        cast(Supervisor, child)._ready_file = (
+                            Path(self.ready_directory.name)
+                            / f".ready-{self.boot_id}-{self.child_starts}"
+                        )
+
+                    error = "start_failed"
+                    child.start()
+                except Exception:
+                    logger.exception("child %s: %s %s", error, spec.kind, spec.role)
+                    if child is not None:
+                        await stop([child])
+                        marker = getattr(child, "_ready_file", None)
+                        if marker is not None:
+                            await thread(marker.unlink, missing_ok=True)
+
+                    self.child_failure(spec, error)
+                    continue
+
+                self.running[spec] = child
+                self.child_health[spec] = False
+                # A successful construction is not observed readiness, and
+                # therefore cannot refresh grace or reset repeated failures.
+
+    def child_failure(self, spec: ChildSpec, error: str) -> None:
+        previous = self.retries.get(spec)
+        delay = 0.5 if previous is None else min(previous[0] * 2, 30.0)
+        self.retries[spec] = (delay, time.monotonic() + delay, error)
+
+    def required(self, name: str, *, sidecars: bool = False) -> set[ChildSpec]:
+        generation = self.generations.get(name)
+        if generation is None or generation.stream.log is None:
+            return set()
+
+        log = generation.stream.log
+        target = (Path(log.root), log.name)
+        return {
+            spec
+            for spec in self.wanted
+            if target in spec.members and (not sidecars or spec.kind == "sidecar")
+        }
+
+    def children_ready(self, name: str | None = None) -> bool:
+        required = self.wanted if name is None else self.required(name)
+        return all(
+            spec in self.running and self.child_health.get(spec, False)
+            for spec in required
+        )
+
+    def child_status(self, *, counts: bool, visible: set[str] | None = None) -> dict:
+        failing = [
+            spec
+            for spec in self.wanted
+            if not self.child_health.get(spec, False) or spec not in self.running
+        ]
+        converged = self.running.keys() == self.wanted and not failing
+        if counts:
+            return {
+                "converged": converged,
+                "wanted": len(self.wanted),
+                "running": len(self.running),
+                "failing": len(failing),
+            }
+
+        failures = []
+        for spec in failing:
+            names = sorted(
+                name
+                for name in self.generations
+                if (visible is None or name in visible) and spec in self.required(name)
+            )
+            if names:
+                failures.append(
+                    {
+                        "kind": spec.kind,
+                        "role": spec.role,
+                        "streams": names,
+                        "error": self.retries[spec][2]
+                        if spec in self.retries
+                        else "not_ready",
+                    }
+                )
+
+        failures.sort(key=lambda f: (f["kind"], f["role"] or "", f["streams"]))
+        return {"converged": converged, "failing": failures}
+
+    async def watch_tick(self) -> None:
+        # Snapshot references before leaving the loop; a pass can replace a
+        # group while these filesystem/socket probes run in the executor.
+        snapshot = list(self.running.items())
+
+        def sample() -> list[bool]:
+            return [
+                not getattr(child, "failed", False) and child.ready
+                for _, child in snapshot
+            ]
+
+        ready = await thread(sample)
+        for (spec, child), healthy in zip(snapshot, ready, strict=True):
+            if self.running.get(spec) is child:
+                self.child_health[spec] = healthy
+                if healthy:
+                    self.retries.pop(spec, None)
+
+        self.refresh_gates(time.monotonic(), observed=True)
+        if not self.closing and (self.child_pass is None or self.child_pass.done()):
+            now = time.monotonic()
+            if any(
+                getattr(child, "failed", False) for child in self.running.values()
+            ) or any(
+                spec not in self.running
+                and (spec not in self.retries or now >= self.retries[spec][1])
+                for spec in self.wanted
+            ):
+                self.trigger_children()
+
+    def refresh_gates(self, now: float, *, observed: bool = False) -> None:
         for name, generation in self.generations.items():
-            generation.writable = not self.closing and (
-                name in self.static or self.records[name]["desired"] == "serving"
-            )
+            required = self.required(name, sidecars=True)
+            if required and generation.sidecar_wait_at is None:
+                generation.sidecar_wait_at = now
 
-    def children_ready(self) -> bool:
-        return self.children_complete and all(child.ready for child in self.children)
+            ready = all(
+                spec in self.running and self.child_health.get(spec, False)
+                for spec in required
+            )
+            if observed and required and ready:
+                generation.sidecar_ready_at = now
+
+            grace = (
+                generation.sidecar_ready_at is not None
+                and now - generation.sidecar_ready_at < self.config.readiness_timeout
+            )
+            generation.writable = bool(
+                not self.closing
+                and generation.accepting
+                and generation.stream.retirement is None
+                and (not required or ready or grace)
+            )
+            if name not in self.static and generation.accepting:
+                if required and not generation.writable:
+                    if (
+                        generation.sidecar_ready_at is None
+                        and generation.sidecar_wait_at is not None
+                        and now - generation.sidecar_wait_at
+                        < self.config.readiness_timeout
+                    ):
+                        self.observe(name, "starting")
+                    else:
+                        self.observe(name, "error", error="children_unavailable")
+
+                else:
+                    self.observe(name, self.records[name]["desired"])
 
     async def watch(self) -> None:
         while True:
             await asyncio.sleep(self.config.readiness_every)
-            if self.changing_children or self.closing:
-                continue
-
-            ready = await thread(self.children_ready)
-            if self.changing_children or self.closing:
-                continue
-
-            if ready:
-                self.ready_at = time.monotonic() + self.config.readiness_timeout
-
-            self.child_ready = ready
-            if not ready and time.monotonic() >= self.ready_at:
-                for name, generation in self.generations.items():
-                    generation.writable = False
-                    if name not in self.static:
-                        self.observe(name, "error", error="children_unavailable")
-
-            elif ready:
-                for name, generation in self.generations.items():
-                    if generation.accepting:
-                        generation.writable = (
-                            name in self.static
-                            or self.records[name]["desired"] == "serving"
-                        )
-                        if name not in self.static:
-                            self.observe(name, self.records[name]["desired"])
+            if not self.closing:
+                await self.watch_tick()
 
     async def close(self) -> None:
         if self.closed:
@@ -958,10 +1123,10 @@ class BrokerRuntime:
 
         # Release no ownership lock if a worker/finalization fails. The process
         # must exit/recover rather than hand live handles to a new owner.
+        await self.stop_children()
         for name in list(self.generations):
             await self.offline(self.records.get(name, {"name": name}))
 
-        await self.stop_children()
         for lock in self.locks.values():
             lock.close()
 
