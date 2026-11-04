@@ -67,9 +67,10 @@ and HTTP control in one FastAPI application. One top-level ASGI lifespan
 owns its registry, durable intent, stream generations and maintenance
 children. Local ownership locks exclude a second managed writer; they do
 not replace deployment fencing of another host or writers outside this runtime. The host
-injects authentication and storage profiles. Shared maintenance membership
-changes fence writes until replacement children report readiness, while
-neighbor stream objects and connections remain in place.
+injects authentication and storage profiles. Child reconciliation restarts
+only changed groups, leaving neighbor stream objects and connections in place.
+Only a stream's WAL-replication sidecar group gates its writes; maintainers
+contribute readiness telemetry alone.
 
 In: fan-out, ordering, offsets, replay, per-subscriber backpressure isolation,
 and the recovery that rests on them — a consumer's cursor, and reading the
@@ -1617,8 +1618,19 @@ registry-backed generations, admission, connections, writer drains, maintenance
 and replication children. A mounted host enters that same lifespan explicitly.
 The host runs one ASGI worker; shared storage locks refuse local alias owners,
 not a distributed lease. Registry intent is durable before acknowledgement and
-recovered before admission. Child replacement fences writes until readiness;
-shutdown fences before drain and reap. The management contract and crash/recovery
+recovered before admission. One owner diffs immutable child identities, stops
+and reaps removals before starting additions, and repeats on fresh state for
+triggers during a pass. Construction/start failures retry with 0.5–30 second
+backoff while desired; failed supervision cannot skip process reap or lock
+release. Passes do not wait for readiness. A sidecar's first observed readiness
+opens a generation's write gate; later unavailability fences that stream after
+`readiness_timeout` since the last observed readiness. Watch ticks continue
+during passes; retries and membership changes do not refresh grace. Missing
+maintainers never fence writes. Per-stream `children_ready` covers all its
+groups, while `/stats` counts and control capabilities report convergence and
+failures without credentials or exception text. Offline excludes its generation
+before final publication; shutdown fences before drain, stops all children once
+before the offline loop, and starts none. The management contract and crash/recovery
 ordering are in [API.md](API.md#dynamic-management).
 
 Subscriber checkpoints count outbound data frames across replay and live paths.

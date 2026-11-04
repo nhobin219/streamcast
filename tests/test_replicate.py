@@ -91,6 +91,17 @@ async def settle(s3, bucket, *, name: str = "trades", timeout=30.0) -> list[str]
     return []
 
 
+async def writable(server):
+    async with asyncio.timeout(40):
+        while True:
+            owner = server.app.state.broker
+            await owner.watch_tick()
+            if all(g.writable for g in owner.generations.values()):
+                return
+
+            await asyncio.sleep(0.01)
+
+
 class TestItActuallyReplicates:
     @pytest.mark.slow
     async def test_serve_ships_the_wal_with_no_second_process_to_run(
@@ -107,7 +118,8 @@ class TestItActuallyReplicates:
             stream,
             "127.0.0.1",
             0,
-        ):
+        ) as server:
+            await writable(server)
             await stream.send_many(
                 [{"event_ts": i, "price": 1.0 * i} for i in range(2_000)]
             )
@@ -118,8 +130,7 @@ class TestItActuallyReplicates:
         assert any(key.endswith(".ltx") for key in found), found[:5]
 
     @pytest.mark.slow
-    # The broker reports ready only once five maintainers and litestream
-    # have, which is most of a minute on a loaded two-core box.
+    # Real WAL replication includes the sidecar's first readiness and upload.
     @pytest.mark.timeout(120)
     async def test_one_process_ships_every_log(self, two_shipped, s3, bucket):
         """**The whole of #14's replication half, end to end.**
@@ -155,6 +166,7 @@ class TestItActuallyReplicates:
 
             assert sidecars[0].owned == {"trades", "quotes"}
 
+            await writable(server)
             for stream in streams:
                 await stream.send_many(
                     [{"event_ts": i, "price": 1.0 * i} for i in range(2_000)]
@@ -400,37 +412,35 @@ class TestNeverTwo:
 
 
 class TestItFailsLoudly:
-    async def test_a_missing_binary_raises_at_startup(self, shipped, monkeypatch):
-        """Not at the first missed push.
-
-        A server that came up and replicated nothing would leave the operator
-        believing they had protection they did not have — the failure this
-        module exists to prevent.
-        """
+    async def test_a_missing_binary_is_visible_and_retried(self, shipped, monkeypatch):
         monkeypatch.setattr(
             "streamcast._replicate.litestream_binary",
             lambda override=None: "/nonexistent/litestream",
         )
         stream = streamcast.StreamHandle("trades", log=shipped, replicate=True)
-        with pytest.raises(SidecarUnavailable, match="litestream was not found"):
-            await serve_streams(
-                stream,
-                "127.0.0.1",
-                0,
-            )
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=False) as server:
+            owner = server.app.state.broker
+            assert not owner.generations["trades"].writable
+            assert not owner.running
+            assert owner.child_status(counts=True) == {
+                "converged": False,
+                "wanted": 1,
+                "running": 0,
+                "failing": 1,
+            }
+            assert next(iter(owner.retries.values()))[2] == "construction_failed"
+            await owner.reconcile_children()
+            assert not owner.running
 
-    async def test_the_message_names_the_way_out(self, shipped, monkeypatch):
+    async def test_the_standalone_factory_message_names_the_way_out(
+        self, shipped, monkeypatch
+    ):
         monkeypatch.setattr(
             "streamcast._replicate.litestream_binary",
             lambda override=None: "/nonexistent/litestream",
         )
-        stream = streamcast.StreamHandle("trades", log=shipped, replicate=True)
         with pytest.raises(SidecarUnavailable) as raised:
-            await serve_streams(
-                stream,
-                "127.0.0.1",
-                0,
-            )
+            Sidecar.new([shipped])
 
         assert "replicate=False" in str(raised.value)
         assert "'trades'" in str(raised.value)

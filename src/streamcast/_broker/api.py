@@ -140,12 +140,18 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
 
     @app.get(CONTROL)
     async def capabilities(request: Request):
-        await authorize(config, request.scope, "control.read", "*")
+        principal = await authorize(config, request.scope, "control.read", "*")
         owner = runtime()
+        visible = {
+            name
+            for name in owner.generations
+            if await config.authorization.allows(principal, "control.read", name)
+        }
         return {
             "version": 1,
             "broker_id": config.broker_id,
             "boot_id": owner.boot_id,
+            "children": owner.child_status(counts=False, visible=visible),
             "transport_max_bytes": config.transport_max_bytes,
             "control_max_bytes": config.control_max_bytes,
             "max_pending": config.max_pending,
@@ -340,7 +346,10 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
             ):
                 streams.append(generation.stream)
 
-        return Response(_stats.payload(streams), media_type="application/json")
+        return Response(
+            _stats.payload(streams, children=owner.child_status(counts=True)),
+            media_type="application/json",
+        )
 
     @app.websocket("/{path:path}")
     async def websocket(websocket: WebSocket, path: str):

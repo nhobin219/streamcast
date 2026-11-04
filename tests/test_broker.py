@@ -40,7 +40,7 @@ from streamcast import (
 )
 from streamcast._broker import runtime as implementation
 from streamcast._broker.registry import Registry
-from streamcast._children import _supervisors
+from streamcast._children import build, desired
 from streamcast._replicate import Sidecar
 from streamcast._tasks import reader, thread
 
@@ -112,7 +112,7 @@ class Child:
 
 @pytest.fixture
 def config(tmp_path, monkeypatch):
-    monkeypatch.setattr(implementation, "_supervisors", lambda *_: [Child()])
+    monkeypatch.setattr(implementation, "build", lambda *_: Child())
     config = BrokerConfig(
         "test",
         tmp_path / "registry.db",
@@ -814,16 +814,34 @@ async def test_unexpected_data_failure_closes_without_storage_details(
                 assert caught.value.rcvd.reason == "stream unavailable"
 
 
+async def children_ready(owner):
+    async with asyncio.timeout(40):
+        while True:
+            await owner.watch_tick()
+            if owner.children_ready():
+                return
+
+            await asyncio.sleep(0.01)
+
+
 async def test_real_children_signal_exact_generation_readiness(config, monkeypatch):
     # One real role proves the handshake and reap boundary. Running five
     # interpreters proves the same protocol five times and costs office CPUs.
     monkeypatch.setattr(
-        implementation, "_supervisors", lambda *args: _supervisors(*args)[:1]
+        implementation,
+        "desired",
+        lambda *args: {
+            spec
+            for spec in desired(*args)
+            if spec.kind == "sidecar" or spec.role == "seal"
+        },
     )
+    monkeypatch.setattr(implementation, "build", build)
 
     async with managed(replace(config, readiness_timeout=15)) as (owner, client, _):
         await serving(owner, client)
         assert len(owner.children) == 1
+        await children_ready(owner)
         assert all(child.ready for child in owner.children)
         pids = {child._process.pid for child in owner.children}
         await put(
@@ -846,8 +864,15 @@ async def test_managed_replication_and_shared_group_replacement(
     # real as well; duplicating the role handshake in five interpreters makes
     # this lifecycle test a CPU/import benchmark on small CI workers.
     monkeypatch.setattr(
-        implementation, "_supervisors", lambda *args: _supervisors(*args)[:1]
+        implementation,
+        "desired",
+        lambda *args: {
+            spec
+            for spec in desired(*args)
+            if spec.kind == "sidecar" or spec.role == "seal"
+        },
     )
+    monkeypatch.setattr(implementation, "build", build)
     profile = config.storage_profiles["local"].model_copy(
         update={
             "config": litelink.LogConfig(wal_replication=True),
@@ -868,6 +893,7 @@ async def test_managed_replication_and_shared_group_replacement(
         initial = list(owner.children)
         assert len(initial) == 2
         assert sum(isinstance(child, Sidecar) for child in initial) == 1
+        await children_ready(owner)
         assert all(child.ready for child in initial)
         await stream.send_many([{"value": i} for i in range(100)])
         found = await settle(s3, bucket + "/events", name="events")
@@ -877,6 +903,7 @@ async def test_managed_replication_and_shared_group_replacement(
         await serving(owner, client, "other")
         assert owner.generations["events"] is generation
         assert all(child._process is None for child in initial)
+        await children_ready(owner)
         assert all(child.ready for child in owner.children)
         assert sum(isinstance(child, Sidecar) for child in owner.children) == 1
         assert await stream.send({"value": 100}) == 101
@@ -1191,42 +1218,46 @@ async def test_server_lifespan_owns_registry_and_drains_connection(config):
         assert next_owner.view("events")["observed"]["state"] == "serving"
 
 
-async def test_failed_group_construction_cannot_restore_neighbor_writes(
+async def test_failed_group_construction_retries_without_reverting_or_fencing(
     config, monkeypatch
 ):
     async with managed(config) as (owner, client, _):
         neighbor = await serving(owner, client)
-        original = implementation._supervisors
+        original = implementation.build
+        previous = owner.generations["events"]
 
         def failed(*_args):
             raise OSError("child construction failed")
 
-        monkeypatch.setattr(implementation, "_supervisors", failed)
+        monkeypatch.setattr(implementation, "build", failed)
         await serving_without_assertion_named(owner, client, "other")
-        assert owner.view("other")["observed"]["state"] == "error"
-        # Let the normal monitor run after the failed replacement. An empty
-        # child list is not evidence that the required group is healthy.
-        checked = asyncio.Event()
-        health = owner.children_ready
+        assert owner.view("other")["observed"]["state"] == "serving"
+        assert owner.records["other"]["pending"] is None
+        assert owner.generations["events"] is previous
+        await owner.watch_tick()
+        assert not owner.children_ready("events")
+        assert not owner.children_ready("other")
+        assert owner.generations["events"].writable
+        assert await neighbor.send({"value": 7}) == 1
+        counts = (await client.get("/stats")).json()["children"]
+        assert counts == {"converged": False, "wanted": 5, "running": 0, "failing": 5}
+        failures = (await client.get("/control/v1")).json()["children"]
+        assert not failures["converged"]
+        assert len(failures["failing"]) == 5
+        assert all(f["error"] == "construction_failed" for f in failures["failing"])
+        assert all(f["streams"] == ["events", "other"] for f in failures["failing"])
+        assert "child construction failed" not in json.dumps(failures)
 
-        def observed():
-            result = health()
-            checked.set()
-            return result
-
-        monkeypatch.setattr(owner, "children_ready", observed)
-        owner.ready_at = 0
-        await checked.wait()
-        await asyncio.sleep(0)
-        assert not owner.generations["events"].writable
-        with pytest.raises(ValueError, match="unavailable"):
-            await neighbor.send({"value": 7})
-
-        monkeypatch.setattr(implementation, "_supervisors", original)
-        old_neighbor = owner.generations["events"]
-        await owner.replace_children()
-        assert owner.generations["events"] is old_neighbor
-        assert await neighbor.send({"value": 8}) == 1
+        monkeypatch.setattr(implementation, "build", original)
+        owner.retries = {
+            spec: (delay, 0, error) for spec, (delay, _, error) in owner.retries.items()
+        }
+        await owner.watch_tick()
+        await owner.child_pass
+        await owner.watch_tick()
+        assert owner.child_status(counts=True)["converged"]
+        assert owner.generations["events"] is previous
+        assert await neighbor.send({"value": 8}) == 2
 
 
 async def serving_without_assertion_named(owner, client, name):
@@ -1288,3 +1319,31 @@ async def test_repeated_lifespan_cancellation_joins_owner(config, monkeypatch, p
     # The original opener must acquire the same lock after cleanup.
     second = await original_open(config)
     await original_close(second)
+
+
+async def test_capabilities_filter_child_members_by_control_read(config, monkeypatch):
+    class Limited(Grants):
+        async def allows(self, principal, action, resource):
+            if principal == "reader" and action == "control.read":
+                return resource in ("*", "other")
+
+            return await super().allows(principal, action, resource)
+
+    async with managed(replace(config, authorization=Limited())) as (owner, client, _):
+        await serving(owner, client)
+
+        def failed(*_):
+            raise OSError("private exception")
+
+        monkeypatch.setattr(implementation, "build", failed)
+        await serving_without_assertion_named(owner, client, "other")
+        response = await client.get("/control/v1", headers=READER)
+        assert response.status_code == 200
+        children = response.json()["children"]
+        assert not children["converged"]
+        assert len(children["failing"]) == 5
+        assert all(f["streams"] == ["other"] for f in children["failing"])
+        assert all(
+            set(f) == {"kind", "role", "streams", "error"} for f in children["failing"]
+        )
+        assert "private exception" not in response.text
