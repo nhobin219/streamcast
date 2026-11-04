@@ -103,6 +103,22 @@ class Stats:
     an apparently stale one.
     """
 
+    published_through: int | None = None
+    """Highest published offset, inclusive, from the last local sample.
+
+    Zero means nothing has been published. None means no completed sample,
+    a failed read, a closed handle or a live-only stream. Reading stats on an
+    event loop starts a local metadata refresh in a thread; concurrent polls
+    share that refresh and return the previous completed sample. Without an
+    event loop, only the cached value is available. No network read is made.
+    Retired streams sample their read-only log in the same way.
+
+    `end_offset` is exclusive: publication has caught up when this reaches
+    `end_offset - 1`. Their difference is an offset span, not a row count:
+    restore reserves gaps, and this watermark does not advance across a gap
+    until a later offset is actually published.
+    """
+
 
 def payload(streams: Iterable[StreamHandle], *, children: dict | None = None) -> bytes:
     """Every stream's stats as a JSON object, for the `/stats` response.
