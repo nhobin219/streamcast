@@ -41,6 +41,7 @@ class Generation:
         self.accepting = False
         self.writable = False
         self.connections: dict[asyncio.Task, Any] = {}
+        self.sidecar_wait_at: float | None = None
         self.sidecar_ready_at: float | None = None
 
     def check(self) -> None:
@@ -680,8 +681,8 @@ class BrokerRuntime:
             await thread(self.registry.update, record)
             await self.reconcile_children()
             generation.accepting = not self.closing
-            self.refresh_gates(time.monotonic())
             self.observe(name, desired)
+            self.refresh_gates(time.monotonic())
         except BaseException:
             if name not in self.generations:
                 await opened.aclose()
@@ -1057,6 +1058,9 @@ class BrokerRuntime:
     def refresh_gates(self, now: float, *, observed: bool = False) -> None:
         for name, generation in self.generations.items():
             required = self.required(name, sidecars=True)
+            if required and generation.sidecar_wait_at is None:
+                generation.sidecar_wait_at = now
+
             ready = all(
                 spec in self.running and self.child_health.get(spec, False)
                 for spec in required
@@ -1076,7 +1080,16 @@ class BrokerRuntime:
             )
             if name not in self.static and generation.accepting:
                 if required and not generation.writable:
-                    self.observe(name, "error", error="children_unavailable")
+                    if (
+                        generation.sidecar_ready_at is None
+                        and generation.sidecar_wait_at is not None
+                        and now - generation.sidecar_wait_at
+                        < self.config.readiness_timeout
+                    ):
+                        self.observe(name, "starting")
+                    else:
+                        self.observe(name, "error", error="children_unavailable")
+
                 else:
                     self.observe(name, self.records[name]["desired"])
 
