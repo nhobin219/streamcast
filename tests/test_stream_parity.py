@@ -22,7 +22,7 @@ from streamcast import (
     create_app,
 )
 from streamcast._broker.model import Fault
-from streamcast._spec import Initialization
+from streamcast._spec import Initialization, Maintenance
 from tests.test_broker import (
     READER,
     SHAPE,
@@ -47,6 +47,7 @@ OBSERVE = {
     "max_inbound": lambda h: h._max_inbound,
     "max_in_flight": lambda h: h._max_in_flight,
     "max_message_bytes": lambda h: h._max_message_bytes,
+    "maintenance": lambda h: h.definition.spec.maintenance,
 }
 STORAGE_OBSERVE = {
     "root": lambda h: Path(h.log.root),
@@ -74,6 +75,7 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
         max_inbound=19,
         max_in_flight=23,
         max_message_bytes=4096,
+        maintenance=Maintenance(),
     )
     options = litelink.S3Options(access_key="test-key", secret_key="test-secret")
     table_config = litelink.LogConfig(target_seal_size=4096)
