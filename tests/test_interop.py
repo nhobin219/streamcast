@@ -42,8 +42,9 @@ from .hosting import serve_streams
 
 PEER = Path(__file__).resolve().parent / "interop_peer.py"
 
-RELEASES = ("0.19.0", "0.20.1", "0.21.1", "0.22.0")
-"""Every release a 0.23 process may meet during an upgrade (CHANGELOG, 0.20.1).
+BEFORE_MARKS = ("0.19.0", "0.20.1", "0.21.1", "0.22.0")
+RELEASES = (*BEFORE_MARKS, "0.27.0")
+"""Releases covered by wire upgrades and the 0.27.1 registry reader expansion.
 
 0.20.0 is not here: it reads only protocol 5, so it refuses this build's
 server as it refuses a 0.19 one, and it was yanked for that (#135).
@@ -250,6 +251,7 @@ class TestTheMarks:
         )
         assert asyncio.run(reopened()) == (2, 2)
 
+    @pytest.mark.parametrize("release", BEFORE_MARKS, indirect=True)
     def test_an_older_server_refuses_an_exactly_once_publisher(self, release, tmp_path):
         """Real releases, not a fixture of their refusal: every one before
         0.23 refuses the unknown `publisher` parameter at the open, before
@@ -279,3 +281,56 @@ class TestTheMarks:
             process.communicate(timeout=60)
 
         assert process.returncode == 0
+
+
+def registry_peer(python: str, mode: str, root: Path, variant: str) -> dict:
+    done = subprocess.run(
+        [
+            python,
+            "-I",
+            str(PEER.with_name("interop_registry_peer.py")),
+            mode,
+            str(root),
+            variant,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("release", ["0.27.0"], indirect=True)
+@pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+@pytest.mark.parametrize("variant", ["create", "replace"])
+def test_registry_and_pending_target_interop(release, tmp_path, direction, variant):
+    version, old = release
+    writer, reader = (
+        (old, sys.executable) if direction == "upgrade" else (sys.executable, old)
+    )
+    root = tmp_path / "registry"
+    written = registry_peer(writer, "registry-write", root, variant)
+    assert written["version"] == (version if direction == "upgrade" else THIS)
+    record = written["records"]["events"]
+    assert record["pending"]["kind"] == "definition"
+    assert "maintenance" not in record["stream"]["spec"]
+    assert "maintenance" not in record["pending"]["target"]["spec"]
+    assert record["stream"]["spec"]["group_commit"] is True
+    assert record["stream"]["spec"]["max_backlog"] == (
+        42
+        if variant == "replace"
+        else streamcast.StreamSpec.model_fields["max_backlog"].default
+    )
+
+    read = registry_peer(reader, "registry-read", root, variant)
+    assert read["version"] == (THIS if direction == "upgrade" else version)
+    assert read["before"] == written["records"]
+    assert read["spec_bytes"] == written["spec_bytes"]
+    assert read["target_bytes"] == written["target_bytes"]
+    expected = json.loads(json.dumps(written["records"]))
+    expected["events"]["pending"] = None
+    assert read["after"] == expected
+    assert read["observed"]["state"] == "stopped"
+    assert read["observed"]["error"] is None
+    assert read["collection"] == written["collection"]

@@ -805,6 +805,27 @@ Flags accept JSON booleans only. Unknown fields, including the old nested
 `limits`, fail closed as `422 invalid_declaration`. Its `errors` array contains
 only `loc` and `type`, never input values or validator messages.
 
+The 0.27.1 reader accepts an omitted or explicit default `maintenance`
+(`dedicated: false`, all six cadences null) and omits it from serialized specs
+and pending definition targets. Every other default remains explicit. A
+non-default control declaration returns `422 invalid_declaration` with the
+message `non-default maintenance requires streamcast 0.28`, before persistence.
+The reader model is private; `Maintenance` is not exported by `streamcast`.
+It validates strict booleans and finite, positive cadences, permitted only
+with `dedicated: true`. `Maintain` validation is unchanged in this patch.
+
+On registry replay and declarative handle opening, 0.27.1 can read a valid
+future `maintenance`, including pending definition targets, and uses shared
+maintenance. It does not apply per-stream dedication or cadence overrides.
+Upgrade readers to 0.27.1 before 0.28 writes that field; the released-0.27.1
+reader against the 0.28 writer is measured in the 0.28 definition-field work.
+The interop tier measures 0.27.0 with this reader in both directions, including
+pending creates and replacements: newly accepted default declarations retain
+the old shape. Before a downgrade to 0.27.0, every stored spec and pending
+definition target must omit `maintenance`; an explicit default still exceeds
+0.27.0's strict declaration schema. Reading a newer registry does not strip
+its non-default values or make that registry safe for 0.27.0.
+
 Storage and initialization are query parameters:
 `PUT /control/v1/streams/events?storage_profile=local&initialization=create_if_absent`.
 On create they default to `default` and `open_existing`; initialization also

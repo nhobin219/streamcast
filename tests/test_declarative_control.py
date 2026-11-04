@@ -10,15 +10,155 @@ from dataclasses import replace
 import pyarrow as pa
 import pytest
 
-from streamcast import _log, _metadata
+from streamcast import Maintain, _log, _metadata
 from streamcast._broker import api
 from streamcast._broker.model import Fault
 from streamcast._broker.registry import Registry
 from streamcast._broker.runtime import BrokerRuntime
-from tests.test_broker import Grants, definition, managed, put, serving
+from streamcast._children import _supervisors
+from tests.test_broker import Child, Grants, definition, managed, put, serving
 
 pytest_plugins = ["tests.test_broker"]
 BASE = "/control/v1/streams/"
+
+
+async def test_default_maintenance_normalizes_definition_and_pending_target(
+    config, monkeypatch
+):
+    async with managed(config) as (owner, client, _):
+        entered, release, _ = hold(monkeypatch, owner)
+        try:
+            created = await request(
+                client, body=definition(maintenance={"dedicated": False})
+            )
+            assert created.status_code == 202
+            await entered.wait()
+            records, collection = owner.registry.load()
+            record = records["events"]
+            assert "maintenance" not in record["stream"]["spec"]
+            assert "maintenance" not in record["pending"]["target"]["spec"]
+            assert record["stream"]["spec"]["group_commit"] is True
+            joined = await request(client, revision=1)
+            assert joined.status_code == 202
+            assert owner.registry.load() == (records, collection)
+        finally:
+            release.set()
+            await owner.queue.join()
+
+        await put(
+            owner, client, "events", {"state": "serving"}, suffix="/desired", revision=1
+        )
+        generation = owner.generations["events"]
+        before = owner.registry.load()
+        noop = await request(client, body=definition(maintenance={}), revision=2)
+        assert noop.status_code == 200
+        assert owner.registry.load() == before
+        assert owner.generations["events"] is generation
+
+
+@pytest.mark.parametrize("operation", ["create", "replace", "migration"])
+async def test_nondefault_maintenance_refused_before_persistence(
+    config, monkeypatch, operation
+):
+    async with managed(config) as (owner, client, _):
+        if operation != "create":
+            await serving(owner, client)
+
+        if operation == "migration":
+            # A newer writer's declaration must not leak through schema validation.
+            owner.records["events"]["stream"]["spec"]["maintenance"] = {
+                "dedicated": True
+            }
+
+        before = copy.deepcopy(owner.records), owner.registry.load()
+
+        def forbidden(*_):
+            pytest.fail("non-default maintenance reached a registry write")
+
+        monkeypatch.setattr(owner.registry, "accept", forbidden)
+        monkeypatch.setattr(owner.registry, "update", forbidden)
+        if operation == "migration":
+            body = {
+                "stream_id": owner.records["events"]["stream_id"],
+                "schema": definition()["schema"],
+                "sort_by": [],
+            }
+            response = await request(client, body=body, revision=2, suffix="/schema")
+        else:
+            response = await request(
+                client,
+                body=definition(maintenance={"dedicated": True}),
+                revision=None if operation == "create" else 2,
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_declaration"
+        assert (
+            response.json()["error"]["message"]
+            == "non-default maintenance requires streamcast 0.28"
+        )
+        assert (owner.records, owner.registry.load()) == before
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("maintenance", [{}, {"dedicated": True, "seal_every": 0.5}])
+async def test_future_maintenance_registry_replay_runs_shared(
+    config, monkeypatch, pending, maintenance
+):
+    async with managed(config) as (owner, client, _):
+        await serving(owner, client)
+        await serving(owner, client, "neighbor")
+
+    registry = Registry.open(config.registry, config.broker_id)
+    try:
+        records, _ = registry.load()
+        record = records["events"]
+        record["stream"]["spec"]["maintenance"] = maintenance
+        if pending:
+            record["pending"] = {
+                "kind": "definition",
+                "revision": record["revision"],
+                "target": {
+                    "spec": copy.deepcopy(record["stream"]["spec"]),
+                    "storage_profile": "local",
+                    "initialization": "create_if_absent",
+                },
+                "status": "failed",
+                "attempt": 1,
+                "error": "transition_failed",
+            }
+
+        registry.update(record)
+        assert registry.load()[0]["events"] == record
+    finally:
+        registry.close()
+
+    plans = []
+
+    def shared(routes, maintain):
+        plans.append(maintain)
+        if "events" in routes:
+            spec = routes["events"].definition.spec
+            assert spec.maintenance.dedicated is maintenance.get("dedicated", False)
+
+        # Exercise real grouping without starting its processes. The future
+        # dedication and cadence still use shared groups and broker defaults.
+        children = _supervisors(routes, maintain)
+        assert len(children) == 5
+        targets = {(stream.log.root, stream.log.name) for stream in routes.values()}
+        assert all(set(child.targets) == targets for child in children)
+        assert all(child._plan == Maintain() for child in children)
+        return [Child()]
+
+    monkeypatch.setattr(api.BrokerRuntime.__module__ + "._supervisors", shared)
+    async with managed(config) as (owner, client, _):
+        assert owner.observed["events"]["state"] == "serving"
+        assert owner.records["events"]["pending"] is None
+        assert owner.records["events"]["stream"]["spec"]["maintenance"] == maintenance
+        assert await owner.generations["events"].stream.send({"value": 7}) == 1
+
+    assert plans and all(plan is True for plan in plans)
 
 
 async def request(client, name="events", body=None, revision=None, suffix=""):

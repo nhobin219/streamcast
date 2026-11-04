@@ -20,7 +20,7 @@ from streamcast._broker.transitions import storage, with_replica
 from streamcast._children import _sidecars, _supervisors
 from streamcast._errors import Unavailable
 from streamcast._maintain import stop
-from streamcast._spec import Initialization, Storage, Stream, StreamSpec
+from streamcast._spec import Initialization, Maintenance, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
 
@@ -162,6 +162,14 @@ class BrokerRuntime:
 
         if spec.name != name:
             raise Fault(422, "name_mismatch")
+
+        if spec.maintenance != Maintenance():
+            raise Fault(
+                422,
+                "invalid_declaration",
+                message="non-default maintenance requires streamcast 0.28",
+                errors=[{"loc": ["maintenance"], "type": "value_error"}],
+            )
 
         if (
             spec.max_message_bytes is not None
