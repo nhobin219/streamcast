@@ -100,7 +100,7 @@ from streamcast._published import BATCH, ReadCache
 from streamcast._spec import Initialization, Stream, StreamSpec
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
-from streamcast._tasks import thread
+from streamcast._tasks import join, thread
 from streamcast._writer import Job, Writer
 
 if TYPE_CHECKING:
@@ -156,6 +156,9 @@ class StreamHandle:
         "_columns",
         "_declared",
         "_end_offset",
+        "_published_through",
+        "_stats_refresh",
+        "_stats_closed",
         "_floor",
         "_last_send",
         "_last_send_ts",
@@ -412,6 +415,11 @@ class StreamHandle:
         # six hours in, and neither number says so alone.
         self._last_send: float | None = None
         self._last_send_ts: float | None = None
+        # The local watermark accessor takes SQLite's lock. Stats must not
+        # take that lock on the event loop, even when another writer holds it.
+        self._published_through: int | None = None
+        self._stats_refresh: asyncio.Task[None] | None = None
+        self._stats_closed = False
 
     @classmethod
     def open(
@@ -2106,10 +2114,23 @@ class StreamHandle:
     def stats(self) -> Stats:
         """This stream's facts, as of now. No verdict — see `_stats`.
 
-        A property rather than a method because it reads counters this object
-        already holds: no log query, no socket, nothing that can fail or
-        block. Poll it as often as you like.
+        Counters and the last completed publication sample; no I/O is awaited
+        here. A poll on an event loop requests a local metadata refresh, with
+        at most one in flight. See `Stats.published_through` for unavailable
+        samples and the inclusive/exclusive offset boundary.
         """
+        if (
+            self._log is not None
+            and not self._stats_closed
+            and (self._stats_refresh is None or self._stats_refresh.done())
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                self._stats_refresh = loop.create_task(self._refresh_publication())
+
         last = self._last_send
         return Stats(
             name=self._name,
@@ -2120,7 +2141,20 @@ class StreamHandle:
             uptime_s=time.monotonic() - self._started,
             last_send_ts=self._last_send_ts,
             last_send_age_s=None if last is None else time.monotonic() - last,
+            published_through=self._published_through,
         )
+
+    async def _refresh_publication(self) -> None:
+        assert self._log is not None
+        try:
+            value = await thread(self._log.published_through)
+        except Exception:
+            # An unavailable observation must not take down /stats or retain
+            # a previous success as though the failed read had confirmed it.
+            value = None
+
+        if not self._stats_closed:
+            self._published_through = value
 
     def _fan_out(self, row: Row, frame: bytes) -> None:
         """One encoded frame into every subscriber's queue that wants it.
@@ -2143,6 +2177,14 @@ class StreamHandle:
         Concurrently, because `close` waits for each peer's close handshake
         and doing that in series is `close_timeout` per dead connection.
         """
+        self._stats_closed = True
+        self._published_through = None
+        cancelled = False
+        if self._stats_refresh is not None:
+            # `thread` joins the actual read even if this waiter is cancelled;
+            # an owned log must not be closed underneath the SQLite operation.
+            cancelled = await join(self._stats_refresh)
+
         await asyncio.gather(
             *(
                 subscriber.close(CloseCode.GOING_AWAY, reason)
@@ -2162,6 +2204,9 @@ class StreamHandle:
         if self._owned is not None:
             await thread(self._owned.close)
             self._owned = None
+
+        if cancelled:
+            raise asyncio.CancelledError
 
     # -- subscribe ---------------------------------------------------------
 
