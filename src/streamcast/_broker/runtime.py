@@ -22,22 +22,27 @@ from streamcast._children import (
     ChildSpec,
     build,
     desired,
-    validate_dedicated,
     warn_unreplicated,
 )
 from streamcast._errors import Unavailable
 from streamcast._maintain import Supervisor, stop
-from streamcast._spec import Initialization, Storage, Stream, StreamSpec
+from streamcast._spec import Initialization, Maintenance, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
 
 logger = logging.getLogger(__name__)
+LIVE = {"maintenance"}
 
 
 class Generation:
     def __init__(self, stream: StreamHandle, number: int) -> None:
         self.stream = stream
         self.number = number
+        self.maintenance = (
+            stream.definition.spec.maintenance
+            if stream.definition is not None
+            else Maintenance()
+        )
         self.accepting = False
         self.writable = False
         self.connections: dict[asyncio.Task, Any] = {}
@@ -55,6 +60,10 @@ class BrokerRuntime:
         self.registry = registry
         self.boot_id = uuid.uuid4().hex
         self.records: dict[str, dict] = {}
+        # Observed applied definitions, distinct from accepted durable intent.
+        # Bounded by the registry's max_streams; absent after a restart until
+        # recovery succeeds, so replay takes the full identity-checking path.
+        self.applied_specs: dict[str, dict] = {}
         self.queued: set[str] = set()
         self.attempts: dict[tuple[str, int, int], asyncio.Future] = {}
         self.waiters = 0
@@ -93,8 +102,8 @@ class BrokerRuntime:
             self.static = {stream.name: stream for stream in streams}
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.collection = await thread(registry.load)
-            # Normalize the expanded reader's field before replay can persist
-            # either an active definition or its pending target in a new shape.
+            # Normalize defaults in active definitions and pending targets;
+            # non-default maintenance remains part of the durable definition.
             for record in self.records.values():
                 specs = [record["stream"]["spec"]]
                 pending = record["pending"]
@@ -132,6 +141,9 @@ class BrokerRuntime:
                 if record.get("pending") is None and record["name"] not in recovered:
                     try:
                         await self.reconcile(record)
+                        self.applied_specs[record["name"]] = copy.deepcopy(
+                            record["stream"]["spec"]
+                        )
                     except Exception as exc:
                         self.observe(
                             record["name"],
@@ -157,10 +169,6 @@ class BrokerRuntime:
                 self.generations[name] = generation
                 warn_unreplicated(stream)
 
-            validate_dedicated(
-                {name: g.stream for name, g in self.generations.items()},
-                config.maintain,
-            )
             await self.reconcile_children()
             for name in self.static:
                 self.generations[name].accepting = True
@@ -173,6 +181,18 @@ class BrokerRuntime:
         except BaseException:
             await self.close()
             raise
+
+    def dedicated_count(self) -> int:
+        return sum(
+            record["desired"] != "retired"
+            and record["stream"]["spec"].get("maintenance", {}).get("dedicated", False)
+            for record in self.records.values()
+        ) + sum(
+            stream.retirement is None
+            and stream.definition is not None
+            and stream.definition.spec.maintenance.dedicated
+            for stream in self.static.values()
+        )
 
     def recorded_storage(self, record: dict) -> Storage:
         return Storage.model_validate(record["stream"]["storage"])
@@ -189,18 +209,10 @@ class BrokerRuntime:
         try:
             return StreamSpec.model_validate(body)
         except ValidationError as exc:
-            # Only the fixed version message is public, never user input or
-            # arbitrary validator messages (which can contain credentials).
-            details = {}
-            for error in exc.errors():
-                if error["type"] == "maintenance_version":
-                    details["message"] = error["msg"]
-
             raise Fault(
                 422,
                 "invalid_declaration",
                 errors=[{"loc": e["loc"], "type": e["type"]} for e in exc.errors()],
-                **details,
             ) from None
 
     def validate_spec(self, body: Any, name: str) -> dict:
@@ -506,7 +518,15 @@ class BrokerRuntime:
                 state = self.observed[name]["state"]
                 if kind == "definition":
                     if dumps(spec) != dumps(record["stream"]["spec"]):
-                        if state != "stopped":
+                        if state != "stopped" and dumps(
+                            {k: v for k, v in spec.items() if k not in LIVE}
+                        ) != dumps(
+                            {
+                                k: v
+                                for k, v in record["stream"]["spec"].items()
+                                if k not in LIVE
+                            }
+                        ):
                             raise Fault(409, "must_be_stopped")
 
                         if any(
@@ -541,6 +561,19 @@ class BrokerRuntime:
                 # new intent merely because observed state was lost or failed.
                 if not equal:
                     record["revision"] += 1
+
+            if (
+                kind == "definition"
+                and spec.get("maintenance", {}).get("dedicated", False)
+                and (
+                    previous is None
+                    or not previous["stream"]["spec"]
+                    .get("maintenance", {})
+                    .get("dedicated", False)
+                )
+                and self.dedicated_count() >= self.config.max_dedicated
+            ):
+                raise Fault(409, "dedicated_limit", limit=self.config.max_dedicated)
 
             pending_count = sum(r["pending"] is not None for r in self.records.values())
             if pending_count >= self.config.max_pending:
@@ -610,7 +643,9 @@ class BrokerRuntime:
 
         key = (name, pending["revision"], pending["attempt"])
         try:
-            await self.claim(record)
+            if not self.maintenance_only(record):
+                await self.claim(record)
+
             if pending["kind"] == "migration":
                 await self.offline(record)
                 self.observe(name, "migrating")
@@ -625,6 +660,7 @@ class BrokerRuntime:
                 await self.reconcile(record)
 
             record["pending"] = None
+            self.applied_specs[name] = copy.deepcopy(record["stream"]["spec"])
             outcome = "applied"
         except Exception as exc:
             pending["status"] = "failed"
@@ -649,10 +685,35 @@ class BrokerRuntime:
             if future is not None:
                 future.set_result(snapshot)
 
+    def maintenance_only(self, record: dict) -> bool:
+        name = record["name"]
+        baseline = self.applied_specs.get(name)
+        pending = record["pending"]
+        return (
+            baseline is not None
+            and pending is not None
+            and pending["kind"] == "definition"
+            and self.observed.get(name, {}).get("state") == record["desired"]
+            and dumps({k: v for k, v in baseline.items() if k not in LIVE})
+            == dumps(
+                {k: v for k, v in record["stream"]["spec"].items() if k not in LIVE}
+            )
+        )
+
     async def reconcile(self, record: dict) -> None:
         name = record["name"]
-        self.s3_options(record)
         desired = record["desired"]
+        if self.maintenance_only(record):
+            if desired == "serving":
+                self.generations[name].maintenance = self._parse_spec(
+                    record["stream"]["spec"]
+                ).maintenance
+                await self.reconcile_children()
+
+            self.observe(name, desired)
+            return
+
+        self.s3_options(record)
         if desired == "stopped":
             await self.offline(record)
             # Validate bound stopped streams too; missing disk is never an

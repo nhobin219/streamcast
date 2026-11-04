@@ -266,7 +266,11 @@ The app's lifespan starts everything the streams need: one maintainer covering e
 published) — and, with `replicate=True`, one litestream for the logs with
 `wal_replication` on. The maintainer is opt-out (`BrokerConfig(maintain=False)`);
 litestream is opt-in. Streams with different `S3Options` get separate child processes;
-`Maintain(dedicated=("trades",))` also gives a log its own maintainer. Without a
+`StreamSpec(..., maintenance=Maintenance(dedicated=True))` gives a declarative
+stream its own maintainer. Dedicated streams may override individual cadences;
+null cadences inherit the host's `Maintain(...)` defaults. Registry-backed brokers
+require maintenance and accept `Maintain(...)`; their `max_dedicated=0` default
+refuses new dedications until the host raises the cap. Without a
 maintainer nothing ever seals — litelink is explicit that *"a maintainer is not
 optional"*.
 

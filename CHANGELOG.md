@@ -23,8 +23,19 @@ there was nothing to have changed from. Everything above it is ordinary.
   observed readiness, including during passes. Retries and membership churn do
   not renew grace. Readiness markers are unique per boot and start.
 - Add aggregate child convergence counts to `/stats`, safe failure summaries
-  to control capabilities, and per-stream `children_ready`. Dedication still
-  uses the host's `Maintain.dedicated` tuple in this slice.
+  to control capabilities, and per-stream `children_ready`.
+- Export `Maintenance` and apply `StreamSpec.maintenance` to static and managed
+  definitions. Maintenance-only PUTs retain serving generations, writers and
+  connections; stopped and retired edits change only the record. Dedicated
+  groups inherit null cadences from host `Maintain` defaults.
+- Remove `Maintain.dedicated` in 0.28; dedication now requires a declarative
+  handle. Validate host cadences as finite positive numbers (`flush_every=None`
+  disables forced flush). Registry-backed brokers accept `Maintain(...)` and
+  still refuse disabled maintenance.
+- Add `max_dedicated=0` admission and the current `dedicated` count to control
+  capabilities. New dedications fail with `409 dedicated_limit` at the cap;
+  existing dedications, replay, retries and retuning survive a lower cap.
+  Non-default definitions require 0.28 readers.
 
 ## 0.27.1 — 2026-11-04
 

@@ -155,6 +155,8 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
             "transport_max_bytes": config.transport_max_bytes,
             "control_max_bytes": config.control_max_bytes,
             "max_pending": config.max_pending,
+            "max_dedicated": config.max_dedicated,
+            "dedicated": owner.dedicated_count(),
             "storage_profiles": {
                 name: {
                     "replicate": profile.replicate,

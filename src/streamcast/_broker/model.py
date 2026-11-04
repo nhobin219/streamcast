@@ -14,6 +14,7 @@ from streamcast._limits import (
     MAX_MESSAGE_BYTES,
     SUBSCRIBER_YIELD_EVERY,
 )
+from streamcast._maintain import Maintain
 from streamcast._spec import NAME, Storage
 
 CONTROL = "/control/v1"
@@ -78,11 +79,12 @@ class BrokerConfig:
     max_pending: int = 32
     control_apply_wait_s: float = 10.0
     max_streams: int = 1024
+    max_dedicated: int = 0
     max_waiters: int = 256
     readiness_timeout: float = 30.0
     readiness_every: float = 0.25
     subscriber_yield_every: int = SUBSCRIBER_YIELD_EVERY
-    maintain: Any = True
+    maintain: bool | Maintain = True
     stats: bool | str = True
 
     def __post_init__(self) -> None:
@@ -136,7 +138,13 @@ class BrokerConfig:
         if self.registry is not None and isinstance(self.authorization, PublicAccess):
             raise ValueError("registry hosting requires explicit authorization")
 
-        if self.registry is not None and self.maintain is not True:
+        if type(self.max_dedicated) is not int or self.max_dedicated < 0:
+            raise ValueError("nonnegative integer max_dedicated required")
+
+        if not isinstance(self.maintain, (bool, Maintain)):
+            raise ValueError("maintain must be a bool or Maintain")
+
+        if self.registry is not None and self.maintain is False:
             raise ValueError("managed streams require maintenance")
 
         if not isinstance(self.stats, (bool, str)) or (
