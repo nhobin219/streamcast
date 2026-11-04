@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from streamcast import (
     BrokerConfig,
     HistoryGuard,
+    Maintenance,
     Storage,
     Stream,
     StreamHandle,
@@ -22,7 +23,7 @@ from streamcast import (
     create_app,
 )
 from streamcast._broker.model import Fault
-from streamcast._spec import Initialization, Maintenance
+from streamcast._spec import Initialization
 from tests.test_broker import (
     READER,
     SHAPE,
@@ -75,7 +76,7 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
         max_inbound=19,
         max_in_flight=23,
         max_message_bytes=4096,
-        maintenance=Maintenance(),
+        maintenance=Maintenance(dedicated=True, compact_every=3),
     )
     options = litelink.S3Options(access_key="test-key", secret_key="test-secret")
     table_config = litelink.LogConfig(target_seal_size=4096)
@@ -105,7 +106,9 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
     # Static handles are served, rather than merely compared before admission.
     from_app = create_app(BrokerConfig(maintain=False), streams=static)
     async with from_app.router.lifespan_context(from_app):
-        config = replace(config, storage_profiles={"local": definitions[1].storage})
+        config = replace(
+            config, max_dedicated=1, storage_profiles={"local": definitions[1].storage}
+        )
         async with managed(config) as (owner, client, _):
             accepted = await put(
                 owner,

@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from streamcast import BrokerConfig
+from streamcast import BrokerConfig, Maintenance
 from streamcast._broker import runtime
 from streamcast._children import ChildSpec, desired
 from streamcast._maintain import Maintain, Supervisor
@@ -25,6 +25,7 @@ def generation(
     )
     stream = SimpleNamespace(
         name=name,
+        definition=None,
         log=log,
         retirement=None,
         retired=retired,
@@ -101,9 +102,48 @@ def test_effective_identity_is_pure_and_role_specific(monkeypatch):
     assert next(
         s for s in retired if s.role == "publish" and s.members[0][0] == Path("a")
     ).retiring == ((Path("a"), "old"),)
-    # Dedication still comes from the tuple in this slice.
-    assert len(desired({"a": a, "b": a}, Maintain(dedicated=("log",)))) == 6
-    assert desired({}, Maintain(dedicated=("log",))) == set()
+    a.maintenance = Maintenance(dedicated=True, compact_every=3)
+    changed = desired(values, Maintain())
+    assert (
+        next(
+            s for s in changed if s.role == "compact" and s.members[0][0] == Path("a")
+        ).every
+        == 3
+    )
+    assert {s for s in changed if s.kind == "sidecar"} == {
+        s for s in initial if s.kind == "sidecar"
+    }
+    assert desired({}, Maintain()) == set()
+
+
+@pytest.mark.parametrize("flush", [None, 7])
+def test_dedicated_overrides_inherit_host_defaults_without_changing_neighbors(
+    flush, monkeypatch
+):
+    monkeypatch.setattr("streamcast._children.environment", lambda _: {})
+    a, b = generation("a"), generation("b")
+    host = Maintain(seal_every=2, compact_every=8, flush_every=flush)
+    original = desired({"a": a, "b": b}, host)
+    a.maintenance = Maintenance(dedicated=True, compact_every=3)
+    split = desired({"a": a, "b": b}, host)
+    assert len(split) == 10
+    for spec in split:
+        assert spec.role is not None
+        assert len(spec.members) == 1
+        name = spec.members[0][1]
+        assert spec.every == (
+            3 if name == "a" and spec.role == "compact" else host.every(spec.role)
+        )
+        assert spec.flush == (flush if spec.role in ("seal", "publish") else None)
+
+    a.maintenance = Maintenance(dedicated=True, compact_every=3, flush_every=4)
+    changed = desired({"a": a, "b": b}, host)
+    assert {s for s in split if s.members[0][1] == "b"} == {
+        s for s in changed if s.members[0][1] == "b"
+    }
+    assert {s.role for s in split ^ changed} == {"seal", "publish"}
+    a.maintenance = Maintenance()
+    assert desired({"a": a, "b": b}, host) == original
 
 
 async def test_one_owner_repeats_fresh_state_and_reaps_before_start(owner, monkeypatch):

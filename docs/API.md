@@ -418,10 +418,14 @@ interpreter. One set for the server, not one per log: each process is a full int
 with litelink, pyarrow, pyiceberg and duckdb loaded — 149 MB RSS measured — so the set
 costs five of those, shared by every log.
 
-`Maintain(dedicated=("trades",))` gives a named log a set of its own, for one busy enough
-that its compaction would hold up the others'. Names are the **log's**, not the
-route; a name this server does not serve with a log raises at `create_app` rather than being
-ignored, and naming every log starts no shared maintainer at all. Without it, nothing in this library ever calls litelink's
+`StreamSpec(..., maintenance=Maintenance(dedicated=True))` gives a declarative
+stream a set of its own. It can override `seal_every`, `compact_every`,
+`publish_every`, `clean_every`, `clean_published_every` and `flush_every`; null
+means inherit the host default. Cadences require dedication, accept only finite
+positive numbers, and reject booleans. Shared streams use host defaults.
+Lent handles without definitions remain shared; there is no log-name tuple.
+When every log is dedicated there is no empty shared group. Without maintenance,
+nothing in this library ever calls litelink's
 `seal()` — measured on 100,000 rows (~14 MB, past the 8 MiB seal target): the buffer
 held every one of them, the table held zero Parquet files, and `buffer.db` was 15.7 MB and
 growing. litelink says it plainly: *"A maintainer is not optional."*
@@ -435,7 +439,10 @@ streamcast.create_app(streams=stream, config=streamcast.BrokerConfig(
 
 `Maintain` is a frozen dataclass of one cadence per role — `seal_every`, `compact_every`,
 `publish_every`, `clean_every`, `clean_published_every`, with the defaults above —
-`flush_every`, and `dedicated`. The cadences differ by orders of magnitude because the costs do: `seal` is an
+and `flush_every`. Role cadences must be finite positive numbers;
+`flush_every=None` disables forced flush. `BrokerConfig(maintain=Maintain(...))`
+also works with a registry; `maintain=False` is refused there. The cadences
+differ by orders of magnitude because the costs do: `seal` is an
 indexed read of one row when there is nothing to seal, compaction rewrites files, and the
 published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
 rows already in staging** (litelink's `evict("buffer")`): `seal` and `publish` move data
@@ -729,10 +736,11 @@ profile discovery. No response includes `s3_options` or credential values.
 Capabilities summarize only `replicate` and `publishes` for each profile.
 
 `BrokerConfig` also accepts `history_guards={}`, `transport_max_bytes=1<<20`,
-`control_max_bytes=256*1024`, `max_pending=32`, `max_streams=1024`,
+`control_max_bytes=256*1024`, `max_pending=32`, `max_streams=1024`, `max_dedicated=0`,
 `control_apply_wait_s=10.0`, `max_waiters=256`, `readiness_timeout=30.0` and
 `readiness_every=0.25`. Integer bounds are positive except `max_waiters`, which
-may be zero. The control wait is finite and nonnegative; zero always returns
+may be zero, and `max_dedicated` is a strict nonnegative integer. The control
+wait is finite and nonnegative; zero always returns
 202 for real work. A per-stream frame limit cannot exceed the transport ceiling.
 Pending intents (including failed ones) and in-flight acceptance tasks are
 bounded by `max_pending`; overflow returns 429 with `Retry-After: 1`.
@@ -741,6 +749,15 @@ lowering it never removes or prevents serving existing streams. Waiter overflow
 returns 202 immediately. There is no durable operation or receipt history:
 each stream holds at most one pending intent, and per-attempt futures are
 removed when resolved. The worker queue deduplicates stream names.
+
+`max_dedicated` admits only new dedicated definitions and false-to-true edits.
+At the cap they fail with `409 dedicated_limit` and `limit`, without a registry
+write. `GET /control/v1` reports `max_dedicated` and `dedicated`: all non-retired
+managed definitions, including stopped and pending ones, plus non-retired
+static declarative handles. Lowering the cap keeps existing dedication. Replay,
+retuning, de-dedication, pending joins, retries and satisfied no-ops bypass new
+admission. An already dedicated stream can resume while over cap. Only
+`control.mutate` authorizes maintenance changes; there is no additional action.
 
 The injected `Authorization` protocol has two asynchronous methods:
 
@@ -833,12 +850,21 @@ Flags accept JSON booleans only. Unknown fields, including the old nested
 `limits`, fail closed as `422 invalid_declaration`. Its `errors` array contains
 only `loc` and `type`, never input values or validator messages.
 
-The 0.27.1 reader also accepts `maintenance` when it is the default: an empty
+`Maintenance` is public in 0.28, and non-default values are serialized with
+the definition. `maintenance` is the only live field: a maintenance-only PUT
+is allowed while serving and runs one child pass without replacing the
+generation, draining the writer or closing connections. Stopped and retired
+maintenance-only edits are record-only. Other definition changes still require
+stopped state; schema or sort-order changes still require migration. Schema
+property order participates in both comparisons. Existing ETag, pending-target,
+retry and satisfied-no-op rules apply to these PUTs.
+
+The 0.27.1 reader accepts `maintenance` only when it is the default: an empty
 object, `dedicated: false`, and null or omitted `seal_every`, `compact_every`,
 `publish_every`, `clean_every`, `clean_published_every` and `flush_every`.
 It normalizes that field away in serialized specs and pending definition
 targets; other defaults and schema property order remain unchanged. Shared
-maintenance behavior is unchanged. `Maintenance` is private in this release.
+maintenance behavior is unchanged. `Maintenance` is private in 0.27.1.
 Non-default maintenance is refused with `422 invalid_declaration`; the error's
 fixed `message` says `non-default maintenance requires streamcast 0.28`.
 Cadences must be finite positive numbers and require `dedicated: true`.

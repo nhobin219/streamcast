@@ -11,6 +11,7 @@ from typing import Protocol
 from streamcast._maintain import FLUSHED, ROLES, Maintain, Supervisor
 from streamcast._process import environment
 from streamcast._replicate import Sidecar
+from streamcast._spec import Maintenance
 from streamcast._stream import StreamHandle
 
 Target = tuple[Path, str]
@@ -19,6 +20,7 @@ Credentials = tuple[tuple[str, str | None], ...]
 
 class Generation(Protocol):
     stream: StreamHandle
+    maintenance: Maintenance
 
 
 @dataclass(frozen=True)
@@ -44,35 +46,15 @@ def desired(
 ) -> set[ChildSpec]:
     """Plan without constructing children, touching files or spawning processes."""
     routes = {name: g.stream for name, g in sorted(generations.items())}
-    return _maintenance(routes, defaults) | _replication(routes)
-
-
-def validate_dedicated(
-    routes: Mapping[str, StreamHandle], maintain: bool | Maintain
-) -> None:
-    """Validate the host tuple once, before admission, not on excluding passes."""
-    if not isinstance(maintain, Maintain):
-        return
-
-    plan = maintain
-    active = {
-        (Path(stream.log.root), stream.log.name)
-        for stream in routes.values()
-        if stream.log is not None and stream.retirement is None
-    }
-    served = {name for _root, name in active}
-    unknown = sorted(set(plan.dedicated) - served)
-    if unknown:
-        raise ValueError(
-            f"maintain=Maintain(dedicated=...) names {', '.join(map(repr, unknown))}, "
-            f"which this server does not serve with a log. Served with a log: "
-            f"{', '.join(map(repr, sorted(served))) or 'nothing'}. "
-            f"Names are the LOG's, which need not be the route it is served at."
-        )
+    return _maintenance(
+        routes, defaults, {name: g.maintenance for name, g in generations.items()}
+    ) | _replication(routes)
 
 
 def _maintenance(
-    routes: Mapping[str, StreamHandle], maintain: bool | Maintain
+    routes: Mapping[str, StreamHandle],
+    maintain: bool | Maintain,
+    policies: Mapping[str, Maintenance],
 ) -> set[ChildSpec]:
     if maintain is False:
         return set()
@@ -84,17 +66,35 @@ def _maintenance(
         if stream.log is not None and stream.retirement is None
     }
 
-    # Five roles per credential group, with the tuple's dedicated logs isolated.
+    overrides = {
+        (Path(stream.log.root), stream.log.name): policies[name]
+        for name, stream in routes.items()
+        if stream.log is not None and stream.retirement is None
+    }
+    # Dedication belongs to the stream definition, never the physical log name.
     groups: list[tuple[Target, ...]] = [
-        (target,) for target in sorted(active) if target[1] in plan.dedicated
+        (target,) for target in sorted(active) if overrides[target].dedicated
     ]
     shared: dict[Credentials, list[Target]] = {}
     for target, stream in sorted(active.items()):
-        if target[1] not in plan.dedicated:
+        if not overrides[target].dedicated:
             shared.setdefault(_credentials(stream), []).append(target)
 
     dedicated = len(groups)
     groups.extend(tuple(group) for group in shared.values())
+    plans = [
+        replace(
+            plan,
+            **{
+                name: value
+                for name, value in overrides[group[0]].model_dump().items()
+                if name != "dedicated" and value is not None
+            },
+        )
+        if index < dedicated
+        else plan
+        for index, group in enumerate(groups)
+    ]
     keys = [_credentials(active[group[0]]) for group in groups]
     owners: dict[Credentials, int] = {}
     for index, key in enumerate(keys):
@@ -114,8 +114,8 @@ def _maintenance(
             role=role,
             members=group,
             credentials=keys[index],
-            every=plan.every(role),
-            flush=plan.flush_every if role in FLUSHED else None,
+            every=plans[index].every(role),
+            flush=plans[index].flush_every if role in FLUSHED else None,
             retiring=tuple(sorted(retiring.get(index, ())))
             if role == "publish"
             else (),
@@ -198,8 +198,13 @@ def _supervisors(
     routes: dict[str, StreamHandle], maintain: bool | Maintain
 ) -> list[Supervisor]:
     """Build maintenance alone for callers inspecting the credential grouping."""
-    validate_dedicated(routes, maintain)
-    return [build(spec, routes) for spec in _maintenance(routes, maintain)]  # ty: ignore[invalid-return-type]
+    policies = {
+        name: stream.definition.spec.maintenance
+        if stream.definition is not None
+        else Maintenance()
+        for name, stream in routes.items()
+    }
+    return [build(spec, routes) for spec in _maintenance(routes, maintain, policies)]  # ty: ignore[invalid-return-type]
 
 
 def _sidecars(routes: dict[str, StreamHandle], replicate: bool) -> list[Sidecar]:

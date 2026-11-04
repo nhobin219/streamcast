@@ -54,7 +54,7 @@ Cadence = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
 class Maintenance(BaseModel):
-    """Private reader model for the upcoming per-stream maintenance policy."""
+    """Per-stream dedication and optional overrides of the broker cadences."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -102,17 +102,6 @@ class StreamSpec(BaseModel):
     max_in_flight: Annotated[StrictInt, Field(ge=1)] = MAX_IN_FLIGHT
     max_message_bytes: Annotated[StrictInt, Field(ge=1)] | None = None
     maintenance: Maintenance = Maintenance()
-
-    @field_validator("maintenance")
-    @classmethod
-    def _reader_only_maintenance(cls, value: Maintenance) -> Maintenance:
-        if value != Maintenance():
-            raise PydanticCustomError(
-                "maintenance_version",
-                "non-default maintenance requires streamcast 0.28",
-            )
-
-        return value
 
     @model_serializer(mode="wrap")
     def _old_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:

@@ -14,7 +14,6 @@ import pytest
 
 from streamcast import upgrade_registry
 from streamcast._broker import upgrade
-from streamcast._broker.model import Fault
 from streamcast._broker.registry import Registry, dumps
 from streamcast._broker.runtime import BrokerRuntime
 from tests.test_broker import definition
@@ -183,41 +182,33 @@ async def test_default_maintenance_registry_and_pending_replay(
         await recovered.close()
 
 
-@pytest.mark.parametrize("location", ["active", "target"])
-async def test_nondefault_maintenance_recovery_refuses_before_writing(
-    config, monkeypatch, location
-):
+@pytest.mark.parametrize("pending", [False, True])
+async def test_nondefault_maintenance_recovers_without_readmission(config, pending):
+    config = replace(config, max_dedicated=1)
     registry = Registry.open(config.registry, config.broker_id)
     owner = BrokerRuntime(config, registry)
     await owner.mutate(
-        "events", "definition", definition(), None, "*", storage_profile="local"
+        "events",
+        "definition",
+        definition(maintenance={"dedicated": True, "compact_every": 9}),
+        None,
+        "*",
+        storage_profile="local",
+        initialization="create_if_absent",
     )
     record = copy.deepcopy(owner.records["events"])
-    spec = (
-        record["stream"]["spec"]
-        if location == "active"
-        else record["pending"]["target"]["spec"]
-    )
-    spec["maintenance"] = {"dedicated": True}
+    record["desired"] = "serving"
+    if not pending:
+        record["pending"] = None
+
     registry.update(record)
-    original = registry.load()
     registry.close()
-
-    def forbidden(*_):
-        pytest.fail("non-default maintenance reached replay writes")
-
-    monkeypatch.setattr(Registry, "update", forbidden)
-    monkeypatch.setattr(Registry, "accept", forbidden)
-    with pytest.raises(Fault) as refused:
-        await BrokerRuntime.open(config)
-
-    assert refused.value.code == "invalid_declaration"
-    assert (
-        refused.value.details["message"]
-        == "non-default maintenance requires streamcast 0.28"
-    )
-    registry = Registry.open(config.registry, config.broker_id)
+    recovered = await BrokerRuntime.open(replace(config, max_dedicated=0))
     try:
-        assert registry.load() == original
+        assert recovered.records["events"]["pending"] is None
+        assert recovered.observed["events"]["state"] == "serving"
+        assert recovered.generations["events"].maintenance.compact_every == 9
+        assert recovered.dedicated_count() == 1
+        assert await recovered.generations["events"].stream.send({"value": 1}) == 1
     finally:
-        registry.close()
+        await recovered.close()

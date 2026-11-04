@@ -431,8 +431,8 @@ def test_maintenance_flags_and_keys_are_strict(bad):
         Maintenance.model_validate(bad)
 
 
-def test_maintenance_is_private_and_frozen():
-    assert not hasattr(streamcast, "Maintenance")
+def test_maintenance_is_public_and_frozen():
+    assert streamcast.Maintenance is Maintenance
     with pytest.raises(ValidationError, match="frozen_instance"):
         Maintenance().dedicated = True  # ty: ignore[invalid-assignment]
 
@@ -458,8 +458,10 @@ def test_default_maintenance_roundtrips_in_old_shape(shape, tmp_path, maintenanc
 @pytest.mark.parametrize(
     "maintenance", [{"dedicated": True}, {"dedicated": True, "seal_every": 1}]
 )
-def test_nondefault_maintenance_needs_028(shape, maintenance):
-    with pytest.raises(ValidationError, match="requires streamcast 0.28"):
-        StreamSpec.model_validate(
-            {"name": "trades", "schema": shape, "maintenance": maintenance}
-        )
+def test_nondefault_maintenance_roundtrips(shape, maintenance):
+    spec = StreamSpec.model_validate(
+        {"name": "trades", "schema": shape, "maintenance": maintenance}
+    )
+    assert spec.maintenance.dedicated
+    assert spec.model_dump()["maintenance"] == spec.maintenance.model_dump()
+    assert StreamSpec.model_validate_json(spec.model_dump_json()) == spec
