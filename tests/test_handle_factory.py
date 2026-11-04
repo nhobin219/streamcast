@@ -169,7 +169,9 @@ async def test_static_live_lent_and_owned_handles_share_lifespan(tmp_path, log):
     lent = StreamHandle("lent", log=log, max_inbound=31)
     owned = StreamHandle.open(
         Stream(
-            spec=StreamSpec(name="owned", schema=SCHEMA),
+            spec=StreamSpec.model_validate(
+                {"name": "owned", "schema": SCHEMA, "maintenance": {}}
+            ),
             storage=Storage(root=tmp_path / "owned-data"),
         ),
         initialization="create_if_absent",
@@ -188,6 +190,7 @@ async def test_static_live_lent_and_owned_handles_share_lifespan(tmp_path, log):
 
         assert live.definition is lent.definition is None
         assert owned.definition is not None
+        assert "maintenance" not in owned.definition.model_dump()["spec"]
 
     assert log.end_offset() == 2
     assert owned.log is not None

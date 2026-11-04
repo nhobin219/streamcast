@@ -79,6 +79,20 @@ class BrokerRuntime:
             self.static = {stream.name: stream for stream in streams}
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.collection = await thread(registry.load)
+            # Normalize the expanded reader's field before replay can persist
+            # either an active definition or its pending target in a new shape.
+            for record in self.records.values():
+                specs = [record["stream"]["spec"]]
+                pending = record["pending"]
+                if pending is not None and pending["kind"] == "definition":
+                    specs.append(pending["target"]["spec"])
+
+                for spec in specs:
+                    if "maintenance" in spec:
+                        normalized = self._parse_spec(spec).model_dump(mode="json")
+                        spec.clear()
+                        spec.update(normalized)
+
             if self.static.keys() & self.records.keys():
                 raise ValueError("static and managed stream names overlap")
 
@@ -150,16 +164,27 @@ class BrokerRuntime:
 
         return profile.s3_options
 
-    def validate_spec(self, body: Any, name: str) -> dict:
+    @staticmethod
+    def _parse_spec(body: Any) -> StreamSpec:
         try:
-            spec = StreamSpec.model_validate(body)
+            return StreamSpec.model_validate(body)
         except ValidationError as exc:
+            # Only the fixed version message is public, never user input or
+            # arbitrary validator messages (which can contain credentials).
+            details = {}
+            for error in exc.errors():
+                if error["type"] == "maintenance_version":
+                    details["message"] = error["msg"]
+
             raise Fault(
                 422,
                 "invalid_declaration",
                 errors=[{"loc": e["loc"], "type": e["type"]} for e in exc.errors()],
+                **details,
             ) from None
 
+    def validate_spec(self, body: Any, name: str) -> dict:
+        spec = self._parse_spec(body)
         if spec.name != name:
             raise Fault(422, "name_mismatch")
 

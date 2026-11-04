@@ -7,13 +7,17 @@ import json
 import os
 import sqlite3
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from streamcast import upgrade_registry
 from streamcast._broker import upgrade
+from streamcast._broker.model import Fault
 from streamcast._broker.registry import Registry, dumps
+from streamcast._broker.runtime import BrokerRuntime
+from tests.test_broker import definition
 from tests.test_registry_upgrade import seed_v1, state
 
 pytest_plugins = ["tests.test_broker"]
@@ -119,3 +123,101 @@ def test_v3_broker_refuses_v2_until_explicit_upgrade(config):
     seed_v2(config)
     with pytest.raises(ValueError, match="registry version 2: run upgrade_registry"):
         Registry.open(config.registry, config.broker_id)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_default_maintenance_registry_and_pending_replay(
+    config, pending, monkeypatch
+):
+    registry = Registry.open(config.registry, config.broker_id)
+    owner = BrokerRuntime(config, registry)
+    await owner.mutate(
+        "events",
+        "definition",
+        definition(max_message_bytes=4096),
+        None,
+        "*",
+        storage_profile="local",
+        initialization="create_if_absent",
+    )
+    record = owner.records["events"]
+    record["stream"]["spec"]["maintenance"] = {"dedicated": False}
+    record["desired"] = "serving"
+    if pending:
+        record["pending"]["target"]["spec"]["maintenance"] = {}
+
+    else:
+        record["pending"] = None
+
+    registry.update(record)
+    registry.close()
+
+    update = Registry.update
+    writes = []
+
+    def old_shape(registry, record):
+        assert "maintenance" not in record["stream"]["spec"]
+        intent = record["pending"]
+        if intent is not None and intent["kind"] == "definition":
+            assert "maintenance" not in intent["target"]["spec"]
+
+        writes.append(copy.deepcopy(record))
+        update(registry, record)
+
+    monkeypatch.setattr(Registry, "update", old_shape)
+    # Reading a default field does not re-admit an existing declaration
+    # against a host's newly lowered transport ceiling.
+    recovered = await BrokerRuntime.open(replace(config, transport_max_bytes=1024))
+    try:
+        assert writes
+        assert recovered.observed["events"]["state"] == "serving"
+        record = recovered.records["events"]
+        assert record["pending"] is None
+        assert "maintenance" not in record["stream"]["spec"]
+        assert recovered.registry.load()[0]["events"] == record
+        stream = recovered.generations["events"].stream
+        assert await stream.send({"value": 1}) == 1
+        assert stream.definition is not None
+        assert stream.definition.spec.maintenance.dedicated is False
+    finally:
+        await recovered.close()
+
+
+@pytest.mark.parametrize("location", ["active", "target"])
+async def test_nondefault_maintenance_recovery_refuses_before_writing(
+    config, monkeypatch, location
+):
+    registry = Registry.open(config.registry, config.broker_id)
+    owner = BrokerRuntime(config, registry)
+    await owner.mutate(
+        "events", "definition", definition(), None, "*", storage_profile="local"
+    )
+    record = copy.deepcopy(owner.records["events"])
+    spec = (
+        record["stream"]["spec"]
+        if location == "active"
+        else record["pending"]["target"]["spec"]
+    )
+    spec["maintenance"] = {"dedicated": True}
+    registry.update(record)
+    original = registry.load()
+    registry.close()
+
+    def forbidden(*_):
+        pytest.fail("non-default maintenance reached replay writes")
+
+    monkeypatch.setattr(Registry, "update", forbidden)
+    monkeypatch.setattr(Registry, "accept", forbidden)
+    with pytest.raises(Fault) as refused:
+        await BrokerRuntime.open(config)
+
+    assert refused.value.code == "invalid_declaration"
+    assert (
+        refused.value.details["message"]
+        == "non-default maintenance requires streamcast 0.28"
+    )
+    registry = Registry.open(config.registry, config.broker_id)
+    try:
+        assert registry.load() == original
+    finally:
+        registry.close()

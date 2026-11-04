@@ -15,12 +15,14 @@ from pydantic import (
     ConfigDict,
     Field,
     ModelWrapValidatorHandler,
+    SerializerFunctionWrapHandler,
     StrictBool,
     StrictInt,
     StrictStr,
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import InitErrorDetails, PydanticCustomError
@@ -48,6 +50,34 @@ def _name(value: str) -> str:
 Name = Annotated[StrictStr, AfterValidator(_name)]
 
 
+Cadence = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+class Maintenance(BaseModel):
+    """Private reader model for the upcoming per-stream maintenance policy."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    dedicated: bool = False
+    seal_every: Cadence | None = None
+    compact_every: Cadence | None = None
+    publish_every: Cadence | None = None
+    clean_every: Cadence | None = None
+    clean_published_every: Cadence | None = None
+    flush_every: Cadence | None = None
+
+    @model_validator(mode="after")
+    def _dedicated_cadences(self) -> Self:
+        if not self.dedicated and any(
+            value is not None
+            for name, value in self.model_dump().items()
+            if name != "dedicated"
+        ):
+            raise ValueError("maintenance cadences require dedicated=true")
+
+        return self
+
+
 class StreamSpec(BaseModel):
     """A stream's schema and policy, with the same shape in Python and JSON."""
 
@@ -71,6 +101,28 @@ class StreamSpec(BaseModel):
     max_inbound: Annotated[StrictInt, Field(ge=1)] = MAX_INBOUND
     max_in_flight: Annotated[StrictInt, Field(ge=1)] = MAX_IN_FLIGHT
     max_message_bytes: Annotated[StrictInt, Field(ge=1)] | None = None
+    maintenance: Maintenance = Maintenance()
+
+    @field_validator("maintenance")
+    @classmethod
+    def _reader_only_maintenance(cls, value: Maintenance) -> Maintenance:
+        if value != Maintenance():
+            raise PydanticCustomError(
+                "maintenance_version",
+                "non-default maintenance requires streamcast 0.28",
+            )
+
+        return value
+
+    @model_serializer(mode="wrap")
+    def _old_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result = handler(self)
+        # Only this field's default is omitted: all other defaults and schema
+        # property order remain part of byte-for-byte pending-target identity.
+        if self.maintenance == Maintenance():
+            result.pop("maintenance", None)
+
+        return result
 
     @field_validator("sort_by", mode="before")
     @classmethod
