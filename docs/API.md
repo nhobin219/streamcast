@@ -266,9 +266,16 @@ children and closes owned handles. Borrowed log handles remain the caller's.
 
 Startup and child passes start children without waiting for readiness.
 Maintainers never gate writes. A generation that requires WAL replication
-opens writes only after its sidecar group is first observed ready. Later,
-it remains writable for `readiness_timeout` (30 seconds) since the last
-observed readiness. Membership changes and retries do not renew that grace.
+opens writes only after its sidecar group is first observed ready. While
+waiting for that first readiness, its observed state is `starting` for
+`readiness_timeout` (30 seconds) from the initial wait, then `error` with
+`children_unavailable`. Writes stay closed throughout that initial wait.
+Membership changes and retries do not restart the wait. Accepted serving
+intent is kept, and later observed readiness changes the state to `serving`
+and opens writes without another request. After first readiness, it remains
+writable for `readiness_timeout` since the last observed readiness; once
+that grace lapses it reports `error` with `children_unavailable` and closes
+writes. Membership changes and retries do not renew that grace.
 A stream without a sidecar is writable while accepting.
 A local `stream.send` then raises `ValueError("stream unavailable")`; retry
 after a moment. A publisher connection is closed with 1001, as at a stop, with

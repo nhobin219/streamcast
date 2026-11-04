@@ -17,6 +17,7 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -40,7 +41,7 @@ from streamcast import (
 )
 from streamcast._broker import runtime as implementation
 from streamcast._broker.registry import Registry
-from streamcast._children import build, desired
+from streamcast._children import ChildSpec, build, desired
 from streamcast._replicate import Sidecar
 from streamcast._tasks import reader, thread
 
@@ -854,6 +855,104 @@ async def test_real_children_signal_exact_generation_readiness(config, monkeypat
                 os.kill(pid, 0)
 
 
+async def test_first_sidecar_readiness_starts_then_errors_after_timeout(
+    config, monkeypatch
+):
+    class WaitingChild(Child):
+        def start(self):
+            pass
+
+    clock = [10.0]
+    monkeypatch.setattr(
+        implementation,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=implementation.time.time),
+    )
+    monkeypatch.setattr(implementation, "build", lambda *_: WaitingChild())
+    # Inject a sidecar plan over local logs; readiness needs no object store.
+    monkeypatch.setattr(
+        implementation,
+        "desired",
+        lambda generations, _: (
+            {
+                ChildSpec(
+                    "sidecar",
+                    tuple(
+                        (Path(g.stream.log.root), g.stream.log.name)
+                        for g in generations.values()
+                    ),
+                    (),
+                )
+            }
+            if generations
+            else set()
+        ),
+    )
+    replicated = replace(config, readiness_every=3600)
+    async with managed(replicated) as (owner, client, _):
+        created = await put(owner, client, "events", definition())
+        assert created.status_code == 202, created.text
+        started = await put(
+            owner, client, "events", {"state": "serving"}, suffix="/desired", revision=1
+        )
+        assert started.status_code == 202, started.text
+        assert owner.records["events"]["pending"] is None, owner.view("events")
+        generation = owner.generations["events"]
+        assert owner.status("events")["observed"] == {
+            "state": "starting",
+            "error": None,
+        }
+        assert not generation.writable and generation.sidecar_ready_at is None
+        with pytest.raises(ValueError, match="stream unavailable"):
+            await generation.stream.send({"value": 1})
+
+        # Replacing a shared group cannot restart an existing generation's wait.
+        clock[0] = 11.5
+        await serving_without_assertion_named(owner, client, "other")
+        await owner.watch_tick()
+        assert owner.status("events")["observed"]["state"] == "starting"
+        clock[0] = 12.0
+        await owner.watch_tick()
+        await owner.reconcile_children()
+        await owner.watch_tick()
+        assert owner.status("events")["observed"] == {
+            "state": "error",
+            "error": "children_unavailable",
+        }
+        assert owner.status("other")["observed"]["state"] == "starting"
+        assert not generation.writable and generation.sidecar_ready_at is None
+        assert owner.generations["events"] is generation
+        assert owner.records["events"]["desired"] == "serving"
+        assert owner.records["events"]["revision"] == 2
+        assert owner.records["events"]["pending"] is None
+
+        # Late readiness recovers the accepted generation without a new request.
+        clock[0] = 13.0
+        for child in owner.children:
+            child.ready = True
+
+        await owner.watch_tick()
+        assert owner.status("events")["observed"] == {
+            "state": "serving",
+            "error": None,
+        }
+        assert generation.writable and generation.sidecar_ready_at == 13.0
+        for child in owner.children:
+            child.ready = False
+
+        clock[0] = 14.99
+        await owner.watch_tick()
+        assert generation.writable
+        assert owner.status("events")["observed"]["state"] == "serving"
+        clock[0] = 15.0
+        await owner.watch_tick()
+        assert not generation.writable
+        assert owner.status("events")["observed"] == {
+            "state": "error",
+            "error": "children_unavailable",
+        }
+
+
 @pytest.mark.replication
 @pytest.mark.slow
 @pytest.mark.timeout(120)
@@ -888,22 +987,27 @@ async def test_managed_replication_and_shared_group_replacement(
         readiness_every=0.05,
     )
     async with managed(replicated) as (owner, client, _):
-        stream = await serving(owner, client)
+        await serving_without_assertion_named(owner, client, "events")
+        assert owner.status("events")["observed"]["state"] in ("starting", "serving")
         generation = owner.generations["events"]
+        stream = generation.stream
         initial = list(owner.children)
         assert len(initial) == 2
         assert sum(isinstance(child, Sidecar) for child in initial) == 1
         await children_ready(owner)
+        assert owner.status("events")["observed"]["state"] == "serving"
         assert all(child.ready for child in initial)
         await stream.send_many([{"value": i} for i in range(100)])
         found = await settle(s3, bucket + "/events", name="events")
         assert any(key.endswith(".ltx") for key in found), found
         metadata_uri = stream.metadata_uri
 
-        await serving(owner, client, "other")
+        await serving_without_assertion_named(owner, client, "other")
+        assert owner.status("other")["observed"]["state"] in ("starting", "serving")
         assert owner.generations["events"] is generation
         assert all(child._process is None for child in initial)
         await children_ready(owner)
+        assert owner.status("other")["observed"]["state"] == "serving"
         assert all(child.ready for child in owner.children)
         assert sum(isinstance(child, Sidecar) for child in owner.children) == 1
         assert await stream.send({"value": 100}) == 101
