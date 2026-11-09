@@ -1,6 +1,6 @@
-"""Real 0.27 registry writer, pending-target reader and recovery process.
+"""Released registry writer, explicit upgrader, reader and recovery process.
 
-Run under either the checkout or released 0.27.0, with isolated imports.
+Run under either the checkout or released 0.27, with isolated imports.
 The write phase deliberately stops at durable acceptance, before a worker
 can apply the definition; the next process must read and replay it.
 """
@@ -20,6 +20,7 @@ from streamcast import (
     StreamHandle,
     StreamSpec,
     initialize_registry,
+    upgrade_registry,
 )
 from streamcast._broker.model import Fault
 from streamcast._broker.registry import Registry
@@ -65,6 +66,22 @@ async def run(phase: str, root: Path) -> dict:
         authorization=Access(),
     )
     report = {"version": importlib.metadata.version("streamcast")}
+    if phase == "probe":
+        try:
+            registry = Registry.open(root / "registry.db", config.broker_id)
+        except ValueError as refused:
+            report["registry_error"] = str(refused)
+        else:
+            registry.close()
+            report["registry_opened"] = True
+
+        return report
+
+    if phase == "upgrade":
+        upgrade_registry(config)
+        report["upgraded"] = True
+        return report
+
     if phase in ("write", "read"):
         if phase == "write":
             initialize_registry(config)

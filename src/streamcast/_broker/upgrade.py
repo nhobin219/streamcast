@@ -34,11 +34,12 @@ def _request(name: str, definition: dict, max_message_bytes: int) -> dict:
 
 
 def upgrade_registry(config: BrokerConfig) -> None:
-    """Upgrade v1 or v2 through individually backed-up, atomic steps.
+    """Upgrade v1, v2 or v3 through individually backed-up, atomic steps.
 
     Stop the broker first. Each source version has its own fsynced backup
-    (``<registry>.v1`` or ``<registry>.v2``). Downgrade restores the matching
-    backup and loses subsequent changes. V3 has no receipts or operation log.
+    (``<registry>.v1``, ``<registry>.v2`` or ``<registry>.v3``). Downgrade restores the matching
+    backup and loses subsequent changes. V4 fences revisions across forget.
+    A rerun at v4 leaves both the high-water mark and backups unchanged.
     """
     if config.registry is None:
         raise ValueError("a registry path is required")
@@ -52,10 +53,10 @@ def upgrade_registry(config: BrokerConfig) -> None:
 
         db = sqlite3.connect(path)
         db.execute("PRAGMA synchronous=FULL")
-        steps = {1: _upgrade_v1_to_v2, 2: _upgrade_v2_to_v3}
+        steps = {1: _upgrade_v1_to_v2, 2: _upgrade_v2_to_v3, 3: _upgrade_v3_to_v4}
         identity = db.execute("SELECT version, broker FROM identity").fetchall()
-        if identity == [(3, config.broker_id)]:
-            raise ValueError("registry already version 3")
+        if identity == [(VERSION, config.broker_id)]:
+            return
 
         if (
             len(identity) != 1
@@ -63,7 +64,7 @@ def upgrade_registry(config: BrokerConfig) -> None:
             or identity[0][0] not in steps
             or identity[0][0] >= VERSION
         ):
-            raise ValueError("registry identity mismatch: v1 or v2 required")
+            raise ValueError("registry identity mismatch: v1, v2 or v3 required")
 
         version = identity[0][0]
         while version < VERSION and version in steps:
@@ -201,3 +202,40 @@ def _upgrade_v2_to_v3(db: sqlite3.Connection, path: Path, config: BrokerConfig) 
         db.execute("DROP TABLE operations")
         db.execute("DROP TABLE receipts")
         db.execute("UPDATE identity SET version = 3")
+
+
+def _upgrade_v3_to_v4(db: sqlite3.Connection, path: Path, config: BrokerConfig) -> None:
+    backup_path = Path(str(path) + ".v3")
+    backup_path.unlink(missing_ok=True)
+    backup = sqlite3.connect(backup_path)
+    try:
+        db.backup(backup)
+    finally:
+        backup.close()
+
+    with backup_path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        # V3 cannot forget records, so the loaded maximum and collection
+        # counter cover every revision it could have issued.
+        mark = max(
+            db.execute("SELECT revision FROM collection").fetchone()[0],
+            max(
+                (
+                    json.loads(body)["revision"]
+                    for (body,) in db.execute("SELECT body FROM streams")
+                ),
+                default=0,
+            ),
+        )
+        db.execute("CREATE TABLE high_water (revision INTEGER)")
+        db.execute("INSERT INTO high_water VALUES (?)", (mark,))
+        db.execute("UPDATE identity SET version = 4")

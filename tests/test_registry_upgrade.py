@@ -61,6 +61,7 @@ V1_OPERATION: dict[str, Any] = {
 
 def seed_v1(config, records=None, operation=None):
     with sqlite3.connect(config.registry) as db:
+        db.execute("DROP TABLE high_water")
         db.execute("UPDATE identity SET version=1")
         db.execute("CREATE TABLE operations (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
         db.execute(
@@ -106,7 +107,7 @@ async def test_explicit_upgrade_backup_pending_intent_and_receipts(config):
     backup = Path(str(config.registry) + ".v1")
     assert state(backup) == original
     converted = state(config.registry)
-    assert converted["identity"] == [(3, config.broker_id)]
+    assert converted["identity"] == [(4, config.broker_id)]
     assert "receipts" not in converted and "operations" not in converted
     record = json.loads(converted["streams"][0][1])
     assert set(record) == {
@@ -129,8 +130,7 @@ async def test_explicit_upgrade_backup_pending_intent_and_receipts(config):
         "storage_profile": "local",
         "initialization": "create_if_absent",
     }
-    with pytest.raises(ValueError, match="registry already version 3"):
-        upgrade_registry(config)
+    upgrade_registry(config)
 
     assert state(backup) == original
     async with managed(config) as (owner, client, _):
@@ -261,7 +261,7 @@ async def test_upgrade_rolls_back_all_records_and_can_retry(config, tmp_path, ba
     assert state(Path(str(config.registry) + ".v1")) == repaired
     registry = Registry.open(config.registry, config.broker_id)
     try:
-        assert registry.db.execute("SELECT version FROM identity").fetchone() == (3,)
+        assert registry.db.execute("SELECT version FROM identity").fetchone() == (4,)
     finally:
         registry.close()
 

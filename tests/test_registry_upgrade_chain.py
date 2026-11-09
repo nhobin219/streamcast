@@ -91,4 +91,4 @@ def test_v1_step_writes_literal_v2_shape(config, monkeypatch):
 
     monkeypatch.undo()
     upgrade_registry(config)
-    assert state(config.registry)["identity"] == [(3, config.broker_id)]
+    assert state(config.registry)["identity"] == [(4, config.broker_id)]
