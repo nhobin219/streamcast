@@ -7,6 +7,15 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- Check unpublished S3 metadata with a prefix-scoped listing instead of
+  `HeadBucket`, so prefix-conditioned grants work without broader bucket access.
+  Missing buckets retain their `FileNotFoundError`; denied listings propagate,
+  including when stream names resemble missing-bucket error messages.
+
 ## 0.28.0 — 2026-11-09
 
 ### Added
