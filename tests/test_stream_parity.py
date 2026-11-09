@@ -362,7 +362,12 @@ async def test_query_replace_and_normalized_retry(config, tmp_path, monkeypatch)
         assert set(operation["target"]) == {"spec", "storage_profile", "initialization"}
         monkeypatch.setattr(owner, "reconcile", reconcile)
         retried = await put(
-            owner, client, "failed", definition(), revision=1, key="retry"
+            owner,
+            client,
+            "failed",
+            definition(),
+            revision=failed.json()["revision"],
+            key="retry",
         )
         assert retried.status_code == 202
         assert owner.records["failed"]["pending"] is None

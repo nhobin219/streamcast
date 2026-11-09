@@ -221,7 +221,11 @@ async def test_zero_timeout_and_waiter_bounds(config, monkeypatch):
         await entered.wait()
         try:
             assert owner.waiters == 1
-            overflow = await request(client, "waiter", revision=1)
+            current = await client.get(BASE + "waiter")
+            assert current.status_code == 200
+            overflow = await request(
+                client, "waiter", revision=current.json()["revision"]
+            )
             assert overflow.status_code == 202
             assert owner.waiters == 1
         finally:
@@ -567,7 +571,9 @@ async def test_mutate_only_responses_schema_auth_and_removed_routes(
         assert failed.json()["error"]["retryable"] is True
         assert "storage" not in failed.text and "target" not in failed.text
         assert failed.json()["error"]["name"] == "failed"
-        assert failed.headers["etag"] == '"1"'
+        revision = queued.json()["revision"] + 1
+        assert failed.json()["error"]["revision"] == revision
+        assert failed.headers["etag"] == f'"{revision}"'
         # Supplied keys have no validation or durable identity semantics.
         keyed = await client.put(
             BASE + "keyed",
