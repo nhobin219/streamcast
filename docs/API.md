@@ -625,7 +625,7 @@ is the same per-stream object for application-specific health decisions.
 
 ## Dynamic management
 
-Use root exports `BrokerConfig`, `Storage`, `Authorization`,
+Use root exports `BrokerConfig`, `Storage`, `Authorization`, `CreationAuthorization`,
 `HistoryGuard`, `initialize_registry`, `upgrade_registry` and `create_app`. Provision a registry
 once, explicitly, then start the application; startup never creates one:
 
@@ -781,7 +781,8 @@ profile, including `None` when omitted, before resolving a default. It decides
 whether the record exists and calls the hook under the same mutation lock,
 before any registry write or transition enqueue. False returns 403. Updates
 do not call it: omitted profiles retain recorded storage, and a changed profile
-returns 409. The hook must not re-enter broker mutations.
+returns 409. The hook must not re-enter broker mutations. Keep it fast: a slow
+hook holds the mutation lock and delays all other control mutations.
 
 With this hook, supplied profile query keys and values must use their literal,
 unencoded spelling; encoded selections return `422 invalid_query`. Duplicate
