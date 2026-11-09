@@ -766,6 +766,31 @@ async def authenticate(scope) -> str | None: ...
 async def allows(principal: str, action: str, resource: str) -> bool: ...
 ```
 
+An authorization object can also implement the optional `CreationAuthorization`
+protocol by adding:
+
+```python
+async def allows_creation(
+    principal: str, resource: str, storage_profile: str | None
+) -> bool: ...
+```
+
+This is an additional grant for new managed streams, after `control.mutate`.
+The broker passes the authenticated principal, exact stream name and requested
+profile, including `None` when omitted, before resolving a default. It decides
+whether the record exists and calls the hook under the same mutation lock,
+before any registry write or transition enqueue. False returns 403. Updates
+do not call it: omitted profiles retain recorded storage, and a changed profile
+returns 409. The hook must not re-enter broker mutations.
+
+With this hook, supplied profile query keys and values must use their literal,
+unencoded spelling; encoded selections return `422 invalid_query`. Duplicate
+query keys are always refused. Hosts requiring an explicit profile reject
+`None` in the hook. For example, a shared host can grant a principal only
+stream names and profiles whose text before the first hyphen equals that
+principal. Ordinary `Authorization` objects keep their two-method contract,
+default profile selection and existing query decoding.
+
 The principal is a stable nonsecret identity. Actions are `data.read`,
 `data.publish`, `stats.read`, `control.read`, `control.mutate` and
 `control.migrate`. Resources are exact stream names, with `"*"` for collection

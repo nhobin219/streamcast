@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from streamcast._limits import (
     MAX_MESSAGE_BYTES,
@@ -40,6 +40,23 @@ class Authorization(Protocol):
     async def authenticate(self, scope: Mapping[str, Any]) -> str | None: ...
 
     async def allows(self, principal: str, action: str, resource: str) -> bool: ...
+
+
+@runtime_checkable
+class CreationAuthorization(Authorization, Protocol):
+    """Optional host grant for a new stream's requested storage profile.
+
+    The broker calls this after the ordinary control.mutate grant, under its
+    mutation lock and before any registry write. `storage_profile` is the
+    caller's explicit selection, or None when omitted; it is not the default
+    resolved by the broker. Updates retain their immutable recorded storage
+    and do not call this hook. Implementations without it retain the ordinary
+    Authorization contract.
+    """
+
+    async def allows_creation(
+        self, principal: str, resource: str, storage_profile: str | None
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)

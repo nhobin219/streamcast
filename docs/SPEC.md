@@ -67,7 +67,10 @@ and HTTP control in one FastAPI application. One top-level ASGI lifespan
 owns its registry, durable intent, stream generations and maintenance
 children. Local ownership locks exclude a second managed writer; they do
 not replace deployment fencing of another host or writers outside this runtime. The host
-injects authentication and storage profiles. Child reconciliation restarts
+injects authentication and storage profiles. An optional creation grant binds
+the authenticated principal to the requested profile under the mutation lock,
+before a new managed record is written; updates retain immutable storage.
+Child reconciliation restarts
 only changed groups, leaving neighbor stream objects and connections in place.
 Only a stream's WAL-replication sidecar group gates its writes; maintainers
 contribute readiness telemetry alone. Dedication belongs to `StreamSpec.maintenance`,

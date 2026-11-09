@@ -9,6 +9,15 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ## Unreleased
 
+### Added
+
+- Optional `CreationAuthorization.allows_creation` grants the authenticated
+  principal access to the requested storage profile before a new managed
+  stream changes the registry. It receives omitted selections as `None`;
+  updates retain immutable recorded storage. Hosts using the hook require
+  literal profile query spelling. Existing authorization implementations
+  keep their two-method contract and profile decoding.
+
 ### Changed
 
 - Reconcile immutable maintenance and replication child identities instead of
