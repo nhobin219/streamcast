@@ -1,4 +1,4 @@
-"""The one-time revision fence precedes the first possible forget."""
+"""The one-time revision fence precedes the first possible delete."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def test_registry_accept_never_lowers_high_water(config):
         registry.accept({"name": "high", "revision": 9})
         registry.accept({"name": "low", "revision": 2})
         assert registry.high_water() == 9
-        registry.forget("high")
+        registry.delete("high")
         assert registry.high_water() == 9
         assert "high" not in registry.load()[0]
     finally:

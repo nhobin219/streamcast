@@ -11,15 +11,19 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
-- `DELETE /control/v1/streams/{name}` forgets applied retirements and never-bound
-  records whose intent is absent, accepted or failed, leaving storage untouched.
-  It requires the new `control.forget` action and the exact current ETag in
-  `If-Match`; `If-Match: *` intentionally returns 412. Running transitions
-  return 409. Public access does not grant this action. Host policies
-  granting all actions now grant forget too. Shared ownership locks survive
-  until their last claimant is gone. Waiting mutations receive 410
-  `stream_forgotten` without an ETag; expired waits retain 202 and their Location
-  subsequently returns 404.
+- **Delete a stream:** `DELETE /control/v1/streams/{name}` removes its definition from
+  the broker; it never deletes its data. Only applied retirements and never-bound
+  records whose intent is absent, accepted or failed qualify; a running transition
+  returns 409 `transition_running`, any other record 409 `not_deletable`. It requires
+  the new `control.delete` action and the exact current ETag in `If-Match`;
+  `If-Match: *` intentionally returns 412. Public access does not grant this action;
+  host policies
+  granting all actions grant it too. The revision high-water mark is unchanged, so stale
+  ETags stay fenced after re-creation. Shared ownership locks survive until their last
+  claimant is gone. Waiting mutations receive 410 `stream_deleted` without an ETag;
+  expired waits retain 202 and their Location subsequently returns 404.
+- A data purge is deliberately not offered: removing a deleted stream's storage is the
+  host's operation.
 
 - Optional `CreationAuthorization.allows_creation` grants the authenticated
   principal access to the requested storage profile before a new managed
@@ -32,7 +36,7 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 - **Breaking (0.28):** new and re-created managed records start at a persistent
   revision high-water mark plus one, rather than always at revision 1. Every
-  accepted revision advances the mark atomically; forget leaves it unchanged.
+  accepted revision advances the mark atomically; delete leaves it unchanged.
   Stale ETags from earlier incarnations cannot mutate a re-created name. Registry
   v4 requires an explicit `upgrade_registry(config)` before startup; its one-time
   migration fences all existing revisions and keeps a `.v3` rollback backup.

@@ -1,4 +1,4 @@
-"""Forgetting registry intent never deletes storage or reuses a name's ETags."""
+"""Deleting registry intent never deletes storage or reuses a name's ETags."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ async def blocked_worker(owner, monkeypatch):
 @pytest.mark.parametrize("bound", [False, True])
 @pytest.mark.parametrize("retired", [False, True])
 @pytest.mark.parametrize("pending", [None, "accepted", "running", "failed"])
-async def test_forget_predicate_truth_table(config, bound, retired, pending):
+async def test_delete_predicate_truth_table(config, bound, retired, pending):
     async with managed(config) as (owner, client, _):
         await put(owner, client, "events", definition())
         record = owner.records["events"]
@@ -90,12 +90,12 @@ async def test_forget_predicate_truth_table(config, bound, retired, pending):
         else:
             assert answer.status_code == 409
             assert answer.json()["error"]["code"] == (
-                "transition_running" if pending == "running" else "not_forgettable"
+                "transition_running" if pending == "running" else "not_deletable"
             )
             assert owner.registry.load()[0]["events"] == record
 
 
-async def test_accepted_unbound_forget_waiters_and_queued_worker(config, monkeypatch):
+async def test_accepted_unbound_delete_waiters_and_queued_worker(config, monkeypatch):
     config = replace(config, control_apply_wait_s=5)
     async with managed(config) as (owner, client, _):
         async with blocked_worker(owner, monkeypatch) as (entered, release):
@@ -136,8 +136,8 @@ async def test_accepted_unbound_forget_waiters_and_queued_worker(config, monkeyp
             for response in (one, two):
                 assert response.status_code == 410
                 assert response.json()["error"] == {
-                    "code": "stream_forgotten",
-                    "message": "stream forgotten",
+                    "code": "stream_deleted",
+                    "message": "stream deleted",
                     "retryable": False,
                     "name": "events",
                     "revision": revision,
@@ -146,8 +146,8 @@ async def test_accepted_unbound_forget_waiters_and_queued_worker(config, monkeyp
 
             assert shared.result() is other_attempt.result()
             assert shared.result() == {
-                "outcome": "forgotten",
-                "error": "stream_forgotten",
+                "outcome": "deleted",
+                "error": "stream_deleted",
                 "revision": revision,
                 "status": {
                     "name": "events",
@@ -156,7 +156,7 @@ async def test_accepted_unbound_forget_waiters_and_queued_worker(config, monkeyp
                         k: record["pending"][k]
                         for k in ("kind", "revision", "status", "attempt", "error")
                     },
-                    "observed": {"state": "forgotten", "error": None},
+                    "observed": {"state": "deleted", "error": None},
                 },
             }
             assert "events" not in owner.queued
@@ -175,7 +175,7 @@ async def test_accepted_unbound_forget_waiters_and_queued_worker(config, monkeyp
         assert "events" not in restarted.records
 
 
-async def test_actual_running_transition_cannot_be_forgotten(config, monkeypatch):
+async def test_actual_running_transition_cannot_be_deleted(config, monkeypatch):
     async with managed(config) as (owner, client, _):
         async with blocked_worker(owner, monkeypatch) as (entered, _):
             assert (await raw_put(client, "blocker")).status_code == 202
@@ -209,7 +209,22 @@ async def test_timed_out_waiter_keeps_202_then_location_is_404(config, monkeypat
             assert missing.json()["error"]["code"] == "unknown_stream"
 
 
-async def test_forget_preconditions_and_distinct_grant(config, monkeypatch):
+async def test_delete_wildcard_if_match_is_412(config):
+    async with managed(config) as (owner, client, _):
+        await put(owner, client, "events", definition())
+        record = copy.deepcopy(owner.records["events"])
+        mark = owner.high_water
+        assert owner.registry.high_water() == mark
+        response = await client.delete(URL, headers={"If-Match": "*"})
+        assert response.status_code == 412
+        assert response.json()["error"]["code"] == "precondition_failed"
+        assert owner.records["events"] == record
+        assert owner.registry.load()[0]["events"] == record
+        assert owner.high_water == mark
+        assert owner.registry.high_water() == mark
+
+
+async def test_delete_preconditions_and_distinct_grant(config, monkeypatch):
     async with managed(config) as (owner, client, _):
         await put(owner, client, "events", definition())
         record = copy.deepcopy(owner.records["events"])
@@ -230,9 +245,9 @@ async def test_forget_preconditions_and_distinct_grant(config, monkeypatch):
         monkeypatch.setattr(config.authorization, "allows", denied)
         denied_response = await delete(client, record["revision"])
         assert denied_response.status_code == 403
-        assert calls == [("admin", "control.forget", "events")]
+        assert calls == [("admin", "control.delete", "events")]
         assert owner.records["events"] == record
-        assert not await PublicAccess().allows("public", "control.forget", "events")
+        assert not await PublicAccess().allows("public", "control.delete", "events")
         monkeypatch.undo()
         assert (await delete(client, record["revision"])).status_code == 204
         missing = await delete(client, record["revision"])
@@ -240,7 +255,7 @@ async def test_forget_preconditions_and_distinct_grant(config, monkeypatch):
         assert missing.json()["error"]["code"] == "unknown_stream"
 
 
-async def test_retired_forget_closes_subscribers_preserves_storage_and_claims(
+async def test_retired_delete_closes_subscribers_preserves_storage_and_claims(
     config, tmp_path
 ):
     async with managed(config) as (owner, client, app):
@@ -305,7 +320,7 @@ async def test_retired_forget_closes_subscribers_preserves_storage_and_claims(
         assert (await client.get(URL)).status_code == 404
 
 
-async def test_static_claim_survives_forget(config, tmp_path):
+async def test_static_claim_survives_delete(config, tmp_path):
     static = StreamHandle.open(
         Stream(
             spec=StreamSpec(name="static", schema=definition()["schema"]),
@@ -322,23 +337,23 @@ async def test_static_claim_survives_forget(config, tmp_path):
         await owner.queue.join()
         path = next(path for path, names in owner.claims.items() if names == {"static"})
         owner.claim_path(path, "events")
-        await owner.forget("events", f'"{accepted["status"]["revision"]}"', None)
+        await owner.delete("events", f'"{accepted["status"]["revision"]}"', None)
         assert owner.claims[path] == {"static"}
         with pytest.raises(BlockingIOError):
             Lock.open(path)
 
         with pytest.raises(Fault, match="static_stream"):
-            await owner.forget("static", '"1"', None)
+            await owner.delete("static", '"1"', None)
 
 
-async def test_unbound_forget_never_opens_storage(config, monkeypatch):
+async def test_unbound_delete_never_opens_storage(config, monkeypatch):
     async with managed(config) as (owner, client, _):
         await put(owner, client, "events", definition())
         root = config.storage_profiles["local"].root
         assert not (root / "events").exists()
 
         def forbidden(*_args, **_kwargs):
-            pytest.fail("forget accessed storage")
+            pytest.fail("delete accessed storage")
 
         monkeypatch.setattr(owner, "recorded_storage", forbidden)
         monkeypatch.setattr(owner, "claim_storage", forbidden)
@@ -426,7 +441,7 @@ class RejectCollection(sqlite3.Connection):
         return super().execute(sql, *args, **kwargs)
 
 
-def test_forget_and_collection_commit_atomically():
+def test_delete_and_collection_commit_atomically():
     db = sqlite3.connect(":memory:", factory=RejectCollection)
     Registry.initialize(db, "test")
     registry = Registry(db, None)
@@ -435,7 +450,7 @@ def test_forget_and_collection_commit_atomically():
         registry.accept(record)
         db.reject = True
         with pytest.raises(OSError, match="injected collection failure"):
-            registry.forget("events")
+            registry.delete("events")
 
         assert registry.load() == ({"events": record}, 1)
         assert registry.high_water() == 3

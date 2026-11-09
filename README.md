@@ -503,9 +503,14 @@ for falling behind.
 
 The same application also manages streams at runtime — define, serve, stop, migrate and
 retire over HTTP, behind an injected authorization policy — when it is given a registry;
-[`docs/API.md`](docs/API.md#dynamic-management) is that contract. A separate
-`control.forget` grant permits forgetting retired or never-bound records without
-deleting storage. New and re-created names receive fenced revisions; existing
+[`docs/API.md`](docs/API.md#dynamic-management) is that contract.
+
+**Delete a stream:** `DELETE /control/v1/streams/{name}` removes its definition from the
+broker; it never deletes its data.
+A data purge is deliberately not offered: removing a deleted stream's storage is the
+host's operation.
+A separate `control.delete` grant permits deleting retired or never-bound records.
+New and re-created names receive fenced revisions; existing
 registries require the explicit v4 upgrade before startup.
 
 ## Client
