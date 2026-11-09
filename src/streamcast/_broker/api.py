@@ -15,7 +15,13 @@ from websockets.exceptions import ConnectionClosed
 
 from streamcast import _stats
 from streamcast._asgi import _Peer, _relative
-from streamcast._broker.model import CONTROL, NAME, BrokerConfig, Fault
+from streamcast._broker.model import (
+    CONTROL,
+    NAME,
+    BrokerConfig,
+    CreationAuthorization,
+    Fault,
+)
 from streamcast._broker.runtime import BrokerRuntime
 from streamcast._errors import Close, NotReplayable, ProtocolError
 from streamcast._protocol import ACCEPTED, VERSION, Publish, parse_subscribe, refusal
@@ -248,7 +254,7 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
 
     async def mutation(name: str, request: Request, kind: str):
         action = "control.migrate" if kind == "migration" else "control.mutate"
-        await authorize(config, request.scope, action, name)
+        principal = await authorize(config, request.scope, action, name)
         owner = runtime()
         value = await body(request, config.control_max_bytes)
         allowed = (
@@ -259,6 +265,17 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
         ):
             raise Fault(422, "invalid_query")
 
+        profile = request.query_params.get("storage_profile")
+        if (
+            isinstance(config.authorization, CreationAuthorization)
+            and profile is not None
+        ):
+            # One literal spelling prevents encoded aliases from acquiring a
+            # different meaning in an ingress policy than in the host hook.
+            literal = b"storage_profile=" + profile.encode("utf-8")
+            if literal not in request.scope["query_string"].split(b"&"):
+                raise Fault(422, "invalid_query")
+
         # These tasks belong to the runtime, not the socket. Close drains them
         # before the transition worker and the registry are shut down.
         accepted = await owner.control(
@@ -268,7 +285,8 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
                 value,
                 request.headers.get("if-match"),
                 request.headers.get("if-none-match"),
-                storage_profile=request.query_params.get("storage_profile"),
+                principal=principal,
+                storage_profile=profile,
                 initialization=request.query_params.get("initialization"),
             )
         )

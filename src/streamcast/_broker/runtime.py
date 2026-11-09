@@ -15,7 +15,7 @@ from typing import Any, cast, get_args
 from pydantic import ValidationError
 
 from streamcast import _log, _metadata
-from streamcast._broker.model import NAME, BrokerConfig, Fault
+from streamcast._broker.model import NAME, BrokerConfig, CreationAuthorization, Fault
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._broker.transitions import storage, with_replica
 from streamcast._children import (
@@ -362,6 +362,7 @@ class BrokerRuntime:
         match: str | None,
         none: str | None,
         *,
+        principal: str | None = None,
         storage_profile: str | None = None,
         initialization: str | None = None,
     ) -> dict:
@@ -381,6 +382,15 @@ class BrokerRuntime:
             previous = self.records.get(name)
             target = body
             if kind == "definition":
+                authorization = self.config.authorization
+                if previous is None and isinstance(
+                    authorization, CreationAuthorization
+                ):
+                    if principal is None or not await authorization.allows_creation(
+                        principal, name, storage_profile
+                    ):
+                        raise Fault(403, "forbidden")
+
                 spec = self.validate_spec(body, name)
                 profile_name = (
                     storage_profile

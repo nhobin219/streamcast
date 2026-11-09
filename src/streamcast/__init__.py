@@ -53,6 +53,7 @@ from streamcast._application import create_app, initialize_registry
 from streamcast._broker.model import (
     Authorization,
     BrokerConfig,
+    CreationAuthorization,
     HistoryGuard,
 )
 from streamcast._broker.upgrade import upgrade_registry
@@ -164,6 +165,7 @@ __all__ = [
     "outbox",
     "Authorization",
     "BrokerConfig",
+    "CreationAuthorization",
     "HistoryGuard",
     "Storage",
     "StreamSpec",
