@@ -287,19 +287,41 @@ def _published(
             raise FileNotFoundError(msg)
 
     if raw is None:
-        # **pyarrow says "not found" for a missing BUCKET too**, in exactly
-        # the words it uses for a missing key — measured against rustfs. A
-        # mistyped bucket would otherwise read as "no copy yet", and a restore
-        # would go on to rebuild the stream's first log as though it were live.
+        # No hint and no plain copy. One prefix-scoped listing of the
+        # metadata directory tells "no copy yet" from "no bucket" without
+        # HeadBucket, which a prefix-conditioned ListBucket grant refuses.
         filesystem, key = _remote._filesystem(store.dir, s3_options)  # noqa: SLF001
         bucket = key.split("/", 1)[0]
-        if filesystem.get_file_info(bucket).type == pafs.FileType.NotFound:
-            msg = f"the published location's bucket {bucket!r} does not exist ({published})"
-            raise FileNotFoundError(msg)
+        try:
+            filesystem.get_file_info(
+                pafs.FileSelector(key, recursive=False, allow_not_found=False)
+            )
+        except FileNotFoundError:
+            return None  # the bucket answered; the prefix is empty
+        except OSError as error:
+            if _no_such_bucket(error, key):
+                msg = f"the published location's bucket {bucket!r} does not exist ({published})"
+                raise FileNotFoundError(msg) from error
 
-        return None
+            raise
+
+        return None  # entries without a hint: still no published version
 
     return store, _metadata.Metadata.from_json(raw.decode())
+
+
+def _no_such_bucket(error: OSError, path: str) -> bool:
+    """Whether listing `path` ("<bucket>/<key>") failed because the bucket
+    does not exist. Arrow reports no error code, only text that embeds the
+    key, and a key may contain any token. So this anchors on the whole
+    message Arrow builds from this exact path: the key fills its slot, and
+    only the error-code position can say NO_SUCH_BUCKET.
+    """
+    bucket, _, key = path.partition("/")
+    return str(error).startswith(
+        f"When listing objects under key '{key}/' in bucket '{bucket}': "
+        "AWS Error NO_SUCH_BUCKET during ListObjectsV2 operation"
+    )
 
 
 def adopt(
