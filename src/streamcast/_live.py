@@ -33,9 +33,10 @@ long one stalls neither the loop nor the socket, and the server never drops
 this view for falling behind because someone ran a slow aggregate (I2).
 
 **A broken view raises; it does not serve stale answers.** A dropped
-connection, `TooSlow` or a network error is reconnected from the last offset,
-with catch-up, under a capped backoff. Anything else — a refusal catch-up
-cannot fix, a protocol error — is kept and raised by the next query.
+connection, `TooSlow`, a network error or an HTTP 503 on reconnect is retried
+from the last offset, with catch-up, under a capped backoff. Anything else —
+a refusal catch-up cannot fix, a protocol error — is kept and raised by the
+next query.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any, Final
 
 import pyarrow as pa
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from streamcast import _client, _log, _snapshot
 from streamcast._errors import NotReplayable, TooSlow
@@ -225,6 +226,11 @@ class Live:
             except _TRANSIENT:
                 continue
             except Exception as exc:  # noqa: BLE001 — kept and raised by the next query
+                # A restarting broker can still accept TCP while refusing
+                # the handshake. Other HTTP refusals need the caller to act.
+                if isinstance(exc, InvalidStatus) and exc.response.status_code == 503:
+                    continue
+
                 self._failure = exc
                 await self._wake()
                 return

@@ -1178,8 +1178,9 @@ caller bounds it. Published rows count, so a time the tables have already
 passed needs no new row. A server that sent its clock periodically would let
 an idle stream prove time passing without a row (#63).
 
-**A broken view raises.** A closed connection, `TooSlow` or a network error
-reconnects from the last row received, with catch-up, under a capped backoff.
+**A broken view raises.** A closed connection, `TooSlow`, a network error or
+an HTTP 503 handshake rejection on reconnect retries from the last row received,
+with catch-up, under a capped backoff. Other HTTP statuses remain fatal.
 Anything else is kept and raised by the next query, so the view never answers
 from data it has stopped receiving.
 
