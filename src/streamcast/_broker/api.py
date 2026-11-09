@@ -318,9 +318,9 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
                     revision=accepted["status"]["revision"],
                 )
             )
-        elif result is not None and result["outcome"] == "forgotten":
+        elif result is not None and result["outcome"] == "deleted":
             return error(
-                Fault(410, "stream_forgotten", name=name, revision=result["revision"])
+                Fault(410, "stream_deleted", name=name, revision=result["revision"])
             )
         elif result is not None and result["outcome"] == "failed":
             response = error(
@@ -345,11 +345,11 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
         return response
 
     @app.delete(CONTROL + "/streams/{name}")
-    async def forget_stream(name: str, request: Request):
-        await authorize(config, request.scope, "control.forget", name)
+    async def delete_stream(name: str, request: Request):
+        await authorize(config, request.scope, "control.delete", name)
         owner = runtime()
         await owner.control(
-            owner.forget(
+            owner.delete(
                 name,
                 request.headers.get("if-match"),
                 request.headers.get("if-none-match"),

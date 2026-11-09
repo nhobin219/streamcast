@@ -620,8 +620,8 @@ class BrokerRuntime:
             self.enqueue(name)
             return {"future": future, "status": self.status(name)}
 
-    async def forget(self, name: str, match: str | None, none: str | None) -> dict:
-        """Forget an applied retirement or a never-bound, non-running intent.
+    async def delete(self, name: str, match: str | None, none: str | None) -> dict:
+        """Delete an applied retirement or a never-bound, non-running intent.
 
         Storage belongs to the host. This removes only registry state and this
         record's ownership claims, after draining any retired generation.
@@ -658,19 +658,19 @@ class BrokerRuntime:
                 if pending is not None and pending["status"] == "running":
                     raise Fault(409, "transition_running")
 
-                raise Fault(409, "not_forgettable")
+                raise Fault(409, "not_deletable")
 
             if name in self.generations:
                 await self.offline(record)
 
             # Before this transaction commits, restart still sees the record.
             # Afterwards it is absent; a crash releases the process's locks.
-            await thread(self.registry.forget, name)
+            await thread(self.registry.delete, name)
             status = self.status(name)
-            status["observed"] = {"state": "forgotten", "error": None}
+            status["observed"] = {"state": "deleted", "error": None}
             snapshot = {
-                "outcome": "forgotten",
-                "error": "stream_forgotten",
+                "outcome": "deleted",
+                "error": "stream_deleted",
                 "revision": record["revision"],
                 "status": status,
             }

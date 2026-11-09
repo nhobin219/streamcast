@@ -38,7 +38,7 @@ def upgrade_registry(config: BrokerConfig) -> None:
 
     Stop the broker first. Each source version has its own fsynced backup
     (``<registry>.v1``, ``<registry>.v2`` or ``<registry>.v3``). Downgrade restores the matching
-    backup and loses subsequent changes. V4 fences revisions across forget.
+    backup and loses subsequent changes. V4 fences revisions across delete.
     A rerun at v4 leaves both the high-water mark and backups unchanged.
     """
     if config.registry is None:
@@ -224,7 +224,7 @@ def _upgrade_v3_to_v4(db: sqlite3.Connection, path: Path, config: BrokerConfig) 
 
     with db:
         db.execute("BEGIN IMMEDIATE")
-        # V3 cannot forget records, so the loaded maximum and collection
+        # V3 cannot delete records, so the loaded maximum and collection
         # counter cover every revision it could have issued.
         mark = max(
             db.execute("SELECT revision FROM collection").fetchone()[0],

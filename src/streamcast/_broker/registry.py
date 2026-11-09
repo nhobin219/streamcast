@@ -146,7 +146,7 @@ class Registry:
             )
 
     @serialized
-    def forget(self, name: str) -> None:
+    def delete(self, name: str) -> None:
         with self.db:
             self.db.execute("DELETE FROM streams WHERE name=?", (name,))
             self.db.execute("UPDATE collection SET revision=revision+1")
