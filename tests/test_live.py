@@ -12,11 +12,15 @@ import socket
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import duckdb
 import litelink
 import pytest
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 import streamcast
 from streamcast import _live, _log
@@ -243,27 +247,80 @@ class TestReconnecting:
                 # be read.
                 assert live._base is not original  # noqa: SLF001
 
+    @pytest.mark.parametrize("status", [None, 400, 401, 403, 404, 429, 500, 502])
     async def test_a_failure_it_cannot_fix_is_raised_by_the_next_query(
-        self, stream, monkeypatch
+        self, stream, monkeypatch, status
     ):
         async with served(stream) as (server, broker):
             async with await streamcast.StreamHandle.live(broker) as live:
                 await live.wait_for(5)
 
+                failure = (
+                    streamcast.NotReplayable("ahead", offset=6, end_offset=6)
+                    if status is None
+                    else InvalidStatus(Response(status, "Rejected", Headers()))
+                )
+                attempts = 0
+
                 async def refused() -> None:
-                    raise streamcast.NotReplayable("ahead", offset=6, end_offset=6)
+                    nonlocal attempts
+                    attempts += 1
+                    assert attempts == 1, "permanent refusal was retried"
+                    raise failure
 
                 monkeypatch.setattr(live, "_connect", refused)
                 for connection in list(server.connections):
                     await connection.close()
 
-                with pytest.raises(RuntimeError, match="stopped"):
+                with pytest.raises(RuntimeError, match="stopped") as stopped:
                     # Bounded, so a view that never records the failure fails
                     # here rather than hanging the suite.
                     await asyncio.wait_for(live.wait_for(100), timeout=5)
 
+                assert stopped.value.__cause__ is failure
+                assert attempts == 1
                 with pytest.raises(RuntimeError, match="stopped"):
                     await live.scan().read_all()
+
+    async def test_503_retries_use_the_capped_backoff(self, stream, monkeypatch):
+        async with served(stream) as (server, broker):
+            async with await streamcast.StreamHandle.live(
+                broker, rebase_every=3600
+            ) as live:
+                await live.wait_for(5)
+                delays = []
+                attempts = 0
+                failure = streamcast.NotReplayable("ahead", offset=6, end_offset=6)
+
+                async def unavailable():
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts <= 7:
+                        raise InvalidStatus(
+                            Response(503, "Service Unavailable", Headers())
+                        )
+
+                    raise failure
+
+                async def backoff(delay):
+                    delays.append(delay)
+                    await asyncio.sleep(0)
+
+                # Replace only this module's clock; listener shutdown and
+                # the test's timeout keep using asyncio's real clock.
+                clock = SimpleNamespace(**vars(asyncio))
+                clock.sleep = backoff
+                monkeypatch.setattr(_live, "asyncio", clock)
+                monkeypatch.setattr(live, "_connect", unavailable)
+                for connection in list(server.connections):
+                    await connection.close()
+
+                with pytest.raises(RuntimeError, match="stopped") as stopped:
+                    await asyncio.wait_for(live.wait_for(100), timeout=5)
+
+                assert stopped.value.__cause__ is failure
+                assert attempts == 8
+                assert delays == [0.1, 0.5, 1.0, 2.0, 5.0, 5.0, 5.0, 5.0]
 
 
 class TestWaitingForATime:
@@ -415,7 +472,9 @@ async def offsets_where(live: _live.Live, **kwargs: Any) -> list[int]:
 
 
 class TestAMigrationUnderAnOpenView:
-    async def test_it_reads_across_the_seam_with_the_new_columns(self, tmp_path):
+    async def test_it_reads_across_the_seam_with_the_new_columns(
+        self, tmp_path, monkeypatch
+    ):
         """Stop, migrate, restart on the same address; the view carries on.
 
         One listening socket, bound for the whole test, with a `dup()` handed
@@ -450,8 +509,31 @@ class TestAMigrationUnderAnOpenView:
             ) as live:
                 await live.wait_for(3)
 
+                # Keep the listening broker in its drained state until the
+                # view actually receives its 503, rather than racing shutdown.
+                rejected = asyncio.Event()
+                reconnect = live._connect
+                close = first.app.state.broker.close
+
+                async def reconnect_during_drain():
+                    try:
+                        return await reconnect()
+                    except InvalidStatus as exc:
+                        assert exc.response.status_code == 503
+                        rejected.set()
+                        raise
+
+                async def close_after_rejection():
+                    await close()
+                    await asyncio.wait_for(rejected.wait(), timeout=5)
+
+                monkeypatch.setattr(live, "_connect", reconnect_during_drain)
+                monkeypatch.setattr(
+                    first.app.state.broker, "close", close_after_rejection
+                )
                 first.close()
                 await first.wait_closed()
+                assert rejected.is_set()
                 await old.aclose()
 
                 new = streamcast.StreamHandle.migrate(
