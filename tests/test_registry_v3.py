@@ -37,6 +37,7 @@ def seed_v2(config, status="running"):
 
 @pytest.mark.parametrize("status", ["accepted", "running", "failed"])
 def test_fold_inspected_before_startup_and_durable_backup(config, monkeypatch, status):
+    monkeypatch.setattr(upgrade, "VERSION", 3)
     original = seed_v2(config, status)
     record = json.loads(original["streams"][0][1])
     operation = json.loads(original["operations"][0][1])
@@ -70,8 +71,7 @@ def test_fold_inspected_before_startup_and_durable_backup(config, monkeypatch, s
     assert json.loads(converted["streams"][0][1]) == expected
     assert state(backup) == original
     before = backup.read_bytes(), backup.stat().st_mtime_ns
-    with pytest.raises(ValueError, match="registry already version 3"):
-        upgrade_registry(config)
+    upgrade_registry(config)
 
     assert (backup.read_bytes(), backup.stat().st_mtime_ns) == before
     assert synced == [True, False]
@@ -100,7 +100,7 @@ def test_fault_before_commit_rolls_back_tables_and_records(config, monkeypatch):
     assert state(config.registry) == original
     assert state(Path(str(config.registry) + ".v2")) == original
     upgrade_registry(config)
-    assert state(config.registry)["identity"] == [(3, config.broker_id)]
+    assert state(config.registry)["identity"] == [(4, config.broker_id)]
 
 
 def test_dangling_pending_aborts_with_source_and_backup_intact(config):

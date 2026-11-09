@@ -168,21 +168,17 @@ def registry_peer(python: str, phase: str, root: Path) -> dict:
     return json.loads(done.stdout)
 
 
-@pytest.mark.parametrize("release", ["0.27.0"], indirect=True)
-@pytest.mark.parametrize("writer", ["this", "release"])
-def test_registry_pending_target_and_recovery_between_027_versions(
-    release, tmp_path, writer
-):
+@pytest.mark.parametrize("release", ["0.27.0", "0.27.1"], indirect=True)
+def test_registry_pending_target_requires_upgrade_and_recovers(release, tmp_path):
     version, python = release
-    source, reader = (
-        (sys.executable, python) if writer == "this" else (python, sys.executable)
-    )
-    written = registry_peer(source, "write", tmp_path)
-    read = registry_peer(reader, "read", tmp_path)
-    assert written["version"] == (THIS if writer == "this" else version)
-    assert read["version"] == (version if writer == "this" else THIS)
-    assert written["default_maintenance"] is (writer == "this")
-    assert read["default_maintenance"] is (writer == "release")
+    written = registry_peer(python, "write", tmp_path)
+    refused = registry_peer(sys.executable, "probe", tmp_path)
+    assert refused["registry_error"] == "registry version 3: run upgrade_registry"
+    assert registry_peer(sys.executable, "upgrade", tmp_path)["upgraded"] is True
+    read = registry_peer(sys.executable, "read", tmp_path)
+    assert written["version"] == version
+    assert read["version"] == THIS
+    assert read["default_maintenance"] is True
     assert read["record"] == written["record"]
     assert read["collection"] == written["collection"] == 1
     record = written["record"]
@@ -191,22 +187,28 @@ def test_registry_pending_target_and_recovery_between_027_versions(
     assert record["pending"]["status"] == "accepted"
     assert "maintenance" not in record["stream"]["spec"]
     assert "maintenance" not in record["pending"]["target"]["spec"]
-    recovered = registry_peer(reader, "recover", tmp_path)
+    recovered = registry_peer(sys.executable, "recover", tmp_path)
     assert recovered["rows"] == 2
     assert recovered["record"]["pending"] is None
     assert recovered["record"]["revision"] == 1
     assert "maintenance" not in recovered["record"]["stream"]["spec"]
+    assert registry_peer(python, "probe", tmp_path)["registry_error"] == (
+        "registry identity mismatch"
+    )
 
 
-@pytest.mark.parametrize("release", ["0.27.1"], indirect=True)
-def test_0271_reads_default_definitions_written_by_028(release, tmp_path):
+@pytest.mark.parametrize("release", ["0.27.0", "0.27.1"], indirect=True)
+def test_027_refuses_v4_registry_written_by_this_build(release, tmp_path):
     _version, python = release
     written = registry_peer(sys.executable, "write", tmp_path)
-    read = registry_peer(python, "read", tmp_path)
-    assert read["default_maintenance"] is True
+    assert written["default_maintenance"] is True
+    assert registry_peer(python, "probe", tmp_path)["registry_error"] == (
+        "registry identity mismatch"
+    )
+    read = registry_peer(sys.executable, "read", tmp_path)
     assert read["record"] == written["record"]
     assert read["collection"] == written["collection"]
-    recovered = registry_peer(python, "recover", tmp_path)
+    recovered = registry_peer(sys.executable, "recover", tmp_path)
     assert recovered["rows"] == 2
     assert recovered["record"]["pending"] is None
 

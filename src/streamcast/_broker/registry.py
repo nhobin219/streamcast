@@ -11,7 +11,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-VERSION = 3
+VERSION = 4
 
 
 def dumps(value: Any) -> str:
@@ -72,6 +72,8 @@ class Registry:
             )
             db.execute("CREATE TABLE collection (revision INTEGER)")
             db.execute("INSERT INTO collection VALUES (0)")
+            db.execute("CREATE TABLE high_water (revision INTEGER)")
+            db.execute("INSERT INTO high_water VALUES (0)")
 
     @classmethod
     def open(cls, path: Path, broker_id: str, *, initialize: bool = False) -> Registry:
@@ -100,7 +102,7 @@ class Registry:
                     os.close(directory)
 
             identity = db.execute("SELECT version, broker FROM identity").fetchall()
-            if identity in ([(1, broker_id)], [(2, broker_id)]):
+            if identity in ([(1, broker_id)], [(2, broker_id)], [(3, broker_id)]):
                 raise ValueError(
                     f"registry version {identity[0][0]}: run upgrade_registry"
                 )
@@ -127,12 +129,26 @@ class Registry:
         )
 
     @serialized
+    def high_water(self) -> int:
+        return self.db.execute("SELECT revision FROM high_water").fetchone()[0]
+
+    @serialized
     def accept(self, record: dict) -> None:
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO streams VALUES (?,?)",
                 (record["name"], dumps(record)),
             )
+            self.db.execute("UPDATE collection SET revision=revision+1")
+            self.db.execute(
+                "UPDATE high_water SET revision=max(revision, ?)",
+                (record["revision"],),
+            )
+
+    @serialized
+    def forget(self, name: str) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM streams WHERE name=?", (name,))
             self.db.execute("UPDATE collection SET revision=revision+1")
 
     @serialized

@@ -150,16 +150,18 @@ async def test_cap_admission_exemptions_and_capabilities(config, monkeypatch):
         assert rejected.status_code == 409
         assert owner.records == unchanged
         # False -> true is admission too, with the same no-write guarantee.
-        await put(owner, client, "other", definition())
+        created = await put(owner, client, "other", definition())
+        assert created.status_code == 202
         before = owner.registry.load()
         rejected = await put(
             owner,
             client,
             "other",
             definition(maintenance={"dedicated": True}),
-            revision=1,
+            revision=created.json()["revision"],
         )
         assert rejected.status_code == 409
+        assert rejected.json()["error"]["code"] == "dedicated_limit"
         assert owner.registry.load() == before
         await put(owner, client, "events", definition(), revision=3)
         assert owner.dedicated_count() == 0
@@ -188,7 +190,7 @@ async def test_cap_admission_exemptions_and_capabilities(config, monkeypatch):
             client,
             "other",
             definition(maintenance={"dedicated": True}),
-            revision=1,
+            revision=created.json()["revision"],
         )
         assert accepted.status_code in (200, 202)
         caps = (await client.get("/control/v1")).json()

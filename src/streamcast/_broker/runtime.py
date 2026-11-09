@@ -70,6 +70,7 @@ class BrokerRuntime:
         self.observed: dict[str, dict] = {}
         self.generations: dict[str, Generation] = {}
         self.locks: dict[Any, Lock] = {}
+        self.claims: dict[Path, set[str]] = {}
         self.running: dict[ChildSpec, Any] = {}
         self.wanted: set[ChildSpec] = set()
         self.retries: dict[ChildSpec, tuple[float, float, str]] = {}
@@ -79,6 +80,7 @@ class BrokerRuntime:
         self.child_starts = 0
         self.excluding: set[str] = set()
         self.collection = 0
+        self.high_water = 0
         self.serial = asyncio.Lock()
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.worker: asyncio.Task | None = None
@@ -102,6 +104,7 @@ class BrokerRuntime:
             self.static = {stream.name: stream for stream in streams}
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.collection = await thread(registry.load)
+            self.high_water = await thread(registry.high_water)
             # Normalize defaults in active definitions and pending targets;
             # non-default maintenance remains part of the durable definition.
             for record in self.records.values():
@@ -159,7 +162,9 @@ class BrokerRuntime:
             # Only their construction remains the host's responsibility.
             for name, stream in self.static.items():
                 if stream.log is not None:
-                    await thread(self.claim_log, Path(stream.log.root), stream.log.name)
+                    await thread(
+                        self.claim_log, Path(stream.log.root), stream.log.name, name
+                    )
 
                 await thread(stream.ensure_metadata)
                 stream._subscriber_yield_every = config.subscriber_yield_every
@@ -240,31 +245,34 @@ class BrokerRuntime:
             else "transition_failed"
         )
 
-    def claim_path(self, path) -> None:
+    def claim_path(self, path, claimant: str) -> None:
         path = path.resolve()
         if path not in self.locks:
             self.locks[path] = Lock.open(path)
 
-    def claim_log(self, home, name: str) -> None:
+        self.claims.setdefault(path, set()).add(claimant)
+
+    def claim_log(self, home, name: str, claimant: str) -> None:
         # Outside the log directory: reserving a future migration successor
         # must not create that directory before litelink.new does. Every
         # layout/profile alias of a physical log derives this same path.
         location = (home / name).resolve()
         self.claim_path(
-            location.parent / ".streamcast-log-owners" / f"{location.name}.lock"
+            location.parent / ".streamcast-log-owners" / f"{location.name}.lock",
+            claimant,
         )
 
     def claim_storage(self, record: dict, *, opening: bool = False) -> None:
         profile = self.recorded_storage(record)
         name = record["name"]
         root = profile.root.resolve()
-        self.claim_path(root / ".streamcast-owners" / f"{name}.lock")
+        self.claim_path(root / ".streamcast-owners" / f"{name}.lock", name)
         home = _metadata.home(root, name)
         metadata = _metadata.load(home, name)
         if metadata is not None:
-            self.claim_log(home, metadata.current.name)
+            self.claim_log(home, metadata.current.name, name)
         elif opening or _metadata._is_log(home / name):
-            self.claim_log(home, name)
+            self.claim_log(home, name, name)
 
     async def claim(self, record: dict) -> None:
         await thread(self.claim_storage, record)
@@ -466,6 +474,7 @@ class BrokerRuntime:
             else:
                 raise Fault(422, "invalid_operation")
 
+            record: dict[str, Any]
             if previous is None:
                 if kind != "definition":
                     raise Fault(404, "unknown_stream")
@@ -490,7 +499,7 @@ class BrokerRuntime:
                     "storage_profile": profile_name,
                     "initialization": intent,
                     "desired": "stopped",
-                    "revision": 1,
+                    "revision": self.high_water + 1,
                     "stream_id": None,
                     "pending": None,
                 }
@@ -601,6 +610,7 @@ class BrokerRuntime:
             if previous is None or record["revision"] != previous["revision"]:
                 await thread(self.registry.accept, record)
                 self.collection += 1
+                self.high_water = max(self.high_water, record["revision"])
             else:
                 await thread(self.registry.update, record)
 
@@ -609,6 +619,80 @@ class BrokerRuntime:
             future = self.attempt(name)
             self.enqueue(name)
             return {"future": future, "status": self.status(name)}
+
+    async def forget(self, name: str, match: str | None, none: str | None) -> dict:
+        """Forget an applied retirement or a never-bound, non-running intent.
+
+        Storage belongs to the host. This removes only registry state and this
+        record's ownership claims, after draining any retired generation.
+        """
+        if name in self.static:
+            raise Fault(409, "static_stream")
+
+        if self.config.registry is None:
+            raise Fault(403, "management_disabled")
+
+        async with self.serial:
+            if self.closing:
+                raise Fault(503, "broker_stopping")
+
+            if NAME.fullmatch(name) is None:
+                raise Fault(422, "invalid_name")
+
+            record = self.records.get(name)
+            if record is None:
+                raise Fault(404, "unknown_stream")
+
+            if match is None:
+                raise Fault(428, "precondition_required")
+
+            if match != f'"{record["revision"]}"' or none is not None:
+                raise Fault(412, "precondition_failed")
+
+            pending = record["pending"]
+            retired = record["desired"] == "retired" and pending is None
+            unbound = record["stream_id"] is None and (
+                pending is None or pending["status"] in ("accepted", "failed")
+            )
+            if not (retired or unbound):
+                if pending is not None and pending["status"] == "running":
+                    raise Fault(409, "transition_running")
+
+                raise Fault(409, "not_forgettable")
+
+            if name in self.generations:
+                await self.offline(record)
+
+            # Before this transaction commits, restart still sees the record.
+            # Afterwards it is absent; a crash releases the process's locks.
+            await thread(self.registry.forget, name)
+            status = self.status(name)
+            status["observed"] = {"state": "forgotten", "error": None}
+            snapshot = {
+                "outcome": "forgotten",
+                "error": "stream_forgotten",
+                "revision": record["revision"],
+                "status": status,
+            }
+            for key in list(self.attempts):
+                if key[0] == name:
+                    future = self.attempts.pop(key)
+                    if not future.done():
+                        future.set_result(snapshot)
+
+            del self.records[name]
+            self.observed.pop(name, None)
+            self.applied_specs.pop(name, None)
+            self.queued.discard(name)
+            # Aliases and static streams can share a physical log's lock.
+            for path, claimants in list(self.claims.items()):
+                claimants.discard(name)
+                if not claimants:
+                    self.locks.pop(path).close()
+                    del self.claims[path]
+
+            self.collection += 1
+            return snapshot
 
     async def work(self) -> None:
         while True:
@@ -641,7 +725,11 @@ class BrokerRuntime:
 
     async def execute(self, name: str) -> None:
         async with self.serial:
-            pending = self.records[name]["pending"]
+            previous = self.records.get(name)
+            if previous is None:
+                return
+
+            pending = previous["pending"]
             if pending is None or pending["status"] != "accepted":
                 return
 
@@ -790,7 +878,7 @@ class BrokerRuntime:
         log = opened.log
         assert log is not None
         try:
-            self.claim_log(log.root, log.name)
+            self.claim_log(log.root, log.name, record["name"])
             opened.ensure_metadata()
             if record["stream_id"] and opened._stream_id != record["stream_id"]:
                 raise ValueError("identity mismatch")
@@ -921,7 +1009,7 @@ class BrokerRuntime:
                 if metadata is None:
                     raise ValueError("identity missing")
 
-                self.claim_log(home, metadata.next_name())
+                self.claim_log(home, metadata.next_name(), record["name"])
 
         await thread(reserve)
         await storage(
@@ -1202,6 +1290,7 @@ class BrokerRuntime:
             lock.close()
 
         self.locks.clear()
+        self.claims.clear()
         await thread(self.registry.close)
         if self.ready_directory is not None:
             await thread(self.ready_directory.cleanup)

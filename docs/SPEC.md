@@ -1640,7 +1640,13 @@ groups, while `/stats` counts and control capabilities report convergence and
 failures without credentials or exception text. Offline excludes its generation
 before final publication; shutdown fences before drain, stops all children once
 before the offline loop, and starts none. The management contract and crash/recovery
-ordering are in [API.md](API.md#dynamic-management).
+ordering are in [API.md](API.md#dynamic-management). Forget holds the mutation
+lock and removes only applied retirements or never-bound non-running intents.
+Registry deletion and collection invalidation commit together; storage remains
+the host's. Per-record ownership claims preserve shared locks. A separate
+persistent high-water counter advances atomically with every revision write
+and survives forget, fencing stale ETags across re-creation. Explicit registry
+v4 migration initializes it before a broker can forget anything.
 
 Subscriber checkpoints count outbound data frames across replay and live paths.
 The positive interval is independent of commit grouping, queue sizes and inbox

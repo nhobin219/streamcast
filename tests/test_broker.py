@@ -192,7 +192,12 @@ async def serving(
     )
     assert created.status_code == 202, created.text
     started = await put(
-        owner, client, name, {"state": "serving"}, suffix="/desired", revision=1
+        owner,
+        client,
+        name,
+        {"state": "serving"},
+        suffix="/desired",
+        revision=owner.records[name]["revision"],
     )
     assert started.status_code == 202, started.text
     assert owner.view(name)["observed"]["state"] == "serving"
@@ -987,7 +992,8 @@ async def test_managed_replication_and_shared_group_replacement(
         readiness_every=0.05,
     )
     async with managed(replicated) as (owner, client, _):
-        await serving_without_assertion_named(owner, client, "events")
+        events_started = await serving_without_assertion_named(owner, client, "events")
+        assert events_started.status_code == 202
         assert owner.status("events")["observed"]["state"] in ("starting", "serving")
         generation = owner.generations["events"]
         stream = generation.stream
@@ -1002,7 +1008,8 @@ async def test_managed_replication_and_shared_group_replacement(
         assert any(key.endswith(".ltx") for key in found), found
         metadata_uri = stream.metadata_uri
 
-        await serving_without_assertion_named(owner, client, "other")
+        other_started = await serving_without_assertion_named(owner, client, "other")
+        assert other_started.status_code == 202
         assert owner.status("other")["observed"]["state"] in ("starting", "serving")
         assert owner.generations["events"] is generation
         assert all(child._process is None for child in initial)
@@ -1017,7 +1024,7 @@ async def test_managed_replication_and_shared_group_replacement(
             "other",
             {"state": "stopped"},
             suffix="/desired",
-            revision=2,
+            revision=other_started.json()["revision"],
         )
         assert stopped.status_code == 202
         assert owner.records["other"]["pending"] is None
@@ -1030,7 +1037,7 @@ async def test_managed_replication_and_shared_group_replacement(
             "events",
             {"state": "stopped"},
             suffix="/desired",
-            revision=2,
+            revision=events_started.json()["revision"],
         )
         assert stopped.status_code == 202
         assert owner.records["events"]["pending"] is None
@@ -1366,7 +1373,14 @@ async def test_failed_group_construction_retries_without_reverting_or_fencing(
 
 async def serving_without_assertion_named(owner, client, name):
     await put(owner, client, name, definition())
-    await put(owner, client, name, {"state": "serving"}, suffix="/desired", revision=1)
+    return await put(
+        owner,
+        client,
+        name,
+        {"state": "serving"},
+        suffix="/desired",
+        revision=owner.records[name]["revision"],
+    )
 
 
 async def test_registry_symlink_alias_cannot_acquire_second_owner(config, tmp_path):

@@ -34,7 +34,7 @@ class Authorization(Protocol):
     The principal is a stable, nonsecret identity used for authorization.
     The host validates ingress trust and Origin here; forwarded headers are
     never interpreted by the broker. Actions are data.read, data.publish,
-    stats.read, control.read, control.mutate, and control.migrate.
+    stats.read, control.read, control.mutate, control.migrate, and control.forget.
     """
 
     async def authenticate(self, scope: Mapping[str, Any]) -> str | None: ...

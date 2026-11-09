@@ -793,8 +793,8 @@ principal. Ordinary `Authorization` objects keep their two-method contract,
 default profile selection and existing query decoding.
 
 The principal is a stable nonsecret identity. Actions are `data.read`,
-`data.publish`, `stats.read`, `control.read`, `control.mutate` and
-`control.migrate`. Resources are exact stream names, with `"*"` for collection
+`data.publish`, `stats.read`, `control.read`, `control.mutate`,
+`control.migrate` and `control.forget`. Resources are exact stream names, with `"*"` for collection
 discovery. Discovery also filters each returned stream by its individual grant.
 
 Authentication and the applicable grant precede body parsing, stream lookup
@@ -808,7 +808,8 @@ trusted ingress, Origin and proxy headers. Registry hosting requires an explicit
 ### HTTP contract, version 1
 
 All paths below are relative to the application mount. Requests and
-responses are JSON. Mutations require `Content-Type: application/json`.
+responses are JSON, except the empty 204 forget response. PUT mutations require
+`Content-Type: application/json`. DELETE has no request body.
 `Idempotency-Key` is ignored; no key is required, checked or persisted. Duplicate
 JSON keys, nonfinite numbers and malformed JSON receive 400. Bodies over the
 configured control limit receive 413 before the application accumulates them.
@@ -836,6 +837,7 @@ before adoption rather than silently stripping keywords in the broker.
 | `PUT /control/v1/streams/{name}` | Create or replace the full declaration. Create requires `If-None-Match: *`; replace requires `If-Match`. |
 | `PUT /control/v1/streams/{name}/desired` | `{"state":"serving"}`, `"stopped"`, or terminal `"retired"`; requires `If-Match`. |
 | `PUT /control/v1/streams/{name}/schema` | `stream_id`, target `schema` and target `sort_by`; requires `If-Match` and `control.migrate`. |
+| `DELETE /control/v1/streams/{name}` | Forget a retired or never-bound record, preserving storage; requires `If-Match` and `control.forget`. Returns empty 204. |
 | `GET /stats` | The existing stats payload, filtered by `stats.read`. |
 
 Names match `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. The ETag is the exact quoted
@@ -843,7 +845,12 @@ decimal revision, for example `"3"`. Missing preconditions receive 428; a
 stale or malformed precondition receives 412. Both precondition headers
 together are refused. Collection cursors bind the collection revision and
 last name; a mutation invalidates an older cursor with 409. Restart from the
-first page. A no-op does not change collection or stream revision.
+first page. A no-op does not change collection or stream revision. Forget also
+invalidates collection cursors. New and re-created records start at the persistent
+revision high-water mark plus one; every accepted revision advances that mark
+to at least its revision in the same transaction. Existing records increment
+their own revision on changed intent. Forget never changes the high-water mark,
+so an ETag from any earlier incarnation of the same name always gets 412.
 
 PUT takes `StreamSpec` JSON, the same portable model as the static factory:
 
@@ -985,19 +992,52 @@ current health. Errors use
 `{"error":{"code":...,"message":...,"retryable":false}}`; messages contain
 no storage paths, credentials or rows. Statuses include 400 malformed input,
 401 authentication, 403 grants or history guard, 404 unknown resources,
-409 conflict, 412 preconditions, 413 size, 415 media type, 422 unsupported
+409 conflict, 410 forgotten while waiting, 412 preconditions, 413 size, 415 media type, 422 unsupported
 declaration, 428 preconditions required, 429 capacity, 500 attempt failure,
 and 503 unavailable. 429/503 include `Retry-After: 1`. Transition errors are
 `transition_failed` or `unknown_storage_profile` for a removed host profile;
 inspect host-side evidence before retrying an irreversible transition.
 
-### Registry v3 upgrade
+### Forgetting a managed record
+
+DELETE authorizes `control.forget` on the stream name. `PublicAccess` does not
+provide this grant; a host policy that grants every action does. Authorization
+precedes stream lookup. Static streams cannot be forgotten. A missing record
+gets 404; a missing `If-Match` gets 428 and a stale ETag or both precondition
+headers get 412.
+
+Under the mutation lock, forgetting is allowed for either:
+
+- an applied retirement: `desired == "retired"` and `pending == null`;
+- a never-bound record (`stream_id == null`) with no pending intent or one
+  whose status is `accepted` or `failed`.
+
+A running transition gets 409 `transition_running`; every other ineligible
+record gets 409 `not_forgettable`. An accepted initial intent is safe to cancel
+because no data route has exposed a stream before binding its identity.
+Forgetting closes any retired generation and its subscribers, deletes the
+registry record and advances the collection counter atomically, then drops its
+in-memory observations, queued work and ownership claims. A shared lock remains
+held for other records and static streams. It neither opens nor deletes storage.
+Before the registry deletion commits, restart still finds the record; afterwards
+it is absent, and process exit releases the old locks. A repeated DELETE sees 404.
+The host separately owns storage cleanup.
+
+Every unresolved attempt for the forgotten name receives the same snapshot:
+`outcome: "forgotten"`, `error: "stream_forgotten"`, its revision, and its last
+compact status with `observed: {"state":"forgotten","error":null}`. Waiting PUTs
+return 410 `stream_forgotten` with name and revision, without an ETag. A PUT
+whose wait already expired keeps its 202 response; its Location then returns
+404. GET likewise returns 404. Re-create uses `If-None-Match: *` and a fresh
+revision greater than every previous revision of that name.
+
+### Registry v4 upgrade
 
 Stop the broker and call `streamcast.upgrade_registry(config)` explicitly
-before startup. V1 and v2 otherwise refuse with
+before startup. V1, v2 and v3 otherwise refuse with
 `registry version <version>: run upgrade_registry`. A lifetime registry lock
-covers both steps. Every step copies SQLite to `<registry>.v1` or
-`<registry>.v2` and fsyncs the file and parent directory before its transaction.
+covers all steps. Every step copies SQLite to its `<registry>.v1`,
+`<registry>.v2` or `<registry>.v3` backup and fsyncs the file and parent directory before its transaction.
 
 The v1 → v2 transaction resolves profiles, verifies each bound identity against
 authoritative disk metadata, flattens limits while preserving resolved message
@@ -1012,8 +1052,11 @@ Startup executes every pending slot, including failed ones, before admission.
 
 A pre-commit failure leaves that step's source intact; rerun replaces an
 incomplete backup. An interrupted chain resumes at its committed version.
-A v3 rerun refuses with `registry already version 3` before touching backups.
-Older brokers refuse v3. Downgrade restores the matching backup and loses
+The v3 → v4 transaction initializes the single high-water counter to
+`max(collection counter, maximum stored record revision)`, using zero when
+there are no stored revisions, then commits identity 4. No earlier registry can forget a record, so
+the migration covers every revision previously issued. Rerunning at v4 leaves
+the mark and backups unchanged. Older brokers refuse v4. Downgrade restores the matching backup and loses
 subsequent changes; the backups are the operator's to delete.
 
 ### Data consumer contract and protected history

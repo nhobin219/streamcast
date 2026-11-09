@@ -503,7 +503,10 @@ for falling behind.
 
 The same application also manages streams at runtime — define, serve, stop, migrate and
 retire over HTTP, behind an injected authorization policy — when it is given a registry;
-[`docs/API.md`](docs/API.md#dynamic-management) is that contract.
+[`docs/API.md`](docs/API.md#dynamic-management) is that contract. A separate
+`control.forget` grant permits forgetting retired or never-bound records without
+deleting storage. New and re-created names receive fenced revisions; existing
+registries require the explicit v4 upgrade before startup.
 
 ## Client
 

@@ -11,6 +11,15 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- `DELETE /control/v1/streams/{name}` forgets applied retirements and never-bound
+  records whose intent is absent, accepted or failed, leaving storage untouched.
+  It requires the new `control.forget` action and current `If-Match`; running
+  transitions return 409. Public access does not grant this action. Host policies
+  granting all actions now grant forget too. Shared ownership locks survive
+  until their last claimant is gone. Waiting mutations receive 410
+  `stream_forgotten` without an ETag; expired waits retain 202 and their Location
+  subsequently returns 404.
+
 - Optional `CreationAuthorization.allows_creation` grants the authenticated
   principal access to the requested storage profile before a new managed
   stream changes the registry. It receives omitted selections as `None`;
@@ -19,6 +28,14 @@ there was nothing to have changed from. Everything above it is ordinary.
   keep their two-method contract and profile decoding.
 
 ### Changed
+
+- **Breaking (0.28):** new and re-created managed records start at a persistent
+  revision high-water mark plus one, rather than always at revision 1. Every
+  accepted revision advances the mark atomically; forget leaves it unchanged.
+  Stale ETags from earlier incarnations cannot mutate a re-created name. Registry
+  v4 requires an explicit `upgrade_registry(config)` before startup; its one-time
+  migration fences all existing revisions and keeps a `.v3` rollback backup.
+  A completed upgrade is idempotent. Upgrade broker readers before opening v4.
 
 - Reconcile immutable maintenance and replication child identities instead of
   replacing every group. Changed groups stop and reap before replacement;
