@@ -13,8 +13,9 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 - `DELETE /control/v1/streams/{name}` forgets applied retirements and never-bound
   records whose intent is absent, accepted or failed, leaving storage untouched.
-  It requires the new `control.forget` action and current `If-Match`; running
-  transitions return 409. Public access does not grant this action. Host policies
+  It requires the new `control.forget` action and the exact current ETag in
+  `If-Match`; `If-Match: *` intentionally returns 412. Running transitions
+  return 409. Public access does not grant this action. Host policies
   granting all actions now grant forget too. Shared ownership locks survive
   until their last claimant is gone. Waiting mutations receive 410
   `stream_forgotten` without an ETag; expired waits retain 202 and their Location
