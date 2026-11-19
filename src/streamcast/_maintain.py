@@ -22,7 +22,7 @@ its own process when it is heavy on CPU or the network:
 
 | role | runs | why it stands alone |
 |---|---|---|
-| `seal` | `seal()`, flushed per `flush_every` | pure-Python CPU work, and all that bounds the buffer |
+| `seal` | `seal()`, flushed per `flush_every` | pure-Python CPU work; bounds the unsealed tail |
 | `compact` | `compact()` | the heaviest CPU work; beside `seal` it would delay it |
 | `publish` | `publish()`, flushed per `flush_every` | the network: one push to a slow bucket can take a minute |
 | `clean` | `evict()`, `reclaim("buffer")`, `reclaim("staging")`, `sweep("staging")` | local disk, freed promptly |
@@ -32,7 +32,7 @@ Local cleanup is one process, in that order: eviction queues the files
 `reclaim` deletes, and both are metadata commits that finish in milliseconds.
 The published table's cleanup is apart because on object storage it is
 network calls, and a slow listing of a bucket must not delay freeing local
-disk. **`evict()` is what deletes buffer rows already in staging** — `seal()`
+disk. **`evict()` is what deletes buffer rows confirmed published** — `seal()`
 and `publish()` move data and delete nothing — so a split without `clean`
 grows `buffer.db` without bound.
 
@@ -209,9 +209,9 @@ def _publish(log: litelink.WriteHandle, flush: bool) -> None:
 
 def _clean(log: litelink.WriteHandle, _flush: bool) -> None:
     # In this order: eviction queues the files `reclaim` deletes. `evict()`
-    # is both tables — the buffer rows staging now holds, and the staging
-    # files the published table holds. `reclaim("buffer")` is a VACUUM only
-    # when the log's `vacuum_free_ratio` is set.
+    # is both tables — the buffer rows confirmed published, and the staging
+    # files the published table holds. This explicit `reclaim("buffer")`
+    # vacuums free pages, regardless of `vacuum_free_ratio`, and can block appends.
     log.evict()
     log.reclaim("buffer")
     log.reclaim("staging")

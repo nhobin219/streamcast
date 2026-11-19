@@ -7,6 +7,17 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- Require litelink `>=0.14.2,<0.15` for the deletion veto's manifest walk,
+  which avoids allocating whole-history Arrow file statistics during published
+  cleanup (litelink#225). Applications that pin litelink below 0.14.2 must
+  raise their pin. Sealed rows stay buffered until confirmed publication
+  (litelink#216); maintenance tests check retention before publication and
+  eviction afterward, and the maintenance documentation describes buffer sizing.
+
 ## 0.28.1 — 2026-11-19
 
 ### Fixed

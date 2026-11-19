@@ -15,6 +15,7 @@ import contextlib
 import inspect
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import litelink
@@ -123,24 +124,57 @@ class TestTheDefect:
             assert wide_log.buffered_rows() < ROWS
 
     @pytest.mark.slow
-    async def test_sealed_rows_leave_the_buffer(self, wide_log):
-        """Sealing moves rows; only `advance()` deletes them from `buffer.db`.
+    async def test_sealed_rows_leave_the_buffer(self, wide_log, monkeypatch):
+        """Sealed rows stay in `buffer.db` until confirmed publication.
 
         `buffered_rows()` counts UNSEALED rows, so it drops on a seal alone and
-        cannot see this: a maintainer that sealed and published but never ran
-        litelink's `evict("buffer")` would pass every other test here while
-        `buffer.db` held every row it was ever sent. Counted in the file.
+        cannot prove either retention before publication or eviction after it.
+        Count the physical rows, and start the publisher only after checking
+        retention, so an early flush cannot hide premature eviction.
         """
+        publishers = []
+        start = Supervisor.start
+
+        def gated_start(child):
+            if child.role == "publish":
+                publishers.append(child)
+            else:
+                start(child)
+
+        monkeypatch.setattr(Supervisor, "start", gated_start)
         stream = streamcast.StreamHandle("trades", log=wide_log)
-        async with serve_streams(stream, "127.0.0.1", 0, maintain=FAST):
+        plan = replace(FAST, flush_every=1.0)
+        async with serve_streams(stream, "127.0.0.1", 0, maintain=plan):
             await fill(stream)
             assert await settle(wide_log)
 
+            _maintain._clean(wide_log, False)  # noqa: SLF001
+            assert wide_log.published_through() == 0
+            assert in_buffer(wide_log) == ROWS, "unpublished rows were evicted"
+            sealed_rows = ROWS - wide_log.buffered_rows()
+            assert sealed_rows > 0
+
+            assert len(publishers) == 1
+            start(publishers[0])
+
             deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and in_buffer(wide_log) >= ROWS:
+            while (
+                time.monotonic() < deadline
+                and wide_log.published_through() < sealed_rows
+            ):
                 await asyncio.sleep(0.25)
 
-            assert in_buffer(wide_log) < ROWS, "sealed rows were never evicted"
+            assert wide_log.published_through() >= sealed_rows, "nothing was published"
+
+            deadline = time.monotonic() + 15
+            while (
+                time.monotonic() < deadline and in_buffer(wide_log) > ROWS - sealed_rows
+            ):
+                await asyncio.sleep(0.25)
+
+            assert in_buffer(wide_log) <= ROWS - sealed_rows, (
+                "published sealed rows were never evicted"
+            )
 
     @pytest.mark.slow
     async def test_a_replay_still_spans_the_seam_the_maintainer_made(self, wide_log):

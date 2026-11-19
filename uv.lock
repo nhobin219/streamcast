@@ -210,6 +210,20 @@ wheels = [
 ]
 
 [[package]]
+name = "boto3"
+version = "1.43.75"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b1/dd/b93be617dd5d1c6a3a248066030a450e62d211c0af0f49ed3a0d761383c9/boto3-1.43.75.tar.gz", hash = "sha256:86da93d3d5b46a58b03fa51b598ffa4aeaff485a3000affacf78491c105e44f0", size = 112673, upload-time = "2026-08-19T19:54:17.236Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/52/89/d0baf1269e57ac548387c11e5d9ba78d1e118ceb43f1e5e5114bdd2e8391/boto3-1.43.75-py3-none-any.whl", hash = "sha256:08a79edb68e6a0d65d305eb90188639313650e155aed015e86eef59d8475dde0", size = 140026, upload-time = "2026-08-19T19:54:15.509Z" },
+]
+
+[[package]]
 name = "botocore"
 version = "1.43.75"
 source = { registry = "https://pypi.org/simple" }
@@ -728,20 +742,21 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.14.0"
+version = "0.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "boto3" },
     { name = "duckdb" },
     { name = "pyarrow" },
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/c5/05995adea681e921083c81311989089c254257361de3489d0effcc419342/litelink-0.14.0.tar.gz", hash = "sha256:fc0b4df16652db8c5db14368ad53b6e7b392232c88c9b7fb1bd051464b5b5d5c", size = 371823, upload-time = "2026-10-19T05:54:18.211Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/e6/aaa9bfedb39cad65ea0b5d829096dee2d2e3bbb66773edda64ba6255ddb6/litelink-0.14.2.tar.gz", hash = "sha256:1b0713766a11c9432180f45cb7bc427f91d2a38aab4ab62da2dcb5d39f550450", size = 379407, upload-time = "2026-11-19T21:07:14.481Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/4a/8f6eb398ac16b8ae3e7981fda86d97d3665b9d804d72c143a8515f0f9604/litelink-0.14.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ab65958181ce3bb8aed86ef9c8226215c0d031ac592a66d517b45a9334a43bbd", size = 44251916, upload-time = "2026-10-19T05:54:06.319Z" },
-    { url = "https://files.pythonhosted.org/packages/35/20/d00204707f3fb4797be88d5835251449909f41511a9347c91daea8d533d2/litelink-0.14.0-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:15aa9a6a6eb59530a5c302ebcf7aebbd64ca303371281517f9dcbdcfcbd69a5d", size = 46973510, upload-time = "2026-10-19T05:54:09.271Z" },
-    { url = "https://files.pythonhosted.org/packages/29/f2/0902d30852d93f7e865f694838bb80afb90081743b7cc019aeea5b331b5d/litelink-0.14.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:86a4aafcb3a41b46a141bd178330a146fe2b050e9c524bc29e9e1286941398fa", size = 56122518, upload-time = "2026-10-19T05:54:12.522Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/28/85b6e27c8346ea0494739fcccb2a24f20b14f236b74efc285a85b69654c1/litelink-0.14.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:68a015600ff9d0e5962ef4174ab7c327a0fa18645ed6de25f9e2f3cbd13e77c5", size = 60020519, upload-time = "2026-10-19T05:54:15.85Z" },
+    { url = "https://files.pythonhosted.org/packages/04/b9/8fe1bfbce02ca3122bf59f7fc5de5f3a793844e7bfac3e4e108402dc05fd/litelink-0.14.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:abc450a27f18d2ec68aa7dc2cef86dbc2dfa91e94c3a6108c6c161e80f46c879", size = 44258936, upload-time = "2026-11-19T21:06:58.643Z" },
+    { url = "https://files.pythonhosted.org/packages/00/0f/1f5ec083d4ff57cd0bb9bb89e98b179eb14dbce7a48e43bd3e4807e27740/litelink-0.14.2-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:6f0fb0a5d5198a3115a01f4be1c43ff6f8b5e666e041b40888b4f48145f8055c", size = 46980529, upload-time = "2026-11-19T21:07:02.721Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/97/beec83d7f8c4de7ed23f72b4d891a7cef1ac8789ec905edc352e9623353e/litelink-0.14.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:fe6b3844f25f8eae13ec76de2855d7b873a6b45456a6a3436434a6582abf79a0", size = 56129536, upload-time = "2026-11-19T21:07:07.03Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/aa/7871eb09e786db9c03fa01e1e1a8cdd40633ceac0a25835de756d7779228/litelink-0.14.2-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6395fbd58258c45de08b5197daf750c972eef5538d576c1aacfe84163aa00374", size = 60027537, upload-time = "2026-11-19T21:07:11.729Z" },
 ]
 
 [[package]]
@@ -1996,6 +2011,18 @@ wheels = [
 ]
 
 [[package]]
+name = "s3transfer"
+version = "0.19.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/c5/0a5ce655109cb96b8dfad36908a4e108d15f5dc2eff8fbc3146c4312e704/s3transfer-0.19.3.tar.gz", hash = "sha256:8326acc3d056d7f7b8a37110c7d2aea41f67e83f6ae79cd3b5fbcca34c726406", size = 166087, upload-time = "2026-10-19T19:19:49.751Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/a4/88f9e10498759121060b8050a1554753dfc04df39bbbcc7aad9ecc8d9440/s3transfer-0.19.3-py3-none-any.whl", hash = "sha256:24eb7535804306355e31c952a90022bf5b2f9d760f9a11062c7493a217c08553", size = 90252, upload-time = "2026-10-19T19:19:48.309Z" },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2104,7 +2131,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "litelink", specifier = ">=0.14.0,<0.15" },
+    { name = "litelink", specifier = ">=0.14.2,<0.15" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "opentelemetry-api", specifier = ">=1.30.0,<2" },
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.1" },

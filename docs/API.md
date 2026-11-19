@@ -445,7 +445,7 @@ also works with a registry; `maintain=False` is refused there. The cadences
 differ by orders of magnitude because the costs do: `seal` is an
 indexed read of one row when there is nothing to seal, compaction rewrites files, and the
 published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
-rows already in staging** (litelink's `evict("buffer")`): `seal` and `publish` move data
+rows confirmed published** (litelink's `evict("buffer")`): `seal` and `publish` move data
 and delete nothing, so a maintainer without it grows `buffer.db` without bound.
 
 **`flush_every` (60 s) is the RPO without WAL replication, and how far the published table
@@ -462,6 +462,18 @@ log per flush. Flushes fall on wall-clock multiples of the interval, so the two 
 agree on them across restarts. `flush_every=None` never flushes, leaving RPO to WAL
 replication (`replicate=True`), which bounds it in seconds either way. Compaction is never
 flushed.
+
+Sealed rows remain in the buffer until publication is confirmed, including with
+WAL replication off and a local published table. Size the buffer for arrivals
+between successful publications and the next `clean` pass, rather than one seal
+target. With maintenance keeping up, the default scheduling allowance is about
+85 seconds of arrivals: 60 seconds to the flush boundary, up to 5 seconds of
+publish lag, 10 seconds to a publish pass, and 10 seconds to cleanup, plus work
+and upload time. This is a sizing estimate, not a hard cap: stalled publication
+can grow the buffer without bound. `staging_max_bytes` limits staging, and
+`max_inbound` limits queued writes; neither caps retained buffer rows. The cleaner
+evicts buffer rows before staging so the files proving publication remain
+available, then reclaims SQLite free pages; that reclaim can block appends.
 
 The published table is what a catch-up, a snapshot and a `Live` view read, so this is also
 their freshness: a `Live` view holds every row not yet published in memory, up to
