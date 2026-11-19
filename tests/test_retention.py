@@ -359,7 +359,12 @@ async def test_clean_published_with_retention_keeps_resources_flat(
         assert log is not None
         metadata = _metadata.load(home(tmp_path), "t")
         assert metadata is not None and len(metadata.sealed_logs) == 1
-        for _ in range(5):
+        # Warm the allocator with the same uncollected workload we measure.
+        # A shorter warmup leaves arena growth from temporary Python objects
+        # in the measured RSS, even when the S3 client pool is already warm.
+        # Collect temporary objects before the baseline; keep shared I/O alive.
+        gc.disable()
+        for _ in range(50):
             assert (
                 _retention.run(home(tmp_path), "t", log, now=T0, s3_options=s3) is None
             )
@@ -368,7 +373,6 @@ async def test_clean_published_with_retention_keeps_resources_flat(
         # FileIO's bound-method cache forms a cycle. Do not let the collector
         # mask a fresh pool per pass, or depend on a Python version's schedule.
         gc.collect()
-        gc.disable()
         samples = [(0, *resources())]
         for cycle in range(1, 51):
             assert (
