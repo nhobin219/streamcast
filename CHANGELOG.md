@@ -7,20 +7,20 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.28.1 — 2026-11-19
 
 ### Fixed
 
 - Reuse litelink's bounded FileIO pool when reading published manifest statistics,
   avoiding fresh S3 clients on each retention-bearing `clean-published` pass
-  (#243). Metadata remains fresh across publishes. On Linux with cyclic GC
+  (#243, #245). Metadata remains fresh across publishes. On Linux with cyclic GC
   disabled, 50 no-op passes changed RSS by 5,268 KiB and eventfds from 9 to 209
   before the fix; afterward RSS changed by 1,348 KiB and eventfds stayed at 11.
   The regression allows 2 MiB of RSS allocator variation and no new eventfds.
 - Check unpublished S3 metadata with a prefix-scoped listing instead of
   `HeadBucket`, so prefix-conditioned grants work without broader bucket access.
   Missing buckets retain their `FileNotFoundError`; denied listings propagate,
-  including when stream names resemble missing-bucket error messages.
+  including when stream names resemble missing-bucket error messages (#242).
 
 ## 0.28.0 — 2026-11-09
 
