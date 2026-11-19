@@ -43,9 +43,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlsplit
 
+import duckdb
 import pyarrow as pa
 from litelink import S3Options, current_metadata, duckdb_connection
+from litelink._table import shared_file_io
+from pyiceberg.catalog.noop import NoopCatalog
 from pyiceberg.conversions import from_bytes
+from pyiceberg.serializers import FromInputFile
 from pyiceberg.table import StaticTable
 
 from streamcast._log import COLUMN
@@ -53,8 +57,6 @@ from streamcast._log import COLUMN
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from os import PathLike
-
-    import duckdb
 
 
 def path(uri: str) -> str:
@@ -118,8 +120,6 @@ def check_memory_limit(memory_limit: str) -> None:
     reports a table it cannot open as a credentials problem. Checked by DuckDB
     itself, on a throwaway database, so the notation is exactly what it takes.
     """
-    import duckdb  # noqa: PLC0415 — only for a caller that sets a limit
-
     with duckdb.connect() as probe:
         try:
             probe.execute("SET memory_limit = ?", [memory_limit])
@@ -189,7 +189,26 @@ def _counted_from_manifests(
     # that passes no options gave pyiceberg none, and a non-AWS endpoint in
     # the environment never reached it (0.22.1).
     properties = (s3_options or S3Options()).resolved().catalog_properties()
-    table = StaticTable.from_metadata(metadata, properties=properties)
+    # StaticTable.from_metadata builds two fresh FileIOs per open. Each
+    # PyArrowFileIO cycles through its bound-method cache, retaining an S3
+    # client until cyclic GC. Use litelink's bounded, thread-safe pool for
+    # both reads instead; cache the I/O, never the snapshot metadata.
+    io = shared_file_io(properties, metadata)
+    snapshot = FromInputFile.table_metadata(io.new_input(metadata))
+    # These counters change on publish but configure no filesystem, as in
+    # litelink's catalog. Keep all other table-level FileIO overrides.
+    relevant = {
+        key: value
+        for key, value in snapshot.properties.items()
+        if not key.startswith("litelink.")
+    }
+    table = StaticTable(
+        identifier=("static-table", metadata),
+        metadata_location=metadata,
+        metadata=snapshot,
+        io=shared_file_io({**properties, **relevant}, metadata),
+        catalog=NoopCatalog("static-table"),
+    )
     field = table.schema().find_field(COLUMN)
     low: int | None = None
     high: int | None = None

@@ -10,6 +10,8 @@ passes run at chosen times, rather than waiting out a window.
 from __future__ import annotations
 
 import asyncio
+import gc
+import os
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -301,6 +303,102 @@ class TestRetiredLogs:
             assert await offsets(tmp_path) == [4, 5, 6, 7]
         finally:
             await migrated.aclose()
+
+
+def resources() -> tuple[int, int]:
+    """Current RSS in KiB and eventfds; maxrss cannot show reclamation."""
+    rss = next(
+        int(line.split()[1])
+        for line in Path("/proc/self/status").read_text().splitlines()
+        if line.startswith("VmRSS:")
+    )
+    eventfds = 0
+    for fd in Path("/proc/self/fd").iterdir():
+        try:
+            eventfds += os.readlink(fd) == "anon_inode:[eventfd]"
+        except FileNotFoundError:
+            pass
+
+    return rss, eventfds
+
+
+@pytest.mark.replication
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="Linux procfs")
+async def test_clean_published_with_retention_keeps_resources_flat(
+    tmp_path, monkeypatch, s3, bucket
+):
+    """A fixed retired S3 log must not allocate a client pool on each pass.
+
+    The scheduler runs retention less frequently than published cleanup; run
+    both directly to exercise that work without waiting for their intervals.
+    """
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=tmp_path.absolute(), published=bucket, s3_options=s3
+            ),
+        ),
+        initialization="create_if_absent",
+    )
+    try:
+        await write(stream, monkeypatch, T0, [1])
+        stream.ensure_metadata()
+    finally:
+        await stream.aclose()
+
+    migrated = streamcast.StreamHandle.migrate(
+        "t", root=tmp_path, schema=WIDER, s3_options=s3
+    )
+    collected = gc.isenabled()
+    try:
+        streamcast.StreamHandle.retain(
+            "t", root=tmp_path, max_age=WINDOW, s3_options=s3
+        )
+        log = migrated.log
+        assert log is not None
+        metadata = _metadata.load(home(tmp_path), "t")
+        assert metadata is not None and len(metadata.sealed_logs) == 1
+        # Warm the allocator with the same uncollected workload we measure.
+        # A shorter warmup leaves arena growth from temporary Python objects
+        # in the measured RSS, even when the S3 client pool is already warm.
+        # Collect temporary objects before the baseline; keep shared I/O alive.
+        gc.disable()
+        for _ in range(50):
+            assert (
+                _retention.run(home(tmp_path), "t", log, now=T0, s3_options=s3) is None
+            )
+            _maintain.ROLES["clean-published"](log, False)
+
+        # FileIO's bound-method cache forms a cycle. Do not let the collector
+        # mask a fresh pool per pass, or depend on a Python version's schedule.
+        gc.collect()
+        samples = [(0, *resources())]
+        for cycle in range(1, 51):
+            assert (
+                _retention.run(home(tmp_path), "t", log, now=T0, s3_options=s3) is None
+            )
+            _maintain.ROLES["clean-published"](log, False)
+            if cycle % 10 == 0:
+                samples.append((cycle, *resources()))
+
+        print("cycles,rss_kib,eventfds")
+        for sample in samples:
+            print(",".join(map(str, sample)))
+
+        _, rss, eventfds = samples[0]
+        # RSS has page/allocator noise; eventfds must add none after warmup.
+        assert all(
+            current_rss <= rss + 2 * 1024 and current_eventfds <= eventfds
+            for _, current_rss, current_eventfds in samples[1:]
+        ), samples
+        assert _metadata.load(home(tmp_path), "t") == metadata
+    finally:
+        if collected:
+            gc.enable()
+
+        gc.collect()
+        await migrated.aclose()
 
 
 def test_the_published_cleanup_is_told_the_streams(tmp_path):

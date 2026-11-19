@@ -98,6 +98,27 @@ class TestTheConnection:
 
 
 class TestALocalTable:
+    def test_manifest_io_is_reused_but_metadata_is_fresh(self, tmp_path, monkeypatch):
+        """A publish changes litelink's counters, not the FileIO configuration."""
+        seen = []
+        real = _published.StaticTable.__init__
+
+        def opened(self, *args, **kwargs):
+            seen.append(kwargs["io"])
+            real(self, *args, **kwargs)
+
+        monkeypatch.setattr(_published.StaticTable, "__init__", opened)
+        with published_log(tmp_path, 3) as log:
+            uri = f"{log.published.rstrip('/')}/trades"
+            before = _published.path(_published.current_metadata(uri))
+            assert _published._counted_from_manifests(before, None) == (1, 3, 3)
+            publish(log, 3, 4)
+            after = _published.path(_published.current_metadata(uri))
+            assert after != before
+            assert _published._counted_from_manifests(after, None) == (1, 7, 7)
+            assert len(seen) == 2
+            assert seen[0] is seen[1]
+
     def test_it_reads_the_rows_and_their_extent(self, tmp_path):
         with published_log(tmp_path, 5) as log:
             table = _published.Table.open(log.published, "trades", None)
