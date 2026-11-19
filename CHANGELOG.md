@@ -11,6 +11,12 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- Reuse litelink's bounded FileIO pool when reading published manifest statistics,
+  avoiding fresh S3 clients on each retention-bearing `clean-published` pass
+  (#243). Metadata remains fresh across publishes. On Linux with cyclic GC
+  disabled, 50 no-op passes changed RSS by 5,268 KiB and eventfds from 9 to 209
+  before the fix; afterward RSS changed by 1,348 KiB and eventfds stayed at 11.
+  The regression allows 2 MiB of RSS allocator variation and no new eventfds.
 - Check unpublished S3 metadata with a prefix-scoped listing instead of
   `HeadBucket`, so prefix-conditioned grants work without broader bucket access.
   Missing buckets retain their `FileNotFoundError`; denied listings propagate,
