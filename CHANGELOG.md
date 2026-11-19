@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.28.2 — 2026-11-19
 
 ### Changed
 
@@ -17,6 +17,9 @@ there was nothing to have changed from. Everything above it is ordinary.
   raise their pin. Sealed rows stay buffered until confirmed publication
   (litelink#216); maintenance tests check retention before publication and
   eviction afterward, and the maintenance documentation describes buffer sizing.
+  With maintenance keeping up, default scheduling buffers about 85 seconds of
+  arrivals, plus work and upload time. This is a sizing estimate, not a hard cap:
+  the buffer is unbounded if publication stalls.
 
 ## 0.28.1 — 2026-11-19
 
