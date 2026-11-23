@@ -66,19 +66,29 @@ Dialect = Literal["sqlite", "postgres"]
 T = TypeVar("T")
 
 
+def _unclassified_connection_error(error: BaseException) -> bool:
+    """libpq omits SQLSTATE for both unavailable servers and connect refusals."""
+    return (
+        psycopg is not None
+        and isinstance(error, psycopg.OperationalError)
+        and error.sqlstate is None
+    )
+
+
 def _transient_connection_error(error: BaseException) -> bool:
     """A lost/unavailable Postgres connection, including adapter exceptions.
 
     OperationalError also includes permanent failures such as disk full.
-    No SQLSTATE is libpq's connection failure; class 08 is a connection
-    exception, and 57P01–03 cover shutdown, crash and startup respectively.
+    Unclassified libpq failures need a bounded grace period: credentials and
+    policy refusals look like outages. Class 08 is a connection exception,
+    and 57P01–03 cover shutdown, crash and startup respectively.
     """
-    return (
+    return _unclassified_connection_error(error) or (
         psycopg is not None
         and isinstance(error, psycopg.OperationalError)
+        and error.sqlstate is not None
         and (
-            error.sqlstate is None
-            or error.sqlstate.startswith("08")
+            error.sqlstate.startswith("08")
             or error.sqlstate in {"57P01", "57P02", "57P03"}
         )
     )

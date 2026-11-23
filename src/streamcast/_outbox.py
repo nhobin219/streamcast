@@ -41,8 +41,9 @@ the lowest pending seq already says it, and a second copy could disagree.
 
 **The sender:**
 
-* it connects only when it has rows, so a quiet process holds no idle
-  connection for the broker's keepalive to close;
+* it connects when it has rows or unresolved acknowledgement waiters, so a
+  final ACK with a lost COMMIT reply reconciles even after its row is gone;
+  a quiet process holds no idle connection for the broker to close;
 * it ships ordered batches of `SEND_BATCH` rows as one frame, pipelined up to
   `max_in_flight`;
 * a batch the broker refuses (`Rejected`) is sent again one row at a time,
@@ -58,7 +59,9 @@ the lowest pending seq already says it, and a second copy could disagree.
 * it reconnects under a capped backoff (`BACKOFF`), and polls every
   `POLL_EVERY` for rows another process committed to the same database;
 * database connection failures, including polling and acknowledgement
-  transactions, use that same backoff without a retry-count limit. A
+  transactions, use that same backoff. Unclassified libpq errors have a
+  five-minute grace period because permanent connect refusals omit SQLSTATE
+  too; errors still unclassified after that surface and stop the sender. A
   caller's enqueue still raises its current database error; the sender
   never stores a transient failure or replays a caller's transaction;
 * a refusal of the connection itself -- `Superseded`, `ExactlyOnceUnavailable`,
@@ -100,7 +103,11 @@ from streamcast._errors import (
 from streamcast._limits import BACKOFF, MAX_IN_FLIGHT, POLL_EVERY, SEND_BATCH
 from streamcast._protocol import stream_name
 from streamcast._publish import Publication, publish
-from streamcast._store import _transient_connection_error, sql
+from streamcast._store import (
+    _transient_connection_error,
+    _unclassified_connection_error,
+    sql,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -115,6 +122,14 @@ _DECODE = msgspec.json.Decoder()
 
 LANDED_KEPT = 10_000
 """Offsets of recently acknowledged seqs kept for `landed`, oldest out first."""
+
+UNCLASSIFIED_DB_RETRY_GRACE = 300.0
+"""Seconds of consecutive unclassified connection failures before surfacing.
+
+libpq gives no SQLSTATE for either an outage or a permanent connect refusal.
+Five minutes accommodates a brief restart without hiding bad credentials or
+connection policy forever. A successful sender cycle resets the grace.
+"""
 
 
 def _now_us() -> int:
@@ -616,10 +631,14 @@ class Outbox:
 
     async def _run(self) -> None:
         attempt = 0
+        unclassified_since: float | None = None
         try:
             while not self._closed:
                 try:
-                    if not await self._has_rows():
+                    if not await self._has_rows() and not self._waiting:
+                        self._recovered()
+                        attempt = 0
+                        unclassified_since = None
                         self._drained.set()
                         await self._sleep(self._poll_every)
                         continue
@@ -633,6 +652,23 @@ class Outbox:
                         or _transient_connection_error(exc)
                     ):
                         raise
+
+                    if _unclassified_connection_error(exc):
+                        now = time.monotonic()
+                        if unclassified_since is None:
+                            unclassified_since = now
+
+                        if now - unclassified_since >= UNCLASSIFIED_DB_RETRY_GRACE:
+                            msg = (
+                                "Postgres connection failures without SQLSTATE "
+                                f"persisted for {UNCLASSIFIED_DB_RETRY_GRACE:g} "
+                                "seconds; check credentials, database existence "
+                                "and connection policy, then reopen the outbox"
+                            )
+                            raise RuntimeError(msg) from exc
+
+                    else:
+                        unclassified_since = None
 
                     if not self._outage:
                         self._outage = True
@@ -648,10 +684,16 @@ class Outbox:
                     continue
 
                 attempt = 0
+                unclassified_since = None
 
         except Exception as exc:  # noqa: BLE001 — surfaced by the next call
             # Not BaseException: a cancel is `close`, not a failure to report.
             self._fail(exc)
+
+    def _recovered(self) -> None:
+        if self._outage:
+            self._outage = False
+            self._notice(f"streamcast outbox {self._stream!r}: publishing again")
 
     def _fail(self, exc: BaseException) -> None:
         self._failure = exc
@@ -700,9 +742,7 @@ class Outbox:
                     if not waiter.done():
                         waiter.set_result(None)
 
-            if self._outage:
-                self._outage = False
-                self._notice(f"streamcast outbox {self._stream!r}: publishing again")
+            self._recovered()
 
             await self._ship(out)
         finally:

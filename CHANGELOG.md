@@ -18,6 +18,11 @@ there was nothing to have changed from. Everything above it is ordinary.
   during an outage, while permanent sender failures still surface.
   `PostgresStore` reconnects broken connections using the original DSN and
   keywords, resolving the hostname again, without replaying caller blocks.
+  A final ACK with a lost COMMIT reply reconciles existing waiters even with
+  no rows remaining. Idle recovery resets outage notices and backoff.
+  SQLSTATE-less libpq failures have a five-minute retry grace, then surface
+  the latest cause with connection-diagnostic guidance rather than hiding
+  permanent credential, database or connection-policy failures indefinitely.
   No schema or wire change. Intended patch release: 0.28.3.
 
 ## 0.28.2 — 2026-11-19
