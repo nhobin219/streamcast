@@ -1553,6 +1553,19 @@ answered as duplicates of the old stream's.
   once and its end once, backs off (`BACKOFF`), and polls (`POLL_EVERY`) for
   rows another process committed. A refusal of the connection itself is
   raised from the next `send` and the block's exit.
+- **A database connection outage does not stop the sender.** Polling,
+  reconciliation, reads and acknowledgement transactions all retry under
+  the same capped backoff, including outages longer than its final delay.
+  Postgres connection exceptions (SQLSTATE class 08), shutdown/crash/startup
+  (57P01–03) and libpq connection failures without a SQLSTATE are retried;
+  other database errors stop the sender and surface to callers. An enqueue
+  during a database outage raises its current driver error, never a stored
+  transient exception. A healthy enqueue can commit during sender backoff.
+  `PostgresStore` replaces a broken connection at the next transaction,
+  using the original DSN and connection keywords so hostnames resolve again;
+  explicit caller-supplied `hostaddr` still pins an address. Caller blocks
+  are never replayed, and a lost COMMIT reply is still an uncertain commit.
+  Reconnecting does not create or repair the schema. Explicit close is final.
 
 ### The inbox
 

@@ -1289,6 +1289,16 @@ also commits it; an exit by exception rolls it back. Closing an outbox stops its
 without draining it. Schema-rejected rows are logged and deleted; their seqs are removed
 from the pending sequence. `landed` returns an offset only while it is still known.
 
+The outbox retries transient Postgres connection errors from polling and delivery
+transactions under `backoff` (default 0.5, 1, 2, 5, then 10 seconds per attempt,
+with no attempt limit). Permanent database errors still stop the sender.
+An enqueue during a database outage raises the current `psycopg.OperationalError`;
+retry the application operation after recovery, accounting for an uncertain COMMIT.
+An enqueue with a healthy transaction can commit while the sender backs off.
+`PostgresStore` reopens broken connections at the next transaction with the original
+DSN and keywords, resolving the hostname again unless the caller pins `hostaddr`.
+It never replays the caller's block. Explicit `close()` prevents reconnection.
+
 ### Outbox backlog visibility
 
 `pending_rows()`, `pending_bytes()` and `oldest_pending_age()` read this

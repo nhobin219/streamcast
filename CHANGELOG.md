@@ -7,6 +7,19 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- Recover a running transactional outbox after a Postgres restart during an
+  instance resize. Transient connection failures in polling, reconciliation,
+  reads and acknowledgements retry under the capped backoff; they no longer
+  permanently poison later sends. Enqueues raise their current database error
+  during an outage, while permanent sender failures still surface.
+  `PostgresStore` reconnects broken connections using the original DSN and
+  keywords, resolving the hostname again, without replaying caller blocks.
+  No schema or wire change. Intended patch release: 0.28.3.
+
 ## 0.28.2 — 2026-11-19
 
 ### Changed

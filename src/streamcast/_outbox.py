@@ -57,6 +57,10 @@ the lowest pending seq already says it, and a second copy could disagree.
   stream this sender ships to;
 * it reconnects under a capped backoff (`BACKOFF`), and polls every
   `POLL_EVERY` for rows another process committed to the same database;
+* database connection failures, including polling and acknowledgement
+  transactions, use that same backoff without a retry-count limit. A
+  caller's enqueue still raises its current database error; the sender
+  never stores a transient failure or replays a caller's transaction;
 * a refusal of the connection itself -- `Superseded`, `ExactlyOnceUnavailable`,
   `StreamRetired`, `StreamMismatch`, `AcknowledgedRowsLost`,
   `StoreBehindBroker`, or a `SequenceGap` the sender did not cause -- is
@@ -96,7 +100,7 @@ from streamcast._errors import (
 from streamcast._limits import BACKOFF, MAX_IN_FLIGHT, POLL_EVERY, SEND_BATCH
 from streamcast._protocol import stream_name
 from streamcast._publish import Publication, publish
-from streamcast._store import sql
+from streamcast._store import _transient_connection_error, sql
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -614,14 +618,22 @@ class Outbox:
         attempt = 0
         try:
             while not self._closed:
-                if not await self._has_rows():
-                    self._drained.set()
-                    await self._sleep(self._poll_every)
-                    continue
-
                 try:
+                    if not await self._has_rows():
+                        self._drained.set()
+                        await self._sleep(self._poll_every)
+                        continue
+
                     await self._session()
-                except (OSError, ConnectionClosed, TimeoutError, CommitFailed) as exc:
+                except Exception as exc:
+                    if not (
+                        isinstance(
+                            exc, (OSError, ConnectionClosed, TimeoutError, CommitFailed)
+                        )
+                        or _transient_connection_error(exc)
+                    ):
+                        raise
+
                     if not self._outage:
                         self._outage = True
                         self._notice(
