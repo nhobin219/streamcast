@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
-## Unreleased
+## 0.28.3 — 2026-11-24
 
 ### Fixed
 
@@ -23,7 +23,7 @@ there was nothing to have changed from. Everything above it is ordinary.
   SQLSTATE-less libpq failures have a five-minute retry grace, then surface
   the latest cause with connection-diagnostic guidance rather than hiding
   permanent credential, database or connection-policy failures indefinitely.
-  No schema or wire change. Intended patch release: 0.28.3.
+  No schema or wire change (#250).
 
 ## 0.28.2 — 2026-11-19
 
