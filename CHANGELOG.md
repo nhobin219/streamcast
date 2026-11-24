@@ -7,6 +7,19 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- Refuse symlinked DuckDB spill directories and spill directories that equal
+  or contain a storage root or stream home, before creating or clearing them.
+  Stream startup and offline operations, maintainer startup, the supervisor's
+  initial sweep and obsolete-child cleanup raise a clear `ValueError` for these
+  aliases. Comparisons resolve relative paths and symlinked parents and respect
+  filesystem case rules. This prevents cleanup from deleting durable data when
+  storage deliberately aliases the reserved spill namespace. Normal spill
+  declarations and budget semantics are unchanged; no wire or format change.
+
 ## 0.29.0 — 2026-11-24
 
 ### Added

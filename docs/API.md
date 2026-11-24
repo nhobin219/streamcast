@@ -91,7 +91,10 @@ The offline APIs' legacy unnamed stream uses `<base>/.spill/streams/.root`.
 Stop the broker before calling offline `retain`, `ingest` or `retire` with the
 same spill base: those calls also clear that stream's leaf. Spill bases and
 namespaces must belong exclusively to their owners; do not alias them to data
-with symbolic links.
+with symbolic links. Startup and offline operations raise `ValueError` before
+creating or clearing spill if the leaf is a symbolic link or equals or contains
+the storage root or stream home. Comparisons resolve relative paths and symbolic
+links in parents and respect the filesystem's case rules.
 
 **`StreamHandle.open` owns the log it opens.** `initialization="open_existing"`
 is the default and refuses an absent local log. `"create_if_absent"` creates only
@@ -481,6 +484,12 @@ The supervisor creates that namespace and, on its first pass only, sweeps
 unwanted entries matching a known role and its 20-character hexadecimal key.
 Other entries are left alone. Give each broker an exclusive maintainer base;
 brokers sharing one could sweep each other's child directories.
+The supervisor validates the namespace and child leaves against all configured
+storage roots and known stream homes, including stopped records and obsolete
+children. Each child validates its leaf against its log, retired-log and stream
+homes before opening logs. An overlap raises `ValueError` before creating or
+clearing spill; a symlinked directory is also refused. The same resolved-path
+and filesystem case comparisons apply as for stream spill.
 A failed floor-discovery query leaves metadata unchanged. A failed recount after
 truncation keeps the pending operation and unknown row count for the next pass.
 Broker startup cannot bound a caller's already-open lent handles;

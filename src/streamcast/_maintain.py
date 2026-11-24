@@ -532,6 +532,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.duckdb_spill_dir is not None:
+        _spill.validate(
+            args.duckdb_spill_dir,
+            (Path(root) for root, _name in args.logs + args.retire + args.stream),
+        )
         _spill.prepare(args.duckdb_spill_dir)
 
     duckdb = None

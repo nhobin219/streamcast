@@ -1052,6 +1052,34 @@ class BrokerRuntime:
         assert self.closing
         await self.reconcile_children()
 
+    def spill_storage_roots(self) -> set[Path]:
+        # Stopped records, excluded generations and obsolete children still own
+        # durable data, even though they contribute no wanted maintainer.
+        roots = {profile.root for profile in self.config.storage_profiles.values()}
+        for record in self.records.values():
+            root = self.recorded_storage(record).root
+            roots.update((root, _metadata.home(root, record["stream"]["spec"]["name"])))
+
+        streams = [g.stream for g in self.generations.values()] + list(
+            self.static.values()
+        )
+        for stream in streams:
+            if stream.log is not None:
+                roots.add(Path(stream.log.root))
+
+            if stream.definition is not None:
+                root = stream.definition.storage.root
+                roots.update((root, _metadata.home(root, stream.name)))
+
+            roots.update(root for root, _name in stream.retired)
+
+        for spec in self.running:
+            roots.update(
+                root for root, _name in spec.members + spec.retiring + spec.streams
+            )
+
+        return roots
+
     async def child_passes(self) -> None:
         while self.children_dirty:
             self.children_dirty = False
@@ -1066,12 +1094,15 @@ class BrokerRuntime:
             wanted_spill = {
                 spec.spill for spec in self.wanted if spec.spill is not None
             }
+            for directory in wanted_spill:
+                await thread(_spill.validate, directory, self.spill_storage_roots())
+
             if not self.spill_initialized:
-                self.spill_initialized = True
                 plan = self.config.maintain
                 root = getattr(plan, "duckdb_spill_root", None)
                 if root is not None:
                     root = root / _spill.MAINTAINERS
+                    await thread(_spill.validate, root, self.spill_storage_roots())
                     await thread(_spill.prepare, root, empty=False)
                     try:
                         leftovers = await thread(lambda root=root: list(root.iterdir()))
@@ -1086,6 +1117,8 @@ class BrokerRuntime:
 
                     except OSError:
                         logger.exception("could not sweep DuckDB spill root %s", root)
+
+                self.spill_initialized = True
 
             # Only currently desired identities may retain a retry deadline.
             self.retries = {s: r for s, r in self.retries.items() if s in self.wanted}
@@ -1114,6 +1147,9 @@ class BrokerRuntime:
             await stop(list(obsolete.values()))
             for spec, child in obsolete.items():
                 if spec.spill is not None and spec.spill not in wanted_spill:
+                    await thread(
+                        _spill.validate, spec.spill, self.spill_storage_roots()
+                    )
                     await thread(_spill.remove, spec.spill)
 
                 del self.running[spec]

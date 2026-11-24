@@ -67,7 +67,7 @@ def owner(tmp_path):
         BrokerConfig(maintain=False, readiness_timeout=2), cast(Any, None)
     )
     result.ready_directory = SimpleNamespace(name=str(tmp_path))
-    result.static = cast(Any, {"a": None, "b": None})
+    result.static = cast(Any, {name: generation(name).stream for name in ("a", "b")})
     return result
 
 
@@ -630,3 +630,119 @@ async def test_spill_dir_removed_only_after_reap(owner, tmp_path, monkeypatch):
     child.failed = True
     await owner.reconcile_children()
     assert child.closed and (spec.spill / "same-spec").exists()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+async def test_supervisor_refuses_spill_containing_storage(
+    owner, tmp_path, monkeypatch, nested, recorded
+):
+    plan = duckdb_plan(tmp_path)
+    namespace = plan.duckdb_spill_root / _spill.MAINTAINERS
+    root = namespace / ("seal-" + "a" * 20) if nested else namespace
+    root.mkdir(parents=True)
+    marker = root / "buffer.db"
+    marker.write_bytes(b"rows")
+    owner.config = replace(owner.config, maintain=plan)
+    if recorded:
+        owner.records = {
+            "t": {"stream": {"storage": {"root": str(root)}, "spec": {"name": "t"}}}
+        }
+    else:
+        g = policy_generation("t")
+        g.stream.log.root = root
+        owner.generations = {"t": g}
+
+    monkeypatch.setattr(
+        runtime,
+        "build",
+        lambda *_: pytest.fail("invalid spill must fail before children start"),
+    )
+    with pytest.raises(ValueError, match="spill.*storage"):
+        await owner.reconcile_children()
+
+    assert marker.read_bytes() == b"rows"
+
+
+async def test_supervisor_refuses_alias_before_creating_namespace(
+    owner, tmp_path, monkeypatch
+):
+    plan = duckdb_plan(tmp_path)
+    namespace = plan.duckdb_spill_root / _spill.MAINTAINERS
+    g = policy_generation("t")
+    g.stream.log.root = namespace / "not-created"
+    owner.generations = {"t": g}
+    owner.config = replace(owner.config, maintain=plan)
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    with pytest.raises(ValueError, match="spill.*storage"):
+        await owner.reconcile_children()
+
+    assert not plan.duckdb_spill_root.exists()
+
+
+async def test_supervisor_refuses_obsolete_spill_alias_after_reap(owner, tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    marker = root / "buffer.db"
+    marker.write_bytes(b"rows")
+    child = Child()
+    owner.spill_initialized = True
+    spec = ChildSpec("maintainer", ((root, "t"),), (), role="seal", spill=root)
+    owner.running = {spec: child}
+    with pytest.raises(ValueError, match="spill.*storage"):
+        await owner.reconcile_children()
+
+    assert child.closed
+    assert marker.read_bytes() == b"rows"
+
+
+async def test_supervisor_validates_wanted_leaf_against_other_groups(
+    owner, tmp_path, monkeypatch
+):
+    plan = duckdb_plan(tmp_path)
+    a = policy_generation("a")
+    a.stream.log.root = tmp_path / "data"
+    a.maintenance = Maintenance(dedicated=True)
+    leaf = next(spec.spill for spec in desired({"a": a}, plan) if spec.role == "seal")
+    assert leaf is not None
+    b = policy_generation("b")
+    b.stream.log.root = leaf / "other-data"
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": a, "b": b}
+    owner.spill_initialized = True
+    monkeypatch.setattr(
+        runtime,
+        "build",
+        lambda *_: pytest.fail("must refuse before starting either group"),
+    )
+    with pytest.raises(ValueError, match="spill.*storage"):
+        await owner.reconcile_children()
+
+    assert not plan.duckdb_spill_root.exists()
+
+
+async def test_supervisor_refuses_symlinked_leaf_before_sweep(
+    owner, tmp_path, monkeypatch
+):
+    plan = duckdb_plan(tmp_path)
+    generations = {"a": policy_generation("a")}
+    leaf = next(
+        spec.spill for spec in desired(generations, plan) if spec.role == "seal"
+    )
+    assert leaf is not None
+    leaf.parent.mkdir(parents=True)
+    target = tmp_path / "unrelated"
+    target.mkdir()
+    leaf.symlink_to(target, target_is_directory=True)
+    stale = leaf.parent / ("seal-" + "a" * 20)
+    stale.mkdir()
+    marker = stale / "leftover"
+    marker.touch()
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = generations
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    with pytest.raises(ValueError, match="spill.*symlink"):
+        await owner.reconcile_children()
+
+    assert marker.exists()
+    assert leaf.is_symlink()
