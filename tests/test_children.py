@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -746,3 +747,27 @@ async def test_supervisor_refuses_symlinked_leaf_before_sweep(
 
     assert marker.exists()
     assert leaf.is_symlink()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="requires unprivileged directory permissions"
+)
+async def test_supervisor_untraversable_spill_parent_starts_children(
+    owner, tmp_path, monkeypatch, caplog
+):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    plan = replace(duckdb_plan(tmp_path), duckdb_spill_root=locked / "spill")
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    locked.chmod(0)
+    try:
+        await owner.reconcile_children()
+        assert len(owner.running) == 5
+        assert "could not create DuckDB spill directory" in caplog.text
+        assert "could not sweep DuckDB spill root" in caplog.text
+    finally:
+        locked.chmod(0o700)
+
+    assert not (locked / "spill").exists()

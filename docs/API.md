@@ -93,8 +93,12 @@ same spill base: those calls also clear that stream's leaf. Spill bases and
 namespaces must belong exclusively to their owners; do not alias them to data
 with symbolic links. Startup and offline operations raise `ValueError` before
 creating or clearing spill if the leaf is a symbolic link or equals or contains
-the storage root or stream home. Comparisons resolve relative paths and symbolic
-links in parents and respect the filesystem's case rules.
+the storage root or stream home. A leaf inside a storage root or home must be
+beneath `.spill` relative to the deepest containing root or home, so a parent
+symlink cannot redirect it onto a live log. Comparisons resolve relative paths
+and symbolic links in parents and respect the filesystem's case rules.
+An inspection failure on an unavailable spill path is not a validation refusal:
+creation failures are logged and serving continues, as with an unavailable disk.
 
 **`StreamHandle.open` owns the log it opens.** `initialization="open_existing"`
 is the default and refuses an absent local log. `"create_if_absent"` creates only

@@ -10,27 +10,54 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 # The leading dot is outside the stream NAME grammar. Separate owners even
 # when broker and maintenance bases are the same as the storage root.
-STREAMS = Path(".spill") / "streams"
-MAINTAINERS = Path(".spill") / "maintainers"
+_NAMESPACE = ".spill"
+STREAMS = Path(_NAMESPACE) / "streams"
+MAINTAINERS = Path(_NAMESPACE) / "maintainers"
 
 
 def validate(directory: Path, storage_roots: Iterable[Path]) -> None:
-    """Refuse a cleanup directory that owns durable storage, before any writes."""
+    """Refuse observable aliases; prepare logs uninspectable spill paths."""
     _refuse_symlink(directory)
-    resolved = directory.resolve()
+    try:
+        resolved = directory.resolve()
+    except OSError:
+        return
+
+    ancestors = []
     for storage in storage_roots:
-        root = storage.resolve()
+        try:
+            root = storage.resolve()
+        except OSError:
+            continue
+
         contains = root.is_relative_to(resolved)
         # samefile follows the filesystem's case rules, including on volumes
         # whose case sensitivity differs from the platform's Path flavour.
-        if not contains and resolved.exists():
-            contains = any(
-                p.exists() and resolved.samefile(p) for p in (root, *root.parents)
-            )
+        try:
+            if not contains and resolved.exists():
+                contains = any(
+                    p.exists() and resolved.samefile(p) for p in (root, *root.parents)
+                )
+
+        except OSError:
+            pass
 
         if contains:
             raise ValueError(
                 f"DuckDB spill directory {directory} equals or contains storage root {storage}"
+            )
+
+        if resolved.is_relative_to(root):
+            ancestors.append(root)
+
+    if ancestors:
+        # A base may be the storage root or a stream home, but its resolved
+        # leaf must stay in that owner's spill namespace, never on a live log.
+        owner = max(ancestors, key=lambda path: len(path.parts))
+        if resolved.relative_to(owner).parts[0] != _NAMESPACE:
+            raise ValueError(
+                f"DuckDB spill directory {directory} is inside storage root {owner} "
+                "outside its reserved .spill namespace"
             )
 
 
@@ -61,5 +88,11 @@ def prepare(directory: Path, *, empty: bool = True) -> None:
 
 
 def _refuse_symlink(directory: Path) -> None:
-    if directory.is_symlink():
+    try:
+        symlink = directory.is_symlink()
+    except OSError:
+        # prepare logs an inaccessible spill disk; it must not stop serving.
+        return
+
+    if symlink:
         raise ValueError(f"DuckDB spill directory {directory} must not be a symlink")

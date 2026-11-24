@@ -1187,3 +1187,31 @@ async def test_clean_published_rss_returns_after_passes(tmp_path, monkeypatch):
     assert len(samples) == 5
     baseline, *troughs = samples
     assert max(troughs) <= baseline + 64 * 1024 * 1024, samples
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="requires unprivileged directory permissions"
+)
+async def test_child_untraversable_spill_parent_is_nonfatal(
+    tmp_path, monkeypatch, caplog
+):
+    stream = await one_log(tmp_path, monkeypatch)
+    await stream.aclose()
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    leaf = locked / "spill" / "child"
+    roots = probe_roots(monkeypatch)
+    monkeypatch.setattr(_retention, "now_us", lambda: T0)
+
+    def after(count):
+        assert len(roots) == count
+        assert all(root.closed for root in roots)
+
+    locked.chmod(0)
+    try:
+        child_passes(monkeypatch, tmp_path, "t", after, spill=leaf)
+        assert "could not create DuckDB spill directory" in caplog.text
+    finally:
+        locked.chmod(0o700)
+
+    assert not (locked / "spill").exists()

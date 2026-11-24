@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
+import os
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -543,3 +545,107 @@ def test_all_stream_entrypoints_refuse_before_creating_spill(tmp_path, operation
             getattr(streamcast.StreamHandle, operation)("t", **kwargs)
 
     assert not base.exists()
+
+
+@pytest.mark.parametrize("alias", ["nested-log", "parent-link"])
+async def test_spill_inside_home_refused_without_losing_rows(tmp_path, alias):
+    base = tmp_path / "spill"
+    name = "streams" if alias == "nested-log" else "t"
+    root = base / ".spill" if alias == "nested-log" else tmp_path / "data"
+    if alias == "parent-link":
+        base = root
+
+    def source(policy):
+        return streamcast.Stream(
+            spec=streamcast.StreamSpec(name=name, schema=SCHEMA),
+            storage=streamcast.Storage(root=root, duckdb=policy),
+        )
+
+    opened = streamcast.StreamHandle.open(
+        source(None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    if alias == "parent-link":
+        (root / ".spill").mkdir()
+        (root / _spill.STREAMS).symlink_to(root / name, target_is_directory=True)
+
+    policy = replace(POLICY, spill=litelink.Spill(base, 64))
+    with pytest.raises(ValueError, match="spill.*storage"):
+        unexpected = streamcast.StreamHandle.open(source(policy))
+        await unexpected.aclose()
+
+    reopened = streamcast.StreamHandle.open(source(None))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+        assert reopened.log.end_offset() == 4
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="requires unprivileged directory permissions"
+)
+async def test_untraversable_spill_parent_still_serves(tmp_path, caplog):
+    root = tmp_path / "data"
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    policy = replace(POLICY, spill=litelink.Spill(locked / "spill", 64))
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            (locked / "spill").stat()
+
+        reopened = streamcast.StreamHandle.open(definition(root, policy=policy))
+        try:
+            assert reopened.log is not None
+            assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+                "i"
+            ].to_pylist() == [0, 1, 2]
+            assert await reopened.send({"i": 3}) == 4
+            assert "could not create DuckDB spill directory" in caplog.text
+        finally:
+            await reopened.aclose()
+
+    finally:
+        locked.chmod(0o700)
+
+    assert not (locked / "spill").exists()
+
+
+@pytest.mark.parametrize(
+    "operation", ["is_symlink", "resolve", "storage-resolve", "exists", "samefile"]
+)
+@pytest.mark.parametrize("error", [errno.EACCES, errno.EIO])
+def test_spill_validation_inspection_errors_are_nonfatal(
+    tmp_path, monkeypatch, operation, error
+):
+    leaf, storage = tmp_path / "spill", tmp_path / "data"
+    leaf.mkdir()
+    storage.mkdir()
+    marker = leaf / "keep"
+    marker.touch()
+    method = "resolve" if operation == "storage-resolve" else operation
+    target = storage if operation == "storage-resolve" else leaf
+    original = getattr(Path, method)
+    failures = []
+
+    def inspect(path, *args, **kwargs):
+        if path == target:
+            failures.append(path)
+            raise OSError(error, "spill inspection unavailable")
+
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, method, inspect)
+    _spill.validate(leaf, (storage,))
+    assert failures, "the failing inspection must be reached"
+    assert marker.is_file()
