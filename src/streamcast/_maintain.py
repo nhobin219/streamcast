@@ -535,6 +535,7 @@ def main(argv: list[str] | None = None) -> int:
         _spill.validate(
             args.duckdb_spill_dir,
             (Path(root) for root, _name in args.logs + args.retire + args.stream),
+            (Path(root) / name for root, name in args.logs + args.retire),
         )
         _spill.prepare(args.duckdb_spill_dir)
 

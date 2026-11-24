@@ -17,11 +17,13 @@ there was nothing to have changed from. Everything above it is ordinary.
   initial sweep and obsolete-child cleanup raise a clear `ValueError` for these
   aliases. Comparisons resolve relative paths and symlinked parents and respect
   filesystem case rules. This prevents cleanup from deleting durable data when
-  storage deliberately aliases the reserved spill namespace. Leaves inside a
-  storage root or home must remain under that owner's `.spill` namespace after
-  resolution, including when a parent is a symlink. An uninspectable spill path
-  remains nonfatal: creation errors are logged and serving continues. Normal
-  spill declarations and budget semantics are unchanged; no wire or format change.
+  storage deliberately aliases the reserved spill namespace. Leaves cannot
+  overlap known log directories or local published prefixes, or land inside
+  another stream's existing log. Scratch bases inside storage roots and legacy
+  homes remain valid when separate from live data. An uninspectable spill path,
+  including a symlink loop on Python 3.11/3.12, remains nonfatal: creation errors
+  are logged and serving continues. Normal spill declarations and budget semantics
+  are unchanged; no wire or format change.
 
 ## 0.29.0 — 2026-11-24
 

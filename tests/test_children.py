@@ -771,3 +771,81 @@ async def test_supervisor_untraversable_spill_parent_starts_children(
         locked.chmod(0o700)
 
     assert not (locked / "spill").exists()
+
+
+@pytest.mark.parametrize("scratch", [False, True], ids=["root", "scratch"])
+async def test_supervisor_spill_under_storage_starts_children(
+    owner, tmp_path, monkeypatch, scratch
+):
+    root = tmp_path / "data"
+    spill = root / "scratch" if scratch else root
+    plan = replace(duckdb_plan(tmp_path), duckdb_spill_root=spill)
+    owner.config = replace(
+        owner.config,
+        maintain=plan,
+        storage_profiles={"default": runtime.Storage(root=root)},
+    )
+    g = generation("a", root=root / "a")
+    g.stream._s3 = None
+    owner.generations = {"a": g}
+    owner.static = {}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    await owner.reconcile_children()
+    assert len(owner.running) == 5
+    assert (spill / _spill.MAINTAINERS).is_dir()
+    assert all(
+        spec.spill.parent == spill / _spill.MAINTAINERS for spec in owner.running
+    )
+
+
+@pytest.mark.parametrize(
+    "source", ["recorded", "defined", "current", "retired", "running"]
+)
+async def test_supervisor_refuses_spill_inside_known_future_data(
+    owner, tmp_path, monkeypatch, source
+):
+    root = tmp_path / "data"
+    home = root / "t"
+    log_name = "t" if source in ("recorded", "defined") else "old"
+    live = home / log_name
+    plan = replace(duckdb_plan(tmp_path), duckdb_spill_root=live / "scratch")
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    owner.static = {}
+    if source == "recorded":
+        owner.records = {
+            "t": {"stream": {"storage": {"root": str(root)}, "spec": {"name": "t"}}}
+        }
+    elif source == "defined":
+        stream = runtime.Stream(
+            spec=runtime.StreamSpec(
+                name="t",
+                schema={
+                    "type": "object",
+                    "properties": {"i": {"type": "integer"}},
+                    "required": ["i"],
+                },
+            ),
+            storage=runtime.Storage(root=root),
+        )
+        owner.static = {
+            "t": SimpleNamespace(name="t", log=None, definition=stream, retired=())
+        }
+    elif source == "current":
+        owner.static = {"old": generation("old", root=home).stream}
+    elif source == "retired":
+        owner.static = {
+            "t": SimpleNamespace(log=None, definition=None, retired=((home, "old"),))
+        }
+    else:
+        owner.running = {
+            ChildSpec("maintainer", ((home, "old"),), (), role="seal"): Child()
+        }
+
+    monkeypatch.setattr(
+        runtime, "build", lambda *_: pytest.fail("must validate before children start")
+    )
+    with pytest.raises(ValueError, match="spill.*data"):
+        await owner.reconcile_children()
+
+    assert not live.exists()

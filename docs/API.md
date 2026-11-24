@@ -93,10 +93,11 @@ same spill base: those calls also clear that stream's leaf. Spill bases and
 namespaces must belong exclusively to their owners; do not alias them to data
 with symbolic links. Startup and offline operations raise `ValueError` before
 creating or clearing spill if the leaf is a symbolic link or equals or contains
-the storage root or stream home. A leaf inside a storage root or home must be
-beneath `.spill` relative to the deepest containing root or home, so a parent
-symlink cannot redirect it onto a live log. Comparisons resolve relative paths
-and symbolic links in parents and respect the filesystem's case rules.
+the storage root or stream home. A leaf also cannot overlap a known log directory
+or local published prefix, or land inside an existing log belonging to another
+stream. Scratch bases inside a storage root or legacy home are valid when they
+remain separate from that data. Comparisons resolve relative paths and symbolic
+links in parents and respect the filesystem's case rules.
 An inspection failure on an unavailable spill path is not a validation refusal:
 creation failures are logged and serving continues, as with an unavailable disk.
 
@@ -491,9 +492,10 @@ brokers sharing one could sweep each other's child directories.
 The supervisor validates the namespace and child leaves against all configured
 storage roots and known stream homes, including stopped records and obsolete
 children. Each child validates its leaf against its log, retired-log and stream
-homes before opening logs. An overlap raises `ValueError` before creating or
-clearing spill; a symlinked directory is also refused. The same resolved-path
-and filesystem case comparisons apply as for stream spill.
+homes and live log directories before opening logs. The supervisor also includes
+known local published prefixes. An overlap with live data raises `ValueError`
+before creating or clearing spill; a symlinked directory is also refused. The same
+resolved-path and filesystem case comparisons apply as for stream spill.
 A failed floor-discovery query leaves metadata unchanged. A failed recount after
 truncation keeps the pending operation and unknown row count for the next pass.
 Broker startup cannot bound a caller's already-open lent handles;

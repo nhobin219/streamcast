@@ -443,7 +443,7 @@ class StreamHandle:
 
         spec, storage = stream.spec, stream.storage
         name, schema = spec.name, spec.schema_
-        duckdb = _stream_duckdb(storage.duckdb, name, storage.root)
+        duckdb = _stream_duckdb(storage.duckdb, name, storage.root, storage.published)
         home = _metadata.home(storage.root, name)
         published = storage.published
         if published is not None and home != storage.root:
@@ -879,7 +879,7 @@ class StreamHandle:
         handles append, and both publish to the same table. Stop the old
         producer first. See `docs/SPEC.md`.
         """
-        duckdb = _stream_duckdb(duckdb, name, root)
+        duckdb = _stream_duckdb(duckdb, name, root, published)
         return cls._restore(
             name,
             duckdb=duckdb,
@@ -3166,7 +3166,10 @@ def _failed(
 
 
 def _stream_duckdb(
-    policy: litelink.DuckDBPolicy | None, name: str, root: str | PathLike[str]
+    policy: litelink.DuckDBPolicy | None,
+    name: str,
+    root: str | PathLike[str],
+    published: str | None = None,
 ) -> litelink.DuckDBPolicy | None:
     if policy is None or policy.spill is None:
         return policy
@@ -3177,7 +3180,8 @@ def _stream_duckdb(
     # A spill base may also be the storage root: never clear a stream home.
     # The unnamed offline stream has its own leaf in the reserved namespace.
     leaf = policy.spill.directory / _spill.STREAMS / (name or ".root")
-    _spill.validate(leaf, (Path(root), _metadata.home(root, name)))
+    home = _metadata.home(root, name)
+    _spill.validate(leaf, (Path(root), home), _spill.data_paths(home, name, published))
     _spill.prepare(leaf)
     return dataclasses.replace(
         policy, spill=dataclasses.replace(policy.spill, directory=leaf)

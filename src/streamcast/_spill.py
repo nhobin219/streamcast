@@ -6,6 +6,10 @@ import logging
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from streamcast import _metadata
+from streamcast._published import path as published_path
 
 logger = logging.getLogger(__name__)
 # The leading dot is outside the stream NAME grammar. Separate owners even
@@ -15,19 +19,28 @@ STREAMS = Path(_NAMESPACE) / "streams"
 MAINTAINERS = Path(_NAMESPACE) / "maintainers"
 
 
-def validate(directory: Path, storage_roots: Iterable[Path]) -> None:
+def data_paths(home: Path, name: str, published: str | None = None) -> set[Path]:
+    data = {home / name}
+    if published is not None and urlsplit(published).scheme in ("", "file"):
+        data.add(Path(published_path(_metadata.within(published, name))))
+
+    return data
+
+
+def validate(
+    directory: Path, storage_roots: Iterable[Path], data: Iterable[Path] = ()
+) -> None:
     """Refuse observable aliases; prepare logs uninspectable spill paths."""
     _refuse_symlink(directory)
     try:
         resolved = directory.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return
 
-    ancestors = []
     for storage in storage_roots:
         try:
             root = storage.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             continue
 
         contains = root.is_relative_to(resolved)
@@ -47,17 +60,42 @@ def validate(directory: Path, storage_roots: Iterable[Path]) -> None:
                 f"DuckDB spill directory {directory} equals or contains storage root {storage}"
             )
 
-        if resolved.is_relative_to(root):
-            ancestors.append(root)
+    for storage in data:
+        try:
+            live = storage.resolve()
+        except (OSError, RuntimeError):
+            continue
 
-    if ancestors:
-        # A base may be the storage root or a stream home, but its resolved
-        # leaf must stay in that owner's spill namespace, never on a live log.
-        owner = max(ancestors, key=lambda path: len(path.parts))
-        if resolved.relative_to(owner).parts[0] != _NAMESPACE:
+        overlaps = resolved.is_relative_to(live) or live.is_relative_to(resolved)
+        try:
+            if not overlaps:
+                overlaps = any(
+                    a.exists() and b.exists() and a.samefile(b)
+                    for a, b in (
+                        *((resolved, p) for p in (live, *live.parents)),
+                        *((live, p) for p in resolved.parents),
+                    )
+                )
+
+        except OSError:
+            pass
+
+        if overlaps:
             raise ValueError(
-                f"DuckDB spill directory {directory} is inside storage root {owner} "
-                "outside its reserved .spill namespace"
+                f"DuckDB spill directory {directory} overlaps storage data {storage}"
+            )
+
+    # Scratch inside a root or legacy home is valid, but another stream's log
+    # may be there too, outside the caller's explicitly known data directories.
+    for parent in (resolved, *resolved.parents):
+        try:
+            log = _metadata._is_log(parent)
+        except OSError:
+            continue
+
+        if log:
+            raise ValueError(
+                f"DuckDB spill directory {directory} is inside storage log {parent}"
             )
 
 

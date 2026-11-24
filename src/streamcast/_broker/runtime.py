@@ -1052,13 +1052,17 @@ class BrokerRuntime:
         assert self.closing
         await self.reconcile_children()
 
-    def spill_storage_roots(self) -> set[Path]:
+    def spill_storage_roots(self) -> tuple[set[Path], set[Path]]:
         # Stopped records, excluded generations and obsolete children still own
         # durable data, even though they contribute no wanted maintainer.
         roots = {profile.root for profile in self.config.storage_profiles.values()}
+        data: set[Path] = set()
         for record in self.records.values():
-            root = self.recorded_storage(record).root
-            roots.update((root, _metadata.home(root, record["stream"]["spec"]["name"])))
+            storage = self.recorded_storage(record)
+            root, name = storage.root, record["stream"]["spec"]["name"]
+            home = _metadata.home(root, name)
+            roots.update((root, home))
+            data.update(_spill.data_paths(home, name, storage.published))
 
         streams = [g.stream for g in self.generations.values()] + list(
             self.static.values()
@@ -1066,19 +1070,32 @@ class BrokerRuntime:
         for stream in streams:
             if stream.log is not None:
                 roots.add(Path(stream.log.root))
+                data.add(Path(stream.log.root) / stream.log.name)
 
             if stream.definition is not None:
                 root = stream.definition.storage.root
-                roots.update((root, _metadata.home(root, stream.name)))
+                home = _metadata.home(root, stream.name)
+                roots.update((root, home))
+                data.update(
+                    _spill.data_paths(
+                        home, stream.name, stream.definition.storage.published
+                    )
+                )
 
             roots.update(root for root, _name in stream.retired)
+            data.update(root / name for root, name in stream.retired)
 
         for spec in self.running:
             roots.update(
                 root for root, _name in spec.members + spec.retiring + spec.streams
             )
 
-        return roots
+            data.update(
+                root / name
+                for root, name in spec.members + spec.retiring + spec.streams
+            )
+
+        return roots, data
 
     async def child_passes(self) -> None:
         while self.children_dirty:
@@ -1095,14 +1112,14 @@ class BrokerRuntime:
                 spec.spill for spec in self.wanted if spec.spill is not None
             }
             for directory in wanted_spill:
-                await thread(_spill.validate, directory, self.spill_storage_roots())
+                await thread(_spill.validate, directory, *self.spill_storage_roots())
 
             if not self.spill_initialized:
                 plan = self.config.maintain
                 root = getattr(plan, "duckdb_spill_root", None)
                 if root is not None:
                     root = root / _spill.MAINTAINERS
-                    await thread(_spill.validate, root, self.spill_storage_roots())
+                    await thread(_spill.validate, root, *self.spill_storage_roots())
                     await thread(_spill.prepare, root, empty=False)
                     try:
                         leftovers = await thread(lambda root=root: list(root.iterdir()))
@@ -1148,7 +1165,7 @@ class BrokerRuntime:
             for spec, child in obsolete.items():
                 if spec.spill is not None and spec.spill not in wanted_spill:
                     await thread(
-                        _spill.validate, spec.spill, self.spill_storage_roots()
+                        _spill.validate, spec.spill, *self.spill_storage_roots()
                     )
                     await thread(_spill.remove, spec.spill)
 
