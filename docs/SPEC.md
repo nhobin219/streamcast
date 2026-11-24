@@ -1545,7 +1545,8 @@ answered as duplicates of the old stream's.
   `AcknowledgedRowsLost`; `last_seq` at or above `next_seq` is
   `StoreBehindBroker`. Both stop the sender. No acknowledged seq is stored:
   the lowest pending seq already says it.
-- **The sender** connects only when it has rows, ships ordered batches
+- **The sender** connects when it has rows or unresolved acknowledgement
+  waiters, ships ordered batches
   (`SEND_BATCH`) pipelined to `max_in_flight`, sends a refused batch again row
   by row and renumbers the refused row away so seqs stay 1..n, treats a
   commit the broker could not make (`CommitFailed`) as an outage and keeps its
@@ -1553,6 +1554,30 @@ answered as duplicates of the old stream's.
   once and its end once, backs off (`BACKOFF`), and polls (`POLL_EVERY`) for
   rows another process committed. A refusal of the connection itself is
   raised from the next `send` and the block's exit.
+- **A database connection outage does not stop the sender.** Polling,
+  reconciliation, reads and acknowledgement transactions all retry under
+  the same capped backoff, including outages longer than its final delay.
+  A final ACK deletion whose COMMIT reply was lost reconciles existing waiters
+  through a fresh broker greeting even when no rows remain and no new row is
+  enqueued. A healthy idle poll resets outage notices and backoff.
+  Postgres connection exceptions (SQLSTATE class 08), shutdown/crash/startup
+  (57P01–03) are retried without an attempt limit. libpq connection failures
+  without SQLSTATE are ambiguous: both outages and permanent credential,
+  database or connection-policy refusals look this way. They retry for a
+  five-minute grace period of consecutive unclassified failures. A successful
+  sender cycle, including a healthy idle poll, resets the grace; a typed outage
+  starts a separate classified retry and resets it too. After the grace a
+  `RuntimeError` chained to the latest driver error stops the sender and asks
+  the caller to check connection settings and reopen the outbox. A genuine
+  unclassified outage longer than five minutes also needs reopening. Other
+  database errors stop the sender immediately and surface to callers. An enqueue
+  during a database outage raises its current driver error, never a stored
+  transient exception. A healthy enqueue can commit during sender backoff.
+  `PostgresStore` replaces a broken connection at the next transaction,
+  using the original DSN and connection keywords so hostnames resolve again;
+  explicit caller-supplied `hostaddr` still pins an address. Caller blocks
+  are never replayed, and a lost COMMIT reply is still an uncertain commit.
+  Reconnecting does not create or repair the schema. Explicit close is final.
 
 ### The inbox
 

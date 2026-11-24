@@ -1278,7 +1278,7 @@ subject to its buffer-loss limit. External side effects are outside this transac
 |---|---|
 | **the stream's id** | bound at the first connect in each state table, checked at every one after: a recreated stream is `StreamMismatch`, before anything is sent or received |
 | **outbox seqs** | assigned at enqueue in the caller's transaction, gapless; a rollback returns them. Parallel producers take distinct publisher ids |
-| **the sender** | connects only when it has rows; reconciles with the greeting (landed rows deleted unsent; `AcknowledgedRowsLost`, `StoreBehindBroker`); ordered pipelined batches; a refused row dropped and the rest renumbered; an outage said once |
+| **the sender** | connects when it has rows or unresolved acknowledgement waiters; reconciles with the greeting (landed rows deleted unsent; `AcknowledgedRowsLost`, `StoreBehindBroker`); ordered pipelined batches; a refused row dropped and the rest renumbered; an outage said once |
 | **inbox resume** | from `last_received_offset + 1`; unprocessed rows first. A new subscriber starts at the latest offset or `offset=`; one with state refuses `offset=` |
 | **the receive window** | at `inbox_max_bytes` or `inbox_max_rows` the receiver stops and CLOSES its subscription; it reconnects below `inbox_resume_at` of each bound. An empty inbox always takes one row |
 | **startup** | decided from the durable inbox and the same bounds; no pause state is stored or accepted. See [the receive window](#the-receive-window-paused-and-on_pause_change) |
@@ -1288,6 +1288,25 @@ The next `recv` commits the previous processing transaction. A clean inbox conte
 also commits it; an exit by exception rolls it back. Closing an outbox stops its sender
 without draining it. Schema-rejected rows are logged and deleted; their seqs are removed
 from the pending sequence. `landed` returns an offset only while it is still known.
+
+The outbox retries transient Postgres connection errors from polling and delivery
+transactions under `backoff` (default 0.5, 1, 2, 5, then 10 seconds per attempt,
+with no attempt limit for typed connection errors). libpq omits SQLSTATE for
+both outages and permanent connection refusals, such as invalid credentials or
+a missing database. These unclassified failures retry for a five-minute grace
+period; if they persist, the sender stops with a `RuntimeError` chained to the
+latest driver error. Check credentials, database existence and connection policy,
+then reopen the outbox. A genuine unclassified outage lasting beyond the grace
+also needs the outbox reopened. Other permanent database errors stop it immediately.
+A healthy idle poll resets outage notices, backoff and the grace period. A final
+ACK whose COMMIT reply was lost reconciles existing `landed()` waiters even when
+no pending rows remain, without requiring another enqueue.
+An enqueue during a database outage raises the current `psycopg.OperationalError`;
+retry the application operation after recovery, accounting for an uncertain COMMIT.
+An enqueue with a healthy transaction can commit while the sender backs off.
+`PostgresStore` reopens broken connections at the next transaction with the original
+DSN and keywords, resolving the hostname again unless the caller pins `hostaddr`.
+It never replays the caller's block. Explicit `close()` prevents reconnection.
 
 ### Outbox backlog visibility
 

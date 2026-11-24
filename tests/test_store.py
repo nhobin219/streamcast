@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+import psycopg
 import pytest
 
 import streamcast
@@ -128,8 +129,6 @@ class TestALostConnection:
             await store.close()
             pytest.skip("a SQLite file has no connection to lose")
 
-        import psycopg
-
         [(pid,)] = await (
             await store._connection.execute("SELECT pg_backend_pid()")
         ).fetchall()  # noqa: SLF001
@@ -147,8 +146,83 @@ class TestALostConnection:
         async with other.transaction() as tx:
             assert await tx.fetch("SELECT k FROM t") == []
 
+        async with store.transaction() as tx:
+            assert await tx.fetch("SELECT k FROM t") == [], "the same store reconnects"
+            await tx.execute(p(store, "INSERT INTO t VALUES (?, ?)"), (3, "c"))
+
+        async with other.transaction() as tx:
+            assert await tx.fetch("SELECT k, v FROM t") == [(3, "c")]
+
         await other.close()
         await store.close()
+
+    async def test_explicit_close_does_not_reconnect(self, postgres_dsn):
+        store = await streamcast.PostgresStore.connect(postgres_dsn)
+        await store.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            async with store.transaction():
+                pytest.fail("closed store reopened")
+
+    async def test_reconnect_preserves_the_original_dsn_and_keywords(
+        self, postgres_dsn, monkeypatch
+    ):
+        connect = psycopg.AsyncConnection.connect
+        calls = []
+
+        async def recording(cls, dsn, **kwargs):
+            calls.append((dsn, kwargs))
+            return await connect(dsn, **kwargs)
+
+        monkeypatch.setattr(psycopg.AsyncConnection, "connect", classmethod(recording))
+        dsn = postgres_dsn + " connect_timeout=2"
+        keywords = {"application_name": "outbox-recovery", "prepare_threshold": None}
+        store = await streamcast.PostgresStore.connect(
+            dsn, application_name="outbox-recovery", prepare_threshold=None
+        )
+        await store._connection.close()
+        async with store.transaction() as tx:
+            assert await tx.fetch("SELECT 1") == [(1,)]
+
+        assert calls == [(dsn, {"autocommit": True, **keywords})] * 2
+        await store.close()
+
+    async def test_cancelled_reconnect_keeps_the_opened_connection(self, postgres_dsn):
+        store = await streamcast.PostgresStore.connect(postgres_dsn)
+        await store._connection.close()
+        connect = store._connect
+        opened = asyncio.Event()
+        release = asyncio.Event()
+        connections = []
+
+        async def delayed_connect():
+            connection = await connect()
+            connections.append(connection)
+            opened.set()
+            await release.wait()
+            return connection
+
+        store._connect = delayed_connect
+
+        async def read():
+            async with store.transaction() as tx:
+                await tx.fetch("SELECT 1")
+
+        task = asyncio.create_task(read())
+        await opened.wait()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert len(connections) == 1
+        assert store._connection is connections[0], (
+            "the cancelled waiter cannot orphan it"
+        )
+        async with store.transaction() as tx:
+            assert await tx.fetch("SELECT 1") == [(1,)]
+
+        await store.close()
+        assert connections[0].closed
 
 
 class TestATaskWaitingOnItself:

@@ -52,6 +52,11 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeVar
 
 from streamcast._tasks import join
 
+try:
+    import psycopg
+except ImportError:  # pragma: no cover — the postgres extra is optional
+    psycopg = None
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
@@ -59,6 +64,35 @@ if TYPE_CHECKING:
 
 Dialect = Literal["sqlite", "postgres"]
 T = TypeVar("T")
+
+
+def _unclassified_connection_error(error: BaseException) -> bool:
+    """libpq omits SQLSTATE for both unavailable servers and connect refusals."""
+    return (
+        psycopg is not None
+        and isinstance(error, psycopg.OperationalError)
+        and error.sqlstate is None
+    )
+
+
+def _transient_connection_error(error: BaseException) -> bool:
+    """A lost/unavailable Postgres connection, including adapter exceptions.
+
+    OperationalError also includes permanent failures such as disk full.
+    Unclassified libpq failures need a bounded grace period: credentials and
+    policy refusals look like outages. Class 08 is a connection exception,
+    and 57P01–03 cover shutdown, crash and startup respectively.
+    """
+    return _unclassified_connection_error(error) or (
+        psycopg is not None
+        and isinstance(error, psycopg.OperationalError)
+        and error.sqlstate is not None
+        and (
+            error.sqlstate.startswith("08")
+            or error.sqlstate in {"57P01", "57P02", "57P03"}
+        )
+    )
+
 
 SCHEMA_VERSION: Final = 1
 """The version of the library's tables this build writes. A store whose
@@ -405,15 +439,22 @@ class PostgresStore:
     transaction pooler. Pass libpq's keepalive and `options=-c
     statement_timeout=...` settings in the DSN so a database that vanished
     fails a transaction in bounded time rather than hanging it.
+
+    A broken connection is reopened at the next transaction using the
+    original DSN and keywords, resolving its hostname again. An interrupted
+    block is never replayed; a lost COMMIT reply may already have committed.
+    Explicit `close` is final.
     """
 
-    __slots__ = ("_connection", "_lock")
+    __slots__ = ("_closed", "_connect", "_connection", "_lock")
 
     dialect: Final[Dialect] = "postgres"
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, connect: Callable[[], Awaitable[Any]]) -> None:
         self._connection = connection
+        self._connect = connect
         self._lock = _Lock()
+        self._closed = False
 
     @classmethod
     async def connect(
@@ -421,16 +462,18 @@ class PostgresStore:
     ) -> PostgresStore:
         """Connect to `dsn`, creating the library's tables unless
         `create=False`. Other keywords go to `psycopg.AsyncConnection.connect`."""
-        try:
-            import psycopg  # noqa: PLC0415 — an optional extra
-        except ImportError:  # pragma: no cover — depends on the install
+        if psycopg is None:  # pragma: no cover — depends on the install
             msg = "PostgresStore needs psycopg 3: install streamcast[postgres]"
             raise ImportError(msg) from None
 
-        connection = await psycopg.AsyncConnection.connect(
-            dsn, autocommit=True, **kwargs
-        )
-        store = cls(connection)
+        async def connect() -> Any:
+            assert psycopg is not None
+            # Keep the caller's DSN, not connection.info.dsn: psycopg may
+            # add the resolved hostaddr there, pinning a restart's old IP.
+            return await psycopg.AsyncConnection.connect(dsn, autocommit=True, **kwargs)
+
+        connection = await connect()
+        store = cls(connection, connect)
         try:
             await _prepare(store, create=create)
         except BaseException:
@@ -464,9 +507,22 @@ class PostgresStore:
 
         await self._run(run)
 
+    async def _reconnect(self) -> None:
+        await self._connection.close()
+        self._connection = await self._connect()
+
     @contextlib.asynccontextmanager
     async def transaction(self) -> AsyncIterator[Transaction]:
         async with self._lock.held():
+            if self._closed:
+                msg = "the Postgres store is closed"
+                raise RuntimeError(msg)
+
+            if self._connection.closed or self._connection.broken:
+                # Assign inside the joined command, so cancellation cannot
+                # orphan a newly opened connection. Never replay a block.
+                await self._run(self._reconnect)
+
             tx = _PostgresTransaction(self)
             try:
                 # Inside the try, as for SQLite: a cancellation that lands
@@ -493,6 +549,7 @@ class PostgresStore:
 
     async def close(self) -> None:
         async with self._lock.held():
+            self._closed = True
             with contextlib.suppress(Exception):
                 await self._connection.close()
 
