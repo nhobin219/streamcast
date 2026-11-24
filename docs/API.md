@@ -92,12 +92,23 @@ Stop the broker before calling offline `retain`, `ingest` or `retire` with the
 same spill base: those calls also clear that stream's leaf. Spill bases and
 namespaces must belong exclusively to their owners; do not alias them to data
 with symbolic links. Startup and offline operations raise `ValueError` before
-creating or clearing spill if the leaf is a symbolic link or equals or contains
-the storage root or stream home. A leaf also cannot overlap a known log directory
-or local published prefix, or land inside an existing log belonging to another
-stream. Scratch bases inside a storage root or legacy home are valid when they
-remain separate from that data. Comparisons resolve relative paths and symbolic
-links in parents and respect the filesystem's case rules.
+creating or clearing spill if the leaf is a symbolic link, equals or contains a
+known storage root or stream home, or overlaps a known log directory or local
+published prefix. A leaf on or inside an existing log identified by `buffer.db`
+is also refused. Scratch bases inside a storage root or named legacy home can
+be used subject to these checks. Comparisons resolve relative paths and symbolic
+links in parents, with an identity fallback for existing paths.
+
+These checks do not discover every storage location. Cross-root symlinks inside
+the reserved namespace are outside the exclusive-ownership contract and are not
+generally refused. For example, if `R/.spill/streams` points to another storage
+root `R2`, the leaf for stream `t` can resolve to the other stream's home `R2/t`;
+its log is below that home at `R2/t/t`, so the existing-log ancestor check does
+not detect it. Clearing spill can then delete the other stream's data. Bind
+mounts and native case-insensitive volume aliases are also outside the ownership
+contract and are not reliably refused. Do not rely on validation to make these
+layouts safe, or change filesystem aliases between validation and cleanup.
+
 An inspection failure on an unavailable spill path is not a validation refusal:
 creation failures are logged and serving continues, as with an unavailable disk.
 
@@ -493,9 +504,11 @@ The supervisor validates the namespace and child leaves against all configured
 storage roots and known stream homes, including stopped records and obsolete
 children. Each child validates its leaf against its log, retired-log and stream
 homes and live log directories before opening logs. The supervisor also includes
-known local published prefixes. An overlap with live data raises `ValueError`
-before creating or clearing spill; a symlinked directory is also refused. The same
-resolved-path and filesystem case comparisons apply as for stream spill.
+known local published prefixes. An overlap with those known data paths raises
+`ValueError` before creating or clearing spill; a symlinked namespace or child
+leaf is also refused. The resolved-path and existing-path identity checks, and
+the ownership exclusions described for stream spill above, apply here too;
+validation does not discover arbitrary data below a redirected namespace.
 A failed floor-discovery query leaves metadata unchanged. A failed recount after
 truncation keeps the pending operation and unknown row count for the next pass.
 Broker startup cannot bound a caller's already-open lent handles;

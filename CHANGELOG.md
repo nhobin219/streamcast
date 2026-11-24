@@ -11,19 +11,23 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
-- Refuse symlinked DuckDB spill directories and spill directories that equal
-  or contain a storage root or stream home, before creating or clearing them.
+- Refuse a DuckDB spill leaf that is a symbolic link, equals or contains a
+  known storage root or stream home, overlaps a known log directory or local
+  published prefix, or is on or inside an existing log identified by `buffer.db`.
   Stream startup and offline operations, maintainer startup, the supervisor's
-  initial sweep and obsolete-child cleanup raise a clear `ValueError` for these
-  aliases. Comparisons resolve relative paths and symlinked parents and respect
-  filesystem case rules. This prevents cleanup from deleting durable data when
-  storage deliberately aliases the reserved spill namespace. Leaves cannot
-  overlap known log directories or local published prefixes, or land inside
-  another stream's existing log. Scratch bases inside storage roots and legacy
-  homes remain valid when separate from live data. An uninspectable spill path,
-  including a symlink loop on Python 3.11/3.12, remains nonfatal: creation errors
-  are logged and serving continues. Normal spill declarations and budget semantics
-  are unchanged; no wire or format change.
+  initial sweep and obsolete-child cleanup validate before creating or clearing
+  spill. Comparisons resolve relative paths and symlinked parents, with an
+  identity fallback for existing paths. These checks cover the known-path aliases
+  above, not arbitrary storage reachable through the reserved spill namespace.
+  Spill namespaces remain exclusively owned scratch space: cross-root symlinks
+  inside them are outside that contract and are not generally refused. In
+  particular, redirecting `.spill/streams` into another storage root can clear
+  that root's stream home and delete its data. Bind mounts and native
+  case-insensitive volume aliases are also outside the contract and are not
+  reliably refused. Scratch bases inside storage roots and named legacy homes
+  can be used subject to the same checks. An uninspectable spill path, including
+  a symlink loop on Python 3.11/3.12, remains nonfatal: creation errors are logged
+  and serving continues. Budget semantics are unchanged; no wire or format change.
 
 ## 0.29.0 — 2026-11-24
 
