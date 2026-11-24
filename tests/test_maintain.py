@@ -441,6 +441,12 @@ def test_there_is_no_thread_mode_to_get_wrong():
         "clean_published_every",
         # When `seal` and `publish` pass `flush=True`: the RPO interval.
         "flush_every",
+        "duckdb_default_memory_mib",
+        "duckdb_default_threads",
+        "duckdb_retention_memory_mib",
+        "duckdb_retention_threads",
+        "duckdb_retention_spill_mib",
+        "duckdb_spill_root",
     }
 
     # And the child is a real subprocess, not a thread pretending to be one.

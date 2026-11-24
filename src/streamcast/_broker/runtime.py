@@ -12,9 +12,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast, get_args
 
+import litelink
 from pydantic import ValidationError
 
-from streamcast import _log, _metadata
+from streamcast import _log, _metadata, _spill
 from streamcast._broker.model import NAME, BrokerConfig, CreationAuthorization, Fault
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._broker.transitions import storage, with_replica
@@ -25,7 +26,7 @@ from streamcast._children import (
     warn_unreplicated,
 )
 from streamcast._errors import Unavailable
-from streamcast._maintain import Supervisor, stop
+from streamcast._maintain import Maintain, Supervisor, stop
 from streamcast._spec import Initialization, Maintenance, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
@@ -77,6 +78,7 @@ class BrokerRuntime:
         self.child_health: dict[ChildSpec, bool] = {}
         self.child_pass: asyncio.Task | None = None
         self.children_dirty = False
+        self.spill_initialized = False
         self.child_starts = 0
         self.excluding: set[str] = set()
         self.collection = 0
@@ -94,6 +96,15 @@ class BrokerRuntime:
 
     @classmethod
     async def open(cls, config: BrokerConfig, *, streams=()) -> BrokerRuntime:
+        plan = config.maintain
+        if isinstance(plan, Maintain) and plan.duckdb_default_memory_mib is not None:
+            assert plan.duckdb_default_threads is not None
+            litelink.bound_default_connection(
+                litelink.DuckDBPolicy(
+                    plan.duckdb_default_memory_mib, plan.duckdb_default_threads
+                )
+            )
+
         registry = (
             await thread(Registry.memory, config.broker_id)
             if config.registry is None
@@ -1051,6 +1062,24 @@ class BrokerRuntime:
             self.wanted = (
                 set() if self.closing else desired(generations, self.config.maintain)
             )
+            wanted_spill = {
+                spec.spill for spec in self.wanted if spec.spill is not None
+            }
+            if not self.spill_initialized:
+                self.spill_initialized = True
+                plan = self.config.maintain
+                root = getattr(plan, "duckdb_spill_root", None)
+                if root is not None:
+                    await thread(_spill.prepare, root, empty=False)
+                    try:
+                        leftovers = await thread(lambda root=root: list(root.iterdir()))
+                        for directory in leftovers:
+                            if directory not in wanted_spill:
+                                await thread(_spill.remove, directory)
+
+                    except OSError:
+                        logger.exception("could not sweep DuckDB spill root %s", root)
+
             # Only currently desired identities may retain a retry deadline.
             self.retries = {s: r for s, r in self.retries.items() if s in self.wanted}
             obsolete = {
@@ -1077,6 +1106,9 @@ class BrokerRuntime:
             # publish a removal, or replace a child, before its reap finishes.
             await stop(list(obsolete.values()))
             for spec, child in obsolete.items():
+                if spec.spill is not None and spec.spill not in wanted_spill:
+                    await thread(_spill.remove, spec.spill)
+
                 del self.running[spec]
                 self.child_health.pop(spec, None)
                 marker = getattr(child, "_ready_file", None)

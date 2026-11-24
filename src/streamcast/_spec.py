@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, cast
 
 import pyarrow as pa
-from litelink import LogConfig, S3Options
+from litelink import DuckDBPolicy, LogConfig, S3Options
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -155,6 +155,8 @@ class Storage(BaseModel):
     published: str | None = None
     replicate: StrictBool = False
     config: LogConfig | None = None
+    duckdb: DuckDBPolicy | None = None
+    """Reader limits; spill.directory is a base with one leaf per stream."""
     s3_options: S3Options | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="wrap")

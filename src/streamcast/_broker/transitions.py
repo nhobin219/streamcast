@@ -56,7 +56,12 @@ async def storage(record: dict, profile, kind: str, target: dict) -> None:
             raise ValueError("identity mismatch")
 
         if kind == "retire":
-            StreamHandle.retire(name, root=profile.root, s3_options=profile.s3_options)
+            StreamHandle.retire(
+                name,
+                root=profile.root,
+                s3_options=profile.s3_options,
+                duckdb=profile.duckdb,
+            )
         else:
             opened = StreamHandle.migrate(
                 name,
@@ -65,6 +70,7 @@ async def storage(record: dict, profile, kind: str, target: dict) -> None:
                 sort_by=target["sort_by"],
                 config=profile.config,
                 s3_options=profile.s3_options,
+                duckdb=profile.duckdb,
             )
             log = opened.log
             assert log is not None

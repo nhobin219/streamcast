@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import litelink
 
-from streamcast import _metadata, _replicate, _retention
+from streamcast import _metadata, _replicate, _retention, _spill
 from streamcast._process import popen
 
 if TYPE_CHECKING:
@@ -144,9 +144,8 @@ _BACKOFF: Final = (0.5, 1.0, 2.0, 5.0, 10.0)
 class Maintain:
     """How often a stream's log is swept. `BrokerConfig(maintain=Maintain(...))`.
 
-    Exists so the cadences have a home that is not `BrokerConfig`'s fields, and so
-    that a later need — a memory cap on the subprocess, a niced priority — has
-    somewhere to go without another two keyword arguments.
+    Cadences and optional DuckDB budgets have one declaration, carried into
+    each role's subprocess through flat command-line flags.
     """
 
     seal_every: float = SEAL_EVERY
@@ -168,6 +167,13 @@ class Maintain:
     takes only finished files, and RPO is WAL replication's alone.
     """
 
+    duckdb_default_memory_mib: int | None = None
+    duckdb_default_threads: int | None = None
+    duckdb_retention_memory_mib: int | None = None
+    duckdb_retention_threads: int | None = None
+    duckdb_retention_spill_mib: int | None = None
+    duckdb_spill_root: Path | None = None
+
     def __post_init__(self) -> None:
         for name in (
             *[f"{role.replace('-', '_')}_every" for role in ROLES],
@@ -183,6 +189,36 @@ class Maintain:
                 or value <= 0
             ):
                 raise ValueError(f"{name}: a finite positive interval required")
+
+        for name, minimum in (
+            ("duckdb_default_memory_mib", 16),
+            ("duckdb_default_threads", 1),
+            ("duckdb_retention_memory_mib", 16),
+            ("duckdb_retention_threads", 1),
+            ("duckdb_retention_spill_mib", 1),
+        ):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < minimum):
+                raise ValueError(f"{name}: an integer of at least {minimum} required")
+
+        for kind in ("default", "retention"):
+            memory = getattr(self, f"duckdb_{kind}_memory_mib")
+            threads = getattr(self, f"duckdb_{kind}_threads")
+            if (memory is None) != (threads is None):
+                raise ValueError(f"duckdb_{kind}: memory and threads required together")
+
+        if self.duckdb_spill_root is not None and (
+            not isinstance(self.duckdb_spill_root, Path)
+            or not self.duckdb_spill_root.is_absolute()
+        ):
+            raise ValueError("duckdb_spill_root: an absolute Path required")
+
+        if self.duckdb_retention_spill_mib is not None and (
+            self.duckdb_spill_root is None or self.duckdb_retention_memory_mib is None
+        ):
+            raise ValueError(
+                "duckdb_retention_spill_mib requires retention and spill root"
+            )
 
     def every(self, role: str) -> float:
         """The cadence of `role`'s passes, in seconds."""
@@ -288,7 +324,10 @@ def _flush_slot(role: str, flush_every: float) -> int:
 
 
 def retain(
-    streams: Sequence[tuple[Path, str]], logs: dict[str, litelink.WriteHandle]
+    streams: Sequence[tuple[Path, str]],
+    logs: dict[str, litelink.WriteHandle],
+    *,
+    duckdb: litelink.DuckDBPolicy | None = None,
 ) -> None:
     """One retention pass over each stream that has a window (`_retention`).
 
@@ -301,7 +340,7 @@ def retain(
             metadata = _metadata.load(home, name)
             live = None if metadata is None else logs.get(metadata.live_log.name)
             if live is not None:
-                _retention.run(home, name, live)
+                _retention.run(home, name, live, duckdb=duckdb)
 
         except RuntimeError as exc:
             print(f"[retain] {name}: skipped: {exc}", file=sys.stderr, flush=True)
@@ -321,6 +360,7 @@ def sweep(
     retiring: Sequence[tuple[Path, str]] = (),
     flush_every: float | None = None,
     streams: Sequence[tuple[Path, str]] = (),
+    duckdb: litelink.DuckDBPolicy | None = None,
 ) -> None:
     """One role's passes over every log this process maintains, until SIGTERM.
 
@@ -359,7 +399,7 @@ def sweep(
 
         if streams and time.monotonic() >= retain_at:
             retain_at = time.monotonic() + _retention.EVERY
-            retain(streams, dict(logs))
+            retain(streams, dict(logs), duckdb=duckdb)
 
         for name, log in logs:
             if time.monotonic() < due[name]:
@@ -463,7 +503,52 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--role", choices=list(ROLES), required=True)
     parser.add_argument("--every", type=float, required=True)
     parser.add_argument("--flush-every", type=float, default=None)
+    for name in (
+        "default-memory-mib",
+        "default-threads",
+        "retention-memory-mib",
+        "retention-threads",
+        "retention-spill-mib",
+    ):
+        parser.add_argument(f"--duckdb-{name}", type=int)
+
+    parser.add_argument("--duckdb-spill-dir", type=Path)
     args = parser.parse_args(argv)
+    # Validate flags at the same boundary as in-process declarations.
+    plan = Maintain(
+        duckdb_default_memory_mib=args.duckdb_default_memory_mib,
+        duckdb_default_threads=args.duckdb_default_threads,
+        duckdb_retention_memory_mib=args.duckdb_retention_memory_mib,
+        duckdb_retention_threads=args.duckdb_retention_threads,
+        duckdb_retention_spill_mib=args.duckdb_retention_spill_mib,
+        duckdb_spill_root=args.duckdb_spill_dir,
+    )
+    if plan.duckdb_default_memory_mib is not None:
+        assert plan.duckdb_default_threads is not None
+        litelink.bound_default_connection(
+            litelink.DuckDBPolicy(
+                plan.duckdb_default_memory_mib, plan.duckdb_default_threads
+            )
+        )
+
+    if args.duckdb_spill_dir is not None:
+        _spill.prepare(args.duckdb_spill_dir)
+
+    duckdb = None
+    if plan.duckdb_retention_memory_mib is not None:
+        assert plan.duckdb_retention_threads is not None
+        spill = None
+        if plan.duckdb_retention_spill_mib is not None:
+            spill = litelink.Spill(
+                args.duckdb_spill_dir, plan.duckdb_retention_spill_mib
+            )
+
+        duckdb = litelink.DuckDBPolicy(
+            plan.duckdb_retention_memory_mib,
+            plan.duckdb_retention_threads,
+            spill=spill,
+            memory_cache=False,
+        )
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
@@ -508,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
                 [(Path(root), name) for root, name in args.retire],
                 args.flush_every,
                 [(Path(home), name) for home, name in args.stream],
+                duckdb,
             )
 
         on_exit(opened, args.role, args.flush_every)
@@ -543,6 +629,7 @@ class Supervisor:
         "_retiring",
         "_role",
         "_streams",
+        "_spill",
         "_stopped",
         "_targets",
         "_watch",
@@ -556,6 +643,7 @@ class Supervisor:
         retiring: Sequence[tuple[Path, str]] = (),
         streams: Sequence[tuple[Path, str]] = (),
         env: Mapping[str, str | None] | None = None,
+        spill: Path | None = None,
     ) -> None:
         self._ready_file: Path | None = None
         self._targets = list(targets)
@@ -566,6 +654,7 @@ class Supervisor:
         self._streams = list(streams)
         self._names = f"{role}: " + ", ".join(sorted(name for _root, name in targets))
         self._plan = plan
+        self._spill = spill
         self._role = role
         self._process: subprocess.Popen[bytes] | None = None
         self._stopped: subprocess.Popen[bytes] | None = None
@@ -611,6 +700,20 @@ class Supervisor:
         argv += ["--role", self._role, "--every", str(self._plan.every(self._role))]
         if self._plan.flush_every is not None and self._role in FLUSHED:
             argv += ["--flush-every", str(self._plan.flush_every)]
+
+        for name in (
+            "duckdb_default_memory_mib",
+            "duckdb_default_threads",
+            "duckdb_retention_memory_mib",
+            "duckdb_retention_threads",
+            "duckdb_retention_spill_mib",
+        ):
+            value = getattr(self._plan, name)
+            if value is not None:
+                argv += ["--" + name.replace("_", "-"), str(value)]
+
+        if self._spill is not None:
+            argv += ["--duckdb-spill-dir", str(self._spill)]
 
         return argv
 

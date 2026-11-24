@@ -56,16 +56,16 @@ streamcast.StreamHandle(name="", *, log=None, owns_log=False, schema=None,
     max_inbound=65_536, max_in_flight=64, max_message_bytes=None, replicate=False)
 streamcast.StreamHandle.open(stream, *, initialization="open_existing") -> StreamHandle
 
-streamcast.StreamHandle.migrate(name="", *, root, schema, ...)  # a new log, a new schema
+streamcast.StreamHandle.migrate(name="", *, root, schema, duckdb=None, ...)  # a new log, a new schema
 streamcast.StreamHandle.restore(name="", *, root, published,    # on a box without the log
                           s3_options=None, schema=None, sort_by=None, config=None,
                           replica_reserve=None, published_reserve=None,
-                          revive=False, ...)
-streamcast.StreamHandle.retire(name="", *, root, s3_options=None)  # for good; returns the
+                          revive=False, duckdb=None, ...)
+streamcast.StreamHandle.retire(name="", *, root, s3_options=None, duckdb=None)  # for good; returns the
                                                             # record: .at, .end_offset
-streamcast.StreamHandle.retain(name="", *, root, max_age, s3_options=None)  # timedelta or None
+streamcast.StreamHandle.retain(name="", *, root, max_age, s3_options=None, duckdb=None)  # timedelta or None
 streamcast.StreamHandle.ingest(name="", source, *, root, s3_options=None,  # Arrow, in bulk;
-                         publish=True, flush=None)                    # -> (start, end)
+                         publish=True, flush=None, duckdb=None)                    # -> (start, end)
 ```
 
 `name` is where it is served: `"trades"` at `/trades`, `""` at `/`. It is the name's only
@@ -75,6 +75,17 @@ home — routing and the greeting both read it, so they cannot disagree.
 `storage: Storage`. Both reject unknown fields. `StreamSpec` validates the JSON
 Schema whitelist, sort columns and stream policy. `Storage.root` must be absolute
 after expanding `~`; `s3_options` is excluded from serialization, repr and equality.
+
+`Storage.duckdb` optionally takes a `litelink.DuckDBPolicy` (or its mapping form)
+for every reader opened on behalf of the stream, including recovery and schema
+migration. Its `Spill.directory` is a base: each stream owns `<base>/<name>`,
+creates its parents and clears leftovers when opening. Creation failures are
+logged; serving continues, and a query needing spill may then fail. A replay
+that exhausts its pool or spill budget closes that subscription with WebSocket
+1011 `stream unavailable`; other subscriptions and publishers keep running.
+Without a policy the DuckDB defaults are unchanged. These limits bound DuckDB's
+buffer pool, not Arrow allocations or total process RSS.
+The offline APIs' legacy unnamed stream uses the reserved `<base>/.root` leaf.
 
 **`StreamHandle.open` owns the log it opens.** `initialization="open_existing"`
 is the default and refuses an absent local log. `"create_if_absent"` creates only
@@ -447,6 +458,24 @@ indexed read of one row when there is nothing to seal, compaction rewrites files
 published table's cleanup lists a bucket. **`clean` is the only role that deletes buffer
 rows confirmed published** (litelink's `evict("buffer")`): `seal` and `publish` move data
 and delete nothing, so a maintainer without it grows `buffer.db` without bound.
+
+`Maintain` also takes flat optional DuckDB fields:
+`duckdb_default_memory_mib` / `duckdb_default_threads` bind the interpreter's
+module default at broker startup and at every child's startup;
+`duckdb_retention_memory_mib` / `duckdb_retention_threads` cap retention's
+short-lived query roots, with the external file cache disabled.
+Each pair must be supplied together (memory at least 16 MiB, threads at least 1).
+`duckdb_retention_spill_mib` (at least 1) requires the retention pair and an
+absolute `Path` in `duckdb_spill_root`. Every role and maintenance group,
+including dedicated groups, receives these fields as flat child flags. Changing
+a field replaces its children. Each child clears its own spill directory before
+opening logs; the supervisor removes obsolete directories after child reaping.
+The supervisor creates the root and sweeps unnamed leftovers on its first pass.
+A failed floor-discovery query leaves metadata unchanged. A failed recount after
+truncation keeps the pending operation and unknown row count for the next pass.
+Broker startup cannot bound a caller's already-open lent handles;
+applications needing the default bound before constructing them should call
+`litelink.bound_default_connection` first.
 
 **`flush_every` (60 s) is the RPO without WAL replication, and how far the published table
 trails the writer.** A plain `seal()` cuts only at litelink's `target_seal_size` and a plain

@@ -10,18 +10,26 @@ passes run at chosen times, rather than waiting out a window.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
+import json
 import os
+import subprocess
+import sys
 import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import duckdb
 import litelink
+import pyarrow as pa
 import pytest
+from litelink import _handle
 
 import streamcast
-from streamcast import _maintain, _metadata, _retention, _stream, _versions
+from streamcast import _maintain, _metadata, _published, _retention, _stream, _versions
 from streamcast._maintain import Maintain, Supervisor
 
 SCHEMA: dict[str, Any] = {
@@ -524,9 +532,9 @@ class TestRaces:
             assert stream.log is not None
             real = _retention._newest  # noqa: SLF001
 
-            def widened(live, s3_options):  # noqa: ANN001, ANN202
+            def widened(live, s3_options, *, duckdb=None):  # noqa: ANN001, ANN202
                 streamcast.StreamHandle.retain("t", root=tmp_path, max_age=None)
-                return real(live, s3_options)
+                return real(live, s3_options, duckdb=duckdb)
 
             monkeypatch.setattr(_retention, "_newest", widened)
             with pytest.raises(_versions.Conflict):
@@ -711,3 +719,390 @@ class TestThePublishedCopy:
             assert read.column("litelink_offset").to_pylist() == [4, 5, 6]
         finally:
             await stream.aclose()
+
+
+class RootProbe:
+    """Forward real DuckDB calls while observing each root's lifetime."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def close(self):
+        self.connection.close()
+        self.closed = True
+
+
+def probe_roots(monkeypatch):
+    roots = []
+    factory = litelink.duckdb_connection
+
+    def connect(*args, **kwargs):
+        root = RootProbe(factory(*args, **kwargs))
+        assert root.execute(
+            "SELECT current_setting('memory_limit'), current_setting('threads'), "
+            "current_setting('enable_external_file_cache')"
+        ).fetchone() == ("64.0 MiB", 1, False)
+        assert duckdb.sql("SELECT current_setting('memory_limit')").fetchone() == (
+            "16.0 MiB",
+        )
+        roots.append(root)
+        return root
+
+    monkeypatch.setattr(litelink, "duckdb_connection", connect)
+    monkeypatch.setattr(_handle, "duckdb_connection", connect)
+    return roots
+
+
+def child_passes(monkeypatch, root, live_name, after, *, memory=64, spill=None):
+    # No wall-clock wait: a completed sweep is the deterministic pass boundary.
+    count = 0
+
+    def completed(_delay):
+        nonlocal count
+        count += 1
+        after(count)
+        if count == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(_retention, "EVERY", 0)
+    monkeypatch.setattr(_maintain.time, "sleep", completed)
+    monkeypatch.setattr(_maintain.signal, "signal", lambda *_: None)
+    args = [
+        "--log",
+        str(home(root)),
+        live_name,
+        "--stream",
+        str(home(root)),
+        "t",
+        "--role",
+        "clean-published",
+        "--every",
+        "0.01",
+        "--duckdb-default-memory-mib",
+        "16",
+        "--duckdb-default-threads",
+        "1",
+        "--duckdb-retention-memory-mib",
+        str(memory),
+        "--duckdb-retention-threads",
+        "1",
+    ]
+    if spill is not None:
+        args.extend(
+            ["--duckdb-spill-dir", str(spill), "--duckdb-retention-spill-mib", "128"]
+        )
+
+    old = duckdb.default_connection()
+    try:
+        assert _maintain.main(args) == 0
+    finally:
+        duckdb.set_default_connection(old)
+
+
+@pytest.mark.parametrize("retired", [False, True])
+async def test_clean_published_retention_roots_capped_and_closed(
+    tmp_path, monkeypatch, retired
+):
+    stream = await one_log(tmp_path, monkeypatch)
+    await stream.aclose()
+    live_name = "t"
+    if retired:
+        migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
+        assert migrated.log is not None
+        live_name = migrated.log.name
+        await migrated.aclose()
+
+    roots = probe_roots(monkeypatch)
+    monkeypatch.setattr(_retention, "now_us", lambda: T0)
+
+    def after(count):
+        assert len(roots) == count
+        assert all(root.closed for root in roots)
+        for root in roots:
+            with pytest.raises(duckdb.ConnectionException):
+                root.execute("SELECT 1")
+
+    child_passes(monkeypatch, tmp_path, live_name, after)
+
+
+async def test_retention_over_cap_leaves_metadata(tmp_path, monkeypatch, capsys):
+    stream = await one_log(tmp_path, monkeypatch)
+    await stream.aclose()
+    version, before, _manifest = _versions.load(home(tmp_path), "t")
+    real_query = litelink.LogHandle.query_once
+    failures = []
+
+    def allocate(log, _sql, *, duckdb, **kwargs):
+        # Force an actual pool allocation beyond the configured cap; the
+        # production retention entry point and query_once cleanup still run.
+        try:
+            return real_query(
+                log,
+                "CREATE TABLE heavy AS SELECT i, repeat('x', 100) FROM range(300000) t(i)",
+                duckdb=duckdb,
+                **kwargs,
+            )
+        except Exception as exc:
+            failures.append(exc)
+            raise
+
+    monkeypatch.setattr(litelink.LogHandle, "query_once", allocate)
+    monkeypatch.setattr(_retention, "now_us", lambda: NOW)
+
+    def after(count):
+        assert len(failures) == count
+        assert isinstance(failures[-1], duckdb.OutOfMemoryException)
+        current, metadata, _manifest = _versions.load(home(tmp_path), "t")
+        assert current == version
+        assert metadata == before
+
+    child_passes(monkeypatch, tmp_path, "t", after, memory=16)
+    assert capsys.readouterr().err.count("retrying next pass") == 3
+
+
+async def test_child_clears_spill_dir_at_start(tmp_path, monkeypatch):
+    stream = await one_log(tmp_path, monkeypatch)
+    await stream.aclose()
+    leaf = tmp_path / "missing" / "parents" / "maintain" / "clean-published-key"
+    leaf.mkdir(parents=True)
+    (leaf / "leftover").touch()
+    roots = probe_roots(monkeypatch)
+    real_open = litelink.open
+
+    def open_log(*args, **kwargs):
+        assert leaf.is_dir()
+        assert list(leaf.iterdir()) == []
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(litelink, "open", open_log)
+    monkeypatch.setattr(_retention, "now_us", lambda: T0)
+
+    def after(count):
+        assert len(roots) == count
+        assert all(root.closed for root in roots)
+
+    child_passes(monkeypatch, tmp_path, "t", after, spill=leaf)
+    leaf.rmdir()
+    # The child itself must also create the entire missing path.
+    leaf.parent.rmdir()
+    roots.clear()
+    child_passes(monkeypatch, tmp_path, "t", after, spill=leaf)
+
+
+async def test_child_spill_create_failure_is_nonfatal(tmp_path, monkeypatch, caplog):
+    stream = await one_log(tmp_path, monkeypatch)
+    await stream.aclose()
+    leaf = tmp_path / "missing" / "maintain" / "child"
+    real_mkdir = Path.mkdir
+
+    def mkdir(path, *args, **kwargs):
+        if path == leaf:
+            raise PermissionError("read-only child spill directory")
+
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(_retention, "now_us", lambda: T0)
+    roots = probe_roots(monkeypatch)
+
+    def after(count):
+        assert len(roots) == count
+        assert all(root.closed for root in roots)
+
+    child_passes(monkeypatch, tmp_path, "t", after, spill=leaf)
+    assert "could not create DuckDB spill directory" in caplog.text
+    assert not leaf.exists()
+
+
+async def test_finish_recount_failure_then_retry_completes(
+    tmp_path, monkeypatch, capsys
+):
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=tmp_path, config=litelink.LogConfig(target_compact_size=256)
+            ),
+        ),
+        initialization="create_if_absent",
+    )
+    await write(stream, monkeypatch, T0, [0, 1, 2])
+    await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
+    stream.ensure_metadata()
+    await stream.aclose()
+    migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
+    streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
+    assert migrated.log is not None
+    live_name = migrated.log.name
+    _retention.run(home(tmp_path), "t", migrated.log, now=NOW)
+    await migrated.aclose()
+    roots = probe_roots(monkeypatch)
+    real_open = _published.Table.open
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("recount unavailable")
+
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(_published.Table, "open", fail_once)
+    monkeypatch.setattr(_retention, "now_us", lambda: NOW + GRACE)
+
+    def after(count):
+        _version, metadata, manifest = _versions.load(home(tmp_path), "t")
+        assert metadata is not None
+        assert manifest is not None
+        if count == 1:
+            assert metadata.pending is not None
+            assert _retention._count(manifest, "t") is None
+        else:
+            assert metadata.pending is None
+            assert _retention._count(manifest, "t") == 3
+
+        assert all(root.closed for root in roots)
+
+    child_passes(monkeypatch, tmp_path, live_name, after)
+    assert attempts >= 2
+    assert len(roots) >= 2
+    assert "recount unavailable" in capsys.readouterr().err
+
+
+def rss_child():
+    """Run just the clean-published child in a fresh Linux interpreter."""
+    samples = []
+    retained_roots = []
+    handles = []
+    real_sweep = _maintain.sweep
+    trim = ctypes.CDLL(None).malloc_trim
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+
+    def sample():
+        gc.collect()
+        pa.default_memory_pool().release_unused()
+        trim(0)
+        status = Path("/proc/self/status").read_text()
+        return (
+            int(
+                next(
+                    line.split()[1]
+                    for line in status.splitlines()
+                    if line.startswith("RssAnon:")
+                )
+            )
+            * 1024
+        )
+
+    def sweep(*args, **kwargs):
+        handles.extend(log for _name, log in args[0])
+        # Extension code and allocator arenas are fixed interpreter costs.
+        # Warm them before the idle baseline, with no retained root.
+        litelink.duckdb_connection(
+            s3_options=litelink.S3Options().resolved(),
+            duckdb=litelink.DuckDBPolicy(64, 1, memory_cache=False),
+        ).close()
+        samples.append(sample())
+        return real_sweep(*args, **kwargs)
+
+    def completed(_delay):
+        samples.append(sample())
+        retained_roots.append(
+            sum(log._reader._connection is not None for log in handles)
+        )
+        if len(samples) == 5:
+            raise KeyboardInterrupt
+
+    with (
+        patch.object(_retention, "EVERY", 0),
+        patch.object(_retention, "now_us", lambda: T0),
+        patch.object(_maintain, "sweep", sweep),
+        patch.object(_maintain.time, "sleep", completed),
+    ):
+        assert _maintain.main(sys.argv[1:]) == 0
+
+    print(json.dumps({"rss": samples, "retained_roots": retained_roots}), flush=True)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RssAnon probe")
+async def test_clean_published_rss_returns_after_passes(tmp_path, monkeypatch):
+    args = []
+    schema = {
+        "type": "object",
+        "properties": {"payload": {"type": "string"}},
+        "required": ["payload"],
+    }
+    for index in range(5):
+        name = f"t{index}"
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name=name, schema=schema),
+                storage=streamcast.Storage(root=tmp_path),
+            ),
+            initialization="create_if_absent",
+        )
+        with monkeypatch.context() as patched:
+            patched.setattr(_stream.time, "time_ns", lambda: T0 * 1000)
+            await stream.send({"payload": "published history"})
+            assert stream.log is not None
+            stream.log.seal(flush=True)
+            stream.log.publish(flush=True)
+            await stream.send_many(
+                [{"payload": "x" * (20 * 1024)} for _ in range(1000)]
+            )
+            stream.log.seal(flush=True)
+            stream.log.publish(flush=True)
+
+        stream.ensure_metadata()
+        await stream.aclose()
+        streamcast.StreamHandle.retain(
+            name, root=tmp_path, max_age=timedelta(days=index % 3 + 1)
+        )
+        args.extend(["--log", str(_metadata.home(tmp_path, name)), name])
+        args.extend(["--stream", str(_metadata.home(tmp_path, name)), name])
+
+    args.extend(
+        [
+            "--role",
+            "clean-published",
+            "--every",
+            "0.01",
+            "--duckdb-default-memory-mib",
+            "16",
+            "--duckdb-default-threads",
+            "1",
+            "--duckdb-retention-memory-mib",
+            "64",
+            "--duckdb-retention-threads",
+            "1",
+        ]
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tests.test_retention import rss_child; rss_child()",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=40,
+        check=True,
+    )
+    measured = json.loads(result.stdout.splitlines()[-1])
+    samples = measured["rss"]
+    print(f"RssAnon bytes (baseline, four idle troughs): {samples}")
+    # The RSS allowance covers allocator and extension overhead. A leaked
+    # reader can remain below it on this fixture, so also check the resource
+    # itself at the same idle boundary, before main closes the handles.
+    assert measured["retained_roots"] == [0, 0, 0, 0], measured
+    assert len(samples) == 5
+    baseline, *troughs = samples
+    assert max(troughs) <= baseline + 64 * 1024 * 1024, samples

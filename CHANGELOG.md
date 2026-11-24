@@ -7,6 +7,37 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- Optional `Storage.duckdb` reader budgets, accepting a `litelink.DuckDBPolicy`
+  or its mapping form, forwarded through stream creation, open, restoration,
+  migration and offline operations. Spill uses a separate directory per stream;
+  owners create all parents and clear leftovers at start. Failed creation is
+  logged without preventing serving. A replay over its allocation or spill
+  budget closes that subscription with 1011 `stream unavailable`.
+- Flat `Maintain.duckdb_default_*`, `duckdb_retention_*` and
+  `duckdb_spill_root` fields, validated at declaration and carried through child
+  planning to flat command-line flags, including dedicated maintenance groups.
+  Policy changes replace the children. Broker and child startup bind the
+  configured module default; retention uses short-lived query roots with the
+  external file cache disabled. Obsolete spill directories are removed after
+  the owning child is reaped.
+
+### Changed
+
+- Require litelink `>=0.15,<0.16` for creation-time DuckDB policies, bounded
+  module defaults and scoped `query_once`. Applications capping streamcast's
+  minor must opt into 0.29; applications pinning litelink must allow 0.15.
+  Existing call shapes remain supported, and DuckDB defaults remain unchanged
+  without a policy. No wire or durable-format change. DuckDB pool limits do
+  not cap Arrow allocations or total process RSS.
+- Replay benchmark, 10,000 rows on the same machine: cold/warm 240.4/74.1 ms
+  before, 247.0/74.1 ms after with defaults, and 241.7/76.1 ms with a 64 MiB,
+  one-thread reader. This measures the small replay fixture, not large-query
+  spill throughput.
+
 ## 0.28.4 — 2026-11-24
 
 ### Changed

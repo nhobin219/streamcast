@@ -449,3 +449,155 @@ async def test_close_during_offline_reaps_before_worker_finalizes(owner, monkeyp
     release.set()
     await task
     assert child.stops == 1 and owner.closed
+
+
+def policy_generation(name):
+    result = generation(name)
+    result.stream._s3 = None
+    return result
+
+
+def duckdb_plan(tmp_path, **changes):
+    return Maintain(
+        duckdb_default_memory_mib=16,
+        duckdb_default_threads=1,
+        duckdb_retention_memory_mib=64,
+        duckdb_retention_threads=2,
+        duckdb_retention_spill_mib=128,
+        duckdb_spill_root=tmp_path / "missing" / "maintain",
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("dedicated", [False, True])
+def test_spawn_argv_carries_duckdb_policy(tmp_path, dedicated):
+    plan = duckdb_plan(tmp_path)
+    generations = {"a": policy_generation("a"), "b": policy_generation("b")}
+    generations["a"].maintenance = Maintenance(
+        dedicated=dedicated, **({"seal_every": 7} if dedicated else {})
+    )
+    specs = desired(generations, plan)
+    assert len(specs) == (10 if dedicated else 5)
+    routes = {name: g.stream for name, g in generations.items()}
+    directories = set()
+    for spec in specs:
+        child = runtime.build(spec, routes)
+        assert isinstance(child, Supervisor)
+        argv = child._spawn_argv()
+        for flag, expected in (
+            ("default-memory-mib", "16"),
+            ("default-threads", "1"),
+            ("retention-memory-mib", "64"),
+            ("retention-threads", "2"),
+            ("retention-spill-mib", "128"),
+            ("spill-dir", str(spec.spill)),
+        ):
+            assert argv[argv.index("--duckdb-" + flag) + 1] == expected
+
+        assert spec.spill is not None and spec.role is not None
+        assert spec.spill.parent == plan.duckdb_spill_root
+        assert spec.spill.name.startswith(spec.role + "-")
+        directories.add(spec.spill)
+        if spec.role == "clean-published":
+            assert "--stream" in argv
+
+    assert len(directories) == len(specs)
+    assert not plan.duckdb_spill_root.exists()  # planning stays pure
+
+
+async def test_policy_change_replaces_children(owner, tmp_path, monkeypatch):
+    owner.config = replace(owner.config, maintain=duckdb_plan(tmp_path))
+    owner.generations = {"a": policy_generation("a")}
+    built = []
+
+    def build(spec, routes):
+        child = Child()
+        built.append(child)
+        return child
+
+    monkeypatch.setattr(runtime, "build", build)
+    await owner.reconcile_children()
+    old = dict(owner.running)
+    owner.config = replace(
+        owner.config,
+        maintain=replace(owner.config.maintain, duckdb_retention_threads=3),
+    )
+    await owner.reconcile_children()
+    assert len(owner.running) == 5
+    assert old.keys().isdisjoint(owner.running)
+    assert all(child.closed for child in old.values())
+    assert len(built) == 10
+
+
+async def test_supervisor_removes_unnamed_spill_dirs(owner, tmp_path, monkeypatch):
+    plan = duckdb_plan(tmp_path)
+    root = plan.duckdb_spill_root
+    root.mkdir(parents=True)
+    stale = root / "obsolete"
+    stale.mkdir()
+    (stale / "spill").touch()
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    await owner.reconcile_children()
+    assert root.is_dir() and not stale.exists()
+    # An unnamed directory created after startup may still have a live owner.
+    stale.mkdir()
+    await owner.reconcile_children()
+    assert stale.exists()
+
+
+@pytest.mark.parametrize("failed_create", [False, True])
+async def test_supervisor_creates_spill_root_parents(
+    owner, tmp_path, monkeypatch, caplog, failed_create
+):
+    plan = duckdb_plan(tmp_path)
+    root = plan.duckdb_spill_root
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    if failed_create:
+        real_mkdir = Path.mkdir
+
+        def mkdir(path, *args, **kwargs):
+            if path == root:
+                raise PermissionError("read-only spill root")
+
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+
+    await owner.reconcile_children()
+    assert len(owner.running) == 5
+    assert root.is_dir() is not failed_create
+    if failed_create:
+        assert "could not create DuckDB spill directory" in caplog.text
+
+
+async def test_spill_dir_removed_only_after_reap(owner, tmp_path, monkeypatch):
+    plan = duckdb_plan(tmp_path)
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    await owner.reconcile_children()
+    spec, child = next(iter(owner.running.items()))
+    spec.spill.mkdir(parents=True)
+    (spec.spill / "in-flight").touch()
+    child.release.clear()
+    owner.generations = {}
+    task = asyncio.create_task(owner.reconcile_children())
+    await child.entered.wait()
+    assert spec.spill.is_dir() and not child.closed
+    child.release.set()
+    await task
+    assert child.closed and not spec.spill.exists()
+
+    # A failed watcher replaced at the same identity must retain its leaf.
+    owner.generations = {"a": policy_generation("a")}
+    await owner.reconcile_children()
+    spec, child = next(iter(owner.running.items()))
+    spec.spill.mkdir(parents=True)
+    (spec.spill / "same-spec").touch()
+    child.failed = True
+    await owner.reconcile_children()
+    assert child.closed and (spec.spill / "same-spec").exists()
