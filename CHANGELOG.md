@@ -7,6 +7,18 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Changed
+
+- Require litelink `>=0.14.3,<0.15` for published-file summaries bounded to
+  active publish work (litelink#228, litelink#229) and otherwise unused
+  S3/FileIO clients released on shared-cache eviction without waiting for
+  cyclic garbage collection (litelink#227).
+  Applications that pin an older litelink must raise their pin. No API, wire
+  or durable-format change. These fixes do not establish an RSS plateau or
+  cap the retained buffer during publication stalls (#249, #251).
+
 ## 0.28.3 — 2026-11-24
 
 ### Fixed
