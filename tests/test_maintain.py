@@ -16,11 +16,13 @@ import inspect
 import sqlite3
 import time
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import litelink
 import pyarrow as pa
 import pytest
+from litelink._table import DataFile
 
 import streamcast
 from streamcast import _maintain
@@ -203,6 +205,57 @@ def _a_log(root, name):
     return litelink.new(
         root, name, schema=pa.schema([pa.field("n", pa.int64(), nullable=False)])
     )
+
+
+def test_publish_role_retains_no_published_history(tmp_path):
+    """Completed history belongs on disk, not on the long-lived role handle."""
+    with litelink.new(
+        tmp_path,
+        "history",
+        schema=SCHEMA,
+        config=litelink.LogConfig(
+            target_seal_size=4096,
+            target_compact_size=1,
+            staging_retention=timedelta(0),
+        ),
+    ) as log:
+        for cycle in range(12):
+            log.extend(rows(cycle * 2, cycle * 2 + 2))
+            ROLES["seal"](log, True)
+            ROLES["publish"](log, True)
+            log.evict("buffer")
+            log.evict("staging")
+            assert log.published_through() == (cycle + 1) * 2
+            assert log.published_files() == cycle + 1
+            assert log.staging_files() == 0
+
+            # Follow collaborators and containers, without entering module
+            # globals. Moving a history cache to another collaborator must
+            # still fail. Staging may cache its last one-file view; completed
+            # publication must not add history-sized retained summaries.
+            pending: list[object] = [log]
+            seen: set[int] = set()
+            retained: list[DataFile] = []
+            while pending:
+                value = pending.pop()
+                if id(value) in seen:
+                    continue
+
+                seen.add(id(value))
+                if isinstance(value, DataFile):
+                    retained.append(value)
+                elif isinstance(value, dict):
+                    pending.extend(value.values())
+                elif isinstance(value, (list, tuple, set, frozenset)):
+                    pending.extend(value)
+                elif type(value).__module__.startswith("litelink.") and hasattr(
+                    value, "__dict__"
+                ):
+                    pending.extend(vars(value).values())
+
+            assert len(retained) <= 1, (
+                f"cycle {cycle}: {len(retained)} retained summaries"
+            )
 
 
 class TestLifecycle:
