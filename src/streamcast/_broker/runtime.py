@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import re
 import time
 import uuid
 from collections.abc import Coroutine
@@ -26,7 +27,7 @@ from streamcast._children import (
     warn_unreplicated,
 )
 from streamcast._errors import Unavailable
-from streamcast._maintain import Maintain, Supervisor, stop
+from streamcast._maintain import ROLES, Maintain, Supervisor, stop
 from streamcast._spec import Initialization, Maintenance, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
 from streamcast._tasks import thread
@@ -1070,11 +1071,17 @@ class BrokerRuntime:
                 plan = self.config.maintain
                 root = getattr(plan, "duckdb_spill_root", None)
                 if root is not None:
+                    root = root / _spill.MAINTAINERS
                     await thread(_spill.prepare, root, empty=False)
                     try:
                         leftovers = await thread(lambda root=root: list(root.iterdir()))
                         for directory in leftovers:
-                            if directory not in wanted_spill:
+                            role, _separator, key = directory.name.rpartition("-")
+                            if (
+                                role in ROLES
+                                and re.fullmatch(r"[0-9a-f]{20}", key) is not None
+                                and directory not in wanted_spill
+                            ):
                                 await thread(_spill.remove, directory)
 
                     except OSError:

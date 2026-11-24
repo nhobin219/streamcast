@@ -15,7 +15,7 @@ import pytest
 from websockets.exceptions import ConnectionClosedError
 
 import streamcast
-from streamcast import _metadata, _stream, _versions
+from streamcast import _metadata, _spill, _stream, _versions
 from streamcast._broker.runtime import BrokerRuntime
 
 SCHEMA = {"type": "object", "properties": {"i": {"type": "integer"}}, "required": ["i"]}
@@ -212,6 +212,26 @@ async def test_offline_operations_forward_policy(tmp_path, monkeypatch, operatio
     )
 
 
+async def test_spill_base_equal_storage_root_preserves_rows(tmp_path):
+    opened = streamcast.StreamHandle.open(
+        definition(tmp_path, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    policy = replace(POLICY, spill=litelink.Spill(tmp_path, 128))
+    reopened = streamcast.StreamHandle.open(
+        definition(tmp_path, policy=policy), initialization="create_if_absent"
+    )
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+        assert reopened.log.end_offset() == 4
+    finally:
+        await reopened.aclose()
+
+
 async def test_owner_creates_spill_parents_at_start(tmp_path):
     base = tmp_path / "missing" / "parents" / "broker"
     policy = litelink.DuckDBPolicy(16, 1, spill=litelink.Spill(base, 256))
@@ -219,7 +239,7 @@ async def test_owner_creates_spill_parents_at_start(tmp_path):
         definition(tmp_path / "data", policy=policy), initialization="create_if_absent"
     )
     try:
-        leaf = base / "t"
+        leaf = base / _spill.STREAMS / "t"
         assert leaf.is_dir()
         assert opened.log is not None
         assert opened.log.sql(
@@ -250,7 +270,7 @@ def test_legacy_root_spill_cannot_empty_base(tmp_path):
     policy = replace(POLICY, spill=litelink.Spill(base, 128))
     bound = _stream._stream_duckdb(policy, "")
     assert bound is not None and bound.spill is not None
-    assert bound.spill.directory == base / ".root"
+    assert bound.spill.directory == base / _spill.STREAMS / ".root"
     assert bound.spill.directory.is_dir()
     assert sibling.is_dir()
     for name in ("..", "../another-stream", str(tmp_path.absolute())):
@@ -267,7 +287,7 @@ async def test_spill_create_failure_does_not_stop_serving(
     real_mkdir = Path.mkdir
 
     def fail(path, *args, **kwargs):
-        if path == base / "t":
+        if path == base / _spill.STREAMS / "t":
             raise PermissionError("read-only spill directory")
 
         return real_mkdir(path, *args, **kwargs)

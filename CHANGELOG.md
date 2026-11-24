@@ -25,6 +25,16 @@ there was nothing to have changed from. Everything above it is ordinary.
   external file cache disabled. Obsolete spill directories are removed after
   the owning child is reaped.
 
+### Fixed
+
+- Local published-table retention does not resolve S3 credentials, with or
+  without a DuckDB policy. Discovery and post-truncate recount both use the
+  table URI to decide whether to install an S3 secret.
+- Spill cleanup uses reserved, separate stream and maintainer namespaces,
+  preserving stream homes when a spill base is also the storage root.
+  Startup sweeps only recognized maintainer spill keys; unrelated entries
+  remain untouched.
+
 ### Changed
 
 - Require litelink `>=0.15,<0.16` for creation-time DuckDB policies, bounded

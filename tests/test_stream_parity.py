@@ -56,6 +56,13 @@ STORAGE_OBSERVE = {
     "replicate": lambda h: h.replicate,
     "config": lambda h: h.log.config,
     "s3_options": lambda h: h._s3,
+    "duckdb": lambda h: (
+        h.log.sql(
+            "SELECT current_setting('memory_limit') AS memory, current_setting('threads') AS threads"
+        )
+        .read_all()
+        .to_pylist()[0]
+    ),
 }
 
 
@@ -80,6 +87,7 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
     )
     options = litelink.S3Options(access_key="test-key", secret_key="test-secret")
     table_config = litelink.LogConfig(target_seal_size=4096)
+    policy = litelink.DuckDBPolicy(64, 1)
     handles = []
     definitions = []
     for path in ("static", "managed"):
@@ -89,6 +97,7 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
             replicate=True,
             config=table_config,
             s3_options=options,
+            duckdb=policy,
         )
         full = Stream(spec=spec, storage=storage)
         definitions.append(full)
@@ -148,6 +157,10 @@ async def test_every_field_static_and_managed(config, tmp_path, initialization):
                 assert STORAGE_OBSERVE["replicate"](handle) is True
                 assert STORAGE_OBSERVE["config"](handle) == table_config
                 assert STORAGE_OBSERVE["s3_options"](handle) == options
+                assert STORAGE_OBSERVE["duckdb"](handle) == {
+                    "memory": "64.0 MiB",
+                    "threads": 1,
+                }
                 if initialization == "restore_published":
                     assert handle.log.scan(columns=["value"]).read_all().column(
                         "value"

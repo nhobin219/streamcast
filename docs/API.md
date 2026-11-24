@@ -78,14 +78,20 @@ after expanding `~`; `s3_options` is excluded from serialization, repr and equal
 
 `Storage.duckdb` optionally takes a `litelink.DuckDBPolicy` (or its mapping form)
 for every reader opened on behalf of the stream, including recovery and schema
-migration. Its `Spill.directory` is a base: each stream owns `<base>/<name>`,
-creates its parents and clears leftovers when opening. Creation failures are
+migration. Its `Spill.directory` is a base: each stream owns
+`<base>/.spill/streams/<name>`, creates its parents and clears leftovers when
+opening. The reserved namespace keeps spill separate from stream homes even
+when the base is the storage root. Creation failures are
 logged; serving continues, and a query needing spill may then fail. A replay
 that exhausts its pool or spill budget closes that subscription with WebSocket
 1011 `stream unavailable`; other subscriptions and publishers keep running.
 Without a policy the DuckDB defaults are unchanged. These limits bound DuckDB's
 buffer pool, not Arrow allocations or total process RSS.
-The offline APIs' legacy unnamed stream uses the reserved `<base>/.root` leaf.
+The offline APIs' legacy unnamed stream uses `<base>/.spill/streams/.root`.
+Stop the broker before calling offline `retain`, `ingest` or `retire` with the
+same spill base: those calls also clear that stream's leaf. Spill bases and
+namespaces must belong exclusively to their owners; do not alias them to data
+with symbolic links.
 
 **`StreamHandle.open` owns the log it opens.** `initialization="open_existing"`
 is the default and refuses an absent local log. `"create_if_absent"` creates only
@@ -470,7 +476,11 @@ absolute `Path` in `duckdb_spill_root`. Every role and maintenance group,
 including dedicated groups, receives these fields as flat child flags. Changing
 a field replaces its children. Each child clears its own spill directory before
 opening logs; the supervisor removes obsolete directories after child reaping.
-The supervisor creates the root and sweeps unnamed leftovers on its first pass.
+Child directories are `<duckdb_spill_root>/.spill/maintainers/<role>-<key>`.
+The supervisor creates that namespace and, on its first pass only, sweeps
+unwanted entries matching a known role and its 20-character hexadecimal key.
+Other entries are left alone. Give each broker an exclusive maintainer base;
+brokers sharing one could sweep each other's child directories.
 A failed floor-discovery query leaves metadata unchanged. A failed recount after
 truncation keeps the pending operation and unknown row count for the next pass.
 Broker startup cannot bound a caller's already-open lent handles;

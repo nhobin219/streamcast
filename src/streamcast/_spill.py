@@ -7,6 +7,10 @@ import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+# The leading dot is outside the stream NAME grammar. Separate owners even
+# when broker and maintenance bases are the same as the storage root.
+STREAMS = Path(".spill") / "streams"
+MAINTAINERS = Path(".spill") / "maintainers"
 
 
 def remove(directory: Path) -> None:

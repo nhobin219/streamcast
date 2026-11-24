@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from streamcast import BrokerConfig, Maintenance
+from streamcast import BrokerConfig, Maintenance, _spill
 from streamcast._broker import runtime
 from streamcast._children import ChildSpec, desired
 from streamcast._maintain import Maintain, Supervisor
@@ -495,7 +495,7 @@ def test_spawn_argv_carries_duckdb_policy(tmp_path, dedicated):
             assert argv[argv.index("--duckdb-" + flag) + 1] == expected
 
         assert spec.spill is not None and spec.role is not None
-        assert spec.spill.parent == plan.duckdb_spill_root
+        assert spec.spill.parent == plan.duckdb_spill_root / _spill.MAINTAINERS
         assert spec.spill.name.startswith(spec.role + "-")
         directories.add(spec.spill)
         if spec.role == "clean-published":
@@ -529,18 +529,47 @@ async def test_policy_change_replaces_children(owner, tmp_path, monkeypatch):
     assert len(built) == 10
 
 
+async def test_supervisor_sweep_preserves_nonspill_data(owner, tmp_path, monkeypatch):
+    plan = replace(duckdb_plan(tmp_path), duckdb_spill_root=tmp_path)
+    # Even a valid stream name shaped like a spill key remains durable data.
+    for name in ("t", "clean-published-" + "a" * 20):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "buffer.db").write_bytes(b"acknowledged rows")
+
+    (tmp_path / "metadata.json").write_text("durable")
+    owner.config = replace(owner.config, maintain=plan)
+    owner.generations = {"a": policy_generation("a")}
+    monkeypatch.setattr(runtime, "build", lambda *_: Child())
+    await owner.reconcile_children()
+    for name in ("t", "clean-published-" + "a" * 20):
+        assert (tmp_path / name / "buffer.db").read_bytes() == b"acknowledged rows"
+
+    assert (tmp_path / "metadata.json").read_text() == "durable"
+
+
 async def test_supervisor_removes_unnamed_spill_dirs(owner, tmp_path, monkeypatch):
     plan = duckdb_plan(tmp_path)
-    root = plan.duckdb_spill_root
+    root = plan.duckdb_spill_root / _spill.MAINTAINERS
     root.mkdir(parents=True)
-    stale = root / "obsolete"
+    stale = root / ("clean-published-" + "b" * 20)
     stale.mkdir()
     (stale / "spill").touch()
+    foreign = [
+        root / "notes",
+        root / "clean-published-not-a-key",
+        root / ("unknown-" + "a" * 20),
+    ]
+    for path in foreign:
+        path.mkdir()
+        (path / "keep").touch()
+
     owner.config = replace(owner.config, maintain=plan)
     owner.generations = {"a": policy_generation("a")}
     monkeypatch.setattr(runtime, "build", lambda *_: Child())
     await owner.reconcile_children()
     assert root.is_dir() and not stale.exists()
+    assert all((path / "keep").exists() for path in foreign)
     # An unnamed directory created after startup may still have a live owner.
     stale.mkdir()
     await owner.reconcile_children()
@@ -552,7 +581,7 @@ async def test_supervisor_creates_spill_root_parents(
     owner, tmp_path, monkeypatch, caplog, failed_create
 ):
     plan = duckdb_plan(tmp_path)
-    root = plan.duckdb_spill_root
+    root = plan.duckdb_spill_root / _spill.MAINTAINERS
     owner.config = replace(owner.config, maintain=plan)
     owner.generations = {"a": policy_generation("a")}
     monkeypatch.setattr(runtime, "build", lambda *_: Child())

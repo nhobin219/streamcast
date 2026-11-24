@@ -19,6 +19,7 @@ import sys
 import threading
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -916,6 +917,86 @@ async def test_child_spill_create_failure_is_nonfatal(tmp_path, monkeypatch, cap
     child_passes(monkeypatch, tmp_path, "t", after, spill=leaf)
     assert "could not create DuckDB spill directory" in caplog.text
     assert not leaf.exists()
+
+
+@pytest.mark.parametrize(
+    "published", ["s3://example/tables", "file:///local/tables", "/local/tables"]
+)
+def test_published_root_only_resolves_s3_for_remote_tables(monkeypatch, published):
+    options = litelink.S3Options(access_key="test-access", secret_key="test-secret")
+    policy = litelink.DuckDBPolicy(64, 1, memory_cache=False)
+    calls, closed = [], []
+    root = SimpleNamespace(close=lambda: closed.append(True))
+
+    def connect(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(litelink, "duckdb_connection", connect)
+    with _retention._published_root(published, options, policy) as opened:
+        assert opened is root and not closed
+
+    assert closed == [True]
+    assert calls == [
+        {
+            "s3_options": options.resolved() if published.startswith("s3://") else None,
+            "duckdb": policy,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "policy", [None, litelink.DuckDBPolicy(64, 1, memory_cache=False)]
+)
+async def test_local_published_retention_without_aws(tmp_path, monkeypatch, policy):
+    # Local tables must work even when no credential chain can resolve.
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_ARN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    stream = streamcast.StreamHandle.open(
+        streamcast.Stream(
+            spec=streamcast.StreamSpec(name="t", schema=SCHEMA),
+            storage=streamcast.Storage(
+                root=tmp_path, config=litelink.LogConfig(target_compact_size=256)
+            ),
+        ),
+        initialization="create_if_absent",
+    )
+    await write(stream, monkeypatch, T0, [0, 1, 2])
+    await write(stream, monkeypatch, T0 + 2 * DAY, [3, 4, 5])
+    stream.ensure_metadata()
+    await stream.aclose()
+    migrated = streamcast.StreamHandle.migrate("t", root=tmp_path, schema=WIDER)
+    streamcast.StreamHandle.retain("t", root=tmp_path, max_age=WINDOW)
+    try:
+        assert migrated.log is not None
+        begun = _retention.run(
+            home(tmp_path), "t", migrated.log, duckdb=policy, now=NOW
+        )
+        assert begun is not None and begun.pending is not None
+        assert begun.sealed_logs[0].start_offset == 4
+        done = _retention.run(
+            home(tmp_path), "t", migrated.log, duckdb=policy, now=NOW + GRACE
+        )
+        assert done is not None and done.pending is None
+        _version, _metadata, manifest = _versions.load(home(tmp_path), "t")
+        assert manifest is not None and _retention._count(manifest, "t") == 3
+        assert await offsets(tmp_path) == [4, 5, 6]
+    finally:
+        await migrated.aclose()
 
 
 async def test_finish_recount_failure_then_retry_completes(

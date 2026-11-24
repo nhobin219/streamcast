@@ -3174,9 +3174,9 @@ def _stream_duckdb(
     if name and NAME.fullmatch(name) is None:
         raise ValueError("invalid stream name")
 
-    # Legacy offline APIs also serve the unnamed root stream. Reserve a
-    # leaf outside the named-stream grammar so it cannot empty the base.
-    leaf = policy.spill.directory / (name or ".root")
+    # A spill base may also be the storage root: never clear a stream home.
+    # The unnamed offline stream has its own leaf in the reserved namespace.
+    leaf = policy.spill.directory / _spill.STREAMS / (name or ".root")
     _spill.prepare(leaf)
     return dataclasses.replace(
         policy, spill=dataclasses.replace(policy.spill, directory=leaf)

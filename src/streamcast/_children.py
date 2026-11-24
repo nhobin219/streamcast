@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 
+from streamcast import _spill
 from streamcast._maintain import FLUSHED, ROLES, Maintain, Supervisor
 from streamcast._process import environment
 from streamcast._replicate import Sidecar
@@ -131,6 +132,7 @@ def _maintenance(
             duckdb_spill_root=plans[index].duckdb_spill_root,
             spill=(
                 cast(Path, plans[index].duckdb_spill_root)
+                / _spill.MAINTAINERS
                 / f"{role}-{_spill_key(role, group)}"
             )
             if plans[index].duckdb_spill_root is not None

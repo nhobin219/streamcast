@@ -57,6 +57,7 @@ from streamcast import _log, _manifest, _metadata, _published, _versions
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from duckdb import DuckDBPyConnection
     from litelink import S3Options, WriteHandle
 
     from streamcast._metadata import Entry, Metadata
@@ -289,7 +290,9 @@ def finish(
             )
             if manifest is not None and straddled.name in _names(manifest):
                 # Counted again, as what the table holds now.
-                with _published_root(s3_options, duckdb) as connection:
+                with _published_root(
+                    straddled.published, s3_options, duckdb
+                ) as connection:
                     opened = _published.Table.open(
                         straddled.published,
                         straddled.name,
@@ -388,7 +391,7 @@ def _newest(
         if entry.published is None:
             return entry.start_offset  # nowhere to read it: kept
 
-        with _published_root(s3_options, duckdb) as connection:
+        with _published_root(entry.published, s3_options, duckdb) as connection:
             opened = _published.Table.open(
                 entry.published, entry.name, s3_options, shared=connection
             )
@@ -412,11 +415,21 @@ def _us(span: timedelta) -> int:
     return int(span.total_seconds() * 1_000_000)
 
 
-__all__ = ["EVERY", "GRACE", "begin", "finish", "floor", "run"]
+def _published_root(
+    published: str,
+    s3_options: S3Options | None,
+    duckdb: litelink.DuckDBPolicy | None,
+) -> contextlib.closing[DuckDBPyConnection]:
+    # A local table needs no S3 secret, even on a credential-less machine.
+    resolved = None
+    if published.startswith("s3://"):
+        resolved = (
+            litelink.S3Options() if s3_options is None else s3_options
+        ).resolved()
 
-
-def _published_root(s3_options: S3Options | None, duckdb: litelink.DuckDBPolicy | None):
-    resolved = (litelink.S3Options() if s3_options is None else s3_options).resolved()
     return contextlib.closing(
         litelink.duckdb_connection(s3_options=resolved, duckdb=duckdb)
     )
+
+
+__all__ = ["EVERY", "GRACE", "begin", "finish", "floor", "run"]
