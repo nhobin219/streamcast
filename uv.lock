@@ -742,7 +742,7 @@ wheels = [
 
 [[package]]
 name = "litelink"
-version = "0.14.3"
+version = "0.15.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
@@ -751,12 +751,12 @@ dependencies = [
     { name = "pyiceberg", extra = ["pyarrow", "sql-sqlite"] },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/30/1adbd3a16fae9408e6821e3923d3cab890ef8d344c733d3eb1f3ebd9f286/litelink-0.14.3.tar.gz", hash = "sha256:f40ac2345ea0a8b24e9e75ec3b882fae0aa4a9777ee344ee348c5f5fd4f8357d", size = 380173, upload-time = "2026-11-24T03:09:16.025Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/b47ade318915e8808a81836668b5836db7c5ca05e6b59f5fb019cd7b81ef/litelink-0.15.0.tar.gz", hash = "sha256:0e97543b05c006fd656a4c857eaa39dd7711bfce8263d3a10d8cf3a17e2fd1ae", size = 381964, upload-time = "2026-11-24T21:10:43.901Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/d8/6b2dedf568f9d3edc943a8a15bcaa9870a05ee31f63d9beae726ed30b30d/litelink-0.14.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:f2801f37a1a2edbb3da597ce03fb467a14f11a40eca1e0c231635587a3cd532b", size = 44259760, upload-time = "2026-11-24T03:09:02.313Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/ae/00131cfb0be31fbb37cdf91b1f52e097e856d0e037e400306a1c80569233/litelink-0.14.3-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:35fad350ada5ac32507d0c73478143480e7264aa7900c1cee8c96ed06781e26b", size = 46981352, upload-time = "2026-11-24T03:09:05.796Z" },
-    { url = "https://files.pythonhosted.org/packages/00/8e/56754b6fc21e3b4af9cc83f7d5f7ea95c5edfa70af3590c291088e551831/litelink-0.14.3-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:92097a89270f2aa675e3f8ed0129b8836919e9f16f118932b28eb17fa244a352", size = 56130362, upload-time = "2026-11-24T03:09:09.525Z" },
-    { url = "https://files.pythonhosted.org/packages/83/c9/3144654ff7095bd43656c37265673c5686c6a81d561285b8147c02eaf4f0/litelink-0.14.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fac4085a1a01d1cf554a0adc914e0cf976facaeafb73f4307eac9896fd0f1a56", size = 60028362, upload-time = "2026-11-24T03:09:13.53Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/5a/4f0aa5c5580999bf87619aad1e4c235ccce158ddc10a1a1bc078f83e5500/litelink-0.15.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:8290dd5917bf7d68b95c95766f1ee66e304bed96473110470983252cbbe91fdb", size = 44261081, upload-time = "2026-11-24T21:10:31.136Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/1d/05f33a6785f0af2c93aaea7f788766adaf4b2714f2ffcef4f4fbafaf1799/litelink-0.15.0-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:3420f262fbb243280724462baba7d0aaa47c9354f423191e7a8912338e6e635b", size = 46982675, upload-time = "2026-11-24T21:10:34.033Z" },
+    { url = "https://files.pythonhosted.org/packages/05/23/4b630da6beb06b121c78d3eb87a11cfdbcd27e49759ba7d64ce8a3ba7733/litelink-0.15.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:54db978347e30807ef528af561fbb804a42987082dadb2325b413e183b925821", size = 56131682, upload-time = "2026-11-24T21:10:37.955Z" },
+    { url = "https://files.pythonhosted.org/packages/03/29/7cad1f51463c4d385e3838dcc7b8d658fe68b9550b8014234404c30f22f3/litelink-0.15.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d441083a212cf6df258121ac39775edf7f26e8e4c95bd504bf08276e1d7ec8b1", size = 60029680, upload-time = "2026-11-24T21:10:41.481Z" },
 ]
 
 [[package]]
@@ -2094,7 +2094,7 @@ wheels = [
 
 [[package]]
 name = "streamcast"
-version = "0.28.4"
+version = "0.29.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -2131,7 +2131,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "litelink", specifier = ">=0.14.3,<0.15" },
+    { name = "litelink", specifier = ">=0.15,<0.16" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "opentelemetry-api", specifier = ">=1.30.0,<2" },
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.1" },

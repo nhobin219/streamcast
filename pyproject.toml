@@ -1,6 +1,6 @@
 [project]
 name = "streamcast"
-version = "0.28.4"
+version = "0.29.0"
 description = "A JSON WebSocket pubsub framework for structured data. Every message lands in an Iceberg table: no ETL, no second copy."
 readme = "README.md"
 authors = [
@@ -72,12 +72,13 @@ dependencies = [
     # for deletion-veto paths collected from manifests without allocating
     # whole-history Arrow file statistics (litelink#225); 0.14.3 for
     # published-file summaries bounded to active publish work (litelink#228)
-    # and evicted FileIO clients released without cyclic GC (litelink#227).
+    # and evicted FileIO clients released without cyclic GC (litelink#227);
+    # 0.15.0 for DuckDBPolicy, bound defaults and query_once scoped roots.
     #
     # Capped below the next minor: under 0.x a minor is litelink's breaking
     # release, and a published streamcast must not resolve one it was never
     # tested against. Each release moves the cap deliberately.
-    "litelink>=0.14.3,<0.15",
+    "litelink>=0.15,<0.16",
     # Serialisation is on the hot path in BOTH directions — every publish
     # encodes a row, every replayed row re-encodes one — which is what earns
     # a compiled dependency here. Measured against stdlib `json` on a

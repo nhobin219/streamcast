@@ -61,6 +61,7 @@ from streamcast import (
     _replicate,
     _schema,
     _snapshot,
+    _spill,
     _versions,
 )
 from streamcast._codec import compile_codec
@@ -97,7 +98,7 @@ from streamcast._protocol import (
     refusal,
 )
 from streamcast._published import BATCH, ReadCache
-from streamcast._spec import Initialization, Stream, StreamSpec
+from streamcast._spec import NAME, Initialization, Stream, StreamSpec
 from streamcast._stats import Stats
 from streamcast._subscriber import Subscriber
 from streamcast._tasks import join, thread
@@ -442,6 +443,7 @@ class StreamHandle:
 
         spec, storage = stream.spec, stream.storage
         name, schema = spec.name, spec.schema_
+        duckdb = _stream_duckdb(storage.duckdb, name)
         home = _metadata.home(storage.root, name)
         published = storage.published
         if published is not None and home != storage.root:
@@ -463,7 +465,7 @@ class StreamHandle:
         }
         options["replicate"] = storage.replicate
         retired = _open_retired(
-            home, name, schema=schema, s3_options=storage.s3_options
+            home, name, duckdb=duckdb, schema=schema, s3_options=storage.s3_options
         )
         if retired is not None:
             log, metadata = retired
@@ -475,6 +477,7 @@ class StreamHandle:
                 log, metadata = _open_or_create(
                     home,
                     name,
+                    duckdb=duckdb,
                     schema=schema,
                     sort_by=spec.sort_by,
                     config=storage.config,
@@ -489,6 +492,7 @@ class StreamHandle:
 
                 opened = cls._restore(
                     name,
+                    duckdb=duckdb,
                     root=storage.root,
                     published=storage.published,
                     schema=schema,
@@ -530,6 +534,7 @@ class StreamHandle:
         sort_by: Sequence[str] | None = None,
         config: object | None = None,
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
         max_replay: int | None = MAX_REPLAY,
         replay_published: bool = False,
         group_commit: bool = True,
@@ -595,8 +600,11 @@ class StreamHandle:
         metadata names it current. A publisher's next seq is the same on
         either side.
         """
+        duckdb = _stream_duckdb(duckdb, name)
         root = _metadata.home(root, name)
-        opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
+        opened = _open_retired(
+            root, name, duckdb=duckdb, schema=schema, s3_options=s3_options
+        )
         if opened is not None:
             # Retired, so served as it is: never migrated onto a new log, which
             # is what reviving does (`restore(..., revive=True)`).
@@ -617,7 +625,7 @@ class StreamHandle:
         retired = False
         try:
             old: LogHandle | None = litelink.open(
-                root, current, s3_options=_options(s3_options)
+                root, current, duckdb=duckdb, s3_options=_options(s3_options)
             )
         except litelink.RetiredError:
             # **A migration that died after retiring this log** and before
@@ -625,7 +633,11 @@ class StreamHandle:
             # — litelink refuses a writer on the log from here on — so this
             # run carries on from creating, or adopting, its successor.
             old = litelink.open(
-                root, current, read_only=True, s3_options=_options(s3_options)
+                root,
+                current,
+                duckdb=duckdb,
+                read_only=True,
+                s3_options=_options(s3_options),
             )
             retired = True
         except FileNotFoundError:
@@ -648,7 +660,9 @@ class StreamHandle:
                 # a retired log alone can also be an interrupted migration.
                 old.close()
                 old = None
-                opened = _open_retired(root, name, schema=schema, s3_options=s3_options)
+                opened = _open_retired(
+                    root, name, duckdb=duckdb, schema=schema, s3_options=s3_options
+                )
                 assert opened is not None
                 log, found = opened
                 return cls._read_only(
@@ -703,6 +717,7 @@ class StreamHandle:
                 old,
                 root,
                 metadata.next_name(),
+                duckdb=duckdb,
                 declared=declared,
                 sort_by=sort_by,
                 config=config,
@@ -788,6 +803,7 @@ class StreamHandle:
         root: str | PathLike[str],
         published: str,
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
@@ -863,8 +879,10 @@ class StreamHandle:
         handles append, and both publish to the same table. Stop the old
         producer first. See `docs/SPEC.md`.
         """
+        duckdb = _stream_duckdb(duckdb, name)
         return cls._restore(
             name,
+            duckdb=duckdb,
             root=root,
             published=published,
             s3_options=s3_options,
@@ -889,6 +907,7 @@ class StreamHandle:
         root: str | PathLike[str],
         published: str,
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
         binary: str | None = None,
         replay_published: bool = False,
         group_commit: bool = True,
@@ -955,6 +974,7 @@ class StreamHandle:
                 name,
                 root,
                 metadata,
+                duckdb=duckdb,
                 published=published,
                 config=config,
                 s3_options=s3_options,
@@ -989,6 +1009,7 @@ class StreamHandle:
         log = litelink.restore(
             root,
             name if current is None else current.name,
+            duckdb=duckdb,
             published=published,
             s3_options=s3_options,  # ty: ignore[invalid-argument-type]
             binary=binary,
@@ -1028,6 +1049,7 @@ class StreamHandle:
         *,
         root: str | PathLike[str],
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
     ) -> _metadata.Retirement:
         """Finish a stream for good: every row published, nothing more taken.
 
@@ -1058,6 +1080,7 @@ class StreamHandle:
         Safe to run again: an already retired stream returns its record, and
         a retire that died partway finishes.
         """
+        duckdb = _stream_duckdb(duckdb, name)
         root = _metadata.home(root, name)
         metadata = _metadata.load(root, name)
         if metadata is not None and metadata.retirement is not None:
@@ -1067,13 +1090,17 @@ class StreamHandle:
         finished = False
         try:
             log: LogHandle = litelink.open(
-                root, current, s3_options=_options(s3_options)
+                root, current, duckdb=duckdb, s3_options=_options(s3_options)
             )
         except litelink.RetiredError:
             # litelink retired it — a retire that died before the metadata
             # was written. Only the record is left to make.
             log = litelink.open(
-                root, current, read_only=True, s3_options=_options(s3_options)
+                root,
+                current,
+                duckdb=duckdb,
+                read_only=True,
+                s3_options=_options(s3_options),
             )
             finished = True
         except FileNotFoundError:
@@ -1137,6 +1164,7 @@ class StreamHandle:
         root: str | PathLike[str],
         max_age: timedelta | None,
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
     ) -> None:
         """Keep a stream's rows for `max_age`, or for good with None, the default.
 
@@ -1160,6 +1188,7 @@ class StreamHandle:
         from before this one ignores the setting, and one that rewrites the
         metadata drops it — set it again after running one.
         """
+        duckdb = _stream_duckdb(duckdb, name)
         if max_age is not None and max_age <= timedelta(0):
             msg = f"max_age={max_age}: a positive window, or None to keep everything"
             raise ValueError(msg)
@@ -1176,7 +1205,11 @@ class StreamHandle:
                 # Not served yet, so no metadata: what the broker would write.
                 try:
                     log = litelink.open(
-                        root, name, read_only=True, s3_options=_options(s3_options)
+                        root,
+                        name,
+                        duckdb=duckdb,
+                        read_only=True,
+                        s3_options=_options(s3_options),
                     )
                 except FileNotFoundError:
                     msg = f"there is no stream {name!r} at {root} to set retention on"
@@ -1219,6 +1252,7 @@ class StreamHandle:
         *,
         root: str | PathLike[str],
         s3_options: object | None = None,
+        duckdb: litelink.DuckDBPolicy | None = None,
         publish: bool = True,
         flush: bool | None = None,
     ) -> tuple[int, int] | None:
@@ -1265,6 +1299,7 @@ class StreamHandle:
 
         A retired stream raises `StreamRetired`: revive it first.
         """
+        duckdb = _stream_duckdb(duckdb, name)
         if source is None:
             msg = "ingest needs a source: a pyarrow Table or RecordBatchReader"
             raise TypeError(msg)
@@ -1277,7 +1312,7 @@ class StreamHandle:
 
         current = name if metadata is None else metadata.current.name
         try:
-            log = litelink.open(root, current, s3_options=s3_options)  # ty: ignore[invalid-argument-type]
+            log = litelink.open(root, current, duckdb=duckdb, s3_options=s3_options)  # ty: ignore[invalid-argument-type]
         except litelink.RetiredError:
             # Retired in litelink by a retire that died before the metadata
             # said so — rerunning `retire` finishes it, and reviving follows.
@@ -1353,6 +1388,7 @@ class StreamHandle:
         published: str,
         config: object | None,
         s3_options: object | None,
+        duckdb: litelink.DuckDBPolicy | None = None,
         max_replay: int | None,
         replay_published: bool,
         group_commit: bool,
@@ -1375,7 +1411,9 @@ class StreamHandle:
         if (Path(root) / successor).exists():
             # **A revive that died after creating the log** and before saving
             # the metadata: carried on from, if it is what that run made.
-            log = litelink.open(root, successor, s3_options=_options(s3_options))
+            log = litelink.open(
+                root, successor, duckdb=duckdb, s3_options=_options(s3_options)
+            )
             if (
                 log.end_offset() != retirement.end_offset
                 or _log.lowest(log) is not None
@@ -1392,6 +1430,7 @@ class StreamHandle:
             log = litelink.new(
                 root,
                 successor,
+                duckdb=duckdb,
                 schema=_log.with_system(declared),
                 sort_by=retirement.sort_by,
                 config=config,  # ty: ignore[invalid-argument-type]
@@ -2752,6 +2791,7 @@ def _open_retired(
     *,
     schema: Mapping[str, object],
     s3_options: object | None = None,
+    duckdb: litelink.DuckDBPolicy | None = None,
 ) -> tuple[LogHandle, _metadata.Metadata] | None:
     """The retired stream's log opened read-only, and its metadata — or None
     if the stream is not retired. The declared schema is checked as for a
@@ -2762,7 +2802,11 @@ def _open_retired(
 
     declared = _declaration(schema)
     log = litelink.open(
-        root, metadata.current.name, read_only=True, s3_options=_options(s3_options)
+        root,
+        metadata.current.name,
+        duckdb=duckdb,
+        read_only=True,
+        s3_options=_options(s3_options),
     )
     if list(_log.declared(log.schema)) != list(declared):
         found = list(_log.columns(log))
@@ -2789,6 +2833,7 @@ def _open_or_create(
     config: object | None,
     published: str | None,
     s3_options: object | None,
+    duckdb: litelink.DuckDBPolicy | None = None,
     prefix: str | None = None,
     create: bool = False,
 ) -> tuple[WriteHandle, _metadata.Metadata | None]:
@@ -2811,7 +2856,9 @@ def _open_or_create(
     metadata = _metadata.load(root, name)
     current = name if metadata is None else metadata.current.name
     try:
-        log = litelink.open(root, current, s3_options=_options(s3_options))
+        log = litelink.open(
+            root, current, duckdb=duckdb, s3_options=_options(s3_options)
+        )
     except litelink.RetiredError:
         if metadata is not None:
             raise
@@ -2820,7 +2867,11 @@ def _open_or_create(
         # lost its metadata after a migration or a retire. Its published copy
         # says, and adopted, it is what the next open reads.
         with litelink.open(
-            root, current, read_only=True, s3_options=_options(s3_options)
+            root,
+            current,
+            duckdb=duckdb,
+            read_only=True,
+            s3_options=_options(s3_options),
         ) as first:
             adopted = _metadata.recovered(name, first, _options(s3_options))
 
@@ -2882,6 +2933,7 @@ def _open_or_create(
         return litelink.new(
             root,
             name,
+            duckdb=duckdb,
             schema=_log.with_system(declared),
             sort_by=sort_by,
             config=config,  # ty: ignore[invalid-argument-type]
@@ -2978,6 +3030,7 @@ def _seal_and_succeed(
     sort_by: Sequence[str] | None,
     config: object | None,
     s3_options: object | None,
+    duckdb: litelink.DuckDBPolicy | None = None,
     retired: bool = False,
 ) -> tuple[WriteHandle, TierStatistics]:
     """Seal `old` for good, then create the log that follows it.
@@ -3018,6 +3071,7 @@ def _seal_and_succeed(
         created = litelink.new(
             root,
             name,
+            duckdb=duckdb,
             schema=_log.with_system(declared),
             sort_by=old.sort_by if sort_by is None else sort_by,
             config=old.config if config is None else config,  # ty: ignore[invalid-argument-type]
@@ -3034,7 +3088,9 @@ def _seal_and_succeed(
         # made and nothing has written to it; anything else is a log with
         # rows the metadata does not account for, which is not a decision to
         # make on the caller's behalf.
-        orphan = litelink.open(root, name, s3_options=_options(s3_options))
+        orphan = litelink.open(
+            root, name, duckdb=duckdb, s3_options=_options(s3_options)
+        )
         if (
             orphan.end_offset() == start
             and _log.lowest(orphan) is None
@@ -3106,4 +3162,22 @@ def _failed(
         gap=(committed, end) if end > committed else None,
         batch=batch,
         row=row,
+    )
+
+
+def _stream_duckdb(
+    policy: litelink.DuckDBPolicy | None, name: str
+) -> litelink.DuckDBPolicy | None:
+    if policy is None or policy.spill is None:
+        return policy
+
+    if name and NAME.fullmatch(name) is None:
+        raise ValueError("invalid stream name")
+
+    # A spill base may also be the storage root: never clear a stream home.
+    # The unnamed offline stream has its own leaf in the reserved namespace.
+    leaf = policy.spill.directory / _spill.STREAMS / (name or ".root")
+    _spill.prepare(leaf)
+    return dataclasses.replace(
+        policy, spill=dataclasses.replace(policy.spill, directory=leaf)
     )

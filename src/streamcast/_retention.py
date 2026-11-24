@@ -42,6 +42,7 @@ pass.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
 from datetime import timedelta
@@ -56,6 +57,7 @@ from streamcast import _log, _manifest, _metadata, _published, _versions
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from duckdb import DuckDBPyConnection
     from litelink import S3Options, WriteHandle
 
     from streamcast._metadata import Entry, Metadata
@@ -80,6 +82,7 @@ def run(
     live: WriteHandle,
     *,
     s3_options: S3Options | None = None,
+    duckdb: litelink.DuckDBPolicy | None = None,
     now: int | None = None,
 ) -> Metadata | None:
     """One pass: the second half if one is due, else the first if there is
@@ -99,6 +102,7 @@ def run(
             live,
             manifest=manifest,
             s3_options=s3_options,
+            duckdb=duckdb,
             now=at,
             expected=read,
         )
@@ -109,7 +113,7 @@ def run(
     return begin(
         home,
         metadata,
-        newest=_newest(live, s3_options),
+        newest=_newest(live, s3_options, duckdb=duckdb),
         manifest=manifest,
         s3_options=s3_options,
         now=at,
@@ -234,6 +238,7 @@ def finish(
     *,
     manifest: pa.Table | None = None,
     s3_options: S3Options | None = None,
+    duckdb: litelink.DuckDBPolicy | None = None,
     now: int,
     expected: object = _versions.UNCHECKED,
 ) -> Metadata | None:
@@ -285,13 +290,19 @@ def finish(
             )
             if manifest is not None and straddled.name in _names(manifest):
                 # Counted again, as what the table holds now.
-                opened = _published.Table.open(
-                    straddled.published, straddled.name, s3_options
-                )
-                try:
-                    count = opened.record_count
-                finally:
-                    opened.close()
+                with _published_root(
+                    straddled.published, s3_options, duckdb
+                ) as connection:
+                    opened = _published.Table.open(
+                        straddled.published,
+                        straddled.name,
+                        s3_options,
+                        shared=connection,
+                    )
+                    try:
+                        count = opened.record_count
+                    finally:
+                        opened.close()
 
                 recounted = _counted(manifest, straddled.name, count)
 
@@ -342,7 +353,10 @@ def _counted(manifest: pa.Table, name: str, count: int | None) -> pa.Table:
 
 
 def _newest(
-    live: WriteHandle, s3_options: S3Options | None
+    live: WriteHandle,
+    s3_options: S3Options | None,
+    *,
+    duckdb: litelink.DuckDBPolicy | None = None,
 ) -> Callable[[Entry, int], int | None]:
     """`floor`'s question, asked of the live log through its handle and of a
     retired log through its published table."""
@@ -358,10 +372,15 @@ def _newest(
             # it is newer than anything. Read first, every row the query does
             # not see is at or above it.
             end = live.end_offset()
-            table = live.sql(
+            sql = (
                 f'SELECT min("{_log.COLUMN}") AS first FROM log '
                 f'WHERE "{_log.STAMP}" > {int(cutoff)}'
-            ).read_all()
+            )
+            table = (
+                live.sql(sql).read_all()
+                if duckdb is None
+                else live.query_once(sql, duckdb=duckdb)
+            )
             first = table.column("first")[0].as_py()
             if first is None:
                 # Nothing newer: the floor is past every row the log held.
@@ -372,17 +391,20 @@ def _newest(
         if entry.published is None:
             return entry.start_offset  # nowhere to read it: kept
 
-        opened = _published.Table.open(entry.published, entry.name, s3_options)
-        try:
-            if _log.STAMP not in opened.schema.names:
-                return entry.start_offset
+        with _published_root(entry.published, s3_options, duckdb) as connection:
+            opened = _published.Table.open(
+                entry.published, entry.name, s3_options, shared=connection
+            )
+            try:
+                if _log.STAMP not in opened.schema.names:
+                    return entry.start_offset
 
-            row = opened._connection.execute(  # noqa: SLF001
-                f'SELECT min("{_log.COLUMN}") FROM {opened.relation()} '
-                f'WHERE "{_log.STAMP}" > {int(cutoff)}'
-            ).fetchone()
-        finally:
-            opened.close()
+                row = opened._connection.execute(  # noqa: SLF001
+                    f'SELECT min("{_log.COLUMN}") FROM {opened.relation()} '
+                    f'WHERE "{_log.STAMP}" > {int(cutoff)}'
+                ).fetchone()
+            finally:
+                opened.close()
 
         return None if row is None or row[0] is None else int(row[0])
 
@@ -391,6 +413,23 @@ def _newest(
 
 def _us(span: timedelta) -> int:
     return int(span.total_seconds() * 1_000_000)
+
+
+def _published_root(
+    published: str,
+    s3_options: S3Options | None,
+    duckdb: litelink.DuckDBPolicy | None,
+) -> contextlib.closing[DuckDBPyConnection]:
+    # A local table needs no S3 secret, even on a credential-less machine.
+    resolved = None
+    if published.startswith("s3://"):
+        resolved = (
+            litelink.S3Options() if s3_options is None else s3_options
+        ).resolved()
+
+    return contextlib.closing(
+        litelink.duckdb_connection(s3_options=resolved, duckdb=duckdb)
+    )
 
 
 __all__ = ["EVERY", "GRACE", "begin", "finish", "floor", "run"]

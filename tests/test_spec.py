@@ -232,6 +232,7 @@ def test_storage_defaults_absolute_root_and_expansion(tmp_path, monkeypatch):
         "published": None,
         "replicate": False,
         "config": None,
+        "duckdb": None,
     }
     assert Storage.model_validate(json.loads(storage.model_dump_json())) == storage
     for root in ["logs", ".", ""]:

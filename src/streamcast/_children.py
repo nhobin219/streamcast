@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
+from streamcast import _spill
 from streamcast._maintain import FLUSHED, ROLES, Maintain, Supervisor
 from streamcast._process import environment
 from streamcast._replicate import Sidecar
@@ -39,6 +41,13 @@ class ChildSpec:
     flush: float | None = None
     retiring: tuple[Target, ...] = ()
     streams: tuple[Target, ...] = ()
+    duckdb_default_memory_mib: int | None = None
+    duckdb_default_threads: int | None = None
+    duckdb_retention_memory_mib: int | None = None
+    duckdb_retention_threads: int | None = None
+    duckdb_retention_spill_mib: int | None = None
+    duckdb_spill_root: Path | None = None
+    spill: Path | None = None
 
 
 def desired(
@@ -115,6 +124,19 @@ def _maintenance(
             members=group,
             credentials=keys[index],
             every=plans[index].every(role),
+            duckdb_default_memory_mib=plans[index].duckdb_default_memory_mib,
+            duckdb_default_threads=plans[index].duckdb_default_threads,
+            duckdb_retention_memory_mib=plans[index].duckdb_retention_memory_mib,
+            duckdb_retention_threads=plans[index].duckdb_retention_threads,
+            duckdb_retention_spill_mib=plans[index].duckdb_retention_spill_mib,
+            duckdb_spill_root=plans[index].duckdb_spill_root,
+            spill=(
+                cast(Path, plans[index].duckdb_spill_root)
+                / _spill.MAINTAINERS
+                / f"{role}-{_spill_key(role, group)}"
+            )
+            if plans[index].duckdb_spill_root is not None
+            else None,
             flush=plans[index].flush_every if role in FLUSHED else None,
             retiring=tuple(sorted(retiring.get(index, ())))
             if role == "publish"
@@ -155,7 +177,15 @@ def build(spec: ChildSpec, routes: Mapping[str, StreamHandle]) -> Supervisor | S
     if spec.kind == "maintainer":
         assert spec.role is not None
         plan = replace(
-            Maintain(flush_every=spec.flush),
+            Maintain(
+                flush_every=spec.flush,
+                duckdb_default_memory_mib=spec.duckdb_default_memory_mib,
+                duckdb_default_threads=spec.duckdb_default_threads,
+                duckdb_retention_memory_mib=spec.duckdb_retention_memory_mib,
+                duckdb_retention_threads=spec.duckdb_retention_threads,
+                duckdb_retention_spill_mib=spec.duckdb_retention_spill_mib,
+                duckdb_spill_root=spec.duckdb_spill_root,
+            ),
             **{f"{spec.role.replace('-', '_')}_every": spec.every},
         )
         return Supervisor(
@@ -165,6 +195,7 @@ def build(spec: ChildSpec, routes: Mapping[str, StreamHandle]) -> Supervisor | S
             retiring=spec.retiring,
             streams=spec.streams,
             env=dict(spec.credentials),
+            spill=spec.spill,
         )
 
     logs = {
@@ -234,3 +265,8 @@ def _sidecars(routes: dict[str, StreamHandle], replicate: bool) -> list[Sidecar]
 
 def _credentials(stream: StreamHandle) -> Credentials:
     return tuple(sorted(environment(stream._s3).items()))  # noqa: SLF001
+
+
+def _spill_key(role: str, group: tuple[Target, ...]) -> str:
+    targets = repr((role, tuple((str(root), name) for root, name in sorted(group))))
+    return hashlib.sha256(targets.encode()).hexdigest()[:20]
