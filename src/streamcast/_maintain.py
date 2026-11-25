@@ -59,6 +59,7 @@ them.
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import asyncio
 import contextlib
@@ -69,13 +70,15 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Event, Lock, Thread, Timer
 from typing import TYPE_CHECKING, Final, Protocol
 
 import litelink
+import msgspec
 
-from streamcast import _metadata, _replicate, _retention, _spill
+from streamcast import _metadata, _plan, _replicate, _retention, _spill
 from streamcast._process import popen
 
 if TYPE_CHECKING:
@@ -269,7 +272,10 @@ ROLES: Final[dict[str, Callable[[litelink.WriteHandle, bool], None]]] = {
 """litelink's process split: one process per role, in pipeline order."""
 
 
-def finish_retiring(pending: Sequence[tuple[Path, str]]) -> list[tuple[Path, str]]:
+def finish_retiring(
+    pending: Sequence[tuple[Path, str]],
+    checkpoint: Callable[[], None] | None = None,
+) -> list[tuple[Path, str]]:
     """Retire, through litelink, the retired logs litelink does not know are.
 
     **A stream migrated before streamcast 0.10 left its old logs sealed but
@@ -288,6 +294,9 @@ def finish_retiring(pending: Sequence[tuple[Path, str]]) -> list[tuple[Path, str
 
     left = []
     for root, name in pending:
+        if checkpoint is not None:
+            checkpoint()
+
         try:
             with litelink.open(root, name) as log:
                 if log.config.wal_replication:
@@ -328,6 +337,7 @@ def retain(
     logs: dict[str, litelink.WriteHandle],
     *,
     duckdb: litelink.DuckDBPolicy | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> None:
     """One retention pass over each stream that has a window (`_retention`).
 
@@ -336,9 +346,17 @@ def retain(
     log is truncated through. A held claim is a pass skipped, not an error.
     """
     for home, name in streams:
+        if checkpoint is not None:
+            checkpoint()
+
         try:
             metadata = _metadata.load(home, name)
-            live = None if metadata is None else logs.get(metadata.live_log.name)
+            live = (
+                None
+                if metadata is None
+                else logs.get(str(home / metadata.live_log.name))
+                or logs.get(metadata.live_log.name)
+            )
             if live is not None:
                 _retention.run(home, name, live, duckdb=duckdb)
 
@@ -361,6 +379,7 @@ def sweep(
     flush_every: float | None = None,
     streams: Sequence[tuple[Path, str]] = (),
     duckdb: litelink.DuckDBPolicy | None = None,
+    follow: _Follow | None = None,
 ) -> None:
     """One role's passes over every log this process maintains, until SIGTERM.
 
@@ -393,15 +412,30 @@ def sweep(
         name: time.monotonic() + index * span for index, (name, _) in enumerate(logs)
     }
     while True:
+        if follow is not None:
+            follow.checkpoint()
+
         if pending and time.monotonic() >= retry_at:
             retry_at = time.monotonic() + every
-            pending = finish_retiring(pending)
+            pending = (
+                finish_retiring(pending, follow.checkpoint)
+                if follow is not None
+                else finish_retiring(pending)
+            )
 
         if streams and time.monotonic() >= retain_at:
             retain_at = time.monotonic() + _retention.EVERY
-            retain(streams, dict(logs), duckdb=duckdb)
+            retain(
+                streams,
+                dict(logs),
+                duckdb=duckdb,
+                checkpoint=follow.checkpoint if follow is not None else None,
+            )
 
         for name, log in logs:
+            if follow is not None:
+                follow.checkpoint()
+
             if time.monotonic() < due[name]:
                 continue
 
@@ -412,11 +446,15 @@ def sweep(
             try:
                 work(log, slot > flushed[name])
                 flushed[name] = slot
+                if follow is not None:
+                    follow.passed(name, None)
 
             except RuntimeError as exc:
                 # Another owner holds a claim over the range this pass wanted.
                 # Not worth dying over: it means the work is already being done.
                 print(f"[{role}] {name}: skipped: {exc}", file=sys.stderr, flush=True)
+                if follow is not None:
+                    follow.passed(name, str(exc))
 
             except Exception as exc:  # noqa: BLE001, PERF203
                 # Anything else — a lost commit race, a transient object-storage
@@ -429,6 +467,8 @@ def sweep(
                     file=sys.stderr,
                     flush=True,
                 )
+                if follow is not None:
+                    follow.passed(name, str(exc))
 
         # Once per loop, not once per log: N logs share one sleep rather than
         # each waiting behind the others.
@@ -481,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         nargs=2,
         metavar=("ROOT", "NAME"),
-        required=True,
+        default=[],
         dest="logs",
     )
     parser.add_argument(
@@ -501,7 +541,9 @@ def main(argv: list[str] | None = None) -> int:
         help="a stream whose retention this process applies (clean-published)",
     )
     parser.add_argument("--role", choices=list(ROLES), required=True)
-    parser.add_argument("--every", type=float, required=True)
+    parser.add_argument("--every", type=float)
+    parser.add_argument("--follow", type=Path)
+    parser.add_argument("--group")
     parser.add_argument("--flush-every", type=float, default=None)
     for name in (
         "default-memory-mib",
@@ -514,6 +556,31 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.add_argument("--duckdb-spill-dir", type=Path)
     args = parser.parse_args(argv)
+    if args.follow is not None:
+        if (
+            not args.group
+            or args.logs
+            or args.retire
+            or args.stream
+            or any(
+                getattr(args, name) is not None
+                for name in vars(args)
+                if name.startswith("duckdb_") or name in ("every", "flush_every")
+            )
+        ):
+            parser.error(
+                "--follow requires --group and takes settings only from the plan"
+            )
+
+        return _follow(args.follow, args.role, args.group, argv)
+
+    if not args.logs or args.every is None or args.group is not None:
+        parser.error("static maintenance requires --log and --every, without --group")
+
+    return _run(args)
+
+
+def _run(args: argparse.Namespace, follow: _Follow | None = None) -> int:
     # Validate flags at the same boundary as in-process declarations.
     plan = Maintain(
         duckdb_default_memory_mib=args.duckdb_default_memory_mib,
@@ -558,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, stop)
+    if follow is None:
+        signal.signal(signal.SIGTERM, stop)
 
     # `open`, never `new`: the server created these logs and is writing to
     # them. Opened one at a time and kept only if it works, so one unopenable
@@ -566,32 +634,48 @@ def main(argv: list[str] | None = None) -> int:
     # other log this process was given.
     with contextlib.ExitStack() as stack:
         opened: list[tuple[str, litelink.WriteHandle]] = []
-        for root, name in args.logs:
-            try:
-                opened.append(
-                    (name, stack.enter_context(litelink.open(Path(root), name)))
-                )
+        try:
+            for root, name in args.logs:
+                if follow is not None:
+                    follow.checkpoint()
 
-            except Exception as exc:  # noqa: BLE001, PERF203
+                try:
+                    opened.append(
+                        (
+                            str(Path(root) / name) if follow is not None else name,
+                            stack.enter_context(litelink.open(Path(root), name)),
+                        )
+                    )
+                    if follow is not None:
+                        follow.opened()
+
+                except Exception as exc:  # noqa: BLE001, PERF203
+                    print(
+                        f"[{args.role}] {name}: cannot open, not maintained: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if follow is not None:
+                        follow.passed(str(Path(root) / name), str(exc))
+
+            if not opened and follow is None:
+                # The supervisor must see a failed start rather than a silent idle loop.
                 print(
-                    f"[{args.role}] {name}: cannot open, not maintained: {exc}",
+                    f"[{args.role}] no logs could be opened",
                     file=sys.stderr,
                     flush=True,
                 )
 
-        if not opened:
-            # Every one failed, which is a condition the supervisor's backoff
-            # should see rather than a loop that sweeps nothing for ever.
-            print(f"[{args.role}] no logs could be opened", file=sys.stderr, flush=True)
+                return 1
 
-            return 1
+            ready = os.environ.get("STREAMCAST_MAINTAIN_READY")
+            if ready and len(opened) == len(args.logs):
+                Path(ready).write_text(str(os.getpid()))
 
-        ready = os.environ.get("STREAMCAST_MAINTAIN_READY")
-        if ready and len(opened) == len(args.logs):
-            Path(ready).write_text(str(os.getpid()))
+            if follow is not None:
+                follow.report()
 
-        with contextlib.suppress(KeyboardInterrupt):
-            sweep(
+            sweep_args = (
                 opened,
                 args.role,
                 args.every,
@@ -600,10 +684,213 @@ def main(argv: list[str] | None = None) -> int:
                 [(Path(home), name) for home, name in args.stream],
                 duckdb,
             )
+            if follow is None:
+                sweep(*sweep_args)
+            else:
+                sweep(*sweep_args, follow=follow)
 
-        on_exit(opened, args.role, args.flush_every)
+        except KeyboardInterrupt:
+            pass
+
+        finally:
+            on_exit(opened, args.role, args.flush_every)
 
     return 0
+
+
+# -- following a broker-owned plan -------------------------------------------
+
+
+def _reexec(argv: list[str] | None) -> None:
+    # Reconstruct the module invocation for console scripts as well as python -m.
+    args = sys.argv[2:] if argv is None else argv
+    os.execv(sys.executable, [sys.executable, "-m", "streamcast", "maintain", *args])
+
+
+def _read_follow_plan(run_dir: Path) -> tuple[_plan.Plan | None, str | None]:
+    try:
+        return _plan.read_plan(run_dir), None
+
+    except FileNotFoundError:
+        return None, "missing_plan"
+
+    except (OSError, ValueError, msgspec.DecodeError):
+        return None, "invalid_plan"
+
+
+@dataclass
+class _Follow:
+    run_dir: Path
+    role: str
+    group: str
+    plan: _plan.Plan
+    argv: list[str] | None
+    status: _plan.Status
+    changed: Event = field(default_factory=Event)
+    finished: Event = field(default_factory=Event)
+    mutex: Lock = field(default_factory=Lock)
+    deadline: Timer | None = None
+    terminating: bool = False
+
+    def report(self) -> None:
+        with self.mutex:
+            self.status.heartbeat_at = time.time()
+            _plan.write_status(self.run_dir, self.role, self.group, self.status)
+
+    def opened(self) -> None:
+        with self.mutex:
+            self.status.logs_open += 1
+
+    def passed(self, name: str, error: str | None) -> None:
+        with self.mutex:
+            previous = self.status.last_pass.get(name, _plan.Pass())
+            self.status.last_pass[name] = _plan.Pass(
+                time.time() if error is None else previous.ok_at, error
+            )
+
+    def change(self) -> None:
+        with self.mutex:
+            if self.changed.is_set() or self.terminating:
+                return
+
+            self.changed.set()
+            grace = _PUBLISH_GRACE if self.role == "publish" else _STOP_GRACE
+            self.deadline = Timer(grace, _reexec, (self.argv,))
+            self.deadline.daemon = True
+            self.deadline.start()
+
+    def checkpoint(self) -> None:
+        plan, _error = _read_follow_plan(self.run_dir)
+        if plan != self.plan:
+            self.change()
+            raise KeyboardInterrupt
+
+    def watch(self) -> None:
+        while not self.finished.wait(_POLL):
+            if self.terminating:
+                return
+
+            plan, _error = _read_follow_plan(self.run_dir)
+            if plan != self.plan and not self.changed.is_set():
+                self.change()
+                if not self.terminating:
+                    _thread.interrupt_main()
+
+            try:
+                self.report()
+            except OSError:
+                # A dead watcher must not leave an uninterruptible role behind.
+                self.change()
+                if not self.terminating:
+                    _thread.interrupt_main()
+
+                return
+
+
+def _follow_args(role: str, group: str, spec: _plan.RolePlan) -> argparse.Namespace:
+    # Validate with Maintain, the same boundary used by the static flags.
+    values = {
+        name: getattr(spec, name)
+        for name in Maintain.__dataclass_fields__
+        if name.startswith("duckdb_")
+    }
+    if spec.duckdb_spill_root is not None:
+        values["duckdb_spill_root"] = Path(spec.duckdb_spill_root)
+
+    policy = replace(
+        Maintain(flush_every=spec.flush_every, **values),
+        **{f"{role.replace('-', '_')}_every": spec.every},
+    )
+    spill = (
+        policy.duckdb_spill_root / _spill.MAINTAINERS / _plan.key(role, group)
+        if policy.duckdb_spill_root is not None
+        else None
+    )
+    return argparse.Namespace(
+        role=role,
+        logs=spec.logs,
+        retire=spec.retire,
+        stream=spec.streams,
+        every=spec.every,
+        flush_every=spec.flush_every,
+        duckdb_spill_dir=spill,
+        **{
+            name: value for name, value in values.items() if name != "duckdb_spill_root"
+        },
+    )
+
+
+def _follow(run_dir: Path, role: str, group: str, argv: list[str] | None) -> int:
+    name = _plan.key(role, group)
+    follow = None
+
+    def stop(*_: object) -> None:
+        if follow is not None:
+            follow.terminating = True
+            if follow.deadline is not None:
+                follow.deadline.cancel()
+
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        with _plan.role_lock(run_dir, role, group):
+            while True:
+                plan, error = _read_follow_plan(run_dir)
+                if plan is not None:
+                    if (plan.streamcast, plan.litelink) != _plan.versions():
+                        error = "version_mismatch"
+                    elif name not in plan.roles:
+                        error = "unknown_group"
+                    elif plan.state == "serving":
+                        args = _follow_args(role, group, plan.roles[name])
+                        follow = _Follow(
+                            run_dir,
+                            role,
+                            group,
+                            plan,
+                            argv,
+                            _plan.Status(plan.boot_id, plan.generation),
+                        )
+                        watcher = Thread(target=follow.watch, daemon=True)
+                        watcher.start()
+                        try:
+                            with contextlib.suppress(KeyboardInterrupt):
+                                _run(args, follow)
+                        finally:
+                            follow.finished.set()
+                            watcher.join()
+
+                        if follow.changed.is_set() and not follow.terminating:
+                            _reexec(argv)
+
+                        return 0
+
+                # No handles are open here. A fenced plan can be acknowledged;
+                # invalid versions and absent groups cannot masquerade as ready.
+                status = _plan.Status(
+                    boot_id=plan.boot_id if plan is not None else None,
+                    applied_generation=plan.generation
+                    if plan is not None and error is None
+                    else None,
+                    error=error,
+                    heartbeat_at=time.time(),
+                )
+                _plan.write_status(run_dir, role, group, status)
+                time.sleep(_POLL)
+
+    except BlockingIOError:
+        print(f"[{role}] role/group already running", file=sys.stderr, flush=True)
+        return 1
+
+    except KeyboardInterrupt:
+        return 0
+
+    finally:
+        if follow is not None and follow.deadline is not None:
+            follow.deadline.cancel()
+
+        signal.signal(signal.SIGTERM, previous)
 
 
 # -- the parent --------------------------------------------------------------
