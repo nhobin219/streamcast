@@ -102,6 +102,9 @@ dependencies = [
     "uvicorn>=0.54",
 ]
 
+[project.scripts]
+streamcast = "streamcast.__main__:main"
+
 [project.optional-dependencies]
 # The Postgres adapter for a CALLER's database (`PostgresStore`), where an
 # outbox and an inbox commit with the caller's own state. psycopg 3, for its
