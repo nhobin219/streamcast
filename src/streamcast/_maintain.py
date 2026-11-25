@@ -748,16 +748,17 @@ class _Follow:
                 time.time() if error is None else previous.ok_at, error
             )
 
-    def change(self) -> None:
+    def change(self) -> bool:
         with self.mutex:
             if self.changed.is_set() or self.terminating:
-                return
+                return False
 
             self.changed.set()
             grace = _PUBLISH_GRACE if self.role == "publish" else _STOP_GRACE
             self.deadline = Timer(grace, _reexec, (self.argv,))
             self.deadline.daemon = True
             self.deadline.start()
+            return True
 
     def checkpoint(self) -> None:
         plan, _error = _read_follow_plan(self.run_dir)
@@ -772,16 +773,14 @@ class _Follow:
 
             plan, _error = _read_follow_plan(self.run_dir)
             if plan != self.plan and not self.changed.is_set():
-                self.change()
-                if not self.terminating:
+                if self.change():
                     _thread.interrupt_main()
 
             try:
                 self.report()
             except OSError:
                 # A dead watcher must not leave an uninterruptible role behind.
-                self.change()
-                if not self.terminating:
+                if self.change():
                     _thread.interrupt_main()
 
                 return

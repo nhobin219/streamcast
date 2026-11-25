@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from streamcast import _spill
+from streamcast._broker.model import ExternalMaintain
 from streamcast._maintain import FLUSHED, ROLES, Maintain, Supervisor
 from streamcast._process import environment
 from streamcast._replicate import Sidecar
@@ -51,9 +52,12 @@ class ChildSpec:
 
 
 def desired(
-    generations: Mapping[str, Generation], defaults: bool | Maintain
+    generations: Mapping[str, Generation], defaults: bool | Maintain | ExternalMaintain
 ) -> set[ChildSpec]:
     """Plan without constructing children, touching files or spawning processes."""
+    if isinstance(defaults, ExternalMaintain):
+        return set()
+
     routes = {name: g.stream for name, g in sorted(generations.items())}
     return _maintenance(
         routes, defaults, {name: g.maintenance for name, g in generations.items()}

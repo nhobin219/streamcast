@@ -6,34 +6,27 @@ import argparse
 import asyncio
 import sqlite3
 import sys
-from contextlib import AsyncExitStack
 from pathlib import Path
 
 import uvicorn
 
-from streamcast._application import create_app, initialize_registry
+from streamcast._application import Opening, create_app, initialize_registry
 from streamcast._broker.registry import Registry
 from streamcast._config_file import ConfigurationError, ServiceConfig, load
-from streamcast._stream import StreamHandle
 
 
 async def serve(settings: ServiceConfig) -> None:
-    async with AsyncExitStack() as handles:
-        streams = []
-        for definition in settings.streams:
-            stream = StreamHandle.open(definition, initialization="open_existing")
-            handles.push_async_callback(stream.aclose)
-            streams.append(stream)
-
-        app = create_app(settings.broker, streams=streams)
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app, host=settings.host, port=settings.port, workers=1, lifespan="on"
-            )
+    app = create_app(
+        settings.broker, streams=[Opening(item) for item in settings.streams]
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app, host=settings.host, port=settings.port, workers=1, lifespan="on"
         )
-        await server.serve()
-        if not server.started:
-            raise RuntimeError("broker failed to start")
+    )
+    await server.serve()
+    if not server.started:
+        raise RuntimeError("broker failed to start")
 
 
 def init_registry(settings: ServiceConfig) -> None:

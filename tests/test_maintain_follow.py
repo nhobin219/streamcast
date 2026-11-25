@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import cast
 
 import litelink
@@ -19,6 +20,9 @@ import pytest
 from msgspec.structs import replace
 
 from streamcast import _maintain, _plan, _spill
+from streamcast._broker.model import ExternalMaintain
+from streamcast._external import External
+from streamcast._stream import StreamHandle
 
 
 class Reexec(BaseException):
@@ -468,3 +472,93 @@ def test_plan_settings_reach_role_work(run_dir, tmp_path, monkeypatch, fake_log)
     monkeypatch.setattr(_maintain, "sweep", sweep)
     assert _maintain.main(args(run_dir)) == 0
     assert calls == ["seal"]
+
+
+def test_follow_retain_finds_log_by_identical_path_string(
+    run_dir, monkeypatch, tmp_path
+):
+    home = tmp_path / "data" / "events"
+    handle = SimpleNamespace(
+        _s3=None,
+        log=SimpleNamespace(root=home, name="events"),
+        retirement=None,
+        retired=(),
+    )
+    external = External(
+        ExternalMaintain(_maintain.Maintain(), run_dir, {"default": None}), "boot"
+    )
+    roles = external.plan_roles({"events": cast(StreamHandle, handle)}, {})
+    _plan.write_plan(run_dir, plan(roles=roles))
+    opened = object()
+    calls = []
+
+    @contextlib.contextmanager
+    def opening(root, name):
+        assert (root, name) == (home, "events")
+        yield opened
+
+    def retention(root, name, live, **kwargs):
+        calls.append((root, name, live))
+        terminate()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("retention did not find the followed live log")
+
+    monkeypatch.setattr(litelink, "open", opening)
+    monkeypatch.setattr(
+        _maintain._metadata,
+        "load",
+        lambda *args: SimpleNamespace(live_log=SimpleNamespace(name="events")),
+    )
+    monkeypatch.setattr(_maintain._retention, "run", retention)
+    monkeypatch.setitem(_maintain.ROLES, "clean-published", forbidden)
+    assert _maintain.main(args(run_dir, role="clean-published")) == 0
+    assert calls == [(home, "events", opened)]
+
+
+def test_watcher_does_not_interrupt_twice_when_checkpoint_wins(run_dir, monkeypatch):
+    current = plan()
+    _plan.write_plan(run_dir, replace(current, generation=2))
+    follow = _maintain._Follow(run_dir, "seal", "default", current, [], _plan.Status())
+    interrupts = []
+    armed = []
+
+    class Changed(Event):
+        def __init__(self):
+            self.value = False
+            self.checks = 0
+
+        def is_set(self):
+            self.checks += 1
+            if self.checks == 1:
+                # The watcher has observed false, but the checkpoint wins
+                # before change() takes its mutex.
+                with pytest.raises(KeyboardInterrupt):
+                    follow.checkpoint()
+
+                return False
+
+            return self.value
+
+        def set(self):
+            self.value = True
+
+    class Finished(Event):
+        def wait(self, timeout=None):
+            if armed:
+                return True
+
+            armed.append(True)
+            return False
+
+    changed = Changed()
+    follow.changed = changed
+    follow.finished = Finished()
+    monkeypatch.setattr(_maintain, "Timer", Deadline)
+    monkeypatch.setattr(
+        _maintain._thread, "interrupt_main", lambda: interrupts.append(True)
+    )
+    follow.watch()
+    assert changed.value
+    assert follow.deadline is not None
+    assert interrupts == []

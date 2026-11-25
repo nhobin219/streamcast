@@ -10,14 +10,24 @@ contract.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from fastapi import FastAPI
 
 from streamcast._broker.api import application
-from streamcast._broker.model import BrokerConfig
+from streamcast._broker.model import BrokerConfig, ExternalMaintain
 from streamcast._broker.registry import Registry
+from streamcast._spec import Stream
 from streamcast._stream import StreamHandle
+
+
+@dataclass(frozen=True)
+class Opening:
+    """A definition whose storage is opened by the runtime after ownership."""
+
+    stream: Stream
+    open: Callable[[], StreamHandle] | None = None
 
 
 def initialize_registry(config: BrokerConfig) -> None:
@@ -31,7 +41,7 @@ def initialize_registry(config: BrokerConfig) -> None:
 def create_app(
     config: BrokerConfig | None = None,
     *,
-    streams: StreamHandle | Iterable[StreamHandle] = (),
+    streams: StreamHandle | Opening | Iterable[StreamHandle | Opening] = (),
 ) -> FastAPI:
     """Build the broker application, without opening storage or sockets.
 
@@ -40,8 +50,13 @@ def create_app(
     Static streams cannot be reconfigured through HTTP. Registry-backed dynamic
     streams use the same runtime, admission, connection and shutdown paths.
     """
-    chosen = (streams,) if isinstance(streams, StreamHandle) else tuple(streams)
-    names = [stream.name for stream in chosen]
+    chosen = (
+        (streams,) if isinstance(streams, (StreamHandle, Opening)) else tuple(streams)
+    )
+    names = [
+        item.name if isinstance(item, StreamHandle) else item.stream.spec.name
+        for item in chosen
+    ]
     if len(set(names)) != len(names):
         raise ValueError("two streams are both named the same")
 
@@ -49,10 +64,19 @@ def create_app(
         raise ValueError("create_app needs streams or a registry")
 
     settings = config or BrokerConfig()
+    if isinstance(settings.maintain, ExternalMaintain) and any(
+        isinstance(item, StreamHandle) for item in chosen
+    ):
+        raise ValueError("an already-open stream cannot be fenced by the role barrier")
+
+    limits = [
+        item._max_message_bytes
+        if isinstance(item, StreamHandle)
+        else item.stream.spec.max_message_bytes
+        for item in chosen
+    ]
     if any(
-        stream._max_message_bytes is not None
-        and stream._max_message_bytes > settings.transport_max_bytes
-        for stream in chosen
+        limit is not None and limit > settings.transport_max_bytes for limit in limits
     ):
         raise ValueError("max_message_bytes exceeds transport_max_bytes")
 

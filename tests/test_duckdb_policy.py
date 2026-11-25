@@ -73,7 +73,7 @@ def test_maintain_rejects_bad_duckdb_fields(fields):
 def test_brokerconfig_takes_maintain_with_duckdb_fields():
     plan = streamcast.Maintain(duckdb_default_memory_mib=16, duckdb_default_threads=1)
     assert streamcast.BrokerConfig(maintain=plan).maintain is plan
-    with pytest.raises(ValueError, match="bool or Maintain"):
+    with pytest.raises(ValueError, match="bool, Maintain or ExternalMaintain"):
         streamcast.BrokerConfig(maintain={"duckdb_default_memory_mib": 16})  # ty: ignore[invalid-argument-type]
 
 
