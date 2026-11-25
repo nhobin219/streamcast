@@ -144,6 +144,15 @@ def application(config: BrokerConfig, streams=()) -> FastAPI:
 
         return value
 
+    @app.get("/livez")
+    async def livez():
+        return {"status": "live"}
+
+    @app.get("/readyz")
+    async def readyz():
+        runtime()
+        return {"status": "ready"}
+
     @app.get(CONTROL)
     async def capabilities(request: Request):
         principal = await authorize(config, request.scope, "control.read", "*")
