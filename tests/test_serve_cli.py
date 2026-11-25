@@ -22,6 +22,7 @@ from streamcast import (
     create_app,
 )
 from streamcast.__main__ import main
+from streamcast._application import Opening
 from streamcast._broker import runtime
 from streamcast._broker.registry import Registry
 
@@ -97,11 +98,17 @@ def test_serve_config_round_trips_to_broker_config(tmp_path):
 
 async def test_serve_open_existing_never_creates(tmp_path, monkeypatch):
     settings = _config_file.load(config_file(tmp_path))
-    monkeypatch.setattr(
-        _serve.uvicorn,
-        "Server",
-        lambda config: pytest.fail("missing storage reached the socket server"),
-    )
+
+    class Startup:
+        def __init__(self, config):
+            self.config = config
+            self.started = False
+
+        async def serve(self):
+            async with self.config.app.router.lifespan_context(self.config.app):
+                pytest.fail("missing storage completed startup")
+
+    monkeypatch.setattr(_serve.uvicorn, "Server", Startup)
     with pytest.raises(FileNotFoundError):
         await _serve.serve(settings)
 
@@ -302,3 +309,39 @@ def test_http_probe_uses_health_route_and_timeout(monkeypatch):
     ]
     Response.status = 503
     assert main(["probe", "ready", "--url", "http://localhost:8765"]) == 1
+
+
+async def test_serve_opens_through_runtime_not_before_app(tmp_path, monkeypatch):
+    settings = _config_file.load(config_file(tmp_path))
+    handle = StreamHandle.open(settings.streams[0], initialization="create_if_absent")
+    await handle.aclose()
+    calls = []
+    original_app = _serve.create_app
+    original_open = StreamHandle.open
+
+    def app(config, *, streams):
+        assert calls == []
+        assert all(isinstance(item, Opening) for item in streams)
+        calls.append("app")
+        return original_app(config, streams=streams)
+
+    def opening(stream, **kwargs):
+        assert calls == ["app", "server"]
+        calls.append("open")
+        return original_open(stream, **kwargs)
+
+    class Server:
+        def __init__(self, config):
+            assert calls == ["app"]
+            calls.append("server")
+            self.config, self.started = config, True
+
+        async def serve(self):
+            async with self.config.app.router.lifespan_context(self.config.app):
+                assert calls == ["app", "server", "open"]
+
+    monkeypatch.setattr(_serve, "create_app", app)
+    monkeypatch.setattr(StreamHandle, "open", opening)
+    monkeypatch.setattr(_serve.uvicorn, "Server", Server)
+    await _serve.serve(settings)
+    assert calls == ["app", "server", "open"]

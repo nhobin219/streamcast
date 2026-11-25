@@ -10,6 +10,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
+from litelink import S3Options
+
 from streamcast._limits import (
     MAX_MESSAGE_BYTES,
     SUBSCRIBER_YIELD_EVERY,
@@ -85,6 +87,29 @@ class PublicAccess:
 
 
 @dataclass(frozen=True)
+class ExternalMaintain:
+    """Maintenance performed by role processes following a shared plan."""
+
+    policy: Maintain
+    run_dir: Path
+    groups: Mapping[str, S3Options | None] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy, Maintain) or not self.groups:
+            raise ValueError("external maintenance needs a policy and groups")
+
+        if any(
+            NAME.fullmatch(name) is None
+            or (options is not None and not isinstance(options, S3Options))
+            for name, options in self.groups.items()
+        ):
+            raise ValueError("invalid maintenance group")
+
+        object.__setattr__(self, "run_dir", Path(self.run_dir))
+        object.__setattr__(self, "groups", MappingProxyType(dict(self.groups)))
+
+
+@dataclass(frozen=True)
 class BrokerConfig:
     broker_id: str = "static"
     registry: Path | None = None
@@ -101,7 +126,7 @@ class BrokerConfig:
     readiness_timeout: float = 30.0
     readiness_every: float = 0.25
     subscriber_yield_every: int = SUBSCRIBER_YIELD_EVERY
-    maintain: bool | Maintain = True
+    maintain: bool | Maintain | ExternalMaintain = True
     stats: bool | str = True
 
     def __post_init__(self) -> None:
@@ -158,8 +183,8 @@ class BrokerConfig:
         if type(self.max_dedicated) is not int or self.max_dedicated < 0:
             raise ValueError("nonnegative integer max_dedicated required")
 
-        if not isinstance(self.maintain, (bool, Maintain)):
-            raise ValueError("maintain must be a bool or Maintain")
+        if not isinstance(self.maintain, (bool, Maintain, ExternalMaintain)):
+            raise ValueError("maintain must be a bool, Maintain or ExternalMaintain")
 
         if self.registry is not None and self.maintain is False:
             raise ValueError("managed streams require maintenance")

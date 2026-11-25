@@ -11,13 +11,19 @@ import uuid
 from collections.abc import Coroutine
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, cast, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import litelink
 from pydantic import ValidationError
 
 from streamcast import _log, _metadata, _spill
-from streamcast._broker.model import NAME, BrokerConfig, CreationAuthorization, Fault
+from streamcast._broker.model import (
+    NAME,
+    BrokerConfig,
+    CreationAuthorization,
+    ExternalMaintain,
+    Fault,
+)
 from streamcast._broker.registry import Lock, Registry, dumps
 from streamcast._broker.transitions import storage, with_replica
 from streamcast._children import (
@@ -27,10 +33,15 @@ from streamcast._children import (
     warn_unreplicated,
 )
 from streamcast._errors import Unavailable
+from streamcast._external import External
+from streamcast._inspect import startup_report
 from streamcast._maintain import ROLES, Maintain, Supervisor, stop
 from streamcast._spec import Initialization, Maintenance, Storage, Stream, StreamSpec
 from streamcast._stream import StreamHandle
-from streamcast._tasks import thread
+from streamcast._tasks import join, thread
+
+if TYPE_CHECKING:
+    from streamcast._application import Opening
 
 logger = logging.getLogger(__name__)
 LIVE = {"maintenance"}
@@ -94,10 +105,18 @@ class BrokerRuntime:
         self.controls: set[asyncio.Task] = set()
         self.static: dict[str, StreamHandle] = {}
         self.ready_directory = None
+        self.external = (
+            External(config.maintain, self.boot_id)
+            if isinstance(config.maintain, ExternalMaintain)
+            else None
+        )
 
     @classmethod
     async def open(cls, config: BrokerConfig, *, streams=()) -> BrokerRuntime:
         plan = config.maintain
+        if isinstance(plan, ExternalMaintain):
+            plan = plan.policy
+
         if isinstance(plan, Maintain) and plan.duckdb_default_memory_mib is not None:
             assert plan.duckdb_default_threads is not None
             litelink.bound_default_connection(
@@ -113,7 +132,20 @@ class BrokerRuntime:
         )
         self = cls(config, registry)
         try:
-            self.static = {stream.name: stream for stream in streams}
+            static_names = {
+                item.name if isinstance(item, StreamHandle) else item.stream.spec.name
+                for item in streams
+            }
+            if self.external is not None and any(
+                isinstance(item, StreamHandle) for item in streams
+            ):
+                raise ValueError(
+                    "an already-open stream cannot be fenced by the role barrier"
+                )
+
+            self.static = {
+                item.name: item for item in streams if isinstance(item, StreamHandle)
+            }
             self.ready_directory = TemporaryDirectory(prefix="streamcast-ready-")
             self.records, self.collection = await thread(registry.load)
             self.high_water = await thread(registry.high_water)
@@ -131,7 +163,7 @@ class BrokerRuntime:
                         spec.clear()
                         spec.update(normalized)
 
-            if self.static.keys() & self.records.keys():
+            if static_names & self.records.keys():
                 raise ValueError("static and managed stream names overlap")
 
             # Hold canonical ownership even for stopped definitions. An
@@ -139,6 +171,18 @@ class BrokerRuntime:
             for record in self.records.values():
                 await self.claim(record)
                 self.observe(record["name"], "unknown")
+
+            for item in streams:
+                if not isinstance(item, StreamHandle):
+                    await thread(self.claim_definition, item.stream)
+                    if self.external is not None:
+                        self.external.validate(item.stream)
+
+            if self.external is not None:
+                for record in self.records.values():
+                    self.validate_external(record)
+
+                await self.external.fence()
 
             recovered = set()
             for name, record in list(self.records.items()):
@@ -170,8 +214,13 @@ class BrokerRuntime:
                             ),
                         )
 
-            # Injected streams share every connection/admission/child lifetime.
-            # Only their construction remains the host's responsibility.
+            # Deferred definitions are opened only after every ownership claim
+            # and the startup fence. The runtime owns partial startup too.
+            for item in streams:
+                if not isinstance(item, StreamHandle):
+                    stream = await self.open_static(item)
+                    self.static[stream.name] = stream
+
             for name, stream in self.static.items():
                 if stream.log is not None:
                     await thread(
@@ -186,6 +235,12 @@ class BrokerRuntime:
                 self.generations[name] = generation
                 warn_unreplicated(stream)
 
+            if self.external is not None:
+                for name, generation in self.generations.items():
+                    await self.capture_startup(name, generation.stream)
+
+                self.external.starting = False
+
             await self.reconcile_children()
             for name in self.static:
                 self.generations[name].accepting = True
@@ -198,6 +253,70 @@ class BrokerRuntime:
         except BaseException:
             await self.close()
             raise
+
+    def claim_definition(self, definition: Stream) -> None:
+        root, name = definition.storage.root.resolve(), definition.spec.name
+        self.claim_path(root / ".streamcast-owners" / f"{name}.lock", name)
+        home = _metadata.home(root, name)
+        metadata = _metadata.load(home, name)
+        self.claim_log(home, name if metadata is None else metadata.current.name, name)
+
+    async def open_static(self, opening: Opening) -> StreamHandle:
+        call = opening.open
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                call
+                if call is not None
+                else lambda: StreamHandle.open(
+                    opening.stream, initialization="open_existing"
+                )
+            )
+        )
+        cancelled = await join(task)
+        stream = task.result()
+        try:
+            definition = stream.definition
+            if (
+                stream.name != opening.stream.spec.name
+                or stream.log is None
+                or Path(stream.log.root).resolve()
+                != _metadata.home(
+                    opening.stream.storage.root, opening.stream.spec.name
+                ).resolve()
+                or (
+                    definition is not None
+                    and definition.storage.root.resolve()
+                    != opening.stream.storage.root.resolve()
+                )
+            ):
+                raise ValueError(
+                    "opened stream name or storage root does not match definition"
+                )
+
+            if cancelled:
+                raise asyncio.CancelledError
+
+            return stream
+        except BaseException:
+            await stream.aclose()
+            raise
+
+    def validate_external(self, record: dict) -> None:
+        assert self.external is not None
+        definition = Stream.model_validate(record["stream"])
+        definition = Stream(
+            spec=definition.spec,
+            storage=definition.storage.model_copy(
+                update={"s3_options": self.s3_options(record)}
+            ),
+        )
+        self.external.validate(definition, profile=record["storage_profile"])
+
+    async def capture_startup(self, name: str, stream: StreamHandle) -> None:
+        assert self.external is not None
+        report = await thread(startup_report, stream)
+        assert stream.log is not None
+        self.external.reports[name] = {**report, "home": str(Path(stream.log.root))}
 
     def dedicated_count(self) -> int:
         return sum(
@@ -234,6 +353,18 @@ class BrokerRuntime:
 
     def validate_spec(self, body: Any, name: str) -> dict:
         spec = self._parse_spec(body)
+        if self.external is not None and spec.maintenance.dedicated:
+            raise Fault(
+                422,
+                "invalid_declaration",
+                errors=[
+                    {
+                        "loc": ["maintenance", "dedicated"],
+                        "type": "external_maintenance",
+                    }
+                ],
+            )
+
         if spec.name != name:
             raise Fault(422, "name_mismatch")
 
@@ -824,6 +955,9 @@ class BrokerRuntime:
             return
 
         self.s3_options(record)
+        if self.external is not None:
+            self.validate_external(record)
+
         if desired == "stopped":
             await self.offline(record)
             # Validate bound stopped streams too; missing disk is never an
@@ -850,6 +984,9 @@ class BrokerRuntime:
             # Bind identity durably before a data route can expose it.
             record["stream_id"] = opened._stream_id
             await thread(self.registry.update, record)
+            if self.external is not None and not self.external.starting:
+                await self.capture_startup(name, opened)
+
             await self.reconcile_children()
             generation.accepting = not self.closing
             self.observe(name, desired)
@@ -993,6 +1130,8 @@ class BrokerRuntime:
         stream._admission = None
         del self.generations[name]
         self.excluding.discard(name)
+        if self.external is not None:
+            self.external.reports.pop(name, None)
 
     async def finalize(self, stream: StreamHandle, record: dict) -> None:
         if stream.retirement is not None:
@@ -1100,6 +1239,21 @@ class BrokerRuntime:
     async def child_passes(self) -> None:
         while self.children_dirty:
             self.children_dirty = False
+            if self.external is not None:
+                await self.external.reconcile(
+                    {
+                        name: g.stream
+                        for name, g in self.generations.items()
+                        if name not in self.excluding
+                    },
+                    {
+                        name: record["storage_profile"]
+                        for name, record in self.records.items()
+                    },
+                    closing=self.closing,
+                )
+                continue
+
             generations = {
                 name: g
                 for name, g in self.generations.items()
@@ -1233,6 +1387,9 @@ class BrokerRuntime:
         }
 
     def children_ready(self, name: str | None = None) -> bool:
+        if self.external is not None:
+            return self.external.status()["converged"]
+
         required = self.wanted if name is None else self.required(name)
         return all(
             spec in self.running and self.child_health.get(spec, False)
@@ -1240,6 +1397,9 @@ class BrokerRuntime:
         )
 
     def child_status(self, *, counts: bool, visible: set[str] | None = None) -> dict:
+        if self.external is not None:
+            return self.external.status(visible)
+
         failing = [
             spec
             for spec in self.wanted
@@ -1377,6 +1537,11 @@ class BrokerRuntime:
         await self.stop_children()
         for name in list(self.generations):
             await self.offline(self.records.get(name, {"name": name}))
+
+        # An exception between open and generation installation still leaves
+        # its handle owned here. aclose is idempotent for installed handles.
+        for stream in self.static.values():
+            await stream.aclose()
 
         for lock in self.locks.values():
             lock.close()
