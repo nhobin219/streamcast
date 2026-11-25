@@ -443,7 +443,7 @@ class StreamHandle:
 
         spec, storage = stream.spec, stream.storage
         name, schema = spec.name, spec.schema_
-        duckdb = _stream_duckdb(storage.duckdb, name)
+        duckdb = _stream_duckdb(storage.duckdb, name, storage.root, storage.published)
         home = _metadata.home(storage.root, name)
         published = storage.published
         if published is not None and home != storage.root:
@@ -600,7 +600,7 @@ class StreamHandle:
         metadata names it current. A publisher's next seq is the same on
         either side.
         """
-        duckdb = _stream_duckdb(duckdb, name)
+        duckdb = _stream_duckdb(duckdb, name, root)
         root = _metadata.home(root, name)
         opened = _open_retired(
             root, name, duckdb=duckdb, schema=schema, s3_options=s3_options
@@ -879,7 +879,7 @@ class StreamHandle:
         handles append, and both publish to the same table. Stop the old
         producer first. See `docs/SPEC.md`.
         """
-        duckdb = _stream_duckdb(duckdb, name)
+        duckdb = _stream_duckdb(duckdb, name, root, published)
         return cls._restore(
             name,
             duckdb=duckdb,
@@ -1080,7 +1080,7 @@ class StreamHandle:
         Safe to run again: an already retired stream returns its record, and
         a retire that died partway finishes.
         """
-        duckdb = _stream_duckdb(duckdb, name)
+        duckdb = _stream_duckdb(duckdb, name, root)
         root = _metadata.home(root, name)
         metadata = _metadata.load(root, name)
         if metadata is not None and metadata.retirement is not None:
@@ -1188,7 +1188,7 @@ class StreamHandle:
         from before this one ignores the setting, and one that rewrites the
         metadata drops it — set it again after running one.
         """
-        duckdb = _stream_duckdb(duckdb, name)
+        duckdb = _stream_duckdb(duckdb, name, root)
         if max_age is not None and max_age <= timedelta(0):
             msg = f"max_age={max_age}: a positive window, or None to keep everything"
             raise ValueError(msg)
@@ -1299,7 +1299,7 @@ class StreamHandle:
 
         A retired stream raises `StreamRetired`: revive it first.
         """
-        duckdb = _stream_duckdb(duckdb, name)
+        duckdb = _stream_duckdb(duckdb, name, root)
         if source is None:
             msg = "ingest needs a source: a pyarrow Table or RecordBatchReader"
             raise TypeError(msg)
@@ -3166,7 +3166,10 @@ def _failed(
 
 
 def _stream_duckdb(
-    policy: litelink.DuckDBPolicy | None, name: str
+    policy: litelink.DuckDBPolicy | None,
+    name: str,
+    root: str | PathLike[str],
+    published: str | None = None,
 ) -> litelink.DuckDBPolicy | None:
     if policy is None or policy.spill is None:
         return policy
@@ -3177,6 +3180,8 @@ def _stream_duckdb(
     # A spill base may also be the storage root: never clear a stream home.
     # The unnamed offline stream has its own leaf in the reserved namespace.
     leaf = policy.spill.directory / _spill.STREAMS / (name or ".root")
+    home = _metadata.home(root, name)
+    _spill.validate(leaf, (Path(root), home), _spill.data_paths(home, name, published))
     _spill.prepare(leaf)
     return dataclasses.replace(
         policy, spill=dataclasses.replace(policy.spill, directory=leaf)

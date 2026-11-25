@@ -7,6 +7,28 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## 0.29.1 — 2026-11-24
+
+### Fixed
+
+- Refuse a DuckDB spill leaf that is a symbolic link, equals or contains a
+  known storage root or stream home, overlaps a known log directory or local
+  published prefix, or is on or inside an existing log identified by `buffer.db`.
+  Stream startup and offline operations, maintainer startup, the supervisor's
+  initial sweep and obsolete-child cleanup validate before creating or clearing
+  spill. Comparisons resolve relative paths and symlinked parents, with an
+  identity fallback for existing paths. These checks cover the known-path aliases
+  above, not arbitrary storage reachable through the reserved spill namespace.
+  Spill namespaces remain exclusively owned scratch space: cross-root symlinks
+  inside them are outside that contract and are not generally refused. In
+  particular, redirecting `.spill/streams` into another storage root can clear
+  that root's stream home and delete its data. Bind mounts and native
+  case-insensitive volume aliases are also outside the contract and are not
+  reliably refused. Scratch bases inside storage roots and named legacy homes
+  can be used subject to the same checks. An uninspectable spill path, including
+  a symlink loop on Python 3.11/3.12, remains nonfatal: creation errors are logged
+  and serving continues. Budget semantics are unchanged; no wire or format change.
+
 ## 0.29.0 — 2026-11-24
 
 ### Added

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
+import os
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -15,7 +17,7 @@ import pytest
 from websockets.exceptions import ConnectionClosedError
 
 import streamcast
-from streamcast import _metadata, _spill, _stream, _versions
+from streamcast import _log, _maintain, _metadata, _spill, _stream, _versions
 from streamcast._broker.runtime import BrokerRuntime
 
 SCHEMA = {"type": "object", "properties": {"i": {"type": "integer"}}, "required": ["i"]}
@@ -268,14 +270,14 @@ def test_legacy_root_spill_cannot_empty_base(tmp_path):
     sibling = base / "another-stream"
     sibling.mkdir()
     policy = replace(POLICY, spill=litelink.Spill(base, 128))
-    bound = _stream._stream_duckdb(policy, "")
+    bound = _stream._stream_duckdb(policy, "", tmp_path / "data")
     assert bound is not None and bound.spill is not None
     assert bound.spill.directory == base / _spill.STREAMS / ".root"
     assert bound.spill.directory.is_dir()
     assert sibling.is_dir()
     for name in ("..", "../another-stream", str(tmp_path.absolute())):
         with pytest.raises(ValueError, match="invalid stream name"):
-            _stream._stream_duckdb(policy, name)
+            _stream._stream_duckdb(policy, name, tmp_path / "data")
 
     assert sibling.is_dir()
 
@@ -353,3 +355,478 @@ async def test_replay_over_cap_closes_1011_one_subscription_only(tmp_path, serve
                 await publisher.send({"payload": "still serving"})
 
             assert (await live.recv())[2] == {"payload": "still serving"}
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "equal",
+        "contains",
+        "relative",
+        "trailing",
+        "parent-link",
+        "case-link",
+        "home-link",
+        "leaf-link",
+    ],
+)
+async def test_spill_alias_refused_without_losing_rows(tmp_path, monkeypatch, alias):
+    base = tmp_path / "spill"
+    leaf = base / _spill.STREAMS / "t"
+    root = leaf / "data" if alias == "contains" else leaf
+    if alias in ("home-link", "leaf-link"):
+        root = tmp_path / "data"
+
+    if alias == "leaf-link":
+        base = root
+        leaf = base / _spill.STREAMS / "t"
+
+    if alias == "home-link":
+        leaf.mkdir(parents=True)
+        root.mkdir()
+        (root / "t").symlink_to(leaf, target_is_directory=True)
+
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    if alias in ("parent-link", "case-link"):
+        link = tmp_path / ("SPILL" if alias == "case-link" else "alias")
+        link.symlink_to(base, target_is_directory=True)
+        base = link
+    elif alias == "relative":
+        monkeypatch.chdir(tmp_path)
+        base = Path("spill")
+    elif alias == "trailing":
+        base = Path(str(base) + "/")
+    elif alias == "leaf-link":
+        leaf.parent.mkdir(parents=True)
+        leaf.symlink_to(root / "t", target_is_directory=True)
+
+    policy = replace(POLICY, spill=litelink.Spill(base, 128))
+    with pytest.raises(ValueError, match="spill"):
+        unexpected = streamcast.StreamHandle.open(definition(root, policy=policy))
+        await unexpected.aclose()
+
+    reopened = streamcast.StreamHandle.open(definition(root, policy=None))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.parametrize("exists", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_prepare_rejects_symlink_before_any_write(tmp_path, exists, empty):
+    target = tmp_path / "data"
+    if exists:
+        target.mkdir()
+        (target / "buffer.db").write_bytes(b"rows")
+
+    leaf = tmp_path / "link"
+    leaf.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="spill.*symlink"):
+        _spill.prepare(leaf, empty=empty)
+
+    assert leaf.is_symlink()
+    assert target.exists() is exists
+    if exists:
+        assert (target / "buffer.db").read_bytes() == b"rows"
+
+
+@pytest.mark.parametrize("flag", ["--log", "--retire", "--stream"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_child_refuses_spill_containing_storage_before_open(
+    tmp_path, monkeypatch, flag, nested
+):
+    leaf = tmp_path / "spill"
+    root = leaf / "data" if nested else leaf
+    root.mkdir(parents=True)
+    marker = root / "buffer.db"
+    marker.write_bytes(b"rows")
+
+    def no_open(*args, **kwargs):
+        pytest.fail("invalid spill must fail before opening logs")
+
+    monkeypatch.setattr(litelink, "open", no_open)
+    args = [
+        "--log",
+        str(tmp_path / "safe"),
+        "t",
+        "--role",
+        "seal",
+        "--every",
+        "1",
+        "--duckdb-spill-dir",
+        str(leaf),
+    ]
+    if flag == "--log":
+        args[1] = str(root)
+    else:
+        args.extend([flag, str(root), "t"])
+
+    with pytest.raises(ValueError, match="spill.*storage"):
+        _maintain.main(args)
+
+    assert marker.read_bytes() == b"rows"
+
+
+@pytest.mark.parametrize(
+    "base_kind", ["root", "parent", "home", "relative", "parent-link", "case-distinct"]
+)
+async def test_normal_spill_paths_preserve_rows(tmp_path, monkeypatch, base_kind):
+    root = tmp_path / "data"
+    base = {"root": root, "parent": tmp_path, "home": root / "t"}.get(
+        base_kind, tmp_path / "spill"
+    )
+    if base_kind == "relative":
+        monkeypatch.chdir(tmp_path)
+        base = Path("spill")
+    elif base_kind == "parent-link":
+        target = tmp_path / "target"
+        target.mkdir()
+        base.symlink_to(target, target_is_directory=True)
+    elif base_kind == "case-distinct":
+        root = tmp_path / "SPILL" / _spill.STREAMS / "t"
+        # Case-sensitive filesystems have two independent directories. On a
+        # case-insensitive volume this declaration aliases storage and is invalid.
+        root.mkdir(parents=True)
+        if (base / _spill.STREAMS / "t").exists():
+            with pytest.raises(ValueError, match="spill.*storage"):
+                _stream._stream_duckdb(
+                    replace(POLICY, spill=litelink.Spill(base, 128)), "t", root
+                )
+
+            return
+
+    policy = replace(POLICY, spill=litelink.Spill(base, 128))
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=policy), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    reopened = streamcast.StreamHandle.open(definition(root, policy=policy))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.parametrize(
+    "operation", ["open", "migrate", "restore", "retain", "retire", "ingest"]
+)
+def test_all_stream_entrypoints_refuse_before_creating_spill(tmp_path, operation):
+    base = tmp_path / "not-created"
+    root = base / _spill.STREAMS / "t" / "data"
+    policy = replace(POLICY, spill=litelink.Spill(base, 128))
+    kwargs = {"root": root, "duckdb": policy}
+    if operation == "migrate":
+        kwargs["schema"] = SCHEMA
+    elif operation == "restore":
+        kwargs["published"] = str(tmp_path / "published")
+    elif operation == "retain":
+        kwargs["max_age"] = None
+    elif operation == "ingest":
+        kwargs["source"] = pa.table({"i": [1]})
+
+    with pytest.raises(ValueError, match="spill.*storage"):
+        if operation == "open":
+            streamcast.StreamHandle.open(
+                definition(root, policy=policy), initialization="create_if_absent"
+            )
+        else:
+            getattr(streamcast.StreamHandle, operation)("t", **kwargs)
+
+    assert not base.exists()
+
+
+@pytest.mark.parametrize("alias", ["nested-log", "parent-link"])
+async def test_spill_inside_home_refused_without_losing_rows(tmp_path, alias):
+    base = tmp_path / "spill"
+    name = "streams" if alias == "nested-log" else "t"
+    root = base / ".spill" if alias == "nested-log" else tmp_path / "data"
+    if alias == "parent-link":
+        base = root
+
+    def source(policy):
+        return streamcast.Stream(
+            spec=streamcast.StreamSpec(name=name, schema=SCHEMA),
+            storage=streamcast.Storage(root=root, duckdb=policy),
+        )
+
+    opened = streamcast.StreamHandle.open(
+        source(None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    if alias == "parent-link":
+        (root / ".spill").mkdir()
+        (root / _spill.STREAMS).symlink_to(root / name, target_is_directory=True)
+
+    policy = replace(POLICY, spill=litelink.Spill(base, 64))
+    with pytest.raises(ValueError, match="spill.*storage"):
+        unexpected = streamcast.StreamHandle.open(source(policy))
+        await unexpected.aclose()
+
+    reopened = streamcast.StreamHandle.open(source(None))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+        assert reopened.log.end_offset() == 4
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="requires unprivileged directory permissions"
+)
+async def test_untraversable_spill_parent_still_serves(tmp_path, caplog):
+    root = tmp_path / "data"
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    policy = replace(POLICY, spill=litelink.Spill(locked / "spill", 64))
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            (locked / "spill").stat()
+
+        reopened = streamcast.StreamHandle.open(definition(root, policy=policy))
+        try:
+            assert reopened.log is not None
+            assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+                "i"
+            ].to_pylist() == [0, 1, 2]
+            assert await reopened.send({"i": 3}) == 4
+            assert "could not create DuckDB spill directory" in caplog.text
+        finally:
+            await reopened.aclose()
+
+    finally:
+        locked.chmod(0o700)
+
+    assert not (locked / "spill").exists()
+
+
+@pytest.mark.parametrize(
+    "operation", ["is_symlink", "resolve", "storage-resolve", "exists", "samefile"]
+)
+@pytest.mark.parametrize("error", [errno.EACCES, errno.EIO])
+def test_spill_validation_inspection_errors_are_nonfatal(
+    tmp_path, monkeypatch, operation, error
+):
+    leaf, storage = tmp_path / "spill", tmp_path / "data"
+    leaf.mkdir()
+    storage.mkdir()
+    marker = leaf / "keep"
+    marker.touch()
+    method = "resolve" if operation == "storage-resolve" else operation
+    target = storage if operation == "storage-resolve" else leaf
+    original = getattr(Path, method)
+    failures = []
+
+    def inspect(path, *args, **kwargs):
+        if path == target:
+            failures.append(path)
+            raise OSError(error, "spill inspection unavailable")
+
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, method, inspect)
+    _spill.validate(leaf, (storage,))
+    assert failures, "the failing inspection must be reached"
+    assert marker.is_file()
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["Q", "QL"])
+async def test_scratch_spill_under_storage_still_serves(tmp_path, legacy):
+    root = tmp_path / "data"
+    if legacy:
+        with litelink.new(
+            root, "t", schema=_log.with_system(definition(root).spec.arrow)
+        ):
+            pass
+
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    assert _metadata.home(root, "t") == (root if legacy else root / "t")
+    policy = replace(POLICY, spill=litelink.Spill(root / "tmp", 64))
+    reopened = streamcast.StreamHandle.open(definition(root, policy=policy))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+        await reopened.send({"i": 3})
+        assert (root / "tmp" / _spill.STREAMS / "t").is_dir()
+    finally:
+        await reopened.aclose()
+
+
+async def test_looping_spill_parent_still_serves(tmp_path, caplog):
+    root, loop = tmp_path / "data", tmp_path / "loop"
+    loop.symlink_to(loop, target_is_directory=True)
+    opened = streamcast.StreamHandle.open(
+        definition(root, policy=None), initialization="create_if_absent"
+    )
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    policy = replace(POLICY, spill=litelink.Spill(loop, 64))
+    reopened = streamcast.StreamHandle.open(definition(root, policy=policy))
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+        await reopened.send({"i": 3})
+        assert "could not create DuckDB spill directory" in caplog.text
+    finally:
+        await reopened.aclose()
+
+
+async def test_spill_alias_to_local_published_is_refused(tmp_path):
+    root, published = tmp_path / "data", tmp_path / "published"
+    source = definition(root, policy=None)
+    source = source.model_copy(
+        update={
+            "storage": source.storage.model_copy(
+                update={"published": published.as_uri()}
+            )
+        }
+    )
+    opened = streamcast.StreamHandle.open(source, initialization="create_if_absent")
+    await opened.send_many([{"i": i} for i in range(3)])
+    await opened.aclose()
+    target = published / "t" / "t"
+    target.mkdir(parents=True)
+    marker = target / "acknowledged.parquet"
+    marker.write_bytes(b"published rows")
+    (root / ".spill").mkdir()
+    (root / _spill.STREAMS).symlink_to(published / "t", target_is_directory=True)
+    policy = replace(POLICY, spill=litelink.Spill(root, 64))
+    unsafe = source.model_copy(
+        update={"storage": source.storage.model_copy(update={"duckdb": policy})}
+    )
+    with pytest.raises(ValueError, match="spill.*data"):
+        unexpected = streamcast.StreamHandle.open(unsafe)
+        await unexpected.aclose()
+
+    assert marker.read_bytes() == b"published rows"
+    reopened = streamcast.StreamHandle.open(source)
+    try:
+        assert reopened.log is not None
+        assert reopened.log.sql("SELECT i FROM log ORDER BY i").read_all()[
+            "i"
+        ].to_pylist() == [0, 1, 2]
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["G2-new", "LG-new"])
+def test_spill_refuses_future_log_data(tmp_path, legacy):
+    base = tmp_path / "spill"
+    root = base / ".spill"
+    name = "streams"
+    if legacy:
+        root = root / "streams"
+        name = "t"
+        root.mkdir(parents=True)
+        _metadata.path(root, name).touch()
+
+    leaf = base / _spill.STREAMS / name
+    assert not leaf.exists()
+    with pytest.raises(ValueError, match="spill.*data"):
+        _stream._stream_duckdb(
+            replace(POLICY, spill=litelink.Spill(base, 64)), name, root
+        )
+
+    assert not leaf.exists()
+
+
+def test_spill_inside_another_legacy_log_is_refused(tmp_path):
+    root = tmp_path / "data"
+    with litelink.new(root, "tmp", schema=pa.schema([("i", pa.int64())])) as other:
+        other.extend([{"i": 42}])
+
+    with pytest.raises(ValueError, match="spill.*log"):
+        _stream._stream_duckdb(
+            replace(POLICY, spill=litelink.Spill(root / "tmp", 64)), "t", root
+        )
+
+    with litelink.open(root, "tmp") as other:
+        assert other.sql("SELECT i FROM log").read_all()["i"].to_pylist() == [42]
+
+
+@pytest.mark.parametrize("kind", ["owner", "data"])
+def test_looping_validation_target_is_uninspectable(tmp_path, kind):
+    loop, leaf = tmp_path / "loop", tmp_path / "spill"
+    loop.symlink_to(loop, target_is_directory=True)
+    _spill.validate(
+        leaf, (loop,) if kind == "owner" else (), (loop,) if kind == "data" else ()
+    )
+    assert not leaf.exists()
+
+
+@pytest.mark.parametrize("direction", ["inside", "contains"])
+def test_spill_data_identity_fallback(tmp_path, monkeypatch, direction):
+    leaf, data = tmp_path / "spill", tmp_path / "data"
+    leaf.mkdir()
+    data.mkdir()
+    original = Path.samefile
+    reached = []
+
+    def samefile(a, b):
+        pair = (leaf, data.parent) if direction == "contains" else (data, leaf.parent)
+        if (a, b) == pair:
+            reached.append((a, b))
+            return True
+
+        return original(a, b)
+
+    monkeypatch.setattr(Path, "samefile", samefile)
+    with pytest.raises(ValueError, match="spill.*data"):
+        _spill.validate(leaf, (), (data,))
+
+    assert reached
+
+
+@pytest.mark.parametrize("flag", ["--log", "--retire"])
+def test_child_refuses_spill_inside_future_log(tmp_path, monkeypatch, flag):
+    root = tmp_path / "data"
+    leaf = root / "t" / "scratch"
+    monkeypatch.setattr(
+        litelink, "open", lambda *_, **__: pytest.fail("must validate before logs open")
+    )
+    with pytest.raises(ValueError, match="spill.*data"):
+        _maintain.main(
+            (["--log", str(tmp_path / "safe"), "safe"] if flag == "--retire" else [])
+            + [
+                flag,
+                str(root),
+                "t",
+                "--role",
+                "seal",
+                "--every",
+                "1",
+                "--duckdb-spill-dir",
+                str(leaf),
+            ]
+        )
+
+    assert not leaf.exists()
