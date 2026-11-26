@@ -24,7 +24,7 @@ Longer probe timeouts delay detection of a hung role.
 
 The chart source at a release tag is the versioned artifact; vendor this directory
 at that tag. Chart version and appVersion follow the Python package version.
-The role image must contain `streamcast-supervise`; release the chart and Python
+The role image must contain `tini` and `streamcast-supervise`; release the chart and Python
 package together. Set
 `image.repository` to the built image's repository and `image.tag` to that version.
 There is no image pull or chart publication prerequisite for a locally built image.

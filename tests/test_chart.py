@@ -715,14 +715,44 @@ def test_role_liveness_allows_cli_startup_under_contention(tmp_path, timeout):
 
 
 def kubectl(*args, input=None):
+    timeout = 30
+    if args[0] == "wait":
+        # Waits below specify seconds. Let kubectl report its own deadline
+        # before Python terminates it, including API setup and shutdown time.
+        for arg in args:
+            if arg.startswith("--timeout="):
+                timeout += float(arg.removeprefix("--timeout=").removesuffix("s"))
+
     return subprocess.run(
         ["kubectl", *args],
         input=input,
         text=True,
         capture_output=True,
         check=True,
-        timeout=30,
+        timeout=timeout,
     ).stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_timeout"),
+    [
+        (("wait", "job/provision", "--timeout=90s"), 120),
+        (("wait", "pod/http-client", "--timeout=60s"), 90),
+        (("get", "pod", "broker"), 30),
+        (("exec", "broker", "--", "cat", "/status"), 30),
+        (("delete", "namespace", "chart-oom", "--wait=false"), 30),
+    ],
+)
+def test_kubectl_timeout_allows_wait_budget(monkeypatch, args, expected_timeout):
+    def run(command, **kwargs):
+        assert command == ["kubectl", *args]
+        assert kwargs["timeout"] == expected_timeout
+        assert kwargs["check"] is True
+        assert kwargs["input"] == "manifest"
+        return subprocess.CompletedProcess(command, 0, stdout="observed")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert kubectl(*args, input="manifest") == "observed"
 
 
 @pytest.mark.skipif(
