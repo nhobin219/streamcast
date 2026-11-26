@@ -1,0 +1,81 @@
+nameOverride: ""
+fullnameOverride: ""
+replicas: 1
+image:
+  repository: streamcast
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+podSecurityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  runAsNonRoot: true
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountToken: false
+podAnnotations: {}
+podLabels: {}
+terminationGracePeriodSeconds: 60
+broker:
+  image: {}
+  command: []
+  authorization: ""
+  # BrokerConfig fields, plus storage_profiles and streams from the service file.
+  # Supply a registry (with authorization) or existing static streams to run.
+  config:
+    storage_profiles:
+      default:
+        root: /var/lib/streamcast
+  port: 8765
+  portName: http
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 1Gi}
+  probes:
+    startup: {path: /readyz, periodSeconds: 10, failureThreshold: 36}
+    liveness: {path: /livez, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}
+    readiness: {path: /readyz, periodSeconds: 5}
+  env: []
+  envFrom: []
+maintenance:
+  runDir: {path: /run/streamcast, sizeLimit: 16Mi}
+  image: {}
+  command: []
+  groups:
+    - name: default
+      env: []
+      envFrom: []
+  roles:
+    seal: {resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}}
+    publish: {resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}}
+    compact: {resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}}
+    clean: {resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}}
+    clean-published: {resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 1Gi}}}
+  # Five concurrent CLI probes exceeded 5s on the hosted kind runner.
+  liveness: {periodSeconds: 10, timeoutSeconds: 15, failureThreshold: 6}
+persistence:
+  mountPath: /var/lib/streamcast
+  aliasMounts: []
+  existingClaim: ""
+  storageClass: ""
+  accessModes: [ReadWriteOncePod]
+  size: 20Gi
+  retain: true
+tmp: {sizeLimit: 8Gi}
+service:
+  enabled: true
+  type: ClusterIP
+  name: ""
+  port: 8765
+  headless: true
+placement:
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+priorityClassName: ""
+extraVolumes: []
+extraVolumeMounts: []

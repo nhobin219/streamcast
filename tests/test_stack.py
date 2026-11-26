@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import shlex
@@ -29,6 +30,43 @@ ROLES = ("seal", "publish", "compact", "clean", "clean-published")
 
 def compose_source():
     return yaml.safe_load((ROOT / "docker/compose.yml").read_text())
+
+
+def test_image_build_precompiles_probe_imports(tmp_path):
+    uv = shutil.which("uv")
+    assert uv, "uv is required to exercise the image's installation recipe"
+    commands = [
+        shlex.split(line.removeprefix("RUN "))
+        for line in (ROOT / "docker/Dockerfile").read_text().splitlines()
+        if line.startswith("RUN uv sync ")
+    ]
+    assert len(commands) == 1
+    environment = tmp_path / "image-env"
+    result = subprocess.run(
+        [uv, *commands[0][1:], "--offline", "--python", sys.executable],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "UV_PROJECT_ENVIRONMENT": str(environment),
+            "UV_COMPILE_BYTECODE": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    sites = list(environment.glob("lib/python*/site-packages"))
+    assert len(sites) == 1
+    # The read-only runtime cannot cache these imports between health checks.
+    for module in (
+        "streamcast/__main__.py",
+        "litelink/__init__.py",
+        "pyiceberg/__init__.py",
+        "pydantic/__init__.py",
+    ):
+        source = sites[0] / module
+        assert source.is_file(), module
+        assert Path(importlib.util.cache_from_source(str(source))).is_file(), module
 
 
 def test_one_service_per_role_each_with_mem_limit():

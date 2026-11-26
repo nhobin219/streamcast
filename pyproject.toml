@@ -104,6 +104,7 @@ dependencies = [
 
 [project.scripts]
 streamcast = "streamcast.__main__:main"
+streamcast-supervise = "streamcast_supervise:main"
 
 [project.optional-dependencies]
 # The Postgres adapter for a CALLER's database (`PostgresStore`), where an
@@ -125,7 +126,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-root = "src"
-module-name = "streamcast"
+module-name = ["streamcast", "streamcast_supervise"]
 
 
 [dependency-groups]

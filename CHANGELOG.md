@@ -11,6 +11,11 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Added
 
+- A broker Helm chart runs each maintenance role behind the standard-library-only
+  `streamcast-supervise` command. Role failures and failed probes restart the
+  child with bounded backoff while its container remains running. Nodes require
+  kubelet `singleProcessOOMKill: true` to keep role OOMs from changing pod readiness.
+
 - Service TOML selects external maintenance with `[broker.maintain.external]`,
   an absolute `run_dir` and distinct storage-profile `groups`. Existing
   maintenance fields remain the policy; omitted external settings retain
@@ -22,6 +27,8 @@ there was nothing to have changed from. Everything above it is ordinary.
 
 ### Fixed
 
+- Container images precompile Python bytecode so concurrent health probes do not
+  repeatedly compile dependencies in the read-only runtime.
 - External maintenance publishes a serving plan for an empty registry after
   the startup fence, so idle role probes become ready before any stream exists.
   Unchanged serving plans retain their generation; shutdown still fences roles.
