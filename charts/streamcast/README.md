@@ -51,7 +51,7 @@ registry-backed configuration uses:
 ```yaml
 image:
   repository: streamcast
-  tag: "0.29.1"
+  tag: "0.30.0"
 broker:
   authorization: streamcast:TokenFileAccess.from_env
   config:
