@@ -78,6 +78,20 @@ def test_chart_versions_and_kubernetes_floor():
     assert "kubeVersion" in result.stderr
 
 
+def test_kind_image_loader_supports_containerd_v2():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/chart.yml").read_text())
+    cluster = next(
+        step
+        for step in workflow["jobs"]["kind"]["steps"]
+        if step.get("uses", "").startswith("helm/kind-action@")
+    )
+    # The node image uses containerd 2. An older kind creates the cluster,
+    # but cannot detect its snapshotter when loading the locally built image.
+    version = cluster["with"].get("version")
+    assert version is not None, "pin kind instead of using the action's old default"
+    assert tuple(map(int, version.removeprefix("v").split("."))) >= (0, 27, 0)
+
+
 def test_roles_are_native_sidecars_in_reverse_stop_order(tmp_path):
     objects = render(
         tmp_path,
