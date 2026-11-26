@@ -7,8 +7,11 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -93,6 +96,28 @@ def test_kind_image_loader_supports_containerd_v2():
     assert tuple(map(int, version.removeprefix("v").split("."))) >= (0, 27, 0)
 
 
+def test_kind_requires_single_process_oom_patch():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/chart.yml").read_text())
+    steps = workflow["jobs"]["kind"]["steps"]
+    action = next(
+        step for step in steps if step.get("uses", "").startswith("helm/kind-action@")
+    )
+    assert action["with"]["node_image"] == "kindest/node:v1.32.2"
+    assert action["with"]["config"] == "kind-config.yaml"
+    writer = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Configure single-process OOM killing"
+    )
+    document = yaml.safe_load(writer.split("<<'EOF'\n")[1].rsplit("EOF", 1)[0])
+    patches = [yaml.safe_load(patch) for patch in document["kubeadmConfigPatches"]]
+    assert any(
+        patch.get("kind") == "KubeletConfiguration"
+        and patch.get("singleProcessOOMKill") is True
+        for patch in patches
+    )
+
+
 def test_roles_are_native_sidecars_in_reverse_stop_order(tmp_path):
     objects = render(
         tmp_path,
@@ -117,22 +142,32 @@ def test_roles_are_native_sidecars_in_reverse_stop_order(tmp_path):
     assert workload["updateStrategy"] == {"type": "RollingUpdate"}
     for item in roles:
         role, group = item["args"][1], item["args"][3]
-        assert item["command"] == [
-            "streamcast",
-            "maintain",
-            "--follow",
-            "/run/streamcast",
-        ]
-        assert item["livenessProbe"]["exec"]["command"] == [
-            "streamcast",
-            "probe",
-            "role",
+        command = item["command"]
+        status = f"/run/streamcast/{role}-{group}.supervise.json"
+        assert command[:5] == ["tini", "--", "streamcast-supervise", "--status", status]
+        assert command[5:18] == [
             "--run-dir",
             "/run/streamcast",
             "--role",
             role,
             "--group",
             group,
+            "--probe-period",
+            "10",
+            "--probe-threshold",
+            "6",
+            "--probe-timeout",
+            "15",
+            "--",
+        ]
+        assert command[18:] == ["streamcast", "maintain", "--follow", "/run/streamcast"]
+        assert item["livenessProbe"]["exec"]["command"] == [
+            "streamcast-supervise",
+            "probe",
+            "--status",
+            status,
+            "--max-age",
+            "75",
         ]
 
 
@@ -428,6 +463,7 @@ def pod_state(document):
     status = document["status"]
     return {
         "uid": document["metadata"]["uid"],
+        "pod_ip": status["podIP"],
         "ready": {item["type"]: item for item in status["conditions"]}["Ready"],
         "containers": {
             item["name"]: item
@@ -436,129 +472,231 @@ def pod_state(document):
     }
 
 
-def assert_role_oom_isolated(before, after):
-    assert after["uid"] == before["uid"]
+def assert_single_process_oom(snapshot, expected_roles):
+    assert expected_roles and len(expected_roles) % 5 == 0
+    assert len(set(expected_roles)) == len(expected_roles)
+    assert snapshot["containers"] and set(snapshot["containers"]) == {
+        "broker",
+        *expected_roles,
+    }
+    assert set(snapshot["oom_groups"]) == set(expected_roles)
+    assert all(value == 0 for value in snapshot["oom_groups"].values())
+
+
+def assert_role_oom_isolated(
+    before, after, expected_roles, samples, signal_at, recovered_at
+):
+    # K0: count and identity precede every quantified assertion.
+    for snapshot in (before, after):
+        assert_single_process_oom(snapshot, expected_roles)
+
+    # K1: the role's cgroup records exactly one actual OOM victim.
+    assert isinstance(before["oom_kills"], int) and before["oom_kills"] >= 0
+    assert after["oom_kills"] == before["oom_kills"] + 1
+    # K2: the supervisor replaced its child, recorded the OOM, and still beats.
+    initial, final = before["supervisor"], after["supervisor"]
+    assert initial["pid"] > 1 and final["pid"] > 1 and initial["pid"] != final["pid"]
+    assert initial["restarts"] >= 0 and final["restarts"] == initial["restarts"] + 1
+    assert final["last_exit"]["signal"] == 9 and final["last_exit"]["oom"] is True
+    assert initial["child_started_at"] < signal_at <= final["child_started_at"]
+    assert final["child_started_at"] <= final["heartbeat_at"] <= after["observed_at"]
+    assert after["observed_at"] - final["heartbeat_at"] < 15
+    # K3: the container stayed up, including every unrelated container.
+    for snapshot in (before, after):
+        assert all(
+            item["restartCount"] == 0 for item in snapshot["containers"].values()
+        )
+
+    start = before["containers"]["seal-default"]["state"]["running"]["startedAt"]
+    assert (
+        start
+        and after["containers"]["seal-default"]["state"]["running"]["startedAt"]
+        == start
+    )
+    # K4: Kubernetes' transition timestamp detects even a transient NotReady.
     initial, final = before["ready"], after["ready"]
     assert initial["status"] == final["status"] == "True"
+    assert initial["lastTransitionTime"]
     assert initial["lastTransitionTime"] == final["lastTransitionTime"]
-    seal = after["containers"]["seal-default"]
-    assert seal["restartCount"] > before["containers"]["seal-default"]["restartCount"]
-    assert all(
-        item["restartCount"] == 0
-        for name, item in after["containers"].items()
-        if name != "seal-default"
+    # K5: real Service HTTP and ready endpoints bracket the OOM and recovery.
+    assert before["pod_ip"] and after["pod_ip"] == before["pod_ip"]
+    assert len(samples) >= 5
+    assert any(
+        sample.get("finished_at", float("inf")) < signal_at for sample in samples
     )
-    assert seal["lastState"]["terminated"]["reason"] == "OOMKilled"
+    assert any(sample.get("at", 0) > recovered_at for sample in samples)
+    for sample in samples:
+        assert "error" not in sample
+        assert sample.get("at", 0) > 0 and sample["finished_at"] >= sample["at"]
+        assert before["pod_ip"] in sample.get("ready_ips", [])
+        assert sample.get("http") == 200
+
+    # K6: the same broker remains ready in the same pod.
+    assert before["uid"] and after["uid"] == before["uid"]
+    for snapshot in (before, after):
+        broker = snapshot["containers"]["broker"]
+        assert broker["ready"] is True and broker["restartCount"] == 0
 
 
 @pytest.fixture
-def running_pod_json():
-    # The same object shape returned by kubectl get pod -o json: readiness is
-    # a string condition, while restart counts and termination state are per container.
-    return {
-        "apiVersion": "v1",
-        "kind": "Pod",
-        "metadata": {
-            "name": "oom-streamcast-0",
-            "uid": "11111111-2222-3333-4444-555555555555",
+def oom_observations():
+    roles = [f"{role}-default" for role in STOP_ORDER]
+    before: dict[str, Any] = {
+        "uid": "11111111-2222-3333-4444-555555555555",
+        "pod_ip": "10.0.0.10",
+        "ready": {"status": "True", "lastTransitionTime": "2026-01-01T00:00:01Z"},
+        "containers": {
+            name: {
+                "restartCount": 0,
+                "ready": True,
+                "state": {"running": {"startedAt": "2026-01-01T00:00:00Z"}},
+            }
+            for name in ["broker", *roles]
         },
-        "status": {
-            "phase": "Running",
-            "conditions": [
-                {
-                    "type": "PodScheduled",
-                    "status": "True",
-                    "lastTransitionTime": "2026-01-01T00:00:00Z",
-                },
-                {
-                    "type": "Ready",
-                    "status": "True",
-                    "lastTransitionTime": "2026-01-01T00:00:10Z",
-                },
-            ],
-            "containerStatuses": [
-                {
-                    "name": "broker",
-                    "restartCount": 0,
-                    "ready": True,
-                    "started": True,
-                    "state": {"running": {"startedAt": "2026-01-01T00:00:09Z"}},
-                    "lastState": {},
-                },
-            ],
-            "initContainerStatuses": [
-                {
-                    "name": f"{role}-default",
-                    "restartCount": 0,
-                    "ready": True,
-                    "started": True,
-                    "state": {"running": {"startedAt": "2026-01-01T00:00:01Z"}},
-                    "lastState": {},
-                }
-                for role in STOP_ORDER
-            ],
+        "oom_groups": dict.fromkeys(roles, 0),
+        "oom_kills": 0,
+        "supervisor": {
+            "pid": 20,
+            "restarts": 0,
+            "last_exit": None,
+            "child_started_at": 100,
+            "heartbeat_at": 109,
         },
+        "observed_at": 109,
     }
-
-
-def restarted_pod(document):
-    after = copy.deepcopy(document)
-    seal = next(
-        item
-        for item in after["status"]["initContainerStatuses"]
-        if item["name"] == "seal-default"
+    after = copy.deepcopy(before)
+    after.update(oom_kills=1, observed_at=121)
+    after["supervisor"].update(
+        pid=30,
+        restarts=1,
+        child_started_at=119,
+        heartbeat_at=120,
+        last_exit={"signal": 9, "oom": True},
     )
-    seal["restartCount"] = 1
-    seal["lastState"] = {
-        "terminated": {
-            "reason": "OOMKilled",
-            "exitCode": 137,
-            "signal": 9,
-            "startedAt": "2026-01-01T00:00:01Z",
-            "finishedAt": "2026-01-01T00:00:20Z",
+    samples = [
+        {"at": at, "finished_at": at + 0.2, "http": 200, "ready_ips": ["10.0.0.10"]}
+        for at in range(109, 123)
+    ]
+    return before, after, roles, samples, 110, 121
+
+
+def test_pod_json_parsing_and_role_oom_isolation(oom_observations):
+    before = oom_observations[0]
+    parsed = pod_state(
+        {
+            "metadata": {"uid": before["uid"]},
+            "status": {
+                "podIP": before["pod_ip"],
+                "conditions": [{"type": "Ready", **before["ready"]}],
+                "containerStatuses": [
+                    {"name": "broker", **before["containers"]["broker"]}
+                ],
+                "initContainerStatuses": [
+                    {"name": name, **item}
+                    for name, item in before["containers"].items()
+                    if name != "broker"
+                ],
+            },
         }
+    )
+    assert parsed["containers"] == {
+        name: {"name": name, **item} for name, item in before["containers"].items()
     }
-    seal["state"] = {"running": {"startedAt": "2026-01-01T00:00:21Z"}}
-    return after
-
-
-def test_pod_json_parsing_and_role_oom_isolation(running_pod_json):
-    before = pod_state(json.loads(json.dumps(running_pod_json)))
-    after = pod_state(json.loads(json.dumps(restarted_pod(running_pod_json))))
-    assert before["uid"] == running_pod_json["metadata"]["uid"]
-    assert before["ready"]["type"] == "Ready"
-    assert set(before["containers"]) == {
-        "broker",
-        *(f"{role}-default" for role in STOP_ORDER),
-    }
-    assert_role_oom_isolated(before, after)
+    assert parsed["ready"] == {"type": "Ready", **before["ready"]}
+    assert parsed["uid"] == before["uid"]
+    assert_role_oom_isolated(*oom_observations)
 
 
 @pytest.mark.parametrize(
     "violation",
-    ["uid", "ready", "transition", "seal-count", "other-role", "broker", "reason"],
+    [
+        "oom",
+        "oom-extra",
+        "pid",
+        "role-count",
+        "reason",
+        "signal",
+        "heartbeat",
+        "child-start",
+        "container",
+        "container-start",
+        "empty-container-start",
+        "transition",
+        "empty-transition",
+        "ready",
+        "zero-samples",
+        "non-bracketing",
+        "no-before-sample",
+        "empty-containers",
+        "empty-roles",
+        "empty-groups",
+        "oom-group",
+        "empty-endpoints",
+        "http",
+        "broker",
+        "uid",
+        "pod-ip",
+    ],
 )
-def test_pod_json_rejects_oom_isolation_violations(running_pod_json, violation):
-    after = restarted_pod(running_pod_json)
-    if violation == "uid":
-        after["metadata"]["uid"] = "66666666-7777-8888-9999-000000000000"
-    elif violation == "ready":
-        after["status"]["conditions"][1]["status"] = "False"
-    elif violation == "transition":
-        after["status"]["conditions"][1]["lastTransitionTime"] = "2026-01-01T00:00:20Z"
-    elif violation == "seal-count":
-        after["status"]["initContainerStatuses"][-1]["restartCount"] = 0
-    elif violation == "other-role":
-        after["status"]["initContainerStatuses"][0]["restartCount"] = 1
-    elif violation == "broker":
-        after["status"]["containerStatuses"][0]["restartCount"] = 1
+def test_pod_json_rejects_oom_isolation_violations(oom_observations, violation):
+    before, after, roles, samples, signal_at, recovered_at = oom_observations
+    if violation == "oom":
+        after["oom_kills"] = 0
+    elif violation == "oom-extra":
+        after["oom_kills"] = 2
+    elif violation == "pid":
+        after["supervisor"]["pid"] = before["supervisor"]["pid"]
+    elif violation == "role-count":
+        after["supervisor"]["restarts"] = 0
     elif violation == "reason":
-        after["status"]["initContainerStatuses"][-1]["lastState"]["terminated"][
-            "reason"
-        ] = "Error"
+        after["supervisor"]["last_exit"]["oom"] = False
+    elif violation == "signal":
+        after["supervisor"]["last_exit"]["signal"] = 15
+    elif violation == "heartbeat":
+        after["supervisor"]["heartbeat_at"] = 99
+    elif violation == "child-start":
+        after["supervisor"]["child_started_at"] = 99
+    elif violation == "container":
+        after["containers"]["clean-default"]["restartCount"] = 1
+    elif violation == "container-start":
+        after["containers"]["seal-default"]["state"]["running"]["startedAt"] = "later"
+    elif violation == "empty-container-start":
+        before["containers"]["seal-default"]["state"]["running"]["startedAt"] = ""
+        after["containers"]["seal-default"]["state"]["running"]["startedAt"] = ""
+    elif violation == "transition":
+        after["ready"]["lastTransitionTime"] = "later"
+    elif violation == "empty-transition":
+        before["ready"]["lastTransitionTime"] = ""
+        after["ready"]["lastTransitionTime"] = ""
+    elif violation == "ready":
+        after["ready"]["status"] = "False"
+    elif violation == "zero-samples":
+        samples.clear()
+    elif violation == "non-bracketing":
+        samples[:] = samples[:5]
+    elif violation == "no-before-sample":
+        samples[:] = samples[-5:]
+    elif violation == "empty-containers":
+        after["containers"].clear()
+    elif violation == "empty-roles":
+        roles.clear()
+    elif violation == "empty-groups":
+        after["oom_groups"].clear()
+    elif violation == "oom-group":
+        after["oom_groups"]["seal-default"] = 1
+    elif violation == "empty-endpoints":
+        samples[0]["ready_ips"] = []
+    elif violation == "http":
+        samples[0]["http"] = 503
+    elif violation == "broker":
+        after["containers"]["broker"]["ready"] = False
+    elif violation == "uid":
+        after["uid"] = "different"
+    elif violation == "pod-ip":
+        after["pod_ip"] = ""
 
     with pytest.raises(AssertionError):
-        assert_role_oom_isolated(pod_state(running_pod_json), pod_state(after))
+        assert_role_oom_isolated(before, after, roles, samples, signal_at, recovered_at)
 
 
 @pytest.mark.parametrize("timeout", [None, 25])
@@ -578,7 +716,12 @@ def test_role_liveness_allows_cli_startup_under_contention(tmp_path, timeout):
 
 def kubectl(*args, input=None):
     return subprocess.run(
-        ["kubectl", *args], input=input, text=True, capture_output=True, check=True
+        ["kubectl", *args],
+        input=input,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
     ).stdout
 
 
@@ -586,7 +729,7 @@ def kubectl(*args, input=None):
     os.getenv("STREAMCAST_CHART_KIND") != "1", reason="requires the dedicated kind job"
 )
 @pytest.mark.timeout(360)
-def test_oom_one_role_restarts_only_that_container(tmp_path):
+def test_oom_one_role_restarts_in_place_and_pod_ready_holds(tmp_path):
     # Allocate inside the maintainer itself: an exec helper's OOM could kill
     # only the helper and leave the role alive, proving no restart isolation.
     image = os.environ["STREAMCAST_CHART_IMAGE"]
@@ -727,18 +870,47 @@ def test_oom_one_role_restarts_only_that_container(tmp_path):
             check=True,
         )
         target = "oom-streamcast-0"
-        before = pod_state(
-            json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
+        expected_roles = [
+            item["name"] for item in pod(render(tmp_path, values))["initContainers"]
+        ]
+        assert (
+            len(expected_roles)
+            == 5
+            * len(values.get("maintenance", {}).get("groups", [{"name": "default"}]))
+            > 0
         )
-        seal = before["containers"]["seal-default"]
-        kubectl(
-            "exec",
-            "-n",
-            namespace,
-            target,
-            "-c",
+
+        def execute(container, *command):
+            return kubectl(
+                "exec", "-n", namespace, target, "-c", container, "--", *command
+            )
+
+        def observation():
+            result = pod_state(
+                json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
+            )
+            result["oom_groups"] = {
+                role: int(execute(role, "cat", "/sys/fs/cgroup/memory.oom.group"))
+                for role in expected_roles
+            }
+            result.update(
+                json.loads(
+                    execute(
+                        "seal-default",
+                        "python",
+                        "-c",
+                        "import json; from pathlib import Path; "
+                        "events = dict(line.split() for line in Path('/sys/fs/cgroup/memory.events').read_text().splitlines()); "
+                        "print(json.dumps({'oom_kills': int(events['oom_kill']), "
+                        "'supervisor': json.loads(Path('/run/streamcast/seal-default.supervise.json').read_text())}))",
+                    )
+                )
+            )
+            result["observed_at"] = time.time()
+            return result
+
+        execute(
             "seal-default",
-            "--",
             "streamcast",
             "probe",
             "role",
@@ -749,43 +921,136 @@ def test_oom_one_role_restarts_only_that_container(tmp_path):
             "--group",
             "default",
         )
+        before = observation()
+        assert_single_process_oom(before, expected_roles)
         kubectl(
-            "exec",
+            "run",
+            "http-client",
             "-n",
             namespace,
-            target,
-            "-c",
-            "seal-default",
+            "--image=" + image,
+            "--image-pull-policy=Never",
+            "--restart=Never",
+            "--command",
             "--",
             "python",
             "-c",
-            "import os, signal; os.kill(1, signal.SIGUSR1)",
+            "import time; time.sleep(3600)",
         )
         kubectl(
             "wait",
             "-n",
             namespace,
-            f"pod/{target}",
-            f'--for=jsonpath={{.status.initContainerStatuses[?(@.name=="seal-default")].restartCount}}={seal["restartCount"] + 1}',
-            "--timeout=120s",
+            "pod/http-client",
+            "--for=condition=Ready",
+            "--timeout=60s",
         )
-        after = pod_state(
-            json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
-        )
-        assert_role_oom_isolated(before, after)
-        kubectl(
-            "exec",
+        service_ip = kubectl(
+            "get",
+            "service",
+            "oom-streamcast",
             "-n",
             namespace,
-            target,
-            "-c",
-            "broker",
-            "--",
-            "streamcast",
-            "probe",
-            "ready",
-            "--url",
-            "http://127.0.0.1:8765",
+            "-o",
+            "jsonpath={.spec.clusterIP}",
+        ).strip()
+        assert service_ip and service_ip != "None"
+        samples = []
+        stop, sampled = threading.Event(), threading.Event()
+
+        def sample_service():
+            while not stop.is_set():
+                started = time.monotonic()
+                sample = {"at": time.time()}
+                try:
+                    slices = json.loads(
+                        kubectl(
+                            "get",
+                            "endpointslices",
+                            "-n",
+                            namespace,
+                            "-l",
+                            "kubernetes.io/service-name=oom-streamcast",
+                            "-o",
+                            "json",
+                        )
+                    )["items"]
+                    sample["ready_ips"] = [
+                        address
+                        for item in slices
+                        for endpoint in item["endpoints"]
+                        if endpoint.get("conditions", {}).get("ready") is True
+                        for address in endpoint["addresses"]
+                    ]
+                    sample["http"] = int(
+                        kubectl(
+                            "exec",
+                            "-n",
+                            namespace,
+                            "http-client",
+                            "--",
+                            "python",
+                            "-c",
+                            "import urllib.request; "
+                            f"print(urllib.request.urlopen('http://{service_ip}:8765/readyz', timeout=3).status)",
+                        )
+                    )
+                except (subprocess.SubprocessError, ValueError, KeyError) as exc:
+                    sample["error"] = type(exc).__name__
+
+                sample["finished_at"] = time.time()
+                samples.append(sample)
+                sampled.set()
+                stop.wait(max(0, 1 - (time.monotonic() - started)))
+
+        sampler = threading.Thread(target=sample_service)
+        sampler.start()
+        try:
+            assert sampled.wait(20), "no Service sample before the signal"
+            signal_at = time.time()
+            execute(
+                "seal-default",
+                "python",
+                "-c",
+                f"import os, signal; os.kill({before['supervisor']['pid']}, signal.SIGUSR1)",
+            )
+            deadline = time.monotonic() + 120
+            while True:
+                after = observation()
+                status = after["supervisor"]
+                if (
+                    status.get("pid")
+                    and status["pid"] != before["supervisor"]["pid"]
+                    and status["restarts"] == before["supervisor"]["restarts"] + 1
+                    and status["last_exit"]
+                    == {"code": None, "signal": 9, "oom": True, "liveness": False}
+                    and signal_at
+                    <= status["child_started_at"]
+                    <= status["heartbeat_at"]
+                    and after["observed_at"] - status["heartbeat_at"] < 15
+                ):
+                    recovered_at = time.time()
+                    break
+
+                assert time.monotonic() < deadline, "role child never restarted"
+                time.sleep(0.2)
+
+            # Keep sampling after K2; assert count and both brackets below.
+            deadline = time.monotonic() + 30
+            while len(samples) < 5 or not any(s["at"] > recovered_at for s in samples):
+                assert time.monotonic() < deadline, (
+                    "missing post-recovery Service samples"
+                )
+                time.sleep(0.2)
+
+        finally:
+            stop.set()
+            sampler.join(timeout=35)
+            assert not sampler.is_alive(), "Service sampler did not finish"
+
+        after = observation()
+        assert_role_oom_isolated(
+            before, after, expected_roles, samples, signal_at, recovered_at
         )
     finally:
         kubectl("delete", "namespace", namespace, "--wait=false")

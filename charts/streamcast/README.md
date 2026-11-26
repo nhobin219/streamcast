@@ -3,14 +3,29 @@
 One release runs one broker and five native maintenance sidecars per credential
 group on Kubernetes 1.29 or newer. Every container shares the data volume and its
 aliases. Sidecars stop in the order seal, publish, compact, clean, clean-published,
-after the broker. Only the broker's readiness controls Service membership.
-Maintenance liveness probes allow 15 seconds for CLI startup under contention;
-`maintenance.liveness` configures that timeout, the 10-second period and six
-consecutive failures before restart. Longer timeouts can delay detection of a
-hung role.
+after the broker. Roles have no readiness or startup probe. Each runs under
+`tini -- streamcast-supervise`, which restarts its child inside a container that
+keeps running, so a role restart leaves pod readiness unchanged. This requires
+**kubelet `singleProcessOOMKill: true` on the node** (cgroup v2
+`memory.oom.group == 0`). Without it, an OOM kills the whole container and the pod
+is NotReady until the container runs again. The supervisor warns at startup when
+this requirement is absent; no additional capability is requested.
+
+`maintenance.liveness` configures the child's probe: a 10-second period,
+15-second timeout and six consecutive failures before the supervisor kills and
+restarts the child. The container liveness probe instead checks the supervisor's
+heartbeat with a maximum age of period × threshold + timeout. If the supervisor
+dies, hangs, or cannot write its status, the container restarts and pod readiness
+can change. Child exits use exponential back-off from 1 to 60 seconds, reset
+after 10 minutes of running; SIGTERM and SIGINT are forwarded without restart.
+Each role's bounded `<runDir>/<role>-<group>.supervise.json` file records the
+child PID, restart count, last exit, OOM count, start time, heartbeat and OOM group.
+Longer probe timeouts delay detection of a hung role.
 
 The chart source at a release tag is the versioned artifact; vendor this directory
-at that tag. Chart version and appVersion follow the Python package version. Set
+at that tag. Chart version and appVersion follow the Python package version.
+The role image must contain `streamcast-supervise`; release the chart and Python
+package together. Set
 `image.repository` to the built image's repository and `image.tag` to that version.
 There is no image pull or chart publication prerequisite for a locally built image.
 
@@ -69,7 +84,8 @@ application supplies authorization, storage profiles and ExternalMaintain itself
 `broker.image` overrides the base image; maintenance inherits that image unless
 `maintenance.image` overrides it. Use identical streamcast/litelink versions in
 every container. `maintenance.command` accepts a base command; the chart appends
-`--role` and `--group`. Give each group its own `env`/`envFrom`. Broker environment
+`--role` and `--group` to the supervised command. Give each group its own
+`env`/`envFrom`. Broker environment
 variables are not copied into roles. No credentials belong in `broker.config`.
 
 New data claims use ReadWriteOncePod and retain their data on scale-down and
@@ -105,5 +121,9 @@ token automount defaults to false. `podAnnotations`, `priorityClassName` and
 Chart CI runs lint, template assertions and a kind install on hosted runners. The
 kind test uses a local image and an adopted test volume. A signal handler in the
 test's role command allocates beyond seal's limit inside the maintainer process,
-forcing a real cgroup OOM. The test checks that only seal restarts, the pod UID and
-Ready transition stay unchanged, and the broker's ready probe still answers.
+forcing a real cgroup OOM. The test targets the supervisor's recorded child PID,
+requires exactly one OOM and child restart, and verifies zero container restarts
+and an unchanged pod UID and Ready transition. Every role must read OOM group 0.
+One-second samples bracket the OOM and recovery: the EndpointSlice must contain
+the ready pod IP and a client pod must receive HTTP 200 from the Service's
+ClusterIP on every sample. The kind job patches its kubelet accordingly.

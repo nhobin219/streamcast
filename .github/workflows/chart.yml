@@ -34,7 +34,7 @@ jobs:
       - run: uv sync
       - run: helm lint charts/streamcast --strict
       - run: helm template smoke charts/streamcast
-      - run: uv run pytest tests/test_chart.py -q -k 'not oom_one_role' --durations=5
+      - run: uv run pytest tests/test_chart.py tests/test_supervise.py -q -k 'not oom_one_role' --durations=5
 
   kind:
     name: Kind install and role OOM
@@ -53,14 +53,25 @@ jobs:
       - run: uv sync
       # The image is built locally; the test never needs registry credentials.
       - run: docker build -f docker/Dockerfile -t streamcast:chart-ci .
+      - name: Configure single-process OOM killing
+        run: |
+          cat > kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          kubeadmConfigPatches:
+            - |
+              kind: KubeletConfiguration
+              singleProcessOOMKill: true
+          EOF
       - uses: helm/kind-action@v1.12.0
         with:
           # containerd 2 in this node image requires the newer image loader.
           version: v0.27.0
           cluster_name: chart-ci
           node_image: kindest/node:v1.32.2
+          config: kind-config.yaml
       - run: kind load docker-image streamcast:chart-ci --name chart-ci
-      - run: uv run pytest tests/test_chart.py::test_oom_one_role_restarts_only_that_container -q --durations=5
+      - run: uv run pytest tests/test_chart.py::test_oom_one_role_restarts_in_place_and_pod_ready_holds -q --durations=5
         env:
           STREAMCAST_CHART_KIND: "1"
           STREAMCAST_CHART_IMAGE: streamcast:chart-ci

@@ -64,6 +64,24 @@ spec:
           image: {{ include "streamcast.image" $roleImage | quote }}
           imagePullPolicy: {{ $roleImage.pullPolicy }}
           command:
+            - tini
+            - --
+            - streamcast-supervise
+            - --status
+            - {{ printf "%s/%s-%s.supervise.json" $.Values.maintenance.runDir.path $role $group.name | quote }}
+            - --run-dir
+            - {{ $.Values.maintenance.runDir.path | quote }}
+            - --role
+            - {{ $role | quote }}
+            - --group
+            - {{ $group.name | quote }}
+            - --probe-period
+            - {{ $.Values.maintenance.liveness.periodSeconds | quote }}
+            - --probe-threshold
+            - {{ $.Values.maintenance.liveness.failureThreshold | quote }}
+            - --probe-timeout
+            - {{ $.Values.maintenance.liveness.timeoutSeconds | quote }}
+            - --
             {{- toYaml (default (list "streamcast" "maintain" "--follow" $.Values.maintenance.runDir.path) $.Values.maintenance.command) | nindent 12 }}
           args: ["--role", {{ $role | quote }}, "--group", {{ $group.name | quote }}]
           securityContext:
@@ -72,7 +90,7 @@ spec:
             {{- toYaml (index $.Values.maintenance.roles $role).resources | nindent 12 }}
           livenessProbe:
             exec:
-              command: [streamcast, probe, role, --run-dir, {{ $.Values.maintenance.runDir.path | quote }}, --role, {{ $role | quote }}, --group, {{ $group.name | quote }}]
+              command: [streamcast-supervise, probe, --status, {{ printf "%s/%s-%s.supervise.json" $.Values.maintenance.runDir.path $role $group.name | quote }}, --max-age, {{ add (mul $.Values.maintenance.liveness.periodSeconds $.Values.maintenance.liveness.failureThreshold) $.Values.maintenance.liveness.timeoutSeconds | quote }}]
             {{- toYaml $.Values.maintenance.liveness | nindent 12 }}
           {{- with $group.env }}
           env:

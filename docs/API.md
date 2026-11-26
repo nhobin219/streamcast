@@ -2507,3 +2507,23 @@ both directions — every publish encodes a row, every replayed row re-encodes o
 on a six-column trade row: **0.285 us against 5.815 us** for stdlib `json` to encode
 (20.4x), and 0.386 against 4.989 to decode (12.9x). The ratio narrows as one large string
 column comes to dominate a frame; `just bench` prints both for your own shape.
+
+
+## Container role supervision
+
+`streamcast-supervise --status PATH --run-dir PATH --role ROLE --group GROUP
+[--probe-period 10] [--probe-threshold 6] [--probe-timeout 15] -- COMMAND [ARG ...]`
+runs one maintenance role under a small supervisor. It imports only the standard
+library, raises the child's `oom_score_adj` to 1000 before exec, forwards SIGTERM
+and SIGINT, and exits with the child's status on shutdown. Other exits restart
+after 1 second, doubling to a 60-second cap and resetting after 600 seconds of
+runtime. Consecutive failed or timed-out role probes kill and restart the child.
+
+The atomic status JSON overwrites one bounded record containing `pid`, `restarts`, `last_exit`
+(`code`, `signal`, `oom`, `liveness`), `oom_kills`, `child_started_at`, `heartbeat_at`
+and `oom_group`. Timestamps are Unix seconds. `streamcast-supervise probe --status
+PATH --max-age SECONDS` succeeds only for a fresh heartbeat. An unwritable status
+file leaves supervision running and causes that probe to fail. The chart uses
+this probe for container liveness; the supervisor itself runs under tini.
+See [the chart requirements](../charts/streamcast/README.md) for kubelet settings
+and the limits of readiness isolation.
