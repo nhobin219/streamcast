@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -422,6 +423,159 @@ def test_custom_command_ignores_config_and_parent_labels_keep_selectors(tmp_path
     assert pod(objects)["containers"][0]["command"] == ["python", "-m", "custom_broker"]
 
 
+def pod_state(document):
+    # PodCondition uses type; ContainerStatus uses name, including native sidecars.
+    status = document["status"]
+    return {
+        "uid": document["metadata"]["uid"],
+        "ready": {item["type"]: item for item in status["conditions"]}["Ready"],
+        "containers": {
+            item["name"]: item
+            for item in status["containerStatuses"] + status["initContainerStatuses"]
+        },
+    }
+
+
+def assert_role_oom_isolated(before, after):
+    assert after["uid"] == before["uid"]
+    initial, final = before["ready"], after["ready"]
+    assert initial["status"] == final["status"] == "True"
+    assert initial["lastTransitionTime"] == final["lastTransitionTime"]
+    seal = after["containers"]["seal-default"]
+    assert seal["restartCount"] > before["containers"]["seal-default"]["restartCount"]
+    assert all(
+        item["restartCount"] == 0
+        for name, item in after["containers"].items()
+        if name != "seal-default"
+    )
+    assert seal["lastState"]["terminated"]["reason"] == "OOMKilled"
+
+
+@pytest.fixture
+def running_pod_json():
+    # The same object shape returned by kubectl get pod -o json: readiness is
+    # a string condition, while restart counts and termination state are per container.
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "oom-streamcast-0",
+            "uid": "11111111-2222-3333-4444-555555555555",
+        },
+        "status": {
+            "phase": "Running",
+            "conditions": [
+                {
+                    "type": "PodScheduled",
+                    "status": "True",
+                    "lastTransitionTime": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "type": "Ready",
+                    "status": "True",
+                    "lastTransitionTime": "2026-01-01T00:00:10Z",
+                },
+            ],
+            "containerStatuses": [
+                {
+                    "name": "broker",
+                    "restartCount": 0,
+                    "ready": True,
+                    "started": True,
+                    "state": {"running": {"startedAt": "2026-01-01T00:00:09Z"}},
+                    "lastState": {},
+                },
+            ],
+            "initContainerStatuses": [
+                {
+                    "name": f"{role}-default",
+                    "restartCount": 0,
+                    "ready": True,
+                    "started": True,
+                    "state": {"running": {"startedAt": "2026-01-01T00:00:01Z"}},
+                    "lastState": {},
+                }
+                for role in STOP_ORDER
+            ],
+        },
+    }
+
+
+def restarted_pod(document):
+    after = copy.deepcopy(document)
+    seal = next(
+        item
+        for item in after["status"]["initContainerStatuses"]
+        if item["name"] == "seal-default"
+    )
+    seal["restartCount"] = 1
+    seal["lastState"] = {
+        "terminated": {
+            "reason": "OOMKilled",
+            "exitCode": 137,
+            "signal": 9,
+            "startedAt": "2026-01-01T00:00:01Z",
+            "finishedAt": "2026-01-01T00:00:20Z",
+        }
+    }
+    seal["state"] = {"running": {"startedAt": "2026-01-01T00:00:21Z"}}
+    return after
+
+
+def test_pod_json_parsing_and_role_oom_isolation(running_pod_json):
+    before = pod_state(json.loads(json.dumps(running_pod_json)))
+    after = pod_state(json.loads(json.dumps(restarted_pod(running_pod_json))))
+    assert before["uid"] == running_pod_json["metadata"]["uid"]
+    assert before["ready"]["type"] == "Ready"
+    assert set(before["containers"]) == {
+        "broker",
+        *(f"{role}-default" for role in STOP_ORDER),
+    }
+    assert_role_oom_isolated(before, after)
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["uid", "ready", "transition", "seal-count", "other-role", "broker", "reason"],
+)
+def test_pod_json_rejects_oom_isolation_violations(running_pod_json, violation):
+    after = restarted_pod(running_pod_json)
+    if violation == "uid":
+        after["metadata"]["uid"] = "66666666-7777-8888-9999-000000000000"
+    elif violation == "ready":
+        after["status"]["conditions"][1]["status"] = "False"
+    elif violation == "transition":
+        after["status"]["conditions"][1]["lastTransitionTime"] = "2026-01-01T00:00:20Z"
+    elif violation == "seal-count":
+        after["status"]["initContainerStatuses"][-1]["restartCount"] = 0
+    elif violation == "other-role":
+        after["status"]["initContainerStatuses"][0]["restartCount"] = 1
+    elif violation == "broker":
+        after["status"]["containerStatuses"][0]["restartCount"] = 1
+    elif violation == "reason":
+        after["status"]["initContainerStatuses"][-1]["lastState"]["terminated"][
+            "reason"
+        ] = "Error"
+
+    with pytest.raises(AssertionError):
+        assert_role_oom_isolated(pod_state(running_pod_json), pod_state(after))
+
+
+@pytest.mark.parametrize("timeout", [None, 25])
+def test_role_liveness_allows_cli_startup_under_contention(tmp_path, timeout):
+    values = (
+        {}
+        if timeout is None
+        else {"maintenance": {"liveness": {"timeoutSeconds": timeout}}}
+    )
+    roles = pod(render(tmp_path, values))["initContainers"]
+    for role in roles:
+        probe = role["livenessProbe"]
+        assert probe["timeoutSeconds"] == (15 if timeout is None else timeout)
+        assert probe["periodSeconds"] == 10
+        assert probe["failureThreshold"] == 6
+
+
 def kubectl(*args, input=None):
     return subprocess.run(
         ["kubectl", *args], input=input, text=True, capture_output=True, check=True
@@ -573,11 +727,10 @@ def test_oom_one_role_restarts_only_that_container(tmp_path):
             check=True,
         )
         target = "oom-streamcast-0"
-        before = json.loads(
-            kubectl("get", "pod", target, "-n", namespace, "-o", "json")
+        before = pod_state(
+            json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
         )
-        statuses = before["status"]["initContainerStatuses"]
-        seal = next(item for item in statuses if item["name"] == "seal-default")
+        seal = before["containers"]["seal-default"]
         kubectl(
             "exec",
             "-n",
@@ -616,29 +769,10 @@ def test_oom_one_role_restarts_only_that_container(tmp_path):
             f'--for=jsonpath={{.status.initContainerStatuses[?(@.name=="seal-default")].restartCount}}={seal["restartCount"] + 1}',
             "--timeout=120s",
         )
-        after = json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
-        assert after["metadata"]["uid"] == before["metadata"]["uid"]
-        initial = {item["name"]: item for item in before["status"]["conditions"]}[
-            "Ready"
-        ]
-        final = {item["name"]: item for item in after["status"]["conditions"]}["Ready"]
-        assert initial["status"] == final["status"] == "True"
-        assert initial["lastTransitionTime"] == final["lastTransitionTime"]
-        counts = {
-            item["name"]: item["restartCount"]
-            for item in after["status"]["containerStatuses"]
-            + after["status"]["initContainerStatuses"]
-        }
-        assert counts["seal-default"] > seal["restartCount"]
-        assert all(
-            count == 0 for name, count in counts.items() if name != "seal-default"
+        after = pod_state(
+            json.loads(kubectl("get", "pod", target, "-n", namespace, "-o", "json"))
         )
-        failed = next(
-            item
-            for item in after["status"]["initContainerStatuses"]
-            if item["name"] == "seal-default"
-        )
-        assert failed["lastState"]["terminated"]["reason"] == "OOMKilled"
+        assert_role_oom_isolated(before, after)
         kubectl(
             "exec",
             "-n",

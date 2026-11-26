@@ -4,6 +4,10 @@ One release runs one broker and five native maintenance sidecars per credential
 group on Kubernetes 1.29 or newer. Every container shares the data volume and its
 aliases. Sidecars stop in the order seal, publish, compact, clean, clean-published,
 after the broker. Only the broker's readiness controls Service membership.
+Maintenance liveness probes allow 15 seconds for CLI startup under contention;
+`maintenance.liveness` configures that timeout, the 10-second period and six
+consecutive failures before restart. Longer timeouts can delay detection of a
+hung role.
 
 The chart source at a release tag is the versioned artifact; vendor this directory
 at that tag. Chart version and appVersion follow the Python package version. Set

@@ -34,7 +34,7 @@ jobs:
       - run: uv sync
       - run: helm lint charts/streamcast --strict
       - run: helm template smoke charts/streamcast
-      - run: uv run pytest tests/test_chart.py -q -k 'not oom' --durations=5
+      - run: uv run pytest tests/test_chart.py -q -k 'not oom_one_role' --durations=5
 
   kind:
     name: Kind install and role OOM

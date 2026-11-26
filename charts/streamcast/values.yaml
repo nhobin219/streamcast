@@ -54,7 +54,8 @@ maintenance:
     compact: {resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}}
     clean: {resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}}
     clean-published: {resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 1Gi}}}
-  liveness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6}
+  # Five concurrent CLI probes exceeded 5s on the hosted kind runner.
+  liveness: {periodSeconds: 10, timeoutSeconds: 15, failureThreshold: 6}
 persistence:
   mountPath: /var/lib/streamcast
   aliasMounts: []
