@@ -1,0 +1,123 @@
+name: Container stack
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Image build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and load, without publishing
+        run: docker buildx build --load --tag streamcast:ci --file docker/Dockerfile .
+      - name: Verify installed entrypoint and non-root user
+        run: |
+          docker run --rm --read-only streamcast:ci --help
+          test "$(docker inspect --format '{{.Config.User}}' streamcast:ci)" = '10001:10001'
+      - name: Save amd64 image for stack checks
+        if: matrix.arch == 'amd64'
+        run: docker save streamcast:ci -o image.tar
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'amd64'
+        with:
+          name: stack-image
+          path: image.tar
+          retention-days: 1
+
+  smoke:
+    name: Compose smoke
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      STREAMCAST_IMAGE: streamcast:ci
+      STREAMCAST_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with: {name: stack-image}
+      - run: docker load -i image.tar
+      - uses: astral-sh/setup-uv@v10.3.0
+        with: {enable-cache: true}
+      - run: uv sync --frozen
+      - run: uv tool install rust-just==1.59.0
+      - name: Real containers, health, recovery and volume persistence
+        run: uv run pytest tests/test_stack.py -q --durations=10
+      - name: Remove smoke resources
+        if: always()
+        run: docker compose -f docker/compose.yml down --volumes --remove-orphans
+
+  just:
+    name: Just stack targets
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      STREAMCAST_IMAGE: streamcast:ci
+      COMPOSE_PROJECT_NAME: streamcast-just-ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with: {name: stack-image}
+      - run: docker load -i image.tar
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uv tool install rust-just==1.59.0
+      - run: just image streamcast:ci
+      - run: just stack-up
+      - run: just stack-ps
+      # --follow intentionally waits forever; verify attachment and stop only
+      # this log reader, without changing the stack's processes.
+      - name: Attach the log target
+        run: |
+          just stack-logs broker > stack-logs.txt 2>&1 &
+          reader=$!
+          sleep 3
+          kill -0 "$reader"
+          kill "$reader"
+          wait "$reader" || test "$?" -eq 143
+      - run: just stack-smoke
+      - run: just stack-smoke
+      - run: just stack-down
+      - run: just stack-up
+      - run: just --yes stack-wipe
+      - name: Remove stack resources
+        if: always()
+        run: docker compose --project-name streamcast-just-ci -f docker/compose.yml down --volumes --remove-orphans
+
+  stack-success:
+    name: Container stack success
+    if: always()
+    needs: [build, smoke, just]
+    runs-on: ubuntu-24.04
+    steps:
+      - if: >-
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
+        run: exit 1

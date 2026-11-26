@@ -1,0 +1,27 @@
+[server]
+host = "0.0.0.0"
+port = 8765
+
+[broker]
+broker_id = "local"
+registry = "/var/lib/streamcast/registry.db"
+authorization = "streamcast:TokenFileAccess.from_env"
+max_streams = 64
+
+[broker.maintain]
+duckdb_default_memory_mib = 96
+duckdb_default_threads = 1
+duckdb_retention_memory_mib = 96
+duckdb_retention_threads = 1
+duckdb_retention_spill_mib = 128
+duckdb_spill_root = "/tmp/streamcast-spill"
+
+[broker.maintain.external]
+run_dir = "/run/streamcast"
+groups = ["default"]
+
+# The endpoint and credentials are supplied by the services' environment.
+[storage_profiles.default]
+root = "/var/lib/streamcast/streams"
+published = "s3://streamcast/logs"
+replicate = false
