@@ -23,7 +23,9 @@ from streamcast import (
     StreamSpec,
     _dedupe,
     _inspect,
+    _maintain,
     _plan,
+    _probe,
 )
 from streamcast._application import Opening, create_app, initialize_registry
 from streamcast._broker.model import ExternalMaintain
@@ -110,6 +112,80 @@ async def test_broker_spawns_no_children(tmp_path, definition, monkeypatch):
         assert app.state.broker.running == {}
         assert len(_plan.read_plan(tmp_path / "run").roles) == len(ROLES)
         assert app.state.broker.generations["events"].writable
+
+
+async def test_empty_registry_publishes_serving_plan_and_roles_become_ready(
+    tmp_path, monkeypatch
+):
+    settings = config(
+        tmp_path,
+        registry=tmp_path / "registry.db",
+        authorization=Grants(),
+    )
+    initialize_registry(settings)
+    app = create_app(settings)
+    run_dir = tmp_path / "run"
+    plans = []
+    write_plan = _plan.write_plan
+
+    def record_plan(directory, plan):
+        write_plan(directory, plan)
+        plans.append(plan)
+
+    def stop_at_idle(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_plan, "write_plan", record_plan)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://broker"
+        ) as client:
+            assert (await client.get("/readyz")).status_code == 200
+
+        plan = _plan.read_plan(run_dir)
+        assert plan.state == "serving"
+        assert [(p.state, p.generation) for p in plans] == [
+            ("fenced", 1),
+            ("serving", 2),
+        ]
+        assert plans[0].boot_id == plan.boot_id
+        assert plans[0].roles == plan.roles
+        assert all(
+            not role.logs and not role.retire and not role.streams
+            for role in plan.roles.values()
+        )
+        assert json.loads((run_dir / "broker.json").read_bytes())["state"] == "serving"
+        for role in ROLES:
+            # Only the first idle poll is replaced; the follower writes its
+            # real acknowledgement and the unchanged probe evaluates it.
+            with monkeypatch.context() as follower:
+                follower.setattr(_maintain.time, "sleep", stop_at_idle)
+                assert (
+                    _maintain.main(
+                        ["--follow", str(run_dir), "--role", role, "--group", "default"]
+                    )
+                    == 0
+                )
+
+            status = _plan.read_status(run_dir, role, "default")
+            assert status.error is None
+            assert (status.boot_id, status.applied_generation) == (
+                plan.boot_id,
+                plan.generation,
+            )
+            assert status.logs_open == 0
+            assert _probe.role_ready(run_dir, role, "default")
+
+        await app.state.broker.reconcile_children()
+        assert _plan.read_plan(run_dir) == plan
+        assert len(plans) == 2
+
+    closed = _plan.read_plan(run_dir)
+    assert (closed.state, closed.generation) == ("fenced", plan.generation + 1)
+    assert closed.boot_id == plan.boot_id
+    assert closed.roles == plan.roles
+    assert len(plans) == 3
+    assert all(not _probe.role_ready(run_dir, role, "default") for role in ROLES)
 
 
 async def test_startup_barrier_waits_for_live_role_then_opens(
