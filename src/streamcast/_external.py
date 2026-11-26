@@ -195,7 +195,9 @@ class External:
             return
 
         roles = self.empty_roles() if closing else self.plan_roles(streams, profiles)
-        if roles == self.roles and not closing:
+        # Empty startup has the fenced plan's membership, but must still
+        # publish permission for the roles to serve this boot.
+        if roles == self.roles and self.serving and not closing:
             return
 
         await thread(self.write, "fenced" if closing else "serving", roles)

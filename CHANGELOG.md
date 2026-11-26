@@ -20,6 +20,12 @@ there was nothing to have changed from. Everything above it is ordinary.
   `streamcast token-file create PATH` creates a private, random token exclusively
   and leaves existing files untouched, without printing token values.
 
+### Fixed
+
+- External maintenance publishes a serving plan for an empty registry after
+  the startup fence, so idle role probes become ready before any stream exists.
+  Unchanged serving plans retain their generation; shutdown still fences roles.
+
 ## 0.29.1 — 2026-11-24
 
 ### Fixed
