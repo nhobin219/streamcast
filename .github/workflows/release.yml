@@ -236,3 +236,152 @@ jobs:
       - run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file notes.md --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
+
+  ghcr-build:
+    name: Publish image digest (${{ matrix.arch }})
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Each runner builds its native architecture. The release manifest joins
+      # immutable digests, so neither architecture can overwrite the other.
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  ghcr-image:
+    name: Publish versioned multi-architecture image
+    needs: ghcr-build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: image-digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge release digests
+        shell: bash
+        run: |
+          sources=()
+          for digest in digests/*; do
+            hash="${digest##*/}"
+            [[ "$hash" =~ ^[a-f0-9]{64}$ ]]
+            sources+=("$IMAGE@sha256:$hash")
+          done
+          test "${#sources[@]}" -eq 2
+          docker buildx imagetools create \
+            --tag "$IMAGE:${GITHUB_REF_NAME#v}" \
+            --tag "$IMAGE:$GITHUB_SHA" "${sources[@]}"
+
+  ghcr-latest:
+    name: Promote the newest release image
+    needs: [ghcr-image, github-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    # Serialize only the movable channel. Cancelling a pending promotion must
+    # never cancel publication of a versioned image or chart.
+    concurrency:
+      group: ghcr-latest
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote latest only for the newest stable tag
+        shell: bash
+        run: |
+          git fetch --force --tags origin
+          newest=$(git tag --list 'v*' \
+            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -1)
+          if [ "$GITHUB_REF_NAME" = "$newest" ]; then
+            docker buildx imagetools create \
+              --tag "$IMAGE:latest" "$IMAGE:${GITHUB_REF_NAME#v}"
+          else
+            echo "Skipping latest: $GITHUB_REF_NAME is not the newest stable tag"
+          fi
+
+  ghcr-chart:
+    name: Publish the OCI chart
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - name: Package the matching release chart
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          metadata=$(helm show chart charts/streamcast)
+          test "$(awk '$1 == "version:" {print $2}' <<< "$metadata")" = "$version"
+          test "$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' <<< "$metadata")" = "$version"
+          helm lint charts/streamcast --strict
+          helm package charts/streamcast --destination chart-dist
+      - name: Publish the chart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io \
+            --username "$GHCR_USER" --password-stdin
+          helm push "chart-dist/streamcast-${GITHUB_REF_NAME#v}.tgz" "$CHART_REGISTRY"
