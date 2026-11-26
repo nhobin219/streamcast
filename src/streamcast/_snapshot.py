@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import operator
 import threading
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ from streamcast import (
     _limits,
     _log,
     _manifest,
+    _protocol,
     _published,
     _remote,
     _schema,
@@ -733,13 +735,12 @@ class Snapshot:
             )
 
         live = self.metadata.live_log
-        if frozen.tail is None and not any(piece.entry is live for piece in pieces):
-            # Nothing read from the live log — it has published nothing, and
-            # there is no tail — but its columns still belong in the table,
-            # typed as it declares them: a column a migration added would
-            # otherwise be missing until the live log first publishes, and a
-            # query naming it would be a binder error rather than NULLs. With
-            # nothing else to read either, this is the whole (empty) table.
+        if not any(piece.entry is live for piece in pieces):
+            # No selected published piece supplies the live schema, and the
+            # tail may omit columns. Keep their declared types in the union:
+            # querying an omitted or newly added column must return NULLs,
+            # rather than fail to bind before the live log first publishes.
+            # With nothing else to read, this is the whole (empty) table.
             cursor.register("streamcast_empty", _tail_table(self.metadata.live_log, []))
             parts.append("SELECT * FROM streamcast_empty")
 
@@ -975,6 +976,9 @@ async def snapshot(
     s3_options: S3Options | None = None,
     stream_id: str | None = None,
     max_tail: int = MAX_TAIL,
+    tail_columns: Sequence[str] | None = None,
+    tail_filters: Sequence[_manifest.Term] = (),
+    max_tail_bytes: int | None = None,
     cache: ReadCache = DEFAULT_CACHE,
 ) -> Snapshot:
     """See `StreamHandle.snapshot`."""
@@ -991,13 +995,35 @@ async def snapshot(
         raise ValueError(msg)
 
     found = await asyncio.to_thread(metadata, metadata_uri, s3_options, stream_id)
+    if tail_columns is not None:
+        known = {
+            *_schema.to_arrow(found.live_log.schema).names,
+            _log.COLUMN,
+            _log.STAMP,
+        }
+        unknown = set(tail_columns) - known
+        if unknown:
+            msg = f"unknown tail columns: {sorted(unknown)}"
+            raise ValueError(msg)
+
+        tail_columns = tuple(dict.fromkeys(tail_columns))
+
     return (
         await asyncio.to_thread(
             _assemble, metadata_uri, found, as_of_offset, as_of_ts, s3_options, cache
         )
         if broker is None or as_of_offset is None
         else await _with_tail(
-            metadata_uri, found, as_of_offset, broker, s3_options, max_tail, cache
+            metadata_uri,
+            found,
+            as_of_offset,
+            broker,
+            s3_options,
+            max_tail,
+            cache,
+            tail_columns=tail_columns,
+            tail_filters=tail_filters,
+            max_tail_bytes=max_tail_bytes,
         )
     )
 
@@ -1140,6 +1166,10 @@ async def _with_tail(
     s3_options: S3Options | None,
     max_tail: int,
     cache: ReadCache = DEFAULT_CACHE,
+    *,
+    tail_columns: Sequence[str] | None = None,
+    tail_filters: Sequence[_manifest.Term] = (),
+    max_tail_bytes: int | None = None,
 ) -> Snapshot:
     """The published snapshot, then the broker's rows above it up to the point."""
 
@@ -1168,13 +1198,39 @@ async def _with_tail(
                     raise SnapshotUnavailable(msg)
 
                 records: list[dict[str, Any]] = []
+                tail_bytes = 0
                 while start < end:
                     offset, ts, row = await sub.recv()
                     if offset is None or offset >= end:
                         break
 
-                    records.append({_log.COLUMN: offset, _log.STAMP: ts, **row})
                     start = offset + 1
+                    record = {_log.COLUMN: offset, _log.STAMP: ts, **row}
+                    if not _tail_matches(record, tail_filters):
+                        continue
+
+                    if tail_columns is not None:
+                        record = {
+                            name: record[name]
+                            for name in dict.fromkeys(
+                                (_log.COLUMN, _log.STAMP, *tail_columns)
+                            )
+                            if name in record
+                        }
+
+                    if max_tail_bytes is not None:
+                        tail_bytes += len(_protocol.encode_publish(record))
+                        if tail_bytes > max_tail_bytes:
+                            msg = (
+                                f"cannot serve as of {as_of_offset}: the kept broker "
+                                f"tail exceeds max_tail_bytes={max_tail_bytes}; the "
+                                f"published tables end at {published.end_offset - 1}. "
+                                "Publishing is behind or stalled; ask as of a lower "
+                                "offset, raise max_tail_bytes, or wait for it to catch up."
+                            )
+                            raise SnapshotUnavailable(msg)
+
+                    records.append(record)
                     if len(records) > max_tail:
                         msg = (
                             f"cannot serve as of {as_of_offset}: the broker holds "
@@ -1195,7 +1251,7 @@ async def _with_tail(
             )
             raise SnapshotUnavailable(msg) from refused
 
-        published._tail = _tail_table(found.live_log, records)  # noqa: SLF001
+        published._tail = _tail_table(found.live_log, records, tail_columns)  # noqa: SLF001
         published.end_offset = end
         return published
     except BaseException:
@@ -1203,13 +1259,44 @@ async def _with_tail(
         raise
 
 
-def _tail_table(live: Entry, records: list[dict[str, Any]]) -> pa.Table:
+_TAIL_COMPARE: Final[dict[str, Callable[[Any, Any], bool]]] = {
+    "==": operator.eq,
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
+
+
+def _tail_matches(row: dict[str, Any], terms: Sequence[_manifest.Term]) -> bool:
+    """ANDed scan terms, before projection; NULL and absent values never match."""
+    for column, comparison, value in terms:
+        got = row.get(column)
+        if got is None:
+            return False
+
+        if comparison == "in":
+            if not any(item is not None and got == item for item in value):  # ty: ignore[not-iterable]
+                return False
+
+        elif value is None or not _TAIL_COMPARE[comparison](got, value):
+            return False
+
+    return True
+
+
+def _tail_table(
+    live: Entry, records: list[dict[str, Any]], columns: Sequence[str] | None = None
+) -> pa.Table:
     """The broker's rows as Arrow, typed as the live log declares them.
 
     With `streamcast_ts` from each frame, so a tail row carries the stamp a
     published one does — null where the log has none.
     """
     declared = _schema.to_arrow(live.schema)
+    if columns is not None:
+        declared = pa.schema([field for field in declared if field.name in columns])
+
     schema = pa.schema(
         [
             pa.field(_log.COLUMN, pa.int64(), nullable=False),

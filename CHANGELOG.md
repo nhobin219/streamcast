@@ -16,6 +16,14 @@ there was nothing to have changed from. Everything above it is ordinary.
   child with bounded backoff while its container remains running. Nodes require
   kubelet `singleProcessOOMKill: true` to keep role OOMs from changing pod readiness.
 
+- `StreamHandle.snapshot` accepts `tail_columns`, `tail_filters` and
+  `max_tail_bytes` to project, filter and byte-bound broker rows before keeping
+  them. Offset and stamp survive projection; discarded rows still advance the
+  frontier. Published data, gap refusal and defaults are unchanged. Later
+  queries see NULL for omitted tail columns, even before anything is published.
+  In one Linux arm64 session, fresh readers of 4/40/400 unpublished 64 KiB rows
+  held peak RSS above baseline to 18.7/19.1/19.1 MiB with four small fields;
+  bypassing pre-append projection gave 18.8/21.4/43.9 MiB. Reader setup is included.
 - Service TOML selects external maintenance with `[broker.maintain.external]`,
   an absolute `run_dir` and distinct storage-profile `groups`. Existing
   maintenance fields remain the policy; omitted external settings retain

@@ -7,9 +7,14 @@ back with nothing but the metadata file's URI, as another machine would.
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import resource
 import shutil
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import litelink
 import pyarrow as pa
@@ -19,8 +24,10 @@ import streamcast
 from streamcast import (
     LATEST,
     SnapshotUnavailable,
+    _client,
     _manifest,
     _metadata,
+    _protocol,
     _published,
     _snapshot,
     _versions,
@@ -157,8 +164,9 @@ class TestTheBroker:
         ).read_all()
         assert offsets(table) == [1, 2]
 
+    @pytest.mark.parametrize("reduced", [False, True])
     async def test_a_gap_neither_side_holds_is_refused_with_both_numbers(
-        self, tmp_path, serve
+        self, tmp_path, serve, reduced
     ):
         stream = streamcast.StreamHandle.open(
             streamcast.Stream(
@@ -177,7 +185,12 @@ class TestTheBroker:
         async with serve(stream, maintain=False) as broker:
             with pytest.raises(SnapshotUnavailable) as raised:
                 await streamcast.StreamHandle.snapshot(
-                    uri, as_of_offset=LATEST, broker=broker
+                    uri,
+                    as_of_offset=LATEST,
+                    broker=broker,
+                    tail_columns=["event_ts"] if reduced else None,
+                    tail_filters=[("event_ts", ">", 1000)] if reduced else (),
+                    max_tail_bytes=0 if reduced else None,
                 )
 
         message = str(raised.value)
@@ -510,3 +523,344 @@ class TestTheTailBound:
                 uri, as_of_offset=LATEST, broker=broker, max_tail=5
             ).read_all()
             assert offsets(table) == [1, 2, 3, 4, 5, 6, 7]
+
+
+class TestTailReduction:
+    async def test_tail_columns_projected_before_append(
+        self, tmp_path, serve, monkeypatch
+    ):
+        stream = await stream_of(tmp_path, 3)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        build = Mock(wraps=_snapshot._tail_table)
+        monkeypatch.setattr(_snapshot, "_tail_table", build)
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_columns=["event_ts"],
+            ) as snap:
+                assert snap._tail is not None
+                assert snap._tail.column_names == [
+                    "litelink_offset",
+                    "streamcast_ts",
+                    "event_ts",
+                ]
+                assert offsets(snap._tail) == [1, 2, 3]
+                assert all(
+                    isinstance(ts, int)
+                    for ts in snap._tail["streamcast_ts"].to_pylist()
+                )
+                records = build.call_args.args[1]
+                assert all(
+                    set(record) == set(snap._tail.column_names) for record in records
+                )
+
+    async def test_tail_filters_drop_rows_keep_frontier(self, tmp_path, serve):
+        stream = await stream_of(tmp_path, 2)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        publish(stream.log)
+        await stream.send_many([row(i) for i in range(2, 7)])
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri, as_of_offset=LATEST, broker=broker
+            ) as full:
+                end = full.end_offset
+
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_columns=["event_ts"],
+                tail_filters=[("price", ">=", 104.0), ("event_ts", "in", [4, 6])],
+            ) as snap:
+                assert snap._tail is not None
+                assert snap.end_offset == end == 8
+                table = await snap.scan(
+                    columns=["litelink_offset", "event_ts"]
+                ).read_all()
+                assert offsets(table) == [1, 2, 5, 7]
+
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_filters=[("missing", "==", None)],
+                max_tail_bytes=0,
+            ) as empty_tail:
+                assert empty_tail.end_offset == end
+                assert offsets(await empty_tail.scan().read_all()) == [1, 2]
+
+    @pytest.mark.parametrize(
+        "operator,value",
+        [
+            ("==", 2),
+            ("<", 2),
+            ("<=", 2),
+            (">", 2),
+            (">=", 2),
+            ("in", [0, 2]),
+            ("in", []),
+            ("==", None),
+        ],
+    )
+    async def test_tail_terms_match_scan(self, tmp_path, serve, operator, value):
+        stream = await stream_of(tmp_path, 4)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        terms = [("event_ts", operator, value)]
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+            ) as full:
+                expected = await full.scan(filters=terms).read_all()
+
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_filters=terms,
+            ) as reduced:
+                assert (await reduced.scan().read_all()).equals(expected)
+                assert reduced.end_offset == 5
+
+    async def test_max_tail_bytes_refuses(self, tmp_path, serve, monkeypatch):
+        stream = await stream_of(tmp_path, 4)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_columns=["event_ts"],
+                tail_filters=[("event_ts", ">=", 2)],
+            ) as snap:
+                assert snap._tail is not None
+                size = sum(
+                    len(_protocol.encode_publish(record))
+                    for record in snap._tail.to_pylist()
+                )
+
+            options: dict[str, Any] = {
+                "as_of_offset": LATEST,
+                "broker": broker,
+                "tail_columns": ["event_ts"],
+                "tail_filters": [("event_ts", ">=", 2)],
+            }
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri, **options, max_tail_bytes=size
+            ) as exact:
+                assert offsets(await exact.scan().read_all()) == [3, 4]
+
+            close = Mock()
+            original = _snapshot.Snapshot.close
+
+            async def closed(snap):
+                close(snap)
+                await original(snap)
+
+            monkeypatch.setattr(_snapshot.Snapshot, "close", closed)
+            with pytest.raises(
+                SnapshotUnavailable,
+                match=f"max_tail_bytes={size - 1}.*Publishing is behind",
+            ):
+                await streamcast.StreamHandle.snapshot(
+                    stream.metadata_uri, **options, max_tail_bytes=size - 1
+                )
+
+            assert close.call_count == 1
+            assert close.call_args.args[0]._shut
+
+    async def test_defaults_unchanged(self, tmp_path, serve):
+        stream = await stream_of(tmp_path, 3)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri, as_of_offset=LATEST, broker=broker
+            ) as original:
+                expected = await original.scan().read_all()
+
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_columns=None,
+                tail_filters=(),
+                max_tail_bytes=None,
+            ) as explicit:
+                assert explicit._tail is not None
+                assert (await explicit.scan().read_all()).equals(expected)
+                assert explicit._tail.column_names == [
+                    "litelink_offset",
+                    "streamcast_ts",
+                    "event_ts",
+                    "price",
+                ]
+                assert explicit._tail["price"].to_pylist() == [100.0, 101.0, 102.0]
+                assert explicit.end_offset == original.end_offset == 4
+
+    async def test_unknown_tail_column_rejected(self, tmp_path, serve, monkeypatch):
+        stream = await stream_of(tmp_path, 1)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        async with serve(stream) as broker:
+            connect = Mock(
+                side_effect=AssertionError("must validate before connecting")
+            )
+            monkeypatch.setattr(_client, "connect", connect)
+            with pytest.raises(ValueError, match="unknown.*missing"):
+                await streamcast.StreamHandle.snapshot(
+                    stream.metadata_uri,
+                    as_of_offset=LATEST,
+                    broker=broker,
+                    tail_columns=["event_ts", "missing"],
+                )
+
+            connect.assert_not_called()
+
+    @pytest.mark.parametrize("published_rows", [0, 2])
+    async def test_scan_beyond_tail_columns_is_null(
+        self, tmp_path, serve, published_rows
+    ):
+        stream = await stream_of(tmp_path, published_rows)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        if published_rows:
+            publish(stream.log)
+
+        await stream.send_many([row(i) for i in range(published_rows, 4)])
+        async with serve(stream) as broker:
+            async with await streamcast.StreamHandle.snapshot(
+                stream.metadata_uri,
+                as_of_offset=LATEST,
+                broker=broker,
+                tail_columns=["event_ts"],
+            ) as snap:
+                assert snap._tail is not None
+                table = await snap.scan(columns=["event_ts", "price"]).read_all()
+                assert table["price"].to_pylist() == [100.0, 101.0][:published_rows] + [
+                    None
+                ] * (4 - published_rows)
+                assert table["event_ts"].to_pylist() == list(range(4))
+
+    async def test_disconnect_mid_tail_returns_no_snapshot(
+        self, tmp_path, serve, monkeypatch
+    ):
+        stream = await stream_of(tmp_path, 3)
+        assert stream.metadata_uri is not None
+        assert stream.log is not None
+        connect = _client.connect
+
+        @asynccontextmanager
+        async def disconnected(*args, **kwargs):
+            async with connect(*args, **kwargs) as sub:
+                recv = sub.recv
+                calls = 0
+
+                async def receive(self):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise ConnectionError("disconnected mid-tail")
+
+                    return await recv()
+
+                monkeypatch.setattr(type(sub), "recv", receive)
+                yield sub
+
+        async with serve(stream) as broker:
+            monkeypatch.setattr(_client, "connect", disconnected)
+            with pytest.raises(ConnectionError, match="mid-tail"):
+                await streamcast.StreamHandle.snapshot(
+                    stream.metadata_uri,
+                    as_of_offset=LATEST,
+                    broker=broker,
+                    tail_columns=["event_ts"],
+                )
+
+
+async def _tail_peak(uri, broker):
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    async with await streamcast.StreamHandle.snapshot(
+        uri,
+        as_of_offset=LATEST,
+        broker=broker,
+        tail_columns=["a", "b", "c", "d"],
+    ) as snap:
+        assert snap._tail is not None
+        assert snap._tail.column_names == [
+            "litelink_offset",
+            "streamcast_ts",
+            "a",
+            "b",
+            "c",
+            "d",
+        ]
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return before, peak, snap._tail.num_rows
+
+
+def _measure_tail_peak(uri, broker, result):
+    with result:
+        result.send(asyncio.run(_tail_peak(uri, broker)))
+
+
+async def test_tail_memory_flat_when_projected(tmp_path, serve):
+    """Fresh readers isolate their peaks from the writer and other scales."""
+    schema = {
+        "type": "object",
+        "properties": {
+            **{name: {"type": "integer"} for name in "abcd"},
+            "text": {"type": "string"},
+        },
+        "required": [*"abcd", "text"],
+    }
+    context = multiprocessing.get_context("forkserver")
+    deltas = []
+    for count in (4, 40, 400):
+        stream = streamcast.StreamHandle.open(
+            streamcast.Stream(
+                spec=streamcast.StreamSpec(name="wide", schema=schema),
+                storage=streamcast.Storage(root=tmp_path / str(count)),
+            ),
+            initialization="create_if_absent",
+        )
+        await stream.send_many(
+            [
+                {"a": i, "b": 1, "c": 2, "d": 3, "text": "x" * (64 * 1024)}
+                for i in range(count)
+            ]
+        )
+        async with serve(stream) as broker:
+            receive, send = context.Pipe(duplex=False)
+            child = context.Process(
+                target=_measure_tail_peak, args=(stream.metadata_uri, broker, send)
+            )
+            child.start()
+            send.close()
+            try:
+                await asyncio.to_thread(child.join, 20)
+                assert not child.is_alive(), "snapshot reader did not finish"
+                assert child.exitcode == 0
+                before, peak, rows = receive.recv()
+                assert rows == count
+                unit = 1024 if sys.platform == "darwin" else 1
+                deltas.append((peak - before) / unit / 1024)
+            finally:
+                if child.is_alive():
+                    child.terminate()
+                    await asyncio.to_thread(child.join)
+
+                child.close()
+                receive.close()
+
+    print(f"projected tail peak RSS deltas (MiB), 4/40/400 rows: {deltas}")
+    # One transient wire row and fixed reader setup fit here; retaining 25 MiB
+    # of text at 100x must not. CI runs this on both supported Python versions.
+    assert max(deltas) - min(deltas) < 16, deltas

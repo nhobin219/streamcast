@@ -2268,12 +2268,13 @@ kdb tickerplant has: the feed handler parses, the plant stores typed rows.
 ```python
 await streamcast.StreamHandle.snapshot(metadata_uri, *, as_of_offset=None, as_of_ts=None,
                                  broker=None, s3_options=None,
-                                 max_tail=1_000_000, memory_cache=True,
+                                 max_tail=1_000_000, tail_columns=None,
+                                 tail_filters=(), max_tail_bytes=None, memory_cache=True,
                                  disk_cache=False, cache_key=None,
                                  disk_cache_volume_limit=0.8) -> Snapshot
-streamcast.StreamHandle.scan(metadata_uri, *, <the same>, columns=None, where=None, filters=(),
+streamcast.StreamHandle.scan(metadata_uri, *, <snapshot options except tail_* and max_tail_bytes>, columns=None, where=None, filters=(),
                        start_offset=None, end_offset=None, batch_size=1_000_000) -> Reader
-streamcast.StreamHandle.sql(metadata_uri, query, *, <the same>, filters=(), start_offset=None,
+streamcast.StreamHandle.sql(metadata_uri, query, *, <snapshot options except tail_* and max_tail_bytes>, filters=(), start_offset=None,
                       end_offset=None, batch_size=1_000_000) -> Reader
 
 stream.metadata_uri -> str | None     # on the server
@@ -2336,6 +2337,27 @@ once the reader is done.
 
 `snapshot.end_offset` is exclusive: every row the snapshot holds is below it, and a reader
 carrying on live subscribes there.
+
+`snapshot` can reduce the broker tail **before retaining it**. `tail_columns=None`
+keeps all columns; a sequence keeps only those names plus `litelink_offset` and
+`streamcast_ts`. Unknown names raise `ValueError` before connecting. Include every
+column a later query needs: omitted columns read as NULL for tail rows, including
+when nothing has been published. Published rows retain their full schema and values.
+
+`tail_filters=()` keeps all rows. Otherwise the same ANDed `(column, operator, value)`
+terms as `scan(filters=)` (`==`, `<`, `<=`, `>`, `>=`, `in`) run in Python before
+projection. Missing or NULL column values do not match. These terms only reduce the
+tail; apply `scan(filters=)` as well to filter the published rows. Discarded rows
+still advance the offset: the frontier, gap refusal and `end_offset` are unchanged.
+
+`max_tail` bounds the kept row count. `max_tail_bytes=None` adds no byte bound;
+otherwise it caps the sum of the kept rows' JSON-encoded sizes, offset and stamp
+columns included, using the publisher's encoder. Exceeding either bound raises
+`SnapshotUnavailable` with a publishing-behind diagnostic and closes the reader;
+no partial snapshot is returned. The byte bound is on retained encoded rows, not
+process RSS: a full wire row and reader setup still need transient memory. Defaults
+retain today's full-row tail. These three options are on `snapshot`, not the one-shot
+`StreamHandle.scan` or `StreamHandle.sql` wrappers.
 
 | | |
 |---|---|
