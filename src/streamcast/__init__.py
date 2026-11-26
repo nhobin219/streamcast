@@ -101,6 +101,7 @@ from streamcast._spec import Maintenance, Storage, Stream, StreamSpec
 from streamcast._stats import Stats
 from streamcast._store import PostgresStore, SqliteStore, Store, Transaction, store_ddl
 from streamcast._stream import StreamHandle
+from streamcast._token_auth import TokenFileAccess
 
 try:
     __version__ = version("streamcast")
@@ -157,6 +158,7 @@ __all__ = [
     "Subscription",
     "Superseded",
     "TooSlow",
+    "TokenFileAccess",
     "Transaction",
     "__version__",
     "connect",

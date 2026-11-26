@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from streamcast import _inspect, _probe, _serve
+from streamcast import _inspect, _probe, _serve, _token_auth
 from streamcast._maintain import main as _maintain
 
 
@@ -18,6 +18,9 @@ def main(argv: list[str] | None = None) -> int:
         if command in ("serve", "init-registry"):
             return _serve.main(arguments, initialize=command == "init-registry")
 
+        if command == "token-file":
+            return _token_auth.main(arguments)
+
         if command == "probe":
             return _probe.main(arguments)
 
@@ -25,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
             return _inspect.main(arguments)
 
     print(
-        "usage: streamcast {serve,init-registry,maintain,probe,inspect} ...",
+        "usage: streamcast {serve,init-registry,maintain,probe,inspect,token-file} ...",
         file=sys.stderr,
     )
     return 0 if argv == ["--help"] else 2
