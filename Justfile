@@ -176,3 +176,47 @@ bench-snapshot *args:
 # with the default.
 bench-deflate *args:
     uv run python benchmarks/deflate.py {{args}}
+
+# Compose isolates each worktree; COMPOSE_PROJECT_NAME overrides that identity.
+stack_project := env("COMPOSE_PROJECT_NAME", "streamcast-" + `printf '%s' "$PWD" | cksum | cut -d ' ' -f 1`)
+stack_compose := "docker compose --project-name " + stack_project + " -f docker/compose.yml"
+
+# Start all roles, preserving durable volumes across runs.
+stack-up build="" pull="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{build}}" == "1" ]]; then
+        {{stack_compose}} build
+    fi
+    if [[ "{{pull}}" == "1" ]]; then
+        {{stack_compose}} pull
+    fi
+    {{stack_compose}} up -d --wait --wait-timeout 180
+    echo "broker: ws://127.0.0.1:${BROKER_PORT:-8765}"
+
+stack-ps:
+    {{stack_compose}} ps
+
+stack-logs service="":
+    {{stack_compose}} logs --follow {{service}}
+
+# Outbox + inbox persist across the broker restart. Recovery is the verdict.
+stack-smoke:
+    {{stack_compose}} run --rm --no-deps stack-smoke prepare
+    {{stack_compose}} kill -s SIGKILL clean-published
+    {{stack_compose}} restart broker
+    {{stack_compose}} up -d --wait --wait-timeout 180
+    {{stack_compose}} run --rm --no-deps stack-smoke verify
+
+# An ordinary shutdown retains logs, registry, client state and token.
+stack-down:
+    {{stack_compose}} down
+
+# Explicitly discard this worktree's entire stack, including its token.
+[confirm("Delete all stack volumes and durable logs?")]
+stack-wipe:
+    {{stack_compose}} down --volumes
+
+# Build and load the image for the local architecture; never publish it.
+image tag="streamcast:local":
+    docker buildx build --load --tag {{tag}} --file docker/Dockerfile .

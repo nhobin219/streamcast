@@ -1,0 +1,255 @@
+name: ${COMPOSE_PROJECT_NAME:-streamcast}
+
+x-image: &image
+  image: ${STREAMCAST_IMAGE:-streamcast:local}
+  build: {context: .., dockerfile: docker/Dockerfile}
+  pull_policy: missing
+  user: "10001:10001"
+  read_only: true
+  tmpfs: ["/tmp:size=256m,uid=10001,gid=10001"]
+
+x-s3: &s3
+  AWS_ENDPOINT_URL: http://objectstore:9000
+  AWS_ACCESS_KEY_ID: ${STACK_S3_KEY:-streamcast}
+  AWS_SECRET_ACCESS_KEY: ${STACK_S3_SECRET:-streamcast-local}
+  AWS_REGION: us-east-1
+
+x-role: &role
+  <<: *image
+  restart: unless-stopped
+  stop_grace_period: 30s
+  environment: *s3
+  volumes: [data:/var/lib/streamcast, run:/run/streamcast]
+  depends_on: {broker: {condition: service_healthy}}
+  healthcheck: &role-health
+    interval: 5s
+    timeout: 5s
+    retries: 24
+    start_period: 10s
+
+services:
+  objectstore:
+    image: rustfs/rustfs:1.0.0-rc.4
+    environment:
+      RUSTFS_ACCESS_KEY: ${STACK_S3_KEY:-streamcast}
+      RUSTFS_SECRET_KEY: ${STACK_S3_SECRET:-streamcast-local}
+    volumes: [objectstore:/data]
+    healthcheck:
+      test: [CMD, curl, -f, http://127.0.0.1:9000/health]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  objectstore-init:
+    <<: *image
+    environment: *s3
+    entrypoint: [tini, --, python, -c]
+    command:
+      - |
+        import pyarrow.fs as fs
+        store = fs.S3FileSystem(endpoint_override="objectstore:9000", scheme="http",
+                                region="us-east-1", allow_bucket_creation=True)
+        store.create_dir("streamcast")
+    depends_on: {objectstore: {condition: service_healthy}}
+
+  # Compose reruns completed dependencies. Provision only absent storage;
+  # serve validates existing registries while owning their exclusive lock.
+  init:
+    <<: *image
+    entrypoint: [tini, --, /bin/sh, -ec]
+    command:
+      - >-
+        streamcast token-file create /run/streamcast-control/token &&
+        if [ ! -e /var/lib/streamcast/registry.db ]; then
+          streamcast init-registry --config /etc/streamcast/broker.toml;
+        fi
+    environment:
+      <<: *s3
+      STREAMCAST_CONTROL_TOKEN_FILE: /run/streamcast-control/token
+    volumes:
+      - data:/var/lib/streamcast
+      - control:/run/streamcast-control
+      - ./broker.toml:/etc/streamcast/broker.toml:ro
+    depends_on: {objectstore-init: {condition: service_completed_successfully}}
+
+  broker:
+    <<: *image
+    command: [serve, --config, /etc/streamcast/broker.toml]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${BROKER_MEM:-1g}
+    ports: ["127.0.0.1:${BROKER_PORT:-8765}:8765"]
+    environment:
+      <<: *s3
+      STREAMCAST_CONTROL_TOKEN_FILE: /run/streamcast-control/token
+    volumes:
+      - data:/var/lib/streamcast
+      - run:/run/streamcast
+      - control:/run/streamcast-control:ro
+      - ./broker.toml:/etc/streamcast/broker.toml:ro
+    healthcheck:
+      test: [CMD, streamcast, probe, ready, --url, "http://127.0.0.1:8765"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    depends_on: {init: {condition: service_completed_successfully}}
+
+  seal:
+    <<: *role
+    mem_limit: ${SEAL_MEM:-512m}
+    command: [maintain, --follow, /run/streamcast, --role, seal, --group, default]
+    healthcheck:
+      <<: *role-health
+      test: [CMD, streamcast, probe, role, --run-dir, /run/streamcast, --role, seal, --group, default]
+  publish:
+    <<: *role
+    mem_limit: ${PUBLISH_MEM:-768m}
+    command: [maintain, --follow, /run/streamcast, --role, publish, --group, default]
+    healthcheck:
+      <<: *role-health
+      test: [CMD, streamcast, probe, role, --run-dir, /run/streamcast, --role, publish, --group, default]
+  compact:
+    <<: *role
+    mem_limit: ${COMPACT_MEM:-768m}
+    command: [maintain, --follow, /run/streamcast, --role, compact, --group, default]
+    healthcheck:
+      <<: *role-health
+      test: [CMD, streamcast, probe, role, --run-dir, /run/streamcast, --role, compact, --group, default]
+  clean:
+    <<: *role
+    mem_limit: ${CLEAN_MEM:-512m}
+    command: [maintain, --follow, /run/streamcast, --role, clean, --group, default]
+    healthcheck:
+      <<: *role-health
+      test: [CMD, streamcast, probe, role, --run-dir, /run/streamcast, --role, clean, --group, default]
+  clean-published:
+    <<: *role
+    mem_limit: ${CLEAN_PUBLISHED_MEM:-1g}
+    command: [maintain, --follow, /run/streamcast, --role, clean-published, --group, default]
+    healthcheck:
+      <<: *role-health
+      test: [CMD, streamcast, probe, role, --run-dir, /run/streamcast, --role, clean-published, --group, default]
+
+  # One fixed stream and database; client work is bounded to one 20-row run.
+  # Failed runs keep their evidence until stack-wipe.
+  stack-smoke:
+    <<: *image
+    profiles: [smoke]
+    environment: *s3
+    volumes: [data:/var/lib/streamcast, control:/run/streamcast-control:ro]
+    entrypoint:
+      - tini
+      - --
+      - python
+      - -c
+      - |
+        import asyncio
+        import json
+        import sqlite3
+        import sys
+        from pathlib import Path
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+        import streamcast
+
+        BASE = "http://broker:8765/control/v1/streams/stack-smoke"
+        URI = "ws://broker:8765/stack-smoke"
+        DB = Path("/var/lib/streamcast/stack-smoke.db")
+        HEADERS = {"Authorization": "Bearer " + Path("/run/streamcast-control/token").read_text(),
+                   "Content-Type": "application/json"}
+
+        def control(suffix="", value=None, headers=None, method="PUT"):
+            request = Request(BASE + suffix, method=method,
+                              data=None if value is None else json.dumps(value).encode(),
+                              headers={**HEADERS, **(headers or {})})
+            with urlopen(request, timeout=60) as response:
+                return json.load(response)
+
+        async def transfer(start, stop):
+            store = await streamcast.SqliteStore.open(DB)
+            try:
+                async with streamcast.outbox(URI, publisher="stack-smoke", store=store) as out:
+                    async with store.transaction() as tx:
+                        await out.send_many([{"n": n} for n in range(start, stop)], tx=tx)
+
+                    await out.flush(timeout=60)
+
+                async with streamcast.inbox(URI, subscriber="stack-smoke", store=store,
+                                             **({"offset": 1} if start == 0 else {})) as sub:
+                    async with asyncio.timeout(60):
+                        for n in range(start, stop):
+                            offset, _, row, tx = await sub.recv()
+                            assert (offset, row) == (n + 1, {"n": n})
+                            await tx.execute("CREATE TABLE IF NOT EXISTS work (n INTEGER PRIMARY KEY)")
+                            await tx.execute("INSERT INTO work VALUES (?)", (n,))
+
+            finally:
+                await store.close()
+
+        def main():
+            phase = sys.argv[1]
+            if phase == "prepare":
+                definition = {"name": "stack-smoke", "schema": {"type": "object",
+                              "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+                              "exactly_once": True, "replay_published": True}
+                try:
+                    control(method="GET")
+                except HTTPError as error:
+                    if error.code != 404:
+                        raise
+
+                    created = control("?storage_profile=default&initialization=create_if_absent",
+                                      definition, {"If-None-Match": "*"})
+                    control("/desired", {"state": "serving"},
+                            {"If-Match": '"' + str(created["revision"]) + '"'})
+
+                async def frontier():
+                    async with streamcast.publish(URI, publisher="stack-smoke") as pub:
+                        return pub.info.publisher.last_seq
+
+                base = asyncio.run(frontier())
+                with sqlite3.connect(DB) as db:
+                    db.execute("CREATE TABLE IF NOT EXISTS smoke_run (base INTEGER)")
+                    db.execute("DELETE FROM smoke_run")
+                    db.execute("INSERT INTO smoke_run VALUES (?)", (base,))
+                    db.execute("CREATE TABLE IF NOT EXISTS work (n INTEGER PRIMARY KEY)")
+                    db.execute("DELETE FROM work")
+
+                asyncio.run(transfer(base, base + 10))
+            elif phase == "verify":
+                with sqlite3.connect(DB) as db:
+                    [(base,)] = db.execute("SELECT base FROM smoke_run").fetchall()
+
+                asyncio.run(transfer(base + 10, base + 20))
+                with sqlite3.connect(DB) as db:
+                    assert db.execute("SELECT n FROM work ORDER BY n").fetchall() == [(n,) for n in range(base, base + 20)]
+
+                # A complete replay independently checks the broker's durable
+                # prefix, including duplicate rows the inbox might filter.
+                async def replay():
+                    async with streamcast.publish(URI, publisher="stack-smoke") as pub:
+                        assert pub.info.publisher.last_seq == base + 20
+
+                    async with streamcast.connect(URI, offset=base + 1) as sub:
+                        assert sub.info.end_offset == base + 21
+                        async with asyncio.timeout(60):
+                            for n in range(base, base + 20):
+                                offset, _, row = await sub.recv()
+                                assert (offset, row) == (n + 1, {"n": n})
+
+                asyncio.run(replay())
+                print("smoke: 20 contiguous offsets, 20 unique rows, resumed outbox and inbox")
+            else:
+                raise ValueError("expected prepare or verify")
+
+        main()
+    command: [verify]
+    depends_on: {broker: {condition: service_healthy}}
+
+volumes:
+  data: {}
+  objectstore: {}
+  control: {}
+  run:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=16m,uid=10001,gid=10001"}
