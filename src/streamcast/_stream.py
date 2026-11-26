@@ -1494,6 +1494,9 @@ class StreamHandle:
         broker: str | None = None,
         s3_options: S3Options | None = None,
         max_tail: int = MAX_TAIL,
+        tail_columns: Sequence[str] | None = None,
+        tail_filters: Sequence[_manifest.Term] = (),
+        max_tail_bytes: int | None = None,
         memory_cache: bool = True,
         disk_cache: bool = False,
         cache_key: str | PathLike[str] | None = None,
@@ -1512,6 +1515,15 @@ class StreamHandle:
         does not write: `scan`, `sql` and `rows`, then `close` (or
         `async with`). See `_snapshot` for what each point means, when the
         broker is consulted, and what is refused rather than answered short.
+
+        `tail_columns` projects broker rows before retaining them, always
+        keeping offset and stamp. Include every column a later query needs:
+        omitted columns read as NULL in tail rows. `tail_filters` applies
+        ANDed scan terms before projection, without changing `end_offset`.
+        Neither option changes the published rows. `max_tail_bytes` bounds
+        the sum of JSON-encoded kept rows, system columns included, and raises
+        `SnapshotUnavailable` past it. Defaults keep full rows without a byte
+        cap; `max_tail` still bounds the number of kept rows.
 
         **Caching is litelink's, and the caller's choice.** `memory_cache`
         (on) keeps what was read in DuckDB's external file cache for the
@@ -1542,6 +1554,9 @@ class StreamHandle:
             broker=broker,
             s3_options=s3_options,
             max_tail=max_tail,
+            tail_columns=tail_columns,
+            tail_filters=tail_filters,
+            max_tail_bytes=max_tail_bytes,
             cache=ReadCache.of(
                 memory_cache=memory_cache,
                 disk_cache=disk_cache,

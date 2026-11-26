@@ -1120,6 +1120,22 @@ what was pruned. SQL is not mined for terms: a misread predicate would drop a
 log that held matches and answer short, so that waits on a sound extractor
 (#57).
 
+**The fixed snapshot's broker tail can be reduced before retention.**
+`tail_filters` applies the scan's ANDed terms in Python to each full received row;
+a missing or NULL value does not match. `tail_columns` then keeps only the named
+columns plus offset and stamp. Unknown column names are refused before connecting.
+The broker still sends full rows, and the published tables are unchanged. Dropped
+rows advance the offset, so neither option moves the frontier, changes `end_offset`
+or bypasses a gap refusal. A later query sees NULL for an omitted tail column, even
+with no published table; callers include every column they need in `tail_columns`.
+
+`max_tail` bounds retained rows. `max_tail_bytes` optionally bounds the running
+sum of their JSON-encoded sizes, system columns included, using the publisher's
+encoder, after filtering and projection. Exceeding either bound raises
+`SnapshotUnavailable` rather than returning anything partial. A disconnect still
+fails the snapshot. Defaults keep full rows, no filters and no byte cap. This is
+entirely a reader-side reduction, with no protocol or persistent-state change.
+
 **The caller's conditions apply over the union, not inside each log.** A log
 from before a migration added a column has no such column, so a condition on
 it inside that log's read would not bind. Over the union the column is NULL
