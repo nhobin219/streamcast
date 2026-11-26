@@ -1,0 +1,162 @@
+{{- include "streamcast.validate" . -}}
+{{- $baseImage := dict "repository" .Values.image.repository "tag" (default .Chart.AppVersion .Values.image.tag) "pullPolicy" .Values.image.pullPolicy -}}
+{{- $brokerImage := mergeOverwrite (deepCopy $baseImage) .Values.broker.image -}}
+{{- $roleImage := mergeOverwrite (deepCopy $brokerImage) .Values.maintenance.image -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "streamcast.fullname" . }}
+  labels:
+    {{- include "streamcast.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "streamcast.fullname" . }}-pods
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  {{- if and .Values.persistence.retain (not .Values.persistence.existingClaim) }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "streamcast.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- /* The stable name/component separate aliased broker selectors. */}}
+        {{- $labels := include "streamcast.labels" . | fromYaml }}
+        {{- toYaml (mergeOverwrite $labels .Values.podLabels (dict "app.kubernetes.io/name" "streamcast" "streamcast.io/broker" (include "streamcast.fullname" .))) | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if not .Values.broker.command }}
+        checksum/config: {{ include "streamcast.config" . | sha256sum }}
+        {{- end }}
+    spec:
+      restartPolicy: Always
+      serviceAccountName: {{ include "streamcast.serviceAccount" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- range $key, $value := .Values.placement }}
+      {{- if $value }}
+      {{ $key }}:
+        {{- toYaml $value | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      initContainers:
+        {{- /* Native sidecars stop in reverse order, after the broker. */}}
+        {{- range $role := list "clean-published" "clean" "compact" "publish" "seal" }}
+        {{- range $group := $.Values.maintenance.groups }}
+        - name: {{ printf "%s-%s" $role ($group.name | replace "_" "-") }}
+          restartPolicy: Always
+          image: {{ include "streamcast.image" $roleImage | quote }}
+          imagePullPolicy: {{ $roleImage.pullPolicy }}
+          command:
+            {{- toYaml (default (list "streamcast" "maintain" "--follow" $.Values.maintenance.runDir.path) $.Values.maintenance.command) | nindent 12 }}
+          args: ["--role", {{ $role | quote }}, "--group", {{ $group.name | quote }}]
+          securityContext:
+            {{- include "streamcast.security" $ | nindent 12 }}
+          resources:
+            {{- toYaml (index $.Values.maintenance.roles $role).resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: [streamcast, probe, role, --run-dir, {{ $.Values.maintenance.runDir.path | quote }}, --role, {{ $role | quote }}, --group, {{ $group.name | quote }}]
+            {{- toYaml $.Values.maintenance.liveness | nindent 12 }}
+          {{- with $group.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $group.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "streamcast.mounts" $ | nindent 12 }}
+        {{- end }}
+        {{- end }}
+      containers:
+        - name: broker
+          image: {{ include "streamcast.image" $brokerImage | quote }}
+          imagePullPolicy: {{ $brokerImage.pullPolicy }}
+          command:
+            {{- toYaml (default (list "streamcast" "serve" "--config" "/etc/streamcast/broker.toml") .Values.broker.command) | nindent 12 }}
+          ports:
+            - name: {{ .Values.broker.portName }}
+              containerPort: {{ .Values.broker.port }}
+          securityContext:
+            {{- include "streamcast.security" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.broker.resources | nindent 12 }}
+          {{- range $kind, $probe := .Values.broker.probes }}
+          {{ $kind }}Probe:
+            httpGet:
+              path: {{ $probe.path }}
+              port: {{ $.Values.broker.portName }}
+            {{- toYaml (omit $probe "path") | nindent 12 }}
+          {{- end }}
+          {{- with .Values.broker.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.broker.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "streamcast.mounts" . | nindent 12 }}
+            {{- if not .Values.broker.command }}
+            - name: config
+              mountPath: /etc/streamcast
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.maintenance.runDir.sizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
+        {{- if not .Values.broker.command }}
+        - name: config
+          configMap:
+            name: {{ include "streamcast.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.persistence.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  {{- if not .Values.persistence.existingClaim }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- if .Values.persistence.retain }}
+        annotations:
+          helm.sh/resource-policy: keep
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

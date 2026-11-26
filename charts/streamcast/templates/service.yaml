@@ -1,0 +1,33 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ default (include "streamcast.fullname" .) .Values.service.name }}
+  labels:
+    {{- include "streamcast.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "streamcast.selector" . | nindent 4 }}
+  ports:
+    - name: {{ .Values.broker.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.broker.portName }}
+{{- if .Values.service.headless }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "streamcast.fullname" . }}-pods
+  labels:
+    {{- include "streamcast.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "streamcast.selector" . | nindent 4 }}
+  ports:
+    - name: {{ .Values.broker.portName }}
+      port: {{ .Values.broker.port }}
+      targetPort: {{ .Values.broker.portName }}
+{{- end }}
+{{- end }}
