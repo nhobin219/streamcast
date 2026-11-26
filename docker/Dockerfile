@@ -3,7 +3,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /usr/local/bin/uv
 WORKDIR /opt/streamcast
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+# Health probes share a five-second budget with imports. The read-only runtime
+# cannot cache bytecode, so compile it before concurrent probes start.
+RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 FROM python:3.12-slim-bookworm AS runtime
 LABEL org.opencontainers.image.source="https://github.com/nhobin219/streamcast" \
