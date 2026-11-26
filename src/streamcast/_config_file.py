@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import importlib
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from streamcast._broker.model import BrokerConfig, HistoryGuard
+from streamcast._broker.model import BrokerConfig, ExternalMaintain, HistoryGuard
 from streamcast._maintain import Maintain
 from streamcast._spec import Storage, Stream
 
@@ -58,6 +58,13 @@ class _Server(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8765, ge=1, le=65535)
+
+
+class _External(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    run_dir: str
+    groups: list[str] = Field(min_length=1)
 
 
 @dataclass(frozen=True)
@@ -101,7 +108,10 @@ def _authorization(reference: str):
     if not separator:
         raise ValueError("authorization requires module:attribute")
 
-    value = getattr(importlib.import_module(module), attribute)
+    value = importlib.import_module(module)
+    for name in attribute.split("."):
+        value = getattr(value, name)
+
     if isinstance(value, type) or not hasattr(value, "authenticate"):
         value = value()
 
@@ -134,8 +144,16 @@ def load(path: Path) -> ServiceConfig:
         if "authorization" in fields:
             fields["authorization"] = _authorization(fields["authorization"])
 
+        external = None
         if isinstance(fields.get("maintain"), dict):
             policy = dict(fields["maintain"])
+            if "external" in policy:
+                external = _External.model_validate(policy.pop("external"))
+                if not Path(external.run_dir).is_absolute() or len(
+                    set(external.groups)
+                ) != len(external.groups):
+                    raise ValueError("invalid external maintenance directory or groups")
+
             if "duckdb_spill_root" in policy:
                 policy["duckdb_spill_root"] = Path(policy["duckdb_spill_root"])
 
@@ -146,6 +164,19 @@ def load(path: Path) -> ServiceConfig:
             for name, value in file.storage_profiles.items()
         }
         broker = BrokerConfig(**fields, storage_profiles=profiles)
+        if external is not None:
+            broker = replace(
+                broker,
+                maintain=ExternalMaintain(
+                    policy=fields["maintain"],
+                    run_dir=Path(external.run_dir),
+                    groups={
+                        name: broker.storage_profiles[name].s3_options
+                        for name in external.groups
+                    },
+                ),
+            )
+
         streams = []
         for definition in file.streams:
             value = dict(definition)

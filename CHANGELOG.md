@@ -7,6 +7,19 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Added
+
+- Service TOML selects external maintenance with `[broker.maintain.external]`,
+  an absolute `run_dir` and distinct storage-profile `groups`. Existing
+  maintenance fields remain the policy; omitted external settings retain
+  embedded maintenance.
+- `TokenFileAccess.from_env` grants control authority to matching Bearer tokens
+  from a private token file; other requests retain public data and stats access.
+  `streamcast token-file create PATH` creates a private, random token exclusively
+  and leaves existing files untouched, without printing token values.
+
 ## 0.29.1 — 2026-11-24
 
 ### Fixed

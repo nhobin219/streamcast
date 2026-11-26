@@ -17,6 +17,7 @@ from streamcast import (
     StreamHandle,
     StreamSpec,
     _config_file,
+    _plan,
     _probe,
     _serve,
     create_app,
@@ -24,7 +25,9 @@ from streamcast import (
 from streamcast.__main__ import main
 from streamcast._application import Opening
 from streamcast._broker import runtime
+from streamcast._broker.model import ExternalMaintain
 from streamcast._broker.registry import Registry
+from streamcast._maintain import ROLES
 
 SHAPE = {
     "type": "object",
@@ -345,3 +348,154 @@ async def test_serve_opens_through_runtime_not_before_app(tmp_path, monkeypatch)
     monkeypatch.setattr(_serve.uvicorn, "Server", Server)
     await _serve.serve(settings)
     assert calls == ["app", "server", "open"]
+
+
+def external_config(tmp_path, *, managed=False):
+    path = config_file(tmp_path, managed=managed)
+    path.write_text(
+        path.read_text().replace("maintain = false\n", "")
+        + "[broker.maintain]\nseal_every = 0.25\n"
+        + f'[broker.maintain.external]\nrun_dir = "{tmp_path / "run"}"\n'
+        + 'groups = ["default"]\n'
+    )
+    return path
+
+
+def test_external_table_builds_external_maintain_with_policy_run_dir_and_groups(
+    tmp_path,
+):
+    for managed in (False, True):
+        settings = _config_file.load(external_config(tmp_path, managed=managed))
+        assert settings.broker.maintain == ExternalMaintain(
+            Maintain(seal_every=0.25), tmp_path / "run", {"default": None}
+        )
+
+
+def test_group_maps_to_storage_profile_s3_options_or_none(tmp_path):
+    path = external_config(tmp_path, managed=True)
+    path.write_text(
+        path.read_text().replace(
+            'groups = ["default"]', 'groups = ["default", "remote"]'
+        )
+        + f'[storage_profiles.remote]\nroot = "{tmp_path / "remote"}"\n'
+        + '[storage_profiles.remote.s3_options]\nregion = "test-region"\n'
+    )
+    broker = _config_file.load(path).broker
+    assert isinstance(broker.maintain, ExternalMaintain)
+    assert dict(broker.maintain.groups) == {
+        "default": None,
+        "remote": broker.storage_profiles["remote"].s3_options,
+    }
+    assert broker.maintain.groups["remote"] is not None
+    path = external_config(tmp_path, managed=True)
+    path.write_text(
+        path.read_text().replace(
+            f'[storage_profiles.default]\nroot = "{tmp_path / "data"}"\n', ""
+        )
+    )
+    implicit = _config_file.load(path).broker
+    assert isinstance(implicit.maintain, ExternalMaintain)
+    assert dict(implicit.maintain.groups) == {"default": None}
+
+
+def test_external_refuses_unknown_key_relative_run_dir_and_unknown_or_empty_groups(
+    tmp_path, capsys, monkeypatch
+):
+    path = external_config(tmp_path)
+    original = path.read_text()
+    assert isinstance(_config_file.load(path).broker.maintain, ExternalMaintain)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid configuration reached startup")
+
+    monkeypatch.setattr(_serve.uvicorn, "Server", forbidden)
+    for text in (
+        original + "unexpected = true\n",
+        original.replace(str(tmp_path / "run"), "relative"),
+        original.replace('groups = ["default"]', "groups = []"),
+        original.replace('groups = ["default"]', 'groups = [""]'),
+        original.replace('groups = ["default"]', 'groups = ["unknown"]'),
+        original.replace('groups = ["default"]', 'groups = ["default", "default"]'),
+        original.replace('groups = ["default"]', 'groups = "default"'),
+        original.replace(f'run_dir = "{tmp_path / "run"}"\n', ""),
+    ):
+        path.write_text(text)
+        with pytest.raises(_config_file.ConfigurationError) as error:
+            _config_file.load(path)
+
+        assert str(error.value) == (
+            "invalid service configuration; check fields and host authorization"
+        )
+        assert main(["serve", "--config", str(path)]) == 2
+        assert capsys.readouterr().err.strip() == str(error.value)
+
+
+def test_external_with_maintain_false_refused(tmp_path, capsys):
+    path = external_config(tmp_path)
+    assert isinstance(_config_file.load(path).broker.maintain, ExternalMaintain)
+    # TOML forbids a scalar and its child table in either order.
+    text = path.read_text().replace("[broker]\n", "[broker]\nmaintain = false\n")
+    path.write_text(text)
+    with pytest.raises(
+        _config_file.ConfigurationError, match="^invalid TOML configuration$"
+    ):
+        _config_file.load(path)
+
+    assert main(["serve", "--config", str(path)]) == 2
+    assert capsys.readouterr().err.strip() == "invalid TOML configuration"
+
+
+async def test_serve_with_external_spawns_no_children_and_writes_plan(
+    tmp_path, monkeypatch
+):
+    settings = _config_file.load(external_config(tmp_path))
+    handle = StreamHandle.open(settings.streams[0], initialization="create_if_absent")
+    await handle.aclose()
+    observed = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("external maintenance spawned an embedded child")
+
+    class Server:
+        def __init__(self, config):
+            self.config, self.started = config, True
+
+        async def serve(self):
+            async with self.config.app.router.lifespan_context(self.config.app):
+                broker = self.config.app.state.broker
+                assert broker.running == {}
+                plan = _plan.read_plan(tmp_path / "run")
+                assert plan.state == "serving"
+                assert set(plan.roles) == {f"{role}.default" for role in ROLES}
+                assert plan.roles["seal.default"].every == 0.25
+                assert broker.generations["events"].writable
+                observed.append(True)
+
+    monkeypatch.setattr("streamcast._maintain.Supervisor.start", forbidden)
+    monkeypatch.setattr("streamcast._broker.runtime.build", forbidden)
+    monkeypatch.setattr(_serve.uvicorn, "Server", Server)
+    await _serve.serve(settings)
+    assert observed == [True]
+
+
+async def test_static_stream_outside_listed_groups_refused_at_startup(
+    tmp_path, monkeypatch
+):
+    path = external_config(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            'storage_profile = "default"',
+            f'storage = {{root = "{tmp_path / "other"}", s3_options = {{region = "test-region"}}}}',
+        )
+    )
+    settings = _config_file.load(path)
+    assert isinstance(settings.broker.maintain, ExternalMaintain)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unmapped stream storage was opened")
+
+    monkeypatch.setattr(StreamHandle, "open", forbidden)
+    with pytest.raises(ValueError, match="unmapped S3 options"):
+        await runtime.BrokerRuntime.open(
+            settings.broker, streams=[Opening(item) for item in settings.streams]
+        )
