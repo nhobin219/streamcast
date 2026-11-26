@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import streamcast
 from streamcast import _token_auth
 from streamcast._broker import runtime
 from streamcast._broker.model import ExternalMaintain
+from streamcast._broker.registry import Registry
 from streamcast._config_file import load
 from tests.test_broker import Child, running
 
@@ -89,12 +91,57 @@ def test_control_volume_is_exclusive_and_init_creates_token_first():
         )
     }
     assert holders == {"init", "broker", "stack-smoke"}
-    assert services["init"]["command"] == [
+    assert [" ".join(command.split()) for command in services["init"]["command"]] == [
         "streamcast token-file create /run/streamcast-control/token && "
-        "streamcast init-registry --config /etc/streamcast/broker.toml"
+        "if [ ! -e /var/lib/streamcast/registry.db ]; then "
+        "streamcast init-registry --config /etc/streamcast/broker.toml; fi"
     ]
     for role in ROLES:
         assert "STREAMCAST_CONTROL_TOKEN_FILE" not in services[role]["environment"]
+
+
+def test_init_provisions_once_while_broker_owns_registry(tmp_path, monkeypatch):
+    token = tmp_path / "control" / "token"
+    token.parent.mkdir(mode=0o700)
+    registry = tmp_path / "registry.db"
+    config = tmp_path / "broker.toml"
+    config.write_text(
+        (ROOT / "docker/broker.toml")
+        .read_text()
+        .replace("/var/lib/streamcast", str(tmp_path))
+        .replace("/run/streamcast", str(tmp_path / "run"))
+    )
+    monkeypatch.setenv("STREAMCAST_CONTROL_TOKEN_FILE", str(token))
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.defpath
+    )
+    command = compose_source()["services"]["init"]["command"][0]
+    command = (
+        command.replace("/run/streamcast-control/token", shlex.quote(str(token)))
+        .replace("/var/lib/streamcast/registry.db", shlex.quote(str(registry)))
+        .replace("/etc/streamcast/broker.toml", shlex.quote(str(config)))
+    )
+
+    def initialize():
+        result = subprocess.run(
+            ["/bin/sh", "-ec", command], capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 0, result.stderr
+
+    initialize()
+    original_token = token.read_bytes()
+    original_registry = registry.read_bytes()
+    broker = Registry.open(registry, "local")
+    try:
+        # Compose can restart completed dependencies while the broker is up.
+        initialize()
+        assert token.read_bytes() == original_token
+        assert registry.read_bytes() == original_registry
+        assert broker.db.execute("SELECT broker FROM identity").fetchall() == [
+            ("local",)
+        ]
+    finally:
+        broker.close()
 
 
 async def test_smoke_client_round_trip_twice_without_docker(tmp_path, monkeypatch):
@@ -141,7 +188,7 @@ class Stack:
         self.project = project
 
     def compose(self, *args, **kwargs):
-        return subprocess.run(
+        result = subprocess.run(
             [
                 "docker",
                 "compose",
@@ -153,18 +200,33 @@ class Stack:
             ],
             cwd=ROOT,
             env={**os.environ, "BROKER_PORT": "0"},
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=240,
             **kwargs,
-        ).stdout
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stdout + result.stderr)
+
+        return result.stdout
 
     def python(self, code, *, service="broker"):
         return self.compose("exec", "-T", service, "python", "-c", code)
 
     def up(self):
         self.compose("up", "-d", "--wait", "--wait-timeout", "180")
+
+
+def test_compose_failure_reports_captured_diagnostics(monkeypatch):
+    def failed_compose(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0], 1, "broker starting\n", "role unhealthy\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_compose)
+    with pytest.raises(RuntimeError, match="broker starting\nrole unhealthy"):
+        Stack("diagnostic-test").up()
 
 
 @pytest.fixture(scope="module")
@@ -174,12 +236,30 @@ def stack():
 
     assert shutil.which("docker"), "Docker tier required but docker is absent"
     subprocess.run(["docker", "info"], check=True, capture_output=True, timeout=15)
-    instance = Stack("streamcast-test-" + uuid.uuid4().hex[:10])
+    instance = Stack(
+        os.environ.get("COMPOSE_PROJECT_NAME")
+        or "streamcast-test-" + uuid.uuid4().hex[:10]
+    )
     try:
         instance.up()
         yield instance
     finally:
-        instance.compose("down", "--volumes", "--remove-orphans")
+        try:
+            print(instance.compose("ps", "--all"))
+            containers = instance.compose("ps", "--all", "--quiet").split()
+            if containers:
+                states = subprocess.run(
+                    ["docker", "inspect", "--format", "{{json .State}}", *containers],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                print(states.stdout + states.stderr)
+
+            print(instance.compose("logs", "--no-color", "--tail", "80"))
+        finally:
+            instance.compose("down", "--volumes", "--remove-orphans")
 
 
 @pytest.mark.timeout(240)
@@ -228,13 +308,13 @@ def test_sqlite_wal_shared_across_two_containers(stack):
 
 @pytest.mark.timeout(240)
 def test_stack_smoke_no_gap_no_duplicate_after_role_kill_and_broker_restart(stack):
-    stack.compose("run", "--rm", "stack-smoke", "prepare")
+    stack.compose("run", "--rm", "--no-deps", "stack-smoke", "prepare")
     old = stack.compose("ps", "-q", "broker").strip()
     stack.compose("kill", "-s", "SIGKILL", "clean-published")
     stack.compose("restart", "broker")
     stack.up()
     assert stack.compose("ps", "-q", "broker").strip() == old
-    result = stack.compose("run", "--rm", "stack-smoke", "verify")
+    result = stack.compose("run", "--rm", "--no-deps", "stack-smoke", "verify")
     assert "20 contiguous offsets, 20 unique rows" in result
 
 
@@ -366,11 +446,11 @@ def test_just_targets_route_commands_and_confirm_wipe(tmp_path, monkeypatch):
             ["up", "-d", "--wait", "--wait-timeout", "180"],
             ["ps"],
             ["logs", "--follow", "broker"],
-            ["run", "--rm", "stack-smoke", "prepare"],
+            ["run", "--rm", "--no-deps", "stack-smoke", "prepare"],
             ["kill", "-s", "SIGKILL", "clean-published"],
             ["restart", "broker"],
             ["up", "-d", "--wait", "--wait-timeout", "180"],
-            ["run", "--rm", "stack-smoke", "verify"],
+            ["run", "--rm", "--no-deps", "stack-smoke", "verify"],
             ["down"],
         )
     ] + [

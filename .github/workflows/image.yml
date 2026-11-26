@@ -54,6 +54,7 @@ jobs:
     env:
       STREAMCAST_IMAGE: streamcast:ci
       STREAMCAST_REQUIRE_DOCKER: "1"
+      COMPOSE_PROJECT_NAME: streamcast-smoke-ci
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,7 +89,7 @@ jobs:
       - run: docker load -i image.tar
       - uses: astral-sh/setup-uv@v10.3.0
       - run: uv tool install rust-just==1.59.0
-      - run: just image streamcast:ci
+      - run: just image streamcast:recipe-ci
       - run: just stack-up
       - run: just stack-ps
       # --follow intentionally waits forever; verify attachment and stop only
@@ -106,6 +107,13 @@ jobs:
       - run: just stack-down
       - run: just stack-up
       - run: just --yes stack-wipe
+      - name: Stack failure diagnostics
+        if: failure()
+        run: |
+          docker compose --project-name streamcast-just-ci -f docker/compose.yml ps --all
+          docker compose --project-name streamcast-just-ci -f docker/compose.yml ps --all --quiet \
+            | xargs -r docker inspect --format '{{json .State}}'
+          docker compose --project-name streamcast-just-ci -f docker/compose.yml logs --no-color --tail 80
       - name: Remove stack resources
         if: always()
         run: docker compose --project-name streamcast-just-ci -f docker/compose.yml down --volumes --remove-orphans

@@ -52,13 +52,17 @@ services:
         store.create_dir("streamcast")
     depends_on: {objectstore: {condition: service_healthy}}
 
+  # Compose reruns completed dependencies. Provision only absent storage;
+  # serve validates existing registries while owning their exclusive lock.
   init:
     <<: *image
     entrypoint: [tini, --, /bin/sh, -ec]
     command:
       - >-
         streamcast token-file create /run/streamcast-control/token &&
-        streamcast init-registry --config /etc/streamcast/broker.toml
+        if [ ! -e /var/lib/streamcast/registry.db ]; then
+          streamcast init-registry --config /etc/streamcast/broker.toml;
+        fi
     environment:
       <<: *s3
       STREAMCAST_CONTROL_TOKEN_FILE: /run/streamcast-control/token

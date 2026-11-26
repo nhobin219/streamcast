@@ -202,11 +202,11 @@ stack-logs service="":
 
 # Outbox + inbox persist across the broker restart. Recovery is the verdict.
 stack-smoke:
-    {{stack_compose}} run --rm stack-smoke prepare
+    {{stack_compose}} run --rm --no-deps stack-smoke prepare
     {{stack_compose}} kill -s SIGKILL clean-published
     {{stack_compose}} restart broker
     {{stack_compose}} up -d --wait --wait-timeout 180
-    {{stack_compose}} run --rm stack-smoke verify
+    {{stack_compose}} run --rm --no-deps stack-smoke verify
 
 # An ordinary shutdown retains logs, registry, client state and token.
 stack-down:

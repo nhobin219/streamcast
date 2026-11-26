@@ -41,8 +41,10 @@ one thread, with 128 MiB retention spill under `/tmp`. These are local defaults;
 size limits for your workload before using them elsewhere.
 
 Initialization creates the object-store namespace, generates a private token
-file, and explicitly initializes the registry. Re-running init preserves the
-token and accepts an existing compatible registry. The `control` volume's
+file, and explicitly initializes an absent registry. Re-running init preserves
+the token and leaves existing storage to the broker's identity and format checks;
+it does not compete for the running broker's registry lock. Smoke commands use
+`--no-deps` against the already-started stack. The `control` volume's
 directory is mode 0700 and owned by UID 10001; its token is mode 0600. Only init,
 broker and the smoke client mount it. Broker and smoke mount it read-only.
 `TokenFileAccess` grants control authority to that bearer; requests without it
@@ -74,8 +76,9 @@ runners without pushing an image. Its `Compose smoke` job requires the real Dock
 tier in `tests/test_stack.py`; missing Docker fails that job. The ordinary Python
 suite skips those cases unless `STREAMCAST_REQUIRE_DOCKER=1` is set. The Just job
 runs image, up, ps, logs, smoke twice, down, up and the explicitly confirmed wipe.
-Both dependent jobs load the image artifact built at the PR head. Temporary image
-artifacts expire after one day; stack resources are removed on failure too.
+Both dependent jobs load the image artifact built at the PR head; the Just image
+recipe builds a separate tag, preserving that artifact for stack checks. Temporary
+image artifacts expire after one day; stack resources are removed on failure too.
 
 For a focused local check against an already-built image:
 
