@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Evidence belongs to the PR head, not the synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
@@ -39,6 +42,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
@@ -77,6 +82,8 @@ jobs:
         python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
@@ -128,6 +135,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # **No cache on this job, deliberately.** It is the only one that
       # resolves this package's dependencies from the INDEX rather than from
       # the lockfile, and uv's cache includes index metadata. A restored cache
