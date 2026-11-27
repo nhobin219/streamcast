@@ -7,6 +7,17 @@ All notable changes are recorded here. Versions follow
 The 0.1.0 entry describes what the library is rather than what changed, since
 there was nothing to have changed from. Everything above it is ordinary.
 
+## Unreleased
+
+### Fixed
+
+- The broker chart supports `scaleOwner: external` for an operator or controller
+  that keeps the live scale at 0 or 1. In this mode Helm never renders `replicas`,
+  so upgrades preserve a deliberately stopped broker. An existing claim is
+  required to prevent a stray ordinal from getting a new empty volume. The
+  default `scaleOwner: chart` retains `replicas: 1`; switching back to it sets
+  the scale to 1. Configured `replicas` values other than 1 remain invalid.
+
 ## 0.30.0 — 2026-11-26
 
 ### Added

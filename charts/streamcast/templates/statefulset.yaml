@@ -9,7 +9,9 @@ metadata:
   labels:
     {{- include "streamcast.labels" . | nindent 4 }}
 spec:
+  {{- if eq .Values.scaleOwner "chart" }}
   replicas: 1
+  {{- end }}
   serviceName: {{ include "streamcast.fullname" . }}-pods
   podManagementPolicy: OrderedReady
   updateStrategy:

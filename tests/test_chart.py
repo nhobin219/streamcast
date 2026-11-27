@@ -1,4 +1,4 @@
-"""Render real manifests; the opt-in kind tier exercises kubelet OOM isolation."""
+"""Render manifests; kind exercises external scale ownership and OOM isolation."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -204,9 +205,66 @@ def test_new_claim_is_single_pod_and_retained(tmp_path):
     assert claim["spec"]["resources"]["requests"]["storage"] == "20Gi"
 
 
+@pytest.mark.parametrize("values", [{}, {"scaleOwner": "chart"}])
+def test_default_scale_owner_renders_replicas_one(tmp_path, values):
+    defaults = yaml.safe_load((CHART / "values.yaml").read_text())
+    assert defaults["scaleOwner"] == "chart"
+    assert statefulset(render(tmp_path, values))["spec"]["replicas"] == 1
+
+
+@pytest.mark.parametrize("command", [[], ["custom-broker"]])
+def test_external_scale_omits_replicas(tmp_path, command):
+    objects = render(
+        tmp_path,
+        {
+            "scaleOwner": "external",
+            "persistence": {"existingClaim": "data"},
+            "broker": {"command": command},
+        },
+    )
+    workload = statefulset(objects)["spec"]
+    assert "replicas" not in workload
+    assert "volumeClaimTemplates" not in workload
+    assert not any(obj["kind"] == "PersistentVolumeClaim" for obj in objects)
+    volume = next(item for item in pod(objects)["volumes"] if item["name"] == "data")
+    assert volume["persistentVolumeClaim"]["claimName"] == "data"
+
+
+@pytest.mark.parametrize("command", [[], ["custom-broker"]])
+def test_external_scale_requires_existing_claim(tmp_path, command):
+    result = render(
+        tmp_path,
+        {"scaleOwner": "external", "broker": {"command": command}},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "scaleOwner external requires persistence.existingClaim" in result.stderr
+
+
+@pytest.mark.parametrize("owner", ["unknown", "", None])
+@pytest.mark.parametrize("command", [[], ["custom-broker"]])
+def test_unknown_scale_owner_fails(tmp_path, owner, command):
+    result = render(
+        tmp_path,
+        {"scaleOwner": owner, "broker": {"command": command}},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "scaleOwner must be chart or external" in result.stderr
+
+
+@pytest.mark.parametrize("owner", ["chart", "external"])
 @pytest.mark.parametrize("replicas", [0, 2, 3])
-def test_replicas_other_than_one_fails(tmp_path, replicas):
-    result = render(tmp_path, {"replicas": replicas}, check=False)
+def test_replicas_other_than_one_fails(tmp_path, replicas, owner):
+    result = render(
+        tmp_path,
+        {
+            "replicas": replicas,
+            "scaleOwner": owner,
+            "persistence": {"existingClaim": "data"},
+        },
+        check=False,
+    )
     assert result.returncode != 0
     assert "replicas must be 1" in result.stderr
 
@@ -753,6 +811,277 @@ def test_kubectl_timeout_allows_wait_budget(monkeypatch, args, expected_timeout)
 
     monkeypatch.setattr(subprocess, "run", run)
     assert kubectl(*args, input="manifest") == "observed"
+
+
+@pytest.fixture
+def external_scale_chart(tmp_path):
+    image = os.environ["STREAMCAST_CHART_IMAGE"]
+    repository, tag = image.rsplit(":", 1)
+    namespace = "chart-scale-" + uuid.uuid4().hex[:8]
+    values = {
+        "fullnameOverride": "broker",
+        "scaleOwner": "external",
+        "image": {"repository": repository, "tag": tag, "pullPolicy": "Never"},
+        "persistence": {"existingClaim": "data"},
+        "broker": {
+            "config": {
+                "streams": [
+                    {
+                        "spec": {
+                            "name": "events",
+                            "schema": {
+                                "type": "object",
+                                "properties": {"value": {"type": "integer"}},
+                                "required": ["value"],
+                            },
+                        },
+                        "storage_profile": "default",
+                    }
+                ]
+            }
+        },
+    }
+    values_path = tmp_path / "scale-values.yaml"
+    values_path.write_text(yaml.safe_dump(values))
+    kubectl("create", "namespace", namespace)
+    try:
+        yield namespace, image, values_path
+    finally:
+        kubectl("delete", "namespace", namespace, "--wait=false")
+        kubectl("delete", "pv", namespace, "--ignore-not-found", "--wait=false")
+
+
+def provision_scale_claim(namespace, image):
+    # Provision a real stream before starting the broker: the chart opens
+    # existing state, so an empty hostPath would test a startup refusal instead.
+    kubectl(
+        "apply",
+        "-f",
+        "-",
+        input=yaml.safe_dump_all(
+            [
+                {
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolume",
+                    "metadata": {"name": namespace},
+                    "spec": {
+                        "capacity": {"storage": "1Gi"},
+                        "accessModes": ["ReadWriteOnce"],
+                        "storageClassName": "",
+                        "persistentVolumeReclaimPolicy": "Retain",
+                        "claimRef": {"name": "data", "namespace": namespace},
+                        "hostPath": {
+                            "path": "/var/" + namespace,
+                            "type": "DirectoryOrCreate",
+                        },
+                    },
+                },
+                {
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": {"name": "data", "namespace": namespace},
+                    "spec": {
+                        "volumeName": namespace,
+                        "storageClassName": "",
+                        "accessModes": ["ReadWriteOnce"],
+                        "resources": {"requests": {"storage": "1Gi"}},
+                    },
+                },
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {"name": "provision", "namespace": namespace},
+                    "spec": {
+                        "backoffLimit": 0,
+                        "template": {
+                            "spec": {
+                                "restartPolicy": "Never",
+                                "containers": [
+                                    {
+                                        "name": "provision",
+                                        "image": image,
+                                        "imagePullPolicy": "Never",
+                                        "securityContext": {"runAsUser": 0},
+                                        "command": [
+                                            "python",
+                                            "-c",
+                                            "import asyncio; import os; from pathlib import Path; "
+                                            "from streamcast import Storage, Stream, StreamSpec, StreamHandle; "
+                                            "root = Path('/var/lib/streamcast'); "
+                                            "stream = Stream(spec=StreamSpec(name='events', schema={'type':'object','properties':{'value':{'type':'integer'}},'required':['value']}), storage=Storage(root=root)); "
+                                            "asyncio.run(StreamHandle.open(stream, initialization='create_if_absent').aclose()); "
+                                            "[os.chown(p, 10001, 10001) for p in [root, *root.rglob('*')]]",
+                                        ],
+                                        "volumeMounts": [
+                                            {
+                                                "name": "data",
+                                                "mountPath": "/var/lib/streamcast",
+                                            }
+                                        ],
+                                    }
+                                ],
+                                "volumes": [
+                                    {
+                                        "name": "data",
+                                        "persistentVolumeClaim": {"claimName": "data"},
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                },
+            ]
+        ),
+    )
+    kubectl(
+        "wait",
+        "-n",
+        namespace,
+        "job/provision",
+        "--for=condition=complete",
+        "--timeout=90s",
+    )
+
+
+def scale_helm_command(action, namespace, values_path):
+    return [
+        HELM,
+        action,
+        "scale",
+        str(CHART),
+        "-n",
+        namespace,
+        "-f",
+        str(values_path),
+        "--wait",
+        "--timeout=90s",
+    ]
+
+
+def scale_workload(namespace):
+    return json.loads(
+        kubectl("get", "statefulset/broker", "-n", namespace, "-o", "json")
+    )
+
+
+def assert_scale_stopped(namespace):
+    assert scale_workload(namespace)["spec"]["replicas"] == 0
+    kubectl("wait", "-n", namespace, "pod/broker-0", "--for=delete", "--timeout=60s")
+    assert not kubectl(
+        "get", "pod/broker-0", "-n", namespace, "--ignore-not-found", "-o", "name"
+    ).strip()
+
+
+def start_scale_broker(namespace):
+    kubectl("scale", "statefulset/broker", "-n", namespace, "--replicas=1")
+    kubectl("wait", "-n", namespace, "pod/broker-0", "--for=create", "--timeout=30s")
+    kubectl(
+        "wait",
+        "-n",
+        namespace,
+        "pod/broker-0",
+        "--for=condition=Ready",
+        "--timeout=120s",
+    )
+    assert scale_workload(namespace)["spec"]["replicas"] == 1
+    observed = json.loads(kubectl("get", "pod/broker-0", "-n", namespace, "-o", "json"))
+    volume = next(
+        item for item in observed["spec"]["volumes"] if item["name"] == "data"
+    )
+    assert volume["persistentVolumeClaim"]["claimName"] == "data"
+    return observed
+
+
+@pytest.mark.skipif(
+    os.getenv("STREAMCAST_CHART_KIND") != "1", reason="requires the dedicated kind job"
+)
+@pytest.mark.timeout(360)
+def test_external_scale_installs_and_upgrades_without_claim(external_scale_chart):
+    namespace, image, values_path = external_scale_chart
+    install = subprocess.Popen(
+        scale_helm_command("install", namespace, values_path),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        # Observe creation before acting as the external scale owner. The
+        # claim stays absent throughout both Helm waits.
+        kubectl(
+            "wait",
+            "-n",
+            namespace,
+            "statefulset/broker",
+            "--for=create",
+            "--timeout=30s",
+        )
+        kubectl("scale", "statefulset/broker", "-n", namespace, "--replicas=0")
+        output, _ = install.communicate(timeout=120)
+        assert install.returncode == 0, output
+    finally:
+        if install.poll() is None:
+            install.kill()
+            install.communicate(timeout=10)
+
+    assert_scale_stopped(namespace)
+    assert not json.loads(kubectl("get", "pvc", "-n", namespace, "-o", "json"))["items"]
+    subprocess.run(
+        [
+            *scale_helm_command("upgrade", namespace, values_path),
+            "--set-string=podAnnotations.scale-test=absent-claim",
+        ],
+        check=True,
+        timeout=120,
+    )
+    workload = scale_workload(namespace)
+    assert (
+        workload["spec"]["template"]["metadata"]["annotations"]["scale-test"]
+        == "absent-claim"
+    )
+    assert_scale_stopped(namespace)
+    assert not json.loads(kubectl("get", "pvc", "-n", namespace, "-o", "json"))["items"]
+    provision_scale_claim(namespace, image)
+    start_scale_broker(namespace)
+
+
+@pytest.mark.skipif(
+    os.getenv("STREAMCAST_CHART_KIND") != "1", reason="requires the dedicated kind job"
+)
+@pytest.mark.timeout(360)
+def test_external_scale_survives_helm_upgrade(external_scale_chart):
+    namespace, image, values_path = external_scale_chart
+    provision_scale_claim(namespace, image)
+    subprocess.run(
+        scale_helm_command("install", namespace, values_path), check=True, timeout=120
+    )
+    kubectl("scale", "statefulset/broker", "-n", namespace, "--replicas=0")
+    assert_scale_stopped(namespace)
+    subprocess.run(
+        [
+            *scale_helm_command("upgrade", namespace, values_path),
+            "--set-string=podAnnotations.scale-test=stopped",
+        ],
+        check=True,
+        timeout=120,
+    )
+    assert_scale_stopped(namespace)
+    before = start_scale_broker(namespace)
+    subprocess.run(
+        [
+            *scale_helm_command("upgrade", namespace, values_path),
+            "--set-string=podAnnotations.scale-test=running",
+        ],
+        check=True,
+        timeout=120,
+    )
+    assert scale_workload(namespace)["spec"]["replicas"] == 1
+    after = json.loads(kubectl("get", "pod/broker-0", "-n", namespace, "-o", "json"))
+    assert after["metadata"]["uid"] != before["metadata"]["uid"]
+    assert after["metadata"]["annotations"]["scale-test"] == "running"
+    assert any(
+        item["type"] == "Ready" and item["status"] == "True"
+        for item in after["status"]["conditions"]
+    )
 
 
 @pytest.mark.skipif(

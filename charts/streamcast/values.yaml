@@ -1,6 +1,8 @@
 nameOverride: ""
 fullnameOverride: ""
 replicas: 1
+# An external owner keeps the live scale at 0 or 1; Helm omits replicas.
+scaleOwner: chart
 image:
   repository: streamcast
   tag: ""

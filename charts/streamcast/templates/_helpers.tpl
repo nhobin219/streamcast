@@ -101,8 +101,14 @@ maintain = {{ include "streamcast.tomlValue" $policy }}
 {{- end -}}
 
 {{- define "streamcast.validate" -}}
+{{- if not (has .Values.scaleOwner (list "chart" "external")) -}}
+{{- fail "scaleOwner must be chart or external" -}}
+{{- end -}}
 {{- if ne (toString .Values.replicas) "1" -}}
 {{- fail "replicas must be 1: one broker owns the data volume" -}}
+{{- end -}}
+{{- if and (eq .Values.scaleOwner "external") (not .Values.persistence.existingClaim) -}}
+{{- fail "scaleOwner external requires persistence.existingClaim" -}}
 {{- end -}}
 {{- if not (hasPrefix "/" .Values.maintenance.runDir.path) -}}
 {{- fail "maintenance.runDir.path must be absolute" -}}

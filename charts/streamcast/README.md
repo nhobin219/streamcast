@@ -51,7 +51,7 @@ registry-backed configuration uses:
 ```yaml
 image:
   repository: streamcast
-  tag: "0.30.0"
+  tag: "0.30.1"
 broker:
   authorization: streamcast:TokenFileAccess.from_env
   config:
@@ -92,6 +92,16 @@ New data claims use ReadWriteOncePod and retain their data on scale-down and
 deletion. `persistence.existingClaim` omits the claim template and adopts the
 claim's existing access mode. `persistence.aliasMounts` mounts the same volume at
 absolute catalog paths. Never attach the same data volume to two brokers.
+
+`scaleOwner` defaults to `chart`, which renders `replicas: 1`. Set
+`scaleOwner: external` when an operator or controller owns the live scale at
+0 or 1. This requires `persistence.existingClaim` and never renders `replicas`,
+so Helm upgrades leave the external scale alone. The claim may be absent while
+the broker is stopped; it is managed outside the release. On creation Kubernetes
+defaults the scale to 1, so the external owner must scale to 0 when the broker
+must stay stopped. Switching back to `chart` sets the scale to 1. The `replicas`
+value must remain 1 in either mode; it cannot configure a second broker.
+
 The run directory is a 16 MiB memory emptyDir; shared temporary space is an 8 GiB
 emptyDir. Both disappear with the pod. Per-role resources and both bounds are
 configurable. Read-only root filesystems leave only mounted paths writable.
@@ -127,3 +137,7 @@ and an unchanged pod UID and Ready transition. Every role must read OOM group 0.
 One-second samples bracket the OOM and recovery: the EndpointSlice must contain
 the ready pod IP and a client pod must receive HTTP 200 from the Service's
 ClusterIP on every sample. The kind job patches its kubelet accordingly.
+The scale tests verify that an external owner's scale of 0 survives a pod-template
+upgrade, that a running broker rolls at 1, and that installation and upgrade with
+`--wait` complete at 0 before the external claim exists. Creating that claim and
+scaling to 1 then starts a Ready broker.
