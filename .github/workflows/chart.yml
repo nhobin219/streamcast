@@ -34,10 +34,10 @@ jobs:
       - run: uv sync
       - run: helm lint charts/streamcast --strict
       - run: helm template smoke charts/streamcast
-      - run: uv run pytest tests/test_chart.py tests/test_supervise.py -q -k 'not oom_one_role' --durations=5
+      - run: uv run pytest tests/test_chart.py tests/test_supervise.py -q -k 'not oom_one_role and not external_scale_installs and not external_scale_survives' --durations=5
 
   kind:
-    name: Kind install and role OOM
+    name: Kind scale ownership and role OOM
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -71,7 +71,12 @@ jobs:
           node_image: kindest/node:v1.32.2
           config: kind-config.yaml
       - run: kind load docker-image streamcast:chart-ci --name chart-ci
-      - run: uv run pytest tests/test_chart.py::test_oom_one_role_restarts_in_place_and_pod_ready_holds -q --durations=5
+      - run: >-
+          uv run pytest
+          tests/test_chart.py::test_oom_one_role_restarts_in_place_and_pod_ready_holds
+          tests/test_chart.py::test_external_scale_survives_helm_upgrade
+          tests/test_chart.py::test_external_scale_installs_and_upgrades_without_claim
+          -q --durations=5
         env:
           STREAMCAST_CHART_KIND: "1"
           STREAMCAST_CHART_IMAGE: streamcast:chart-ci
